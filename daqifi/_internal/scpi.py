@@ -36,6 +36,14 @@ class System:
 
     # SD Card
     SD_STATUS_QUERY = "SYST:STOR:SD:STAT?"
+    SD_ENABLE_SET = "SYST:STOR:SD:ENAble"
+    SD_LOGGING_SET = "SYST:STOR:SD:LOGging"
+    SD_LIST_QUERY = "SYST:STOR:SD:LISt?"
+    SD_GET = "SYST:STOR:SD:GET"
+    SD_DELETE = "SYST:STOR:SD:DELete"
+    SD_FORMAT = "SYST:STOR:SD:FORmat"
+    SD_BENCHMARK = "SYST:STOR:SD:BENCHmark"
+    SD_BENCHMARK_QUERY = "SYST:STOR:SD:BENCHmark?"
 
 
 # Analog input (ADC) commands
@@ -106,6 +114,8 @@ class Streaming:
     STATUS_QUERY = "SYSTem:StreamData?"
     FORMAT_SET = "SYSTem:STReam:FORmat"
     FORMAT_QUERY = "SYSTem:STReam:FORmat?"
+    INTERFACE_SET = "SYSTem:STReam:INTerface"  # 0=USB, 1=WiFi, 2=SD, 3=All
+    INTERFACE_QUERY = "SYSTem:STReam:INTerface?"
     STATS_QUERY = "SYSTem:STReam:Stats?"
     STATS_CLEAR = "SYSTem:STReam:ClearStats"
 
