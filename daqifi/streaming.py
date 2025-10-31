@@ -482,10 +482,10 @@ class StreamManager:
         """
         Parse CSV streaming data from the device.
 
-        CSV format from firmware:
-        StreamTrigStamp,ch1_ts,ch1_val,...,ch16_ts,ch16_val,dio_ts,dio_val\n
+        CSV format from firmware (simplified):
+        ch0_ts,ch0_val,ch1_ts,ch1_val,...,ch15_ts,ch15_val,dio_ts,dio_val\n
 
-        Each channel has timestamp,value pairs.
+        Per-channel timestamp,value pairs (StreamTrigStamp removed).
         Firmware sends values in millivolts.
 
         Returns:
@@ -517,34 +517,40 @@ class StreamManager:
             if len(values) < 1:
                 return None
 
-            # First value is StreamTrigStamp (device timestamp)
-            # Remaining values are ch_ts,ch_val pairs for each enabled channel
-
-            # Parse channel data (skip first timestamp, then pairs of ts,val)
+            # Parse channel data (timestamp,value pairs starting from beginning)
             channels_data = {}
-            i = 1  # Start after StreamTrigStamp
+            i = 0  # Start from first field (no StreamTrigStamp anymore)
             channel_idx = 0
+            first_timestamp = None
 
             while i + 1 < len(values):
                 try:
-                    # ch_ts = int(values[i])  # Channel timestamp (not used)
-                    ch_val = int(values[i + 1])  # Channel value in millivolts
+                    if values[i] and values[i+1]:  # Both timestamp and value present
+                        ch_ts = int(values[i])  # Channel timestamp
+                        ch_val = int(values[i + 1])  # Channel value in millivolts
 
-                    # Convert millivolts to volts
-                    voltage = ch_val / 1000.0
+                        # Save first valid timestamp for sample
+                        if first_timestamp is None:
+                            first_timestamp = ch_ts
 
-                    # Map to channel ID (based on enabled channels)
-                    if channel_idx < len(self._channels):
-                        ch_id = self._channels[channel_idx]
-                        channels_data[ch_id] = voltage
+                        # Convert millivolts to volts
+                        voltage = ch_val / 1000.0
+
+                        # Map to channel ID (based on enabled channels)
+                        if channel_idx < len(self._channels):
+                            ch_id = self._channels[channel_idx]
+                            channels_data[ch_id] = voltage
 
                     channel_idx += 1
                     i += 2  # Move to next channel pair
                 except (ValueError, IndexError):
                     break
 
-            # Use current time as timestamp
-            timestamp = time.time()
+            # Use device timestamp (converted from 100MHz ticks to seconds)
+            if first_timestamp is not None:
+                timestamp = first_timestamp / 100_000_000.0
+            else:
+                timestamp = time.time()  # Fallback to PC time if no valid channels
 
             # Create sample
             if channels_data:
