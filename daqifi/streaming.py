@@ -482,10 +482,12 @@ class StreamManager:
         """
         Parse CSV streaming data from the device.
 
-        CSV format from firmware (simplified):
-        ch0_ts,ch0_val,ch1_ts,ch1_val,...,ch15_ts,ch15_val,dio_ts,dio_val\n
+        CSV format from firmware (optimized with header):
+        # Enabled ADC: 0,4,7
+        ch0_ts,ch0_val,ch4_ts,ch4_val,ch7_ts,ch7_val,dio_ts,dio_val
+        798519461,2773,798519465,2801,798519469,2795,798520000,15
 
-        Per-channel timestamp,value pairs (StreamTrigStamp removed).
+        Header lists enabled channels, data rows only contain those channels.
         Firmware sends values in millivolts.
 
         Returns:
@@ -509,6 +511,22 @@ class StreamManager:
             if not line:
                 return None  # Empty line
 
+            # Skip comment lines (header)
+            if line.startswith('#'):
+                # Parse enabled channels from header
+                if "Enabled ADC:" in line:
+                    parts = line.split(':')
+                    if len(parts) > 1:
+                        ch_ids = parts[1].strip().split()
+                        self._channels = [int(ch) for ch in ch_ids]
+                        print(f"CSV Header: Enabled channels = {self._channels}")
+                return None  # Don't return data for header line
+
+            # Skip column header line (ch0_ts,ch0_val,...)
+            if line.startswith('ch') or '_ts' in line:
+                print(f"CSV Column Headers: {line}")
+                return None
+
             # Show raw CSV data received (for debugging/verification)
             print(f"CSV data received: {line}")
 
@@ -517,13 +535,13 @@ class StreamManager:
             if len(values) < 1:
                 return None
 
-            # Parse channel data (timestamp,value pairs starting from beginning)
+            # Parse channel data (timestamp,value pairs for enabled channels only)
             channels_data = {}
-            i = 0  # Start from first field (no StreamTrigStamp anymore)
+            i = 0  # Start from first field
             channel_idx = 0
             first_timestamp = None
 
-            while i + 1 < len(values):
+            while i + 1 < len(values) and channel_idx < len(self._channels):
                 try:
                     if values[i] and values[i+1]:  # Both timestamp and value present
                         ch_ts = int(values[i])  # Channel timestamp
@@ -536,10 +554,9 @@ class StreamManager:
                         # Convert millivolts to volts
                         voltage = ch_val / 1000.0
 
-                        # Map to channel ID (based on enabled channels)
-                        if channel_idx < len(self._channels):
-                            ch_id = self._channels[channel_idx]
-                            channels_data[ch_id] = voltage
+                        # Map to actual channel ID from enabled list
+                        ch_id = self._channels[channel_idx]
+                        channels_data[ch_id] = voltage
 
                     channel_idx += 1
                     i += 2  # Move to next channel pair
