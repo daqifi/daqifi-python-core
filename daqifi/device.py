@@ -389,6 +389,151 @@ class NyquistDevice:
         """
         self._comm.clear_errors()
 
+    # ==========================================================================
+    # SD Card File Management
+    # ==========================================================================
+
+    def sd_enable(self, enable: bool = True):
+        """
+        Enable or disable SD card.
+
+        Args:
+            enable: True to enable, False to disable
+
+        Example:
+            device.sd_enable(True)
+        """
+        from ._internal.scpi import System
+        self._comm.send_command(f"{System.SD_ENABLE_SET} {1 if enable else 0}")
+
+    def sd_list_files(self, directory: str = "") -> List[str]:
+        """
+        List files on SD card.
+
+        Args:
+            directory: Optional directory path (default: root/DAQiFi)
+
+        Returns:
+            List of file paths
+
+        Example:
+            files = device.sd_list_files()
+            for f in files:
+                print(f)
+        """
+        from ._internal.scpi import System
+        if directory:
+            response = self._comm.send_command(f'{System.SD_LIST_QUERY} "{directory}"')
+        else:
+            response = self._comm.send_command(System.SD_LIST_QUERY)
+
+        # Parse file list from response
+        files = []
+        for line in response.strip().split('\n'):
+            line = line.strip()
+            # Skip empty lines and prompts
+            if line and not line.startswith('DAQIFI') and not line.startswith('#'):
+                files.append(line)
+        return files
+
+    def sd_get_file(self, filename: str) -> str:
+        """
+        Retrieve file contents from SD card.
+
+        Args:
+            filename: Name of file to retrieve
+
+        Returns:
+            File contents as string
+
+        Example:
+            data = device.sd_get_file("test.csv")
+            print(data)
+        """
+        from ._internal.scpi import System
+        response = self._comm.send_command(f'{System.SD_GET} "{filename}"')
+        return response
+
+    def sd_delete_file(self, filename: str):
+        """
+        Delete a file from SD card.
+
+        Args:
+            filename: Name of file to delete
+
+        Example:
+            device.sd_delete_file("old_data.csv")
+        """
+        from ._internal.scpi import System
+        self._comm.send_command(f'{System.SD_DELETE} "{filename}"')
+
+    def sd_format(self):
+        """
+        Format SD card (erase all files).
+
+        WARNING: This will erase ALL files on the SD card!
+
+        Example:
+            device.sd_format()  # Careful!
+        """
+        from ._internal.scpi import System
+        self._comm.send_command(System.SD_FORMAT)
+
+    def sd_set_logging(self, filename: str):
+        """
+        Set filename for SD card logging.
+
+        Args:
+            filename: Name of file to log data to
+
+        Example:
+            device.sd_enable(True)
+            device.sd_set_logging("data.csv")
+            # Now streaming will log to SD card
+        """
+        from ._internal.scpi import System
+        self._comm.send_command(f'{System.SD_LOGGING_SET} "{filename}"')
+
+    def sd_benchmark(self, size_kb: int = 1024) -> dict:
+        """
+        Run SD card write speed benchmark.
+
+        Args:
+            size_kb: Size of test data in KB (default 1024 = 1MB)
+
+        Returns:
+            Dictionary with benchmark results
+
+        Example:
+            results = device.sd_benchmark(1024)
+            print(f"Speed: {results['speed_mbps']:.2f} MB/s")
+        """
+        from ._internal.scpi import System
+        # Run benchmark
+        self._comm.send_command(f"{System.SD_BENCHMARK} {size_kb}")
+
+        # Query results
+        response = self._comm.send_command(System.SD_BENCHMARK_QUERY)
+        parts = response.strip().split(',')
+
+        if len(parts) == 3:
+            bytes_written = int(parts[0])
+            time_ms = int(parts[1])
+            speed_bps = int(parts[2])
+
+            return {
+                'bytes_written': bytes_written,
+                'time_ms': time_ms,
+                'speed_bps': speed_bps,
+                'speed_mbps': speed_bps / (1024 * 1024)
+            }
+        else:
+            return {'error': 'Could not parse benchmark results'}
+
+    # ==========================================================================
+    # Streaming
+    # ==========================================================================
+
     def create_stream(
         self,
         channels: List[int],
