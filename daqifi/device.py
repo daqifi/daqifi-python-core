@@ -436,12 +436,13 @@ class NyquistDevice:
                 files.append(line)
         return files
 
-    def sd_get_file(self, filename: str) -> str:
+    def sd_get_file(self, filename: str, timeout: float = 30.0) -> str:
         """
         Retrieve file contents from SD card.
 
         Args:
             filename: Name of file to retrieve
+            timeout: Maximum time to wait for file transfer (default: 30s)
 
         Returns:
             File contents as string
@@ -450,9 +451,55 @@ class NyquistDevice:
             data = device.sd_get_file("test.csv")
             print(data)
         """
+        import time
         from ._internal.scpi import System
-        response = self._comm.send_command(f'{System.SD_GET} "{filename}"')
-        return response
+
+        if not self._comm.is_open():
+            raise RuntimeError("Serial port not open")
+
+        # Send GET command
+        cmd = f'{System.SD_GET} "{filename}"'
+        cmd_bytes = (cmd + "\r").encode('ascii')
+        self._comm._serial.write(cmd_bytes)
+        self._comm._serial.flush()
+
+        # Read until we see __END_OF_FILE__ marker
+        response = b""
+        start_time = time.time()
+        end_marker = b"__END_OF_FILE__"
+
+        while (time.time() - start_time) < timeout:
+            if self._comm._serial.in_waiting > 0:
+                chunk = self._comm._serial.read(self._comm._serial.in_waiting)
+                response += chunk
+
+                # Check if we've received the end marker
+                if end_marker in response:
+                    break
+
+                # Reset start time when receiving data (prevents timeout during large transfers)
+                start_time = time.time()
+            else:
+                # No data available, wait a bit
+                time.sleep(0.01)
+
+        # Decode response
+        response_str = response.decode('ascii', errors='ignore')
+
+        # Remove echoed command
+        if cmd in response_str:
+            response_str = response_str.replace(cmd, "")
+
+        # Remove DAQIFI> prompt
+        response_str = response_str.replace("DAQIFI>", "")
+
+        # Remove end marker
+        response_str = response_str.replace("__END_OF_FILE__", "")
+
+        # Clean up
+        response_str = response_str.strip()
+
+        return response_str
 
     def sd_delete_file(self, filename: str):
         """
