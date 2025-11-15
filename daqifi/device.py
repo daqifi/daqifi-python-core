@@ -427,14 +427,29 @@ class NyquistDevice:
         else:
             response = self._comm.send_command(System.SD_LIST_QUERY)
 
-        # Parse file list from response
+        # Parse file list from response (format: path,size per line)
         files = []
+        self._file_sizes = {}  # Store for later use
         for line in response.strip().split('\n'):
             line = line.strip()
             # Skip empty lines and prompts
             if line and not line.startswith('DAQIFI') and not line.startswith('#'):
-                files.append(line)
+                parts = line.split()
+                if len(parts) >= 2 and parts[-1].isdigit():
+                    # New format: path size
+                    path = ' '.join(parts[:-1])  # Rejoin in case path has spaces
+                    size = int(parts[-1])
+                    files.append(path)
+                    self._file_sizes[path] = size
+                else:
+                    # Old format: just path
+                    files.append(line)
+                    self._file_sizes[line] = 0  # Unknown size
         return files
+
+    def sd_get_file_size(self, filename: str) -> int:
+        """Get cached file size from last LIST command."""
+        return self._file_sizes.get(filename, 0)
 
     def sd_get_file(self, filename: str, timeout: float = 30.0) -> str:
         """
@@ -463,7 +478,7 @@ class NyquistDevice:
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
 
-        # Read until we see __END_OF_FILE__ marker
+        # Read until we see __END_OF_FILE__ marker (simplified, no CRLF)
         response = b""
         start_time = time.time()
         end_marker = b"__END_OF_FILE__"
