@@ -204,6 +204,7 @@ class StreamManager:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._read_buffer = ""  # Buffer for partial data (JSON/CSV)
+        self._tick_rate_hz = None  # Tick rate from metadata header (for timestamp conversion)
 
     @property
     def state(self) -> StreamState:
@@ -399,14 +400,16 @@ class StreamManager:
         """
         Parse JSON streaming data from the device.
 
-        JSON format from firmware:
-        {
-        "timestamp":12345,
-        "adc":[
-        {"ch":0, "data":5000},
-        {"ch":1, "data":3300}
-        ]
-        }
+        JSON format from firmware (new):
+        {"meta":{"dev":"Nyquist NQ1","sn":"0123...","tick_hz":1000000}}
+        {"ts":12345,"ai":[{"ch":0,"val":5000},{"ch":1,"val":3300}]}
+
+        Field names:
+        - ts: timestamp (device ticks)
+        - ai: analog input array
+        - di: digital input array
+        - val: value (millivolts for ADC)
+        - meta: metadata header (first message only)
 
         Returns:
             Sample or None if no data available
@@ -449,18 +452,30 @@ class StreamManager:
 
             data = json.loads(json_str)
 
-            # Parse ADC data
+            # Skip metadata header (first message of session)
+            if 'meta' in data:
+                # Extract and store tick rate for future timestamp conversion
+                if 'tick_hz' in data['meta']:
+                    self._tick_rate_hz = data['meta']['tick_hz']
+                    print(f"Metadata received: {data['meta']}")
+                return None  # Not a sample, skip
+
+            # Parse ADC data (new field name: 'ai' not 'adc')
             channels_data = {}
-            if 'adc' in data:
-                for ch_data in data['adc']:
+            if 'ai' in data:
+                for ch_data in data['ai']:
                     ch_id = ch_data['ch']
-                    # Firmware sends data in millivolts, convert to volts
-                    voltage = ch_data['data'] / 1000.0
+                    # Firmware sends data in millivolts, convert to volts (new field: 'val' not 'data')
+                    voltage = ch_data['val'] / 1000.0
                     channels_data[ch_id] = voltage
 
-            # Get timestamp (convert firmware ticks to seconds)
-            # For now, use current time - firmware timestamp is in device ticks
-            timestamp = time.time()
+            # Get timestamp from firmware (new field: 'ts' not 'timestamp')
+            if 'ts' in data and self._tick_rate_hz:
+                # Convert device ticks to seconds using tick rate from metadata
+                timestamp = data['ts'] / self._tick_rate_hz
+            else:
+                # Fallback to current time if no tick rate available yet
+                timestamp = time.time()
 
             # Create sample
             sample = Sample(
@@ -482,13 +497,14 @@ class StreamManager:
         """
         Parse CSV streaming data from the device.
 
-        CSV format from firmware (optimized with header):
-        # Enabled ADC: 0,4,7
-        ch0_ts,ch0_val,ch4_ts,ch4_val,ch7_ts,ch7_val,dio_ts,dio_val
+        CSV format from firmware (new with metadata header):
+        # Device: Nyquist NQ1
+        # Serial Number: 0123456789ABCDEF
+        # Timestamp Tick Rate: 1000000 Hz
+        ain0_ts,ain0_val,ain4_ts,ain4_val,ain7_ts,ain7_val,dio_ts,dio_val
         798519461,2773,798519465,2801,798519469,2795,798520000,15
 
-        Header lists enabled channels, data rows only contain those channels.
-        Firmware sends values in millivolts.
+        Only enabled channels are output. Values are in millivolts.
 
         Returns:
             Sample or None if no data available
@@ -511,20 +527,30 @@ class StreamManager:
             if not line:
                 return None  # Empty line
 
-            # Skip comment lines (header)
+            # Skip metadata header lines (# Device, # Serial Number, # Timestamp Tick Rate)
             if line.startswith('#'):
-                # Parse enabled channels from header
-                if "Enabled ADC:" in line:
-                    parts = line.split(':')
-                    if len(parts) > 1:
-                        ch_ids = parts[1].strip().split()
-                        self._channels = [int(ch) for ch in ch_ids]
-                        print(f"CSV Header: Enabled channels = {self._channels}")
-                return None  # Don't return data for header line
+                # Parse tick rate from metadata header
+                if "Timestamp Tick Rate:" in line:
+                    try:
+                        # Format: "# Timestamp Tick Rate: 1000000 Hz"
+                        parts = line.split(':')
+                        if len(parts) > 1:
+                            tick_str = parts[1].strip().replace(' Hz', '')
+                            self._tick_rate_hz = int(tick_str)
+                            print(f"CSV Metadata: Tick rate = {self._tick_rate_hz} Hz")
+                    except ValueError:
+                        pass
+                return None  # Skip header lines
 
-            # Skip column header line (ch0_ts,ch0_val,...)
-            if line.startswith('ch') or '_ts' in line:
-                print(f"CSV Column Headers: {line}")
+            # Detect and parse column header line (ain0_ts,ain0_val,... or ch0_ts,ch0_val,...)
+            if '_ts' in line and '_val' in line:
+                # Extract channel numbers from column headers
+                import re
+                # Match both ain{N}_ts and ch{N}_ts patterns
+                ch_pattern = re.findall(r'(?:ain|ch)(\d+)_ts', line)
+                if ch_pattern:
+                    self._channels = [int(ch) for ch in ch_pattern]
+                    print(f"CSV Column Headers detected: Enabled channels = {self._channels}")
                 return None
 
             # Show raw CSV data received (for debugging/verification)
@@ -563,9 +589,12 @@ class StreamManager:
                 except (ValueError, IndexError):
                     break
 
-            # Use device timestamp (converted from 100MHz ticks to seconds)
-            if first_timestamp is not None:
-                timestamp = first_timestamp / 100_000_000.0
+            # Use device timestamp (convert using tick rate from metadata)
+            if first_timestamp is not None and self._tick_rate_hz:
+                timestamp = first_timestamp / self._tick_rate_hz
+            elif first_timestamp is not None:
+                # Fallback to 1MHz if tick rate not available
+                timestamp = first_timestamp / 1_000_000.0
             else:
                 timestamp = time.time()  # Fallback to PC time if no valid channels
 
