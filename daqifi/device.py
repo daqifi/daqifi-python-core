@@ -516,6 +516,64 @@ class NyquistDevice:
 
         return response_str
 
+    def sd_get_file_binary(self, filename: str, timeout: float = 30.0) -> bytes:
+        """
+        Retrieve raw binary file contents from SD card.
+
+        Unlike sd_get_file(), this preserves all byte values (no ASCII
+        decoding) for binary integrity verification.
+
+        Args:
+            filename: Name of file to retrieve
+            timeout: Maximum time to wait for file transfer (default: 30s)
+
+        Returns:
+            File contents as raw bytes
+
+        Example:
+            data = device.sd_get_file_binary("benchmark.dat")
+            assert len(data) == expected_size
+        """
+        import time
+        from ._internal.scpi import System
+
+        if not self._comm.is_open():
+            raise RuntimeError("Serial port not open")
+
+        # Send GET command
+        cmd = f'{System.SD_GET} "{filename}"'
+        cmd_bytes = (cmd + "\r").encode('ascii')
+        self._comm._serial.write(cmd_bytes)
+        self._comm._serial.flush()
+
+        # Read until we see __END_OF_FILE__ marker
+        response = b""
+        start_time = time.time()
+        end_marker = b"__END_OF_FILE__"
+
+        while (time.time() - start_time) < timeout:
+            if self._comm._serial.in_waiting > 0:
+                chunk = self._comm._serial.read(self._comm._serial.in_waiting)
+                response += chunk
+
+                if end_marker in response:
+                    break
+
+                start_time = time.time()
+            else:
+                time.sleep(0.01)
+
+        # Strip echo, prompt, and EOF marker from raw bytes
+        # Echo format: <cmd>\r\nDAQIFI> <file data>__END_OF_FILE__...
+        echo_end = response.find(b"DAQIFI> ")
+        if echo_end >= 0:
+            response = response[echo_end + len(b"DAQIFI> "):]
+
+        if end_marker in response:
+            response = response[:response.index(end_marker)]
+
+        return response
+
     def sd_delete_file(self, filename: str):
         """
         Delete a file from SD card.
