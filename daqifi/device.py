@@ -553,18 +553,16 @@ class NyquistDevice:
         # Read until we see __END_OF_FILE__ marker
         # Use bytearray for O(n) accumulation instead of O(n^2) bytes concat
         response = bytearray()
-        start_time = time.time()
         end_marker = b"__END_OF_FILE__"
+        deadline = time.monotonic() + timeout
 
-        while (time.time() - start_time) < timeout:
+        while time.monotonic() < deadline:
             if self._comm._serial.in_waiting > 0:
                 chunk = self._comm._serial.read(self._comm._serial.in_waiting)
                 response.extend(chunk)
 
                 if end_marker in response:
                     break
-
-                start_time = time.time()
             else:
                 time.sleep(0.01)
         else:
@@ -572,12 +570,13 @@ class NyquistDevice:
                 f"SD file download timed out after {timeout}s "
                 f"({len(response)} bytes received, no EOF marker)")
 
-        # Strip echo and prompt from raw bytes
+        # Strip leading echo and prompt from raw bytes
         # Echo format: <cmd>\r\nDAQIFI> <file data>__END_OF_FILE__...
-        # Match prompt with or without trailing space
-        prompt_markers = [b"DAQIFI> ", b"DAQIFI>"]
-        for marker in prompt_markers:
-            echo_end = response.find(marker)
+        # Only search the first 200 bytes to avoid truncating binary data
+        # that might coincidentally contain the prompt string
+        header = bytes(response[:200])
+        for marker in (b"DAQIFI> ", b"DAQIFI>"):
+            echo_end = header.find(marker)
             if echo_end >= 0:
                 response = response[echo_end + len(marker):]
                 break
