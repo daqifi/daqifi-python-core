@@ -530,6 +530,10 @@ class NyquistDevice:
         Returns:
             File contents as raw bytes
 
+        Raises:
+            TimeoutError: If __END_OF_FILE__ marker not received within timeout
+            RuntimeError: If serial port not open
+
         Example:
             data = device.sd_get_file_binary("benchmark.dat")
             assert len(data) == expected_size
@@ -547,14 +551,15 @@ class NyquistDevice:
         self._comm._serial.flush()
 
         # Read until we see __END_OF_FILE__ marker
-        response = b""
+        # Use bytearray for O(n) accumulation instead of O(n^2) bytes concat
+        response = bytearray()
         start_time = time.time()
         end_marker = b"__END_OF_FILE__"
 
         while (time.time() - start_time) < timeout:
             if self._comm._serial.in_waiting > 0:
                 chunk = self._comm._serial.read(self._comm._serial.in_waiting)
-                response += chunk
+                response.extend(chunk)
 
                 if end_marker in response:
                     break
@@ -562,17 +567,27 @@ class NyquistDevice:
                 start_time = time.time()
             else:
                 time.sleep(0.01)
+        else:
+            raise TimeoutError(
+                f"SD file download timed out after {timeout}s "
+                f"({len(response)} bytes received, no EOF marker)")
 
-        # Strip echo, prompt, and EOF marker from raw bytes
+        # Strip echo and prompt from raw bytes
         # Echo format: <cmd>\r\nDAQIFI> <file data>__END_OF_FILE__...
-        echo_end = response.find(b"DAQIFI> ")
-        if echo_end >= 0:
-            response = response[echo_end + len(b"DAQIFI> "):]
+        # Match prompt with or without trailing space
+        prompt_markers = [b"DAQIFI> ", b"DAQIFI>"]
+        for marker in prompt_markers:
+            echo_end = response.find(marker)
+            if echo_end >= 0:
+                response = response[echo_end + len(marker):]
+                break
 
-        if end_marker in response:
-            response = response[:response.index(end_marker)]
+        # Strip EOF marker
+        eof_idx = response.find(end_marker)
+        if eof_idx >= 0:
+            response = response[:eof_idx]
 
-        return response
+        return bytes(response)
 
     def sd_delete_file(self, filename: str):
         """
