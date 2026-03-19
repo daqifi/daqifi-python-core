@@ -516,6 +516,78 @@ class NyquistDevice:
 
         return response_str
 
+    def sd_get_file_binary(self, filename: str, timeout: float = 30.0) -> bytes:
+        """
+        Retrieve raw binary file contents from SD card.
+
+        Unlike sd_get_file(), this preserves all byte values (no ASCII
+        decoding) for binary integrity verification.
+
+        Args:
+            filename: Name of file to retrieve
+            timeout: Maximum time to wait for file transfer (default: 30s)
+
+        Returns:
+            File contents as raw bytes
+
+        Raises:
+            TimeoutError: If __END_OF_FILE__ marker not received within timeout
+            RuntimeError: If serial port not open
+
+        Example:
+            data = device.sd_get_file_binary("benchmark.dat")
+            assert len(data) == expected_size
+        """
+        import time
+        from ._internal.scpi import System
+
+        if not self._comm.is_open():
+            raise RuntimeError("Serial port not open")
+
+        # Send GET command
+        cmd = f'{System.SD_GET} "{filename}"'
+        cmd_bytes = (cmd + "\r").encode('ascii')
+        self._comm._serial.write(cmd_bytes)
+        self._comm._serial.flush()
+
+        # Read until we see __END_OF_FILE__ marker
+        # Use bytearray for O(n) accumulation instead of O(n^2) bytes concat
+        response = bytearray()
+        end_marker = b"__END_OF_FILE__"
+        deadline = time.monotonic() + timeout
+
+        while time.monotonic() < deadline:
+            if self._comm._serial.in_waiting > 0:
+                chunk = self._comm._serial.read(self._comm._serial.in_waiting)
+                response.extend(chunk)
+
+                if end_marker in response:
+                    break
+            else:
+                time.sleep(0.01)
+        else:
+            raise TimeoutError(
+                f"SD file download timed out after {timeout}s "
+                f"({len(response)} bytes received, no EOF marker)")
+
+        # Strip leading echo and prompt from raw bytes
+        # Echo format: <cmd>\r\nDAQIFI> <file data>__END_OF_FILE__...
+        # Only search the first 200 bytes to avoid truncating binary data
+        # that might coincidentally contain the prompt string
+        header = bytes(response[:200])
+        for marker in (b"DAQIFI> ", b"DAQIFI>"):
+            echo_end = header.find(marker)
+            if echo_end >= 0:
+                response = response[echo_end + len(marker):]
+                break
+
+        # Strip EOF marker
+        eof_idx = response.find(end_marker)
+        if eof_idx >= 0:
+            response = response[:eof_idx]
+
+        return bytes(response)
+
     def sd_delete_file(self, filename: str):
         """
         Delete a file from SD card.
