@@ -116,8 +116,8 @@ class Streaming:
     FORMAT_QUERY = "SYSTem:STReam:FORmat?"
     INTERFACE_SET = "SYSTem:STReam:INTerface"  # 0=USB, 1=WiFi, 2=SD, 3=All
     INTERFACE_QUERY = "SYSTem:STReam:INTerface?"
-    STATS_QUERY = "SYSTem:STReam:Stats?"
-    STATS_CLEAR = "SYSTem:STReam:ClearStats"
+    STATS_QUERY = "SYSTem:STReam:STATS?"
+    STATS_CLEAR = "SYSTem:STReam:STATS:CLEar"
 
 
 # Response parsing utilities
