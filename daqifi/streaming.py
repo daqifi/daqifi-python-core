@@ -272,7 +272,7 @@ class StreamManager:
             self._comm.send_set(scpi.Streaming.FORMAT_SET, self._format)
 
             # Send SCPI command to start streaming with frequency parameter
-            # Don't issue any other commands during streaming (only StopStreamData allowed)
+            # Don't issue any other commands during streaming (only STReam:STOP allowed)
             start_cmd = f"{scpi.Streaming.START} {self._sample_rate}"
             response = self._comm.send_command(start_cmd, delay=0.2)
 

@@ -109,9 +109,9 @@ class DigitalIO:
 # Streaming commands
 class Streaming:
     """Data streaming SCPI commands"""
-    START = "SYSTem:StartStreamData"
-    STOP = "SYSTem:StopStreamData"
-    STATUS_QUERY = "SYSTem:StreamData?"
+    START = "SYSTem:STReam:START"
+    STOP = "SYSTem:STReam:STOP"
+    STATUS_QUERY = "SYSTem:STReam:DATA?"
     FORMAT_SET = "SYSTem:STReam:FORmat"
     FORMAT_QUERY = "SYSTem:STReam:FORmat?"
     INTERFACE_SET = "SYSTem:STReam:INTerface"  # 0=USB, 1=WiFi, 2=SD, 3=All
