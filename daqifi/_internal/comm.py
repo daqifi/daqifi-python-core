@@ -400,13 +400,15 @@ class MessageReceivedEventArgs(Generic[T]):
     not yet ported, so the field is typed as the generic ``T`` payload --
     swap to the Protocol once it lands).
 
-    The ``timestamp`` defaults to ``datetime.utcnow()`` at construction time
-    to match the upstream ``DateTime.UtcNow`` semantics.
+    The ``timestamp`` defaults to ``datetime.now(timezone.utc)`` at
+    construction time so the value is timezone-aware (matches the upstream
+    ``DateTime.UtcNow`` semantics; `utcnow()` returns a naive datetime and
+    is deprecated in Python 3.12+).
     """
 
     message: T
     raw_data: bytes
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -421,7 +423,7 @@ class MessageConsumerErrorEventArgs:
 
     error: BaseException
     raw_data: Optional[bytes] = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @runtime_checkable

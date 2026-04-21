@@ -1,6 +1,8 @@
 """Tests for `daqifi.communication` (port of LineBasedMessageParser)."""
 from __future__ import annotations
 
+import pytest
+
 from daqifi.communication import (
     InboundMessage,
     LineBasedMessageParser,
@@ -84,3 +86,20 @@ class TestLineBasedMessageParser:
         parser = LineBasedMessageParser(line_ending="\r")
         messages, _ = parser.parse_messages(b"x\ry\r")
         assert [m.data for m in messages] == ["x", "y"]
+
+    def test_empty_line_ending_rejected(self):
+        # Qodo PR #11 pass-4 finding S1: an empty line_ending would put
+        # `parse_messages` into an infinite loop because `bytes.find("")`
+        # always returns 0.
+        with pytest.raises(ValueError):
+            LineBasedMessageParser(line_ending="")
+
+    def test_malformed_bytes_do_not_crash(self):
+        # `errors="replace"` keeps the parser resilient against partial
+        # multi-byte sequences in the middle of a serial stream.
+        parser = LineBasedMessageParser()
+        bad = b"\xff\xfe\xfdabc\r\n"
+        messages, consumed = parser.parse_messages(bad)
+        assert len(messages) == 1
+        assert "abc" in messages[0].data
+        assert consumed == len(bad)

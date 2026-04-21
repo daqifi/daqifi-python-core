@@ -6,10 +6,13 @@ Ported from upstream ``Daqifi.Core.Device.Protocol.ProtobufProtocolHandler``
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from daqifi.communication import InboundMessage
 from daqifi.enums import ProtobufMessageType
+
+_log = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -70,20 +73,25 @@ class ProtobufProtocolHandler:
 
         message_type = self.detect_message_type(pb_message)
 
-        if message_type is ProtobufMessageType.STATUS:
-            if self._status_message_handler is not None:
-                self._status_message_handler(pb_message)
-        elif message_type is ProtobufMessageType.STREAM:
-            if self._stream_message_handler is not None:
-                self._stream_message_handler(pb_message)
-        elif message_type is ProtobufMessageType.SD_CARD:
-            if self._sd_card_message_handler is not None:
-                self._sd_card_message_handler(pb_message)
-        elif message_type is ProtobufMessageType.ERROR:
-            if self._error_message_handler is not None:
-                self._error_message_handler(pb_message)
-        # ProtobufMessageType.UNKNOWN and any unmapped value: no-op
-        # (could log here if needed)
+        # Wrap the dispatch so a misbehaving user callback can't crash the
+        # async receive loop. Log the traceback so the failure is still
+        # visible — a silent except would mask real bugs.
+        try:
+            if message_type is ProtobufMessageType.STATUS:
+                if self._status_message_handler is not None:
+                    self._status_message_handler(pb_message)
+            elif message_type is ProtobufMessageType.STREAM:
+                if self._stream_message_handler is not None:
+                    self._stream_message_handler(pb_message)
+            elif message_type is ProtobufMessageType.SD_CARD:
+                if self._sd_card_message_handler is not None:
+                    self._sd_card_message_handler(pb_message)
+            elif message_type is ProtobufMessageType.ERROR:
+                if self._error_message_handler is not None:
+                    self._error_message_handler(pb_message)
+            # ProtobufMessageType.UNKNOWN and any unmapped value: no-op.
+        except Exception:
+            _log.exception("Protocol handler callback raised for %s", message_type)
 
     @staticmethod
     def detect_message_type(message: DaqifiOutMessage) -> ProtobufMessageType:

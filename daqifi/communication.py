@@ -45,6 +45,10 @@ class LineBasedMessageParser:
     """
 
     def __init__(self, line_ending: str = "\r\n", encoding: str = "utf-8") -> None:
+        if not line_ending:
+            # An empty line-ending would make `bytes.find` return 0 on every
+            # iteration, putting `parse_messages` into an infinite loop.
+            raise ValueError("line_ending must not be empty")
         self._encoding = encoding
         self._line_ending = line_ending.encode(encoding)
 
@@ -73,9 +77,13 @@ class LineBasedMessageParser:
             line_length = line_end_index - search_start
             if line_length > 0:
                 line_data = data[search_start:line_end_index]
-                message_text = line_data.decode(self._encoding)
-                if message_text.strip():
-                    messages.append(InboundMessage(data=message_text.strip()))
+                # Use errors="replace" so a malformed byte sequence in the
+                # middle of a serial stream doesn't take down the whole
+                # parse — surface the partial text rather than raising.
+                message_text = line_data.decode(self._encoding, errors="replace")
+                stripped = message_text.strip()
+                if stripped:
+                    messages.append(InboundMessage(data=stripped))
 
             search_start = line_end_index + line_ending_len
             consumed_bytes = search_start

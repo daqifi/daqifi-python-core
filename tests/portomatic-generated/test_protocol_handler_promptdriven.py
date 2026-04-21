@@ -202,3 +202,23 @@ def test_handle_async_returns_none() -> None:
     handler = ProtobufProtocolHandler()
     result = asyncio.run(handler.handle_async(_wrap(FakeDaqifiOutMessage())))
     assert result is None
+
+
+def test_handle_async_swallows_handler_exceptions(caplog) -> None:
+    """Qodo PR #11 pass-4 finding S3: a misbehaving user callback must
+    NOT propagate out of `handle_async` and crash the receive loop. The
+    exception is logged so it stays diagnosable."""
+    import logging
+
+    def boom(_msg: object) -> None:
+        raise RuntimeError("user callback blew up")
+
+    handler = ProtobufProtocolHandler(status_message_handler=boom)
+    msg = FakeDaqifiOutMessage(digital_port_num=8)  # routes to STATUS
+
+    with caplog.at_level(logging.ERROR, logger="daqifi.protocol"):
+        # Must not raise.
+        asyncio.run(handler.handle_async(_wrap(msg)))
+
+    assert any("user callback blew up" in r.getMessage() or "callback raised" in r.getMessage()
+               for r in caplog.records)
