@@ -97,10 +97,21 @@ class TestRollover:
         proc = TimestampProcessor()
         near_max = _UINT32_MAX - 1000
         after_rollover = 1000
-        # (MaxValue - near_max) + after_rollover = 1000 + 1000 = 2000
+        # (MaxValue - near_max + 1) + after_rollover = 1001 + 1000 = 2001
+        # The +1 is for the wrap tick from 0xFFFFFFFF → 0 itself, which
+        # the original C# port silently lost (Qodo PR #11 finding S1).
         proc.process_timestamp(_TEST_DEVICE_ID, near_max)
         result = proc.process_timestamp(_TEST_DEVICE_ID, after_rollover)
-        assert result.clock_cycles_between_messages == 2000
+        assert result.clock_cycles_between_messages == 2001
+
+    def test_rollover_at_exact_boundary_counts_one_cycle(self):
+        # Qodo PR #11 finding S1: previous=MAX, current=0 must report 1
+        # cycle elapsed (the wrap tick), not 0.
+        proc = TimestampProcessor()
+        proc.process_timestamp(_TEST_DEVICE_ID, _UINT32_MAX)
+        result = proc.process_timestamp(_TEST_DEVICE_ID, 0)
+        assert result.was_rollover is True
+        assert result.clock_cycles_between_messages == 1
 
     def test_rollover_calculates_correct_time(self):
         proc = TimestampProcessor()

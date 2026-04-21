@@ -50,19 +50,26 @@ class TestExternalProcessResult:
             exit_code=0,
             timed_out=False,
             duration_seconds=0.5,
-            standard_output_lines=["a", "b"],
-            standard_error_lines=[],
+            standard_output_lines=("a", "b"),
+            standard_error_lines=(),
         )
         assert res.exit_code == 0
         assert res.timed_out is False
         assert res.duration_seconds == 0.5
-        assert res.standard_output_lines == ["a", "b"]
-        assert res.standard_error_lines == []
+        assert res.standard_output_lines == ("a", "b")
+        assert res.standard_error_lines == ()
 
     def test_default_lines_empty(self):
         res = ExternalProcessResult(exit_code=0, timed_out=False, duration_seconds=0.0)
-        assert res.standard_output_lines == []
-        assert res.standard_error_lines == []
+        assert res.standard_output_lines == ()
+        assert res.standard_error_lines == ()
+
+    def test_lines_are_tuples_for_immutability(self):
+        # Qodo PR #11 pass-2 finding S3: frozen dataclass with mutable
+        # default lists is not deeply immutable.
+        res = ExternalProcessResult(exit_code=0, timed_out=False, duration_seconds=0.0)
+        assert isinstance(res.standard_output_lines, tuple)
+        assert isinstance(res.standard_error_lines, tuple)
 
     def test_is_frozen(self):
         res = ExternalProcessResult(exit_code=0, timed_out=False, duration_seconds=0.0)

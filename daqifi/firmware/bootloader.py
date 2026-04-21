@@ -110,13 +110,20 @@ def decode_version_response(data: bytes) -> str:
     ):
         pointer = 3
         if pointer < len(data):
-            if data[pointer] == _DATA_LINK_ESCAPE and pointer + 1 < len(data):
+            if data[pointer] == _DATA_LINK_ESCAPE:
+                # Escape marker without a following payload byte → frame
+                # is truncated; treat as malformed rather than silently
+                # accepting the escape byte as the value.
+                if pointer + 1 >= len(data):
+                    return "Error"
                 pointer += 1
             major_version = data[pointer]
             pointer += 1
 
         if pointer < len(data):
-            if data[pointer] == _DATA_LINK_ESCAPE and pointer + 1 < len(data):
+            if data[pointer] == _DATA_LINK_ESCAPE:
+                if pointer + 1 >= len(data):
+                    return "Error"
                 pointer += 1
             minor_version = data[pointer]
 

@@ -101,6 +101,14 @@ class TestDecodeVersionResponse:
         # Only 2 bytes — not enough for cmd + major + minor.
         assert decode_version_response(bytes([_SOH, 0x99])) == "0.0"
 
+    def test_dle_at_end_of_minor_returns_error(self):
+        # Qodo PR #11 finding S2: an escape marker without a following
+        # payload byte must be reported as malformed framing rather than
+        # silently treated as the value byte. SOH | DLE | cmd | major | DLE
+        # (truncated — no minor payload after the escape).
+        data = bytes([_SOH, _DLE, 0x01, 0x02, _DLE])
+        assert decode_version_response(data) == "Error"
+
 
 class TestDecodeProgramFlashResponse:
     def test_valid_ack(self):

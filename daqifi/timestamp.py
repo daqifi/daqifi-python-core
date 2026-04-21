@@ -114,7 +114,11 @@ class TimestampProcessor:
             rollover = previous_device_timestamp > device_timestamp
 
             if rollover:
-                cycles_to_max = _UINT32_MAX - previous_device_timestamp
+                # +1 for the wrap tick from 0xFFFFFFFF → 0 itself, which
+                # would otherwise be lost: e.g. previous=MAX, current=0
+                # is one cycle, not zero. Without the +1, gaps that
+                # straddle the wrap are reported one tick short.
+                cycles_to_max = _UINT32_MAX - previous_device_timestamp + 1
                 clock_cycles_between_messages = cycles_to_max + device_timestamp
             else:
                 clock_cycles_between_messages = device_timestamp - previous_device_timestamp

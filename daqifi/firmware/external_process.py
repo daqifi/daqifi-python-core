@@ -17,7 +17,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Protocol, Sequence, Union, runtime_checkable
+from typing import Callable, Optional, Protocol, Sequence, Tuple, Union, runtime_checkable
 
 
 __all__ = [
@@ -57,8 +57,10 @@ class ExternalProcessResult:
     exit_code: int
     timed_out: bool
     duration_seconds: float
-    standard_output_lines: List[str] = field(default_factory=list)
-    standard_error_lines: List[str] = field(default_factory=list)
+    # `tuple` makes the dataclass deeply immutable — `frozen=True` only
+    # locks the dataclass attributes, not the values they reference.
+    standard_output_lines: Tuple[str, ...] = field(default_factory=tuple)
+    standard_error_lines: Tuple[str, ...] = field(default_factory=tuple)
 
 
 @runtime_checkable
@@ -147,8 +149,8 @@ class SubprocessRunner:
             exit_code=exit_code,
             timed_out=timed_out,
             duration_seconds=duration,
-            standard_output_lines=list(stdout_lines),
-            standard_error_lines=list(stderr_lines),
+            standard_output_lines=tuple(stdout_lines),
+            standard_error_lines=tuple(stderr_lines),
         )
 
 
