@@ -278,8 +278,18 @@ class ScpiMessage:
     data: str
 
     def get_bytes(self) -> bytes:
-        """Return the ASCII bytes for transmission, with CRLF terminator."""
-        return (self.data + "\r\n").encode("ascii")
+        """Return the ASCII bytes for transmission, with CRLF terminator.
+
+        Strips a pre-existing trailing CRLF so callers passing
+        ``"*IDN?\\r\\n"`` don't double-terminate, and surfaces a clear
+        :class:`ValueError` for non-ASCII payloads instead of leaking
+        :class:`UnicodeEncodeError` from deep in the encode call.
+        """
+        command = self.data.rstrip("\r\n") + "\r\n"
+        try:
+            return command.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("SCPI command must be ASCII.") from exc
 
 
 @runtime_checkable
