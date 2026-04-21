@@ -168,8 +168,17 @@ class IntelHexParser:
     def _update_base_address(hex_record: bytes, current_base_address: int) -> int:
         record_type = hex_record[3]
         if record_type == 0x04:
-            # Extended-linear-address record: data bytes carry the new high-16 base.
-            data_bytes = hex_record[4:-1]
+            # Extended-linear-address record: data bytes carry the new high-16
+            # base. The Intel HEX spec requires exactly 2 data bytes; reject
+            # malformed records here rather than silently returning a wrong
+            # base address from a slice of the wrong length.
+            byte_count = hex_record[0]
+            if byte_count != 2:
+                raise ValueError(
+                    "Extended-linear-address record must contain exactly 2 "
+                    f"data bytes (got {byte_count})."
+                )
+            data_bytes = hex_record[4:6]
             return int.from_bytes(data_bytes, byteorder="big")
         return current_base_address
 

@@ -63,6 +63,8 @@ class ProtobufProtocolHandler:
         the discriminator since the upstream type check (``is DaqifiOutMessage``)
         has no clean Python analog without coupling to a real protobuf class.
         """
+        if message is None or not hasattr(message, "data"):
+            return False
         return _is_daqifi_out_message(message.data)
 
     async def handle_async(self, message: InboundMessage[Any]) -> None:
@@ -133,9 +135,18 @@ class ProtobufProtocolHandler:
         if getattr(message, "msg_time_stamp", 0) == 0:
             return False
 
-        analog_in_data = getattr(message, "analog_in_data", ()) or ()
-        analog_in_data_float = getattr(message, "analog_in_data_float", ()) or ()
-        digital_data = getattr(message, "digital_data", b"") or b""
+        # Real protobuf-generated messages always carry sized containers
+        # here, but a stub or duck-typed fake might not. Coerce anything
+        # without `__len__` to an empty value so the size check below
+        # never raises TypeError.
+        def _sized_or_empty(value: Any, empty: Any) -> Any:
+            if value is None:
+                return empty
+            return value if hasattr(value, "__len__") else empty
+
+        analog_in_data = _sized_or_empty(getattr(message, "analog_in_data", None), ())
+        analog_in_data_float = _sized_or_empty(getattr(message, "analog_in_data_float", None), ())
+        digital_data = _sized_or_empty(getattr(message, "digital_data", None), b"")
 
         return (
             len(analog_in_data) > 0

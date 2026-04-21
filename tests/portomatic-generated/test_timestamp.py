@@ -113,6 +113,17 @@ class TestRollover:
         assert result.was_rollover is True
         assert result.clock_cycles_between_messages == 1
 
+    def test_out_of_order_message_not_reported_as_rollover(self):
+        # Qodo PR #11 pass-6 finding S1: when the >10s sanity check
+        # downgrades a "rollover" to an out-of-order message, the result
+        # must say was_rollover=False.
+        proc = TimestampProcessor()
+        # First message at small ts; second at MUCH smaller ts looks like
+        # a rollover but the implied gap > 10s, so it's actually OOO.
+        proc.process_timestamp(_TEST_DEVICE_ID, 1_000_000_000)
+        result = proc.process_timestamp(_TEST_DEVICE_ID, 100)
+        assert result.was_rollover is False
+
     def test_rollover_calculates_correct_time(self):
         proc = TimestampProcessor()
         near_max = _UINT32_MAX - 25_000_000
@@ -128,13 +139,16 @@ class TestRollover:
 
 class TestFalsePositiveRollover:
     def test_negative_time_when_exceeds_10_seconds(self):
+        # Qodo PR #11 pass-6 finding S1: the >10s sanity check now also
+        # downgrades was_rollover to False so the result reflects the
+        # final classification (out-of-order), not the initial guess.
         proc = TimestampProcessor()
         first_ts = 1_000_000_000
         second_ts = 100_000_000  # appears as rollover, but >10s implied
 
         proc.process_timestamp(_TEST_DEVICE_ID, first_ts)
         result = proc.process_timestamp(_TEST_DEVICE_ID, second_ts)
-        assert result.was_rollover is True
+        assert result.was_rollover is False  # was True before the fix
         assert result.seconds_between_messages < 0
 
     def test_valid_rollover_under_10_seconds_positive_time(self):

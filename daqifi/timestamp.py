@@ -126,8 +126,11 @@ class TimestampProcessor:
             seconds_between_messages = clock_cycles_between_messages * self._tick_period
 
             # Sanity check: a "rollover" that implies > 10 s gap is more
-            # likely an out-of-order message — treat it as moving backwards.
+            # likely an out-of-order message — treat it as moving backwards
+            # and downgrade the rollover flag so the result reflects what
+            # the sanity check decided, not the initial classification.
             if rollover and seconds_between_messages > _MAX_ROLLOVER_TIME_BETWEEN_MESSAGES:
+                rollover = False
                 clock_cycles_between_messages = previous_device_timestamp - device_timestamp
                 seconds_between_messages = clock_cycles_between_messages * self._tick_period * -1
 
