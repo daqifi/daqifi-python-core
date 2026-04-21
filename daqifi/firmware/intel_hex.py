@@ -68,8 +68,12 @@ class IntelHexParser:
         base_address: int = 0
         hex_records: List[bytes] = []
 
-        for line in lines:
-            if not line or line.isspace():
+        for raw_line in lines:
+            # Strip line terminators so callers can pass an open file
+            # iterator directly (`for line in open(path):`) without
+            # tripping the odd-character validation on `\r\n` endings.
+            line = raw_line.strip() if raw_line else raw_line
+            if not line:
                 continue
 
             self._validate_line(line)
@@ -100,8 +104,11 @@ class IntelHexParser:
         base_address: int = 0
         records: List[HexFileRecord] = []
 
-        for line in lines:
-            if not line or line.isspace():
+        for raw_line in lines:
+            # Strip line terminators so callers can pass file-iterator lines
+            # directly (the same fix as `parse_hex_records`).
+            line = raw_line.strip() if raw_line else raw_line
+            if not line:
                 continue
 
             self._validate_line(line)

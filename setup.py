@@ -32,16 +32,18 @@ setup(
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering",
         "Topic :: Software Development :: Embedded Systems",
         "Topic :: System :: Hardware",
     ],
-    python_requires=">=3.7",
+    # 3.8+: ported modules use typing.Protocol / runtime_checkable, which are
+    # not available in 3.7. Python 3.7 reached EOL in June 2023.
+    python_requires=">=3.8",
     install_requires=[
         "pyserial>=3.5",
     ],

@@ -48,6 +48,16 @@ class TestParseHexRecordsInputValidation:
     def test_blank_lines_skipped(self):
         assert self.parser.parse_hex_records(["", "  ", "\t"]) == []
 
+    def test_lines_with_trailing_newline_parse(self):
+        # Qodo PR #11 review finding #6: file iterators yield lines with
+        # trailing \n / \r\n, which previously failed odd-length validation.
+        result = self.parser.parse_hex_records([
+            ":020000041D00DD\n",
+            ":020000041D00DD\r\n",
+            "  :020000041D00DD  \n",
+        ])
+        assert len(result) == 3
+
     def test_line_without_colon_raises(self):
         with pytest.raises(ValueError):
             self.parser.parse_hex_records(["1000000000FF"])
