@@ -1,0 +1,86 @@
+"""Tests for `daqifi.communication` (port of LineBasedMessageParser)."""
+from __future__ import annotations
+
+from daqifi.communication import (
+    InboundMessage,
+    LineBasedMessageParser,
+    TextInboundMessage,
+)
+
+
+class TestInboundMessage:
+    def test_holds_data(self):
+        m = InboundMessage(data="hello")
+        assert m.data == "hello"
+
+    def test_text_inbound_message_alias(self):
+        m: TextInboundMessage = InboundMessage(data="hi")
+        assert isinstance(m, InboundMessage)
+        assert m.data == "hi"
+
+
+class TestLineBasedMessageParser:
+    def test_empty_data(self):
+        parser = LineBasedMessageParser()
+        messages, consumed = parser.parse_messages(b"")
+        assert messages == []
+        assert consumed == 0
+
+    def test_single_complete_line(self):
+        parser = LineBasedMessageParser()
+        messages, consumed = parser.parse_messages(b"hello\r\n")
+        assert len(messages) == 1
+        assert messages[0].data == "hello"
+        assert consumed == len(b"hello\r\n")
+
+    def test_multiple_complete_lines(self):
+        parser = LineBasedMessageParser()
+        messages, consumed = parser.parse_messages(b"first\r\nsecond\r\nthird\r\n")
+        assert [m.data for m in messages] == ["first", "second", "third"]
+        assert consumed == len(b"first\r\nsecond\r\nthird\r\n")
+
+    def test_partial_trailing_line_not_consumed(self):
+        parser = LineBasedMessageParser()
+        messages, consumed = parser.parse_messages(b"first\r\nsecond_partial")
+        assert [m.data for m in messages] == ["first"]
+        # Trailing partial bytes are NOT consumed — caller can keep accumulating.
+        assert consumed == len(b"first\r\n")
+
+    def test_blank_lines_skipped(self):
+        parser = LineBasedMessageParser()
+        messages, consumed = parser.parse_messages(b"first\r\n\r\nsecond\r\n")
+        assert [m.data for m in messages] == ["first", "second"]
+        assert consumed == len(b"first\r\n\r\nsecond\r\n")
+
+    def test_whitespace_only_line_skipped(self):
+        parser = LineBasedMessageParser()
+        messages, _ = parser.parse_messages(b"first\r\n   \r\nsecond\r\n")
+        assert [m.data for m in messages] == ["first", "second"]
+
+    def test_message_data_is_trimmed(self):
+        parser = LineBasedMessageParser()
+        messages, _ = parser.parse_messages(b"  spaced  \r\n")
+        assert messages[0].data == "spaced"
+
+    def test_no_line_ending_returns_no_messages(self):
+        parser = LineBasedMessageParser()
+        messages, consumed = parser.parse_messages(b"no terminator here")
+        assert messages == []
+        assert consumed == 0
+
+    def test_custom_line_ending_lf_only(self):
+        parser = LineBasedMessageParser(line_ending="\n")
+        messages, consumed = parser.parse_messages(b"a\nb\nc\n")
+        assert [m.data for m in messages] == ["a", "b", "c"]
+        assert consumed == len(b"a\nb\nc\n")
+
+    def test_custom_encoding_utf8_multibyte(self):
+        parser = LineBasedMessageParser()
+        # "café" is two-byte 'é' in UTF-8.
+        messages, _ = parser.parse_messages("café\r\n".encode("utf-8"))
+        assert messages[0].data == "café"
+
+    def test_carriage_return_only_line_ending(self):
+        parser = LineBasedMessageParser(line_ending="\r")
+        messages, _ = parser.parse_messages(b"x\ry\r")
+        assert [m.data for m in messages] == ["x", "y"]
