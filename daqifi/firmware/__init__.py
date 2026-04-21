@@ -2,6 +2,11 @@
 
 from daqifi.firmware.bootloader import BootloaderProtocol, Pic32BootloaderProtocol
 from daqifi.firmware.crc16 import Crc16
+from daqifi.firmware.download_service import (
+    FirmwareDownloadService,
+    FirmwareUpdateCheckResult,
+    ProgressReporter,
+)
 from daqifi.firmware.external_process import (
     ExternalProcessRequest,
     ExternalProcessResult,
@@ -19,11 +24,14 @@ __all__ = [
     "ExternalProcessRequest",
     "ExternalProcessResult",
     "ExternalProcessRunner",
+    "FirmwareDownloadService",
     "FirmwareReleaseInfo",
+    "FirmwareUpdateCheckResult",
     "FirmwareVersion",
     "HexFileRecord",
     "IntelHexParser",
     "LanChipInfo",
     "Pic32BootloaderProtocol",
+    "ProgressReporter",
     "SubprocessRunner",
 ]
