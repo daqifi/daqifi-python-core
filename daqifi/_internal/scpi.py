@@ -39,6 +39,25 @@ class ConnectionStatus(IntEnum):
     Failed = 5        # The device connection failed after all retry attempts
 
 
+class DeviceState(IntEnum):
+    """Operational state of a DAQiFi device.
+
+    Ports the C# ``DeviceState`` enum from
+    ``Daqifi.Core/Device/DeviceState.cs``. Distinct from
+    :class:`ConnectionStatus` -- ``State`` tracks the high-level
+    lifecycle (Initializing, Ready, Streaming, Error) while ``Status``
+    tracks the transport-level connection (Disconnected, Connecting,
+    Lost, ...).
+    """
+    Disconnected = 0  # not connected or has been disconnected
+    Connecting = 1    # in the process of connecting
+    Connected = 2     # connected but not yet initialized
+    Initializing = 3  # running initialization sequence
+    Ready = 4         # fully initialized and ready
+    Streaming = 5     # actively streaming data
+    Error = 6         # encountered an error
+
+
 class StreamInterface(IntEnum):
     """Target interface for data streaming.
 
