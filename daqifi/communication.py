@@ -14,8 +14,11 @@ element since Python doesn't have out-params.
 """
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, List, Optional, Tuple, TypeVar
+from datetime import datetime, timezone
+from typing import IO, Any, Callable, Generic, List, Optional, Tuple, TypeVar
 
 
 __all__ = [
@@ -25,6 +28,7 @@ __all__ = [
     "LineBasedMessageParser",
     "ProtobufMessageParser",
     "CompositeMessageParser",
+    "StreamMessageConsumer",
 ]
 
 
@@ -346,3 +350,235 @@ class CompositeMessageParser:
             return [], 0
         # ProtobufMessageParser already wraps in ObjectInboundMessage.
         return list(protobuf_messages), consumed
+
+
+# ---- StreamMessageConsumer ---------------------------------------------------
+
+
+@dataclass
+class _MessageReceivedArgs(Generic[T]):
+    """Local minimal MessageReceivedEventArgs (avoid an import cycle into
+    `_internal.comm` and the optional `OutboundMessage` machinery there).
+
+    Same shape as `daqifi._internal.comm.MessageReceivedEventArgs`:
+    `message`, `raw_data`, `timestamp` (UTC).
+    """
+
+    message: Any
+    raw_data: bytes
+    timestamp: datetime
+
+
+@dataclass
+class _ConsumerErrorArgs:
+    """Same shape as `daqifi._internal.comm.MessageConsumerErrorEventArgs`."""
+
+    error: BaseException
+    raw_data: Optional[bytes]
+    timestamp: datetime
+
+
+class StreamMessageConsumer(Generic[T]):
+    """Background-thread consumer that pulls bytes off a stream and emits
+    parsed messages via callback.
+
+    Ports the C# ``StreamMessageConsumer<T>`` from
+    ``Daqifi.Core/Communication/Consumers/StreamMessageConsumer.cs``.
+    Satisfies the :class:`daqifi._internal.comm.MessageConsumer` Protocol.
+
+    The reader runs in a daemon :class:`threading.Thread` (mirrors the
+    upstream ``Thread { IsBackground = true }``). On every read pass:
+
+    1. Read up to ``buffer_size`` bytes from ``stream``.
+    2. Append to an internal byte buffer.
+    3. Hand the buffer to ``message_parser.parse_messages(...)``.
+    4. Drop ``consumed_bytes`` from the front of the buffer.
+    5. Fire ``MessageReceived`` for each parsed message.
+
+    Errors are routed to ``ErrorOccurred`` rather than killing the
+    thread, mirroring upstream's resilience.
+    """
+
+    def __init__(
+        self,
+        stream: IO[bytes],
+        message_parser: Any,  # Duck-typed: anything with parse_messages(bytes)
+        buffer_size: int = 4096,
+        is_wifi_device: bool = False,
+    ) -> None:
+        if stream is None:  # type: ignore[unreachable]
+            raise TypeError("stream must not be None.")
+        if message_parser is None:  # type: ignore[unreachable]
+            raise TypeError("message_parser must not be None.")
+        if buffer_size <= 0:
+            raise ValueError("buffer_size must be positive.")
+        self._stream = stream
+        self._parser = message_parser
+        self._buffer_size = buffer_size
+        self._message_buffer = bytearray()
+        self._is_running = False
+        self._thread: Optional[threading.Thread] = None
+        self._disposed = False
+        self.is_wifi_device = is_wifi_device
+        self._message_handlers: List[Callable[[Any], None]] = []
+        self._error_handlers: List[Callable[[Any], None]] = []
+        # Lock around the message buffer mutation so ClearBuffer doesn't
+        # race the consumer thread.
+        self._buffer_lock = threading.Lock()
+
+    @property
+    def is_running(self) -> bool:
+        return self._is_running
+
+    @property
+    def queued_message_count(self) -> int:
+        with self._buffer_lock:
+            return len(self._message_buffer)
+
+    # ---- event subscription ------------------------------------------------
+
+    def add_message_received(self, handler: Callable[[Any], None]) -> None:
+        self._message_handlers.append(handler)
+
+    def remove_message_received(self, handler: Callable[[Any], None]) -> None:
+        try:
+            self._message_handlers.remove(handler)
+        except ValueError:
+            pass
+
+    def add_error_occurred(self, handler: Callable[[Any], None]) -> None:
+        self._error_handlers.append(handler)
+
+    def remove_error_occurred(self, handler: Callable[[Any], None]) -> None:
+        try:
+            self._error_handlers.remove(handler)
+        except ValueError:
+            pass
+
+    # ---- lifecycle ---------------------------------------------------------
+
+    def start(self) -> None:
+        self._raise_if_disposed()
+        if self._is_running:
+            return
+        self._is_running = True
+        thread_name = f"MessageConsumer-{type(self).__name__}"
+        self._thread = threading.Thread(
+            target=self._process_messages,
+            name=thread_name,
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._is_running = False
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self._thread = None
+        with self._buffer_lock:
+            self._message_buffer.clear()
+
+    def stop_safely(self, timeout_ms: int = 1000) -> bool:
+        if not self._is_running:
+            return True
+        self._is_running = False
+        thread = self._thread
+        stopped = True
+        if thread is not None:
+            thread.join(timeout=timeout_ms / 1000.0)
+            stopped = not thread.is_alive()
+        self._thread = None
+        with self._buffer_lock:
+            self._message_buffer.clear()
+        return stopped
+
+    def clear_buffer(self) -> None:
+        self._raise_if_disposed()
+        with self._buffer_lock:
+            self._message_buffer.clear()
+        # Drain stream-level residual data if the stream exposes a
+        # peek/in_waiting interface (pyserial: `.in_waiting`; sockets: no
+        # standard accessor — skip).
+        try:
+            in_waiting = getattr(self._stream, "in_waiting", None)
+            if in_waiting:
+                self._stream.read(in_waiting)
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if self._disposed:
+            return
+        self.stop_safely()
+        self._disposed = True
+
+    # ---- internals ---------------------------------------------------------
+
+    def _process_messages(self) -> None:
+        while self._is_running:
+            try:
+                bytes_read = b""
+                try:
+                    bytes_read = self._stream.read(self._buffer_size)
+                    # Some stream-like objects return None on timeout (pyserial
+                    # with non-blocking reads); coerce to empty bytes.
+                    if bytes_read is None:
+                        bytes_read = b""
+                except Exception as exc:
+                    if not self._is_running:
+                        return
+                    self._on_error(exc)
+                    time.sleep(0.1)  # back off on error
+                    continue
+
+                if not bytes_read:
+                    time.sleep(0.01)
+                    continue
+
+                with self._buffer_lock:
+                    self._message_buffer.extend(bytes_read)
+                    snapshot = bytes(self._message_buffer)
+
+                try:
+                    messages, consumed = self._parser.parse_messages(snapshot)
+                except Exception as exc:
+                    self._on_error(exc, snapshot)
+                    continue
+
+                if consumed > 0:
+                    with self._buffer_lock:
+                        del self._message_buffer[: min(consumed, len(self._message_buffer))]
+
+                for msg in messages:
+                    try:
+                        self._on_message(msg, snapshot)
+                    except Exception as exc:
+                        self._on_error(exc, snapshot)
+            except Exception as exc:
+                if self._is_running:
+                    self._on_error(exc)
+
+    def _on_message(self, message: Any, raw_data: bytes) -> None:
+        args = _MessageReceivedArgs(
+            message=message,
+            raw_data=raw_data,
+            timestamp=datetime.now(timezone.utc),
+        )
+        for h in list(self._message_handlers):
+            h(args)
+
+    def _on_error(self, error: BaseException, raw_data: Optional[bytes] = None) -> None:
+        args = _ConsumerErrorArgs(
+            error=error,
+            raw_data=raw_data,
+            timestamp=datetime.now(timezone.utc),
+        )
+        for h in list(self._error_handlers):
+            try:
+                h(args)
+            except Exception:
+                pass
+
+    def _raise_if_disposed(self) -> None:
+        if self._disposed:
+            raise RuntimeError("StreamMessageConsumer has been closed.")
