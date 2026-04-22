@@ -8,10 +8,12 @@ Not intended for direct use - use the public API instead.
 import serial
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import IO, Any, Callable, Generic, List, Optional, Protocol, TypeVar, runtime_checkable
+from datetime import datetime, timedelta, timezone
+from typing import IO, Any, Callable, Generic, List, Optional, Protocol, Sequence, Tuple, TypeVar, runtime_checkable
 from enum import IntEnum
 import builtins
+
+from .scpi import ConnectionStatus
 
 
 T = TypeVar("T")
@@ -525,6 +527,294 @@ class MessageConsumer(Protocol[T]):
         ...
 
     def close(self) -> None:
+        ...
+
+
+@dataclass
+class DeviceStatusEventArgs:
+    """Payload for :class:`Device` ``StatusChanged`` callbacks.
+
+    Ports the C# ``DeviceStatusEventArgs`` (subclass of ``EventArgs``).
+    Python uses plain callables instead of the .NET event pattern, so
+    the sender argument is dropped -- subscribers already know who they
+    subscribed to (mirrors :class:`TransportStatusEventArgs`).
+    """
+
+    status: ConnectionStatus
+
+
+@runtime_checkable
+class Device(Protocol):
+    """Structural protocol for all DAQiFi devices.
+
+    Ports the C# ``IDevice`` interface from
+    ``Daqifi.Core/Device/IDevice.cs``. The base contract every device --
+    serial, USB-HID, TCP, UDP -- satisfies. Implementations expose
+    identity (name, ip), connection lifecycle, status notifications, and
+    outbound messaging.
+
+    **Lifecycle:** the upstream ``Connect``/``Disconnect`` are sync;
+    Python keeps the same pair (the project is wholly synchronous --
+    see :class:`StreamTransport` for the rationale).
+
+    **Status notifications:** the upstream ``event
+    EventHandler<DeviceStatusEventArgs>`` becomes a list of plain
+    callbacks via :meth:`add_status_changed` / :meth:`remove_status_changed`,
+    matching the established pattern across this module.
+
+    **Message receipt:** the upstream ``event
+    EventHandler<MessageReceivedEventArgs>`` becomes
+    :meth:`add_message_received` / :meth:`remove_message_received`.
+    """
+
+    @property
+    def name(self) -> str:
+        ...
+
+    @property
+    def ip_address(self) -> Optional[str]:
+        """IPv4 address string, or ``None`` for non-network transports."""
+        ...
+
+    @property
+    def is_connected(self) -> bool:
+        ...
+
+    @property
+    def status(self) -> ConnectionStatus:
+        ...
+
+    def add_status_changed(
+        self, handler: Callable[[DeviceStatusEventArgs], None]
+    ) -> None:
+        ...
+
+    def remove_status_changed(
+        self, handler: Callable[[DeviceStatusEventArgs], None]
+    ) -> None:
+        ...
+
+    def add_message_received(
+        self, handler: Callable[[MessageReceivedEventArgs[Any]], None]
+    ) -> None:
+        ...
+
+    def remove_message_received(
+        self, handler: Callable[[MessageReceivedEventArgs[Any]], None]
+    ) -> None:
+        ...
+
+    def connect(self) -> None:
+        ...
+
+    def disconnect(self) -> None:
+        ...
+
+    def send(self, message: "OutboundMessage[Any]") -> None:
+        ...
+
+
+@runtime_checkable
+class StreamingDevice(Device, Protocol):
+    """Structural protocol for a device that supports data streaming.
+
+    Ports the C# ``IStreamingDevice`` interface from
+    ``Daqifi.Core/Device/IStreamingDevice.cs`` (extends ``IDevice``).
+    Adds a streaming-frequency control plus start/stop hooks for the
+    sample stream.
+    """
+
+    @property
+    def streaming_frequency(self) -> int:
+        """Streaming frequency in Hz."""
+        ...
+
+    @streaming_frequency.setter
+    def streaming_frequency(self, value: int) -> None:
+        ...
+
+    @property
+    def is_streaming(self) -> bool:
+        ...
+
+    def start_streaming(self) -> None:
+        ...
+
+    def stop_streaming(self) -> None:
+        ...
+
+
+@runtime_checkable
+class HidDeviceEnumerator(Protocol):
+    """Structural protocol for HID device discovery.
+
+    Ports the C# ``IHidDeviceEnumerator`` interface from
+    ``Daqifi.Core/Communication/Transport/IHidDeviceEnumerator.cs``.
+    Used by bootloader/firmware-update flows to find candidate USB-HID
+    devices.
+
+    **Sync only:** the upstream signature is ``Task<IReadOnlyList<...>>``;
+    per the project convention (no asyncio) this is exposed as a sync
+    method returning a ``Sequence[HidDeviceInfo]``.
+    """
+
+    def enumerate(
+        self,
+        vendor_id: Optional[int] = None,
+        product_id: Optional[int] = None,
+    ) -> "Sequence[HidDeviceInfo]":
+        ...
+
+
+@runtime_checkable
+class HidTransport(Protocol):
+    """Structural protocol for USB HID bootloader communication.
+
+    Ports the C# ``IHidTransport`` interface from
+    ``Daqifi.Core/Communication/Transport/IHidTransport.cs``. Provides
+    connect/disconnect, raw read/write of HID report payloads, and
+    timeouts.
+
+    **Sync only:** upstream declares paired sync + async APIs; per the
+    project convention only the sync pair is exposed (mirrors
+    :class:`StreamTransport`).
+
+    **Lifecycle:** ``IDisposable`` -> :meth:`close`.
+
+    **Timeouts:** ``TimeSpan`` -> :class:`datetime.timedelta` (the
+    Pythonic equivalent that preserves microsecond precision).
+    """
+
+    @property
+    def is_connected(self) -> bool:
+        ...
+
+    @property
+    def vendor_id(self) -> Optional[int]:
+        """USB VID of the connected device, or ``None`` when disconnected."""
+        ...
+
+    @property
+    def product_id(self) -> Optional[int]:
+        """USB PID of the connected device, or ``None`` when disconnected."""
+        ...
+
+    @property
+    def serial_number(self) -> Optional[str]:
+        ...
+
+    @property
+    def device_path(self) -> Optional[str]:
+        ...
+
+    @property
+    def read_timeout(self) -> timedelta:
+        ...
+
+    @read_timeout.setter
+    def read_timeout(self, value: timedelta) -> None:
+        ...
+
+    @property
+    def write_timeout(self) -> timedelta:
+        ...
+
+    @write_timeout.setter
+    def write_timeout(self, value: timedelta) -> None:
+        ...
+
+    def connect(
+        self,
+        vendor_id: int,
+        product_id: int,
+        serial_number: Optional[str] = None,
+    ) -> None:
+        ...
+
+    def write(self, data: bytes) -> None:
+        ...
+
+    def read(self, timeout: Optional[timedelta] = None) -> bytes:
+        ...
+
+    def disconnect(self) -> None:
+        ...
+
+    def close(self) -> None:
+        ...
+
+
+# UDP endpoint as a plain ``(host, port)`` tuple -- the Pythonic
+# equivalent of ``System.Net.IPEndPoint`` (matches socket-module
+# conventions; e.g. ``socket.sendto(data, (host, port))``).
+UdpEndPoint = Tuple[str, int]
+
+
+@runtime_checkable
+class UdpTransport(Protocol):
+    """Structural protocol for UDP broadcast/unicast transport.
+
+    Ports the C# ``IUdpTransport`` interface from
+    ``Daqifi.Core/Communication/Transport/IUdpTransport.cs``. Used
+    primarily for device discovery and UDP-based messaging.
+
+    **Sync only:** upstream declares paired sync + async APIs; per the
+    project convention only the sync pair is exposed.
+
+    **Endpoints:** upstream uses ``System.Net.IPEndPoint``; the Python
+    port follows the standard library's ``(host, port)`` tuple
+    convention (see :data:`UdpEndPoint`).
+
+    **Status notifications:** ``event
+    EventHandler<TransportStatusEventArgs>`` -> add/remove pair.
+
+    **Lifecycle:** ``IDisposable`` -> :meth:`close`.
+    """
+
+    @property
+    def is_open(self) -> bool:
+        ...
+
+    @property
+    def connection_info(self) -> str:
+        ...
+
+    def add_status_changed(
+        self, handler: Callable[[TransportStatusEventArgs], None]
+    ) -> None:
+        ...
+
+    def remove_status_changed(
+        self, handler: Callable[[TransportStatusEventArgs], None]
+    ) -> None:
+        ...
+
+    def open(self) -> None:
+        ...
+
+    def close(self) -> None:
+        ...
+
+    def send_broadcast(self, data: bytes, port: int) -> None:
+        """Broadcast ``data`` to ``port`` on the default broadcast address."""
+        ...
+
+    def send_broadcast_to(self, data: bytes, end_point: UdpEndPoint) -> None:
+        """Broadcast ``data`` to a specific endpoint.
+
+        Mirrors the C# overload ``SendBroadcastAsync(byte[], IPEndPoint)``.
+        Python doesn't dispatch on argument types, so the targeted
+        variant gets a distinct name.
+        """
+        ...
+
+    def send_unicast(self, data: bytes, end_point: UdpEndPoint) -> None:
+        ...
+
+    def receive(
+        self, timeout: Optional[timedelta] = None
+    ) -> Optional[Tuple[bytes, UdpEndPoint]]:
+        """Receive one datagram. Returns ``None`` on timeout."""
         ...
 
 
