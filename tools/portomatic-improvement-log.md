@@ -74,3 +74,21 @@ When portomatic improvement work resumes, file each item above as a
 ticket (`track:quality` label). Verify it's still reproducible against
 the latest portomatic main first — coverage classifier rules change
 fast.
+
+## Filed tickets (2026-04-22)
+
+The high-value items above have been filed in
+`cptkoolbeenz/portomatic`:
+
+- Item #4 (module-of-functions subset check too strict) →
+  [portomatic#140](https://github.com/cptkoolbeenz/portomatic/issues/140)
+- Items #1 + #2 (token-overlap false positives, suffix weighting) →
+  [portomatic#141](https://github.com/cptkoolbeenz/portomatic/issues/141)
+- Item #3 (I-prefix interface vs concrete name collision) →
+  [portomatic#142](https://github.com/cptkoolbeenz/portomatic/issues/142)
+- Item #5 (scaffold mark warning) →
+  [portomatic#143](https://github.com/cptkoolbeenz/portomatic/issues/143)
+- Item #6 (coverage --json schema alias) — minor; not filed yet.
+
+A separate downstream consolidation ticket lives in this repo:
+[daqifi-python-core#12](https://github.com/daqifi/daqifi-python-core/issues/12).
