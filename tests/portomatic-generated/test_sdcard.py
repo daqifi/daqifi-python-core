@@ -1,15 +1,19 @@
 """Tests for `daqifi.sdcard` (port of SD card value types)."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
+from daqifi.enums import SdCardLogFormat
 from daqifi.sdcard import (
     SdCardDeviceConfiguration,
+    SdCardDownloadResult,
     SdCardFileInfo,
+    SdCardOperations,
     SdCardParseOptions,
     SdCardParseProgress,
+    SdCardTransferProgress,
 )
 
 
@@ -117,3 +121,106 @@ class TestSdCardParseOptions:
         cfg = SdCardDeviceConfiguration(1, 2, 50_000_000)
         opts = SdCardParseOptions(configuration_override=cfg)
         assert opts.configuration_override is cfg
+
+
+@pytest.mark.portomatic_generated
+class TestSdCardTransferProgress:
+    def test_construct(self):
+        p = SdCardTransferProgress(bytes_received=1024, file_name="log.bin")
+        assert p.bytes_received == 1024
+        assert p.file_name == "log.bin"
+
+    def test_is_frozen(self):
+        p = SdCardTransferProgress(bytes_received=0, file_name="x")
+        with pytest.raises(Exception):
+            p.bytes_received = 1  # type: ignore[misc]
+
+    def test_equality(self):
+        a = SdCardTransferProgress(100, "log.bin")
+        b = SdCardTransferProgress(100, "log.bin")
+        assert a == b
+
+
+@pytest.mark.portomatic_generated
+class TestSdCardDownloadResult:
+    def test_required_fields(self):
+        r = SdCardDownloadResult(
+            file_name="log.bin",
+            file_size=2048,
+            duration=timedelta(seconds=3.5),
+        )
+        assert r.file_name == "log.bin"
+        assert r.file_size == 2048
+        assert r.duration == timedelta(seconds=3.5)
+        assert r.file_path is None
+
+    def test_with_local_file_path(self):
+        r = SdCardDownloadResult(
+            file_name="log.bin",
+            file_size=2048,
+            duration=timedelta(milliseconds=750),
+            file_path="/tmp/dl/log.bin",
+        )
+        assert r.file_path == "/tmp/dl/log.bin"
+
+    def test_is_frozen(self):
+        r = SdCardDownloadResult(
+            file_name="log.bin",
+            file_size=0,
+            duration=timedelta(0),
+        )
+        with pytest.raises(Exception):
+            r.file_size = 1  # type: ignore[misc]
+
+
+@pytest.mark.portomatic_generated
+class TestSdCardOperationsProtocol:
+    def test_runtime_checkable_complete_stub(self):
+        class _Stub:
+            @property
+            def is_logging_to_sd_card(self) -> bool:
+                return False
+
+            @property
+            def sd_card_files(self):
+                return ()
+
+            async def get_sd_card_files(self):
+                return ()
+
+            async def start_sd_card_logging(
+                self, file_name=None, channel_mask=None,
+                format=SdCardLogFormat.PROTOBUF,
+            ):
+                return None
+
+            async def stop_sd_card_logging(self):
+                return None
+
+            async def delete_sd_card_file(self, file_name):
+                return None
+
+            async def format_sd_card(self):
+                return None
+
+            async def download_sd_card_file(
+                self, file_name, destination_stream, progress=None,
+            ):
+                return SdCardDownloadResult(file_name, 0, timedelta(0))
+
+            async def download_sd_card_file_to_temp(
+                self, file_name, progress=None,
+            ):
+                return SdCardDownloadResult(file_name, 0, timedelta(0))
+
+        assert isinstance(_Stub(), SdCardOperations)
+
+    def test_incomplete_fails_isinstance(self):
+        class _Incomplete:
+            @property
+            def is_logging_to_sd_card(self) -> bool:
+                return False
+
+            # Missing nearly all of the methods.
+
+        assert not isinstance(_Incomplete(), SdCardOperations)

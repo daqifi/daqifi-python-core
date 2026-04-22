@@ -19,8 +19,19 @@ Includes the small value classes the parser surface needs:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Callable, List, Optional, Tuple
+from datetime import datetime, timedelta
+from typing import (
+    Any,
+    Callable,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    runtime_checkable,
+)
+
+from daqifi.enums import SdCardLogFormat
 
 
 __all__ = [
@@ -28,6 +39,9 @@ __all__ = [
     "SdCardParseProgress",
     "SdCardDeviceConfiguration",
     "SdCardParseOptions",
+    "SdCardTransferProgress",
+    "SdCardDownloadResult",
+    "SdCardOperations",
 ]
 
 
@@ -85,3 +99,165 @@ class SdCardParseOptions:
     progress: Optional[Callable[[SdCardParseProgress], None]] = None
     fallback_timestamp_frequency: int = 50_000_000
     configuration_override: Optional[SdCardDeviceConfiguration] = field(default=None)
+
+
+@dataclass(frozen=True)
+class SdCardTransferProgress:
+    """Progress payload reported during an SD card file download.
+
+    Ports the C# ``sealed record SdCardTransferProgress`` from
+    ``Daqifi.Core/Device/SdCard/SdCardTransferProgress.cs``. Frozen
+    because the upstream record is immutable; the download path emits
+    a fresh instance per progress tick rather than mutating one.
+    """
+
+    bytes_received: int
+    file_name: str
+
+
+@dataclass(frozen=True)
+class SdCardDownloadResult:
+    """Metadata returned at the end of an SD card file download.
+
+    Ports the C# ``sealed record SdCardDownloadResult`` from
+    ``Daqifi.Core/Device/SdCard/SdCardDownloadResult.cs``. ``file_path``
+    is ``None`` when the file was streamed to a caller-provided buffer
+    (no on-disk artifact); set when the convenience overload writes to
+    a temporary file.
+    """
+
+    file_name: str
+    file_size: int
+    duration: timedelta
+    file_path: Optional[str] = None
+
+
+@runtime_checkable
+class SdCardOperations(Protocol):
+    """Protocol for SD-card operations on a DAQiFi device.
+
+    Pythonic name for the C# ``ISdCardOperations`` interface from
+    ``Daqifi.Core/Device/SdCard/ISdCardOperations.cs`` (the ``I``
+    prefix is dropped to match the rest of this codebase's protocols).
+
+    Async methods mirror the C# ``Task`` / ``Task<T>`` returns. The
+    download convenience overload from C# (no destination stream) is
+    surfaced as :meth:`download_sd_card_file_to_temp` so the two
+    overloads have distinct names — Python doesn't dispatch on
+    parameter types like C# does.
+    """
+
+    @property
+    def is_logging_to_sd_card(self) -> bool:
+        """True while the device is actively logging to its SD card."""
+        ...
+
+    @property
+    def sd_card_files(self) -> Sequence[SdCardFileInfo]:
+        """Most recently retrieved file listing.
+
+        Read-only sequence — implementations should return a tuple or
+        an immutable view rather than a live list.
+        """
+        ...
+
+    async def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
+        """Fetch and return the current list of files on the SD card.
+
+        Raises:
+            RuntimeError: if the device is not connected.
+        """
+        ...
+
+    async def start_sd_card_logging(
+        self,
+        file_name: Optional[str] = None,
+        channel_mask: Optional[str] = None,
+        format: SdCardLogFormat = SdCardLogFormat.PROTOBUF,
+    ) -> None:
+        """Begin logging to the SD card.
+
+        Args:
+            file_name: Output file name. If empty/``None``, the device
+                generates a timestamped name like ``log_YYYYMMDD_HHMMSS``
+                with an extension matching ``format`` (``.bin`` for
+                Protobuf, ``.json`` for JSON, ``.csv`` for CSV).
+            channel_mask: Optional decimal bitmask string enabling
+                specific ADC channels (each bit = one channel). When
+                empty/``None`` the current device channel configuration
+                is used.
+            format: Logging format — protobuf, JSON, or CSV.
+
+        Raises:
+            RuntimeError: if the device is not connected.
+        """
+        ...
+
+    async def stop_sd_card_logging(self) -> None:
+        """Stop the active SD card logging session.
+
+        Raises:
+            RuntimeError: if the device is not connected.
+        """
+        ...
+
+    async def delete_sd_card_file(self, file_name: str) -> None:
+        """Delete ``file_name`` from the SD card.
+
+        Raises:
+            RuntimeError: if the device is not connected or is currently
+                logging to the SD card.
+            ValueError: if ``file_name`` is empty or contains invalid
+                characters.
+        """
+        ...
+
+    async def format_sd_card(self) -> None:
+        """Erase the entire SD card.
+
+        Raises:
+            RuntimeError: if the device is not connected or is currently
+                logging.
+        """
+        ...
+
+    async def download_sd_card_file(
+        self,
+        file_name: str,
+        destination_stream: Any,
+        progress: Optional[Callable[[SdCardTransferProgress], None]] = None,
+    ) -> SdCardDownloadResult:
+        """Stream a file from the device's SD card into ``destination_stream``.
+
+        ``destination_stream`` is any binary-writable file-like object
+        (anything supporting ``.write(bytes) -> int``) — keeps the
+        contract duck-typed rather than tying it to ``BinaryIO``.
+        ``progress``, if provided, is called with one
+        :class:`SdCardTransferProgress` per chunk.
+
+        Raises:
+            RuntimeError: if the device is not connected or is not
+                using a USB/serial transport.
+            ValueError: if ``file_name`` is empty or invalid.
+        """
+        ...
+
+    async def download_sd_card_file_to_temp(
+        self,
+        file_name: str,
+        progress: Optional[Callable[[SdCardTransferProgress], None]] = None,
+    ) -> SdCardDownloadResult:
+        """Download a file to a temporary on-disk location.
+
+        Convenience overload of :meth:`download_sd_card_file` that
+        manages the destination file itself; the resulting
+        :class:`SdCardDownloadResult` carries the local path in
+        ``file_path``. Renamed from the C# overload because Python
+        can't dispatch on parameter types.
+
+        Raises:
+            RuntimeError: if the device is not connected or is not
+                using a USB/serial transport.
+            ValueError: if ``file_name`` is empty or invalid.
+        """
+        ...
