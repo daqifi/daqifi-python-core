@@ -372,3 +372,51 @@ class TestDaqifiDeviceFactoryValidation:
             DaqifiDeviceFactory.connect_serial("COM3", baud_rate=0)
         with pytest.raises(ValueError, match="greater than zero"):
             DaqifiDeviceFactory.connect_serial("COM3", baud_rate=-1)
+
+
+# ---- Default protobuf message factory (#13) ----------------------------------
+
+
+class TestDefaultMessageFactory:
+    """The default factory decodes wire bytes into a real
+    :class:`DaqifiOutMessage` so :attr:`DaqifiDevice.metadata`
+    populates after :meth:`initialize`. Replaces the previous
+    bytes-passthrough that left metadata empty on hardware (#13)."""
+
+    def test_default_factory_imports_lazily(self):
+        from daqifi.devices import _default_message_factory
+        # Sanity: callable, takes bytes, returns an object.
+        assert callable(_default_message_factory)
+
+    def test_default_factory_decodes_real_payload(self):
+        # Captured from a real NQ1 over UDP discovery (port 30303);
+        # length prefix already stripped — this is the buffer
+        # ``ProtobufMessageParser`` hands to the factory.
+        from daqifi.devices import _default_message_factory
+        payload = bytes.fromhex(
+            "08e186ae900e400248015064880110900108ba01040000a040"
+            "d8018020e0018020980210da0204c0a801a0e20204ffffff00"
+            "ea0204c0a80101820306f8f005a495a7ba030b4441514946"
+            "692d39354137c003a04c9204034e71319a0405322e302e30"
+            "a20407332e342e366231a804a7d18390c69ea6947e"
+        )
+        # If this regression payload fails to decode, the schema in
+        # ``_internal/proto/DaqifiOutMessage_pb2.py`` has diverged
+        # from firmware — regenerate from the upstream ``.proto``.
+        msg = _default_message_factory(payload)
+        assert msg.device_pn == "Nq1"
+        assert msg.device_fw_rev == "3.4.6b1"
+        assert "DAQ" in msg.host_name.upper()
+
+    def test_factory_override_replaces_default(self):
+        # Tests that pass `message_factory=lambda b: b` should still be
+        # able to opt out of protobuf decoding (e.g. integration tests
+        # using a fake wire format).
+        d = DaqifiStreamingDevice(name="dev", message_factory=lambda b: b)
+        assert d._message_factory(b"raw") == b"raw"
+
+    def test_factory_default_when_omitted(self):
+        # No explicit factory → uses the protobuf decoder by default.
+        from daqifi.devices import _default_message_factory
+        d = DaqifiStreamingDevice(name="dev")
+        assert d._message_factory is _default_message_factory

@@ -89,6 +89,22 @@ class DigitalChannel:
 _DEFAULT_BAUD_RATE = 9600
 
 
+def _default_message_factory(payload: bytes) -> Any:
+    """Decode a wire-format `DaqifiOutMessage` payload.
+
+    Lazily imports the generated protobuf module so consumers that
+    don't need protobuf decoding (tests using fake messages, callers
+    that inject their own factory) don't pay the import cost.
+
+    Parses ``bytes`` into a real :class:`DaqifiOutMessage` instance —
+    this is what populates :attr:`DaqifiDevice.metadata` after
+    :meth:`DaqifiDevice.initialize`. Replaces the previous
+    ``lambda b: b`` passthrough that left metadata empty on hardware.
+    """
+    from ._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+    return DaqifiOutMessage.FromString(payload)
+
+
 # ---- DaqifiDevice ------------------------------------------------------------
 
 
@@ -108,10 +124,12 @@ class DaqifiDevice:
         name: str,
         transport: Optional[Any] = None,
         ip_address: Optional[str] = None,
+        message_factory: Optional[Callable[[bytes], Any]] = None,
     ) -> None:
         self._name = name
         self._ip_address = ip_address
         self._transport = transport
+        self._message_factory = message_factory or _default_message_factory
         self._status = ConnectionStatus.Disconnected
         self._state = DeviceState.Disconnected
         self._metadata = DeviceMetadata()
@@ -229,15 +247,14 @@ class DaqifiDevice:
             if self._transport is not None:
                 self._transport.connect()
                 if self._consumer is None:
-                    # The protobuf parser needs a factory function; the
-                    # project doesn't bind to a real protobuf class -- per
-                    # daqifi.protocol the type is duck-typed. Use bytes
-                    # passthrough as the default factory; callers can
-                    # inject a real one by constructing the consumer
-                    # manually before calling connect().
+                    # Default factory decodes bytes into a real
+                    # `DaqifiOutMessage` (see ``_default_message_factory``).
+                    # Override per-device by passing ``message_factory``
+                    # to the constructor — useful for tests that want
+                    # raw-bytes passthrough or a custom proto class.
                     self._consumer = StreamMessageConsumer[Any](
                         self._transport.stream,
-                        ProtobufMessageParser(message_factory=lambda b: b),
+                        ProtobufMessageParser(message_factory=self._message_factory),
                     )
                 self._consumer.start()
 
@@ -548,8 +565,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
         name: str,
         transport: Optional[Any] = None,
         ip_address: Optional[str] = None,
+        message_factory: Optional[Callable[[bytes], Any]] = None,
     ) -> None:
-        super().__init__(name=name, transport=transport, ip_address=ip_address)
+        super().__init__(
+            name=name,
+            transport=transport,
+            ip_address=ip_address,
+            message_factory=message_factory,
+        )
         self._is_streaming = False
         self._is_logging_to_sd = False
         self._streaming_frequency = 100
@@ -671,13 +694,14 @@ class DaqifiDeviceFactory:
         device_name: str = "DaqifiDevice",
         retry_options: Optional[ConnectionRetryOptions] = None,
         initialize_device: bool = True,
+        message_factory: Optional[Callable[[bytes], Any]] = None,
     ) -> DaqifiStreamingDevice:
         if not host or not host.strip():
             raise ValueError("Host cannot be null or empty.")
         DaqifiDeviceFactory._validate_port(port)
         transport = TcpStreamTransport(host, port)
         return DaqifiDeviceFactory._connect_with_transport(
-            transport, device_name, retry_options, initialize_device
+            transport, device_name, retry_options, initialize_device, message_factory,
         )
 
     @staticmethod
@@ -687,6 +711,7 @@ class DaqifiDeviceFactory:
         device_name: str = "DaqifiDevice",
         retry_options: Optional[ConnectionRetryOptions] = None,
         initialize_device: bool = True,
+        message_factory: Optional[Callable[[bytes], Any]] = None,
     ) -> DaqifiStreamingDevice:
         if port_name is None:
             raise TypeError("port_name must not be None.")
@@ -696,7 +721,7 @@ class DaqifiDeviceFactory:
             raise ValueError("Baud rate must be greater than zero.")
         transport = SerialStreamTransport(port_name, baud_rate)
         return DaqifiDeviceFactory._connect_with_transport(
-            transport, device_name, retry_options, initialize_device
+            transport, device_name, retry_options, initialize_device, message_factory,
         )
 
     @staticmethod
@@ -710,11 +735,14 @@ class DaqifiDeviceFactory:
         device_name: str,
         retry_options: Optional[ConnectionRetryOptions],
         initialize_device: bool,
+        message_factory: Optional[Callable[[bytes], Any]] = None,
     ) -> DaqifiStreamingDevice:
         device: Optional[DaqifiStreamingDevice] = None
         try:
             transport.connect(retry_options=retry_options)
-            device = DaqifiStreamingDevice(device_name, transport=transport)
+            device = DaqifiStreamingDevice(
+                device_name, transport=transport, message_factory=message_factory,
+            )
             device.connect()
             if initialize_device:
                 device.initialize()
