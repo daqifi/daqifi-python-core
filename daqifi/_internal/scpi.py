@@ -39,6 +39,17 @@ class ConnectionStatus(IntEnum):
     Failed = 5        # The device connection failed after all retry attempts
 
 
+class StreamInterface(IntEnum):
+    """Target interface for data streaming.
+
+    Values correspond to firmware SCPI ``SYSTem:STReam:INTerface`` parameter.
+    """
+    Usb = 0      # Stream data over USB
+    WiFi = 1     # Stream data over WiFi
+    SdCard = 2   # Stream data to the SD card
+    All = 3      # Stream data to all interfaces simultaneously
+
+
 # System commands
 class System:
     """System-level SCPI commands"""

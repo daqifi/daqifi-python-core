@@ -201,3 +201,21 @@ class DeviceFinder:
         """
         devices = DeviceFinder.discover(variant=variant)
         return devices[0] if devices else None
+
+
+@dataclass(frozen=True)
+class DeviceDiscoveredEventArgs:
+    """Payload for device-discovered event callbacks.
+
+    Ports the C# ``DeviceDiscoveredEventArgs`` (subclass of ``EventArgs``)
+    from ``Daqifi.Core/Device/Discovery/DeviceDiscoveredEventArgs.cs``.
+    Per the project port convention, ``EventArgs`` becomes a frozen
+    dataclass — the upstream type exposes only ``get;`` properties so
+    the payload is immutable once constructed.
+
+    The C# constructor null-checks ``deviceInfo``; here we rely on
+    duck-typing and let the caller pass any object exposing the
+    ``DeviceInfo`` shape (matching :class:`DeviceInfo` above).
+    """
+
+    device_info: DeviceInfo

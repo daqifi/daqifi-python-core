@@ -625,6 +625,20 @@ class DeviceType(IntEnum):
     NYQUIST_3 = 3
 
 
+class ConnectionType(IntEnum):
+    """Transport over which a discovered device speaks.
+
+    Ports the C# ``ConnectionType`` enum from
+    ``Daqifi.Core/Device/Discovery/IDeviceInfo.cs``. ``IntEnum`` matches
+    the local convention established by :class:`DeviceType`.
+    """
+
+    UNKNOWN = 0
+    WIFI = 1     # WiFi/TCP connection
+    SERIAL = 2   # Serial/USB connection
+    HID = 3      # USB HID (bootloader mode)
+
+
 @dataclass
 class DeviceCapabilities:
     """Capabilities and features available on a DAQiFi device.

@@ -4,7 +4,8 @@ Channel classes for DAQiFi Nyquist devices.
 Provides property-based access to analog and digital channels.
 """
 
-from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 from ._internal.comm import SerialInterface
 from ._internal import scpi
 from .exceptions import CommandError, ConfigurationError
@@ -537,3 +538,21 @@ class DigitalIO(ChannelCollection):
 
     def __repr__(self) -> str:
         return f"DigitalIO({len(self._channels)} channels)"
+
+
+@dataclass(frozen=True)
+class ChannelsPopulatedEventArgs:
+    """Payload for the ``channels populated`` event.
+
+    Ports the C# ``ChannelsPopulatedEventArgs`` (subclass of
+    ``EventArgs``) from ``Daqifi.Core/Device/ChannelsPopulatedEventArgs.cs``.
+    Per the project convention, ``EventArgs`` -> frozen dataclass.
+
+    ``channels`` is a tuple (immutable) — the upstream type uses
+    ``IReadOnlyList<IChannel>`` and frozen dataclasses can't carry a
+    mutable list field without breaking immutability semantics.
+    """
+
+    channels: Tuple[Any, ...]
+    analog_channel_count: int
+    digital_channel_count: int
