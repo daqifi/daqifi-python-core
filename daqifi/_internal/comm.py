@@ -295,6 +295,24 @@ class ScpiMessage:
 
 
 @runtime_checkable
+class MessageParser(Protocol[T]):
+    """Structural protocol for message parsers.
+
+    Ports the C# ``IMessageParser<T>`` interface from
+    ``Daqifi.Core/Communication/Consumers/IMessageParser.cs``. A parser
+    consumes raw bytes and returns parsed messages plus the number of
+    bytes consumed. The ``out int consumedBytes`` upstream parameter
+    becomes the second tuple element since Python has no ``out`` params
+    (mirrors :class:`LineBasedMessageParser`).
+    """
+
+    def parse_messages(
+        self, data: bytes
+    ) -> Tuple[List["IInboundMessage[T]"], int]:
+        ...
+
+
+@runtime_checkable
 class IInboundMessage(Protocol[T]):
     """Structural protocol for a message containing data received from the device.
 
