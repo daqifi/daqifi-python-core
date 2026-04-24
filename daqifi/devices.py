@@ -343,8 +343,7 @@ class DaqifiDevice:
             # Pin the stream output to the same transport we connected
             # over. Without this, streaming bytes can be routed to the
             # last-configured interface (e.g. WiFi) and the consumer on
-            # this transport sees nothing. Detected via duck typing on
-            # the transport's class name to avoid a circular import.
+            # this transport sees nothing.
             interface = self._stream_interface_for_transport()
             if interface is not None:
                 self.send(scpi_commands.set_stream_interface(interface))
@@ -548,22 +547,24 @@ class DaqifiDevice:
     def _set_state(self, value: DeviceState) -> None:
         self._state = value
 
-    def _stream_interface_for_transport(self) -> Optional[Any]:
+    def _stream_interface_for_transport(self) -> Optional[StreamInterface]:
         """Pick the SCPI stream-interface enum that matches the
         connected transport, so streaming data flows back over the
         same channel the caller connected on. Returns None for
         transports we don't recognise (caller can override with an
         explicit ``set_stream_interface`` send).
         """
-        from ._internal.scpi import StreamInterface
         if self._transport is None:
             return None
-        # Duck-type on class name to avoid a circular import on the
-        # concrete transport classes (devices.py is imported by them).
-        cls_name = type(self._transport).__name__
-        if cls_name == "SerialStreamTransport":
+        # Lazy-import the concrete transport classes here. Module-level
+        # would create a true circular import via daqifi.transport →
+        # daqifi.devices (DaqifiDeviceFactory.connect_serial constructs
+        # transport instances) once we move the factory back into
+        # transport.py — local import keeps the option open.
+        from .transport import SerialStreamTransport, TcpStreamTransport
+        if isinstance(self._transport, SerialStreamTransport):
             return StreamInterface.Usb
-        if cls_name == "TcpStreamTransport":
+        if isinstance(self._transport, TcpStreamTransport):
             return StreamInterface.WiFi
         return None
 

@@ -118,7 +118,6 @@ class LineBasedMessageParser:
 
 
 # ---- Protobuf framing constants (mirror upstream limits) ----
-_MAX_RETRY_ATTEMPTS = 3
 _MAX_VARINT32_BYTES = 5
 _MAX_MESSAGE_SIZE_BYTES = 1024 * 1024
 
@@ -160,11 +159,10 @@ class ProtobufMessageParser:
     ``FromString`` (e.g. ``DaqifiOutMessage.FromString``) or any callable
     that turns ``bytes`` into the message object.
 
-    Bad payloads or malformed length prefixes advance one byte and retry,
-    matching the upstream's resilience behaviour. After
-    :data:`_MAX_RETRY_ATTEMPTS` consecutive failures the parser stops and
-    returns whatever it has so far -- the caller can re-invoke once more
-    bytes arrive.
+    Bad payloads or malformed length prefixes advance one byte and try
+    again at the next offset (mirrors upstream resilience). The loop
+    is bounded by ``current_index < len(data)``; the caller can re-invoke
+    once more bytes arrive.
     """
 
     def __init__(self, message_factory: Callable[[bytes], object]) -> None:

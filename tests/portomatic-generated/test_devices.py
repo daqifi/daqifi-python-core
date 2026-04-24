@@ -425,19 +425,34 @@ class TestDefaultMessageFactory:
 # ---- Stream interface auto-pin (#stream-route fix) ----------------------
 
 
-class _FakeSerialTransport(_FakeTransport):
-    """Transport whose class name matches `SerialStreamTransport` —
-    used to verify stream interface auto-pin to USB."""
-    pass
+def _make_fake_transport(real_transport_cls):
+    """Build a subclass of ``real_transport_cls`` that bypasses the
+    real init (which would touch pyserial / sockets) but still passes
+    ``isinstance`` checks against the real class. Needed because the
+    auto-pin logic in `_stream_interface_for_transport` uses
+    ``isinstance`` to identify the transport kind."""
+    class _Fake(real_transport_cls):
+        def __init__(self):
+            # Set the private backing attributes the real `stream` /
+            # `is_connected` properties read — bypass the real
+            # __init__ which would touch pyserial/sockets.
+            self._stream = _FakeStream()
+            self._connected = False
+            self.status_handlers = []
 
-_FakeSerialTransport.__name__ = "SerialStreamTransport"
+        @property
+        def stream(self): return self._stream
+        @property
+        def is_connected(self): return self._connected
 
+        def add_status_changed(self, h): self.status_handlers.append(h)
+        def remove_status_changed(self, h):
+            if h in self.status_handlers: self.status_handlers.remove(h)
+        def connect(self, retry_options=None): self._connected = True
+        def disconnect(self): self._connected = False
+        def close(self): self._connected = False
 
-class _FakeTcpTransport(_FakeTransport):
-    """Same idea for the TCP path."""
-    pass
-
-_FakeTcpTransport.__name__ = "TcpStreamTransport"
+    return _Fake()
 
 
 class TestStreamInterfaceAutoPin:
@@ -447,16 +462,14 @@ class TestStreamInterfaceAutoPin:
     transport. Verifies the fix sends the right SCPI."""
 
     def _scpi_text_sent(self, dev) -> str:
-        # Concatenated wire bytes for assertion convenience.
         return b"".join(dev._transport.stream.written).decode("ascii", "replace")
 
     def test_serial_transport_pins_stream_interface_to_usb(self):
-        t = _FakeSerialTransport()
+        from daqifi.transport import SerialStreamTransport
+        t = _make_fake_transport(SerialStreamTransport)
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
         dev.initialize()
-        # Look for the SCPI command `SYSTem:STReam:INTerface 0` in the
-        # bytes the device sent during initialize().
         sent = self._scpi_text_sent(dev)
         assert "SYSTem:STReam:INTerface 0" in sent, (
             f"USB-transport device did not pin stream interface to 0; "
@@ -464,7 +477,8 @@ class TestStreamInterfaceAutoPin:
         )
 
     def test_tcp_transport_pins_stream_interface_to_wifi(self):
-        t = _FakeTcpTransport()
+        from daqifi.transport import TcpStreamTransport
+        t = _make_fake_transport(TcpStreamTransport)
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
         dev.initialize()
