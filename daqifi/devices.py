@@ -566,8 +566,16 @@ class DaqifiDevice:
 
         timestamp_freq = getattr(message, "timestamp_freq", 0) \
             or getattr(message, "TimestampFreq", 0)
-        if timestamp_freq:
-            self._timestamp_frequency = int(timestamp_freq)
+        # Same int-cast hardening as DeviceMetadata.update_from_protobuf
+        # (Qodo PR 17 pass 43 #2 / pass 32 #1) — a non-numeric stub
+        # value would have crashed the cast and dropped the rest of
+        # populate_channels_from_status mid-way.
+        try:
+            tf_int = int(timestamp_freq)
+        except (TypeError, ValueError):
+            tf_int = 0
+        if tf_int > 0:
+            self._timestamp_frequency = tf_int
 
         self._channels.clear()
 

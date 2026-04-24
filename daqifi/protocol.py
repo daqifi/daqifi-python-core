@@ -213,22 +213,22 @@ class ProtobufProtocolHandler:
             return False
 
         # Real protobuf-generated messages always carry sized containers
-        # here, but a stub or duck-typed fake might not. Coerce anything
-        # without `__len__` to an empty value so the size check below
-        # never raises TypeError.
-        def _sized_or_empty(value: Any, empty: Any) -> Any:
+        # here, but a stub / duck-typed fake might not. Use try/except
+        # around len() so a misbehaving __len__ implementation also
+        # falls through to "no data" rather than crashing the consumer
+        # (Qodo PR 17 pass 43 #1, replacing the earlier hasattr guard).
+        def _nonempty(value: Any) -> bool:
             if value is None:
-                return empty
-            return value if hasattr(value, "__len__") else empty
-
-        analog_in_data = _sized_or_empty(getattr(message, "analog_in_data", None), ())
-        analog_in_data_float = _sized_or_empty(getattr(message, "analog_in_data_float", None), ())
-        digital_data = _sized_or_empty(getattr(message, "digital_data", None), b"")
+                return False
+            try:
+                return len(value) > 0
+            except Exception:
+                return False
 
         return (
-            len(analog_in_data) > 0
-            or len(analog_in_data_float) > 0
-            or len(digital_data) > 0
+            _nonempty(getattr(message, "analog_in_data", None))
+            or _nonempty(getattr(message, "analog_in_data_float", None))
+            or _nonempty(getattr(message, "digital_data", None))
         )
 
 
