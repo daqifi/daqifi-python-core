@@ -1066,9 +1066,23 @@ class DeviceMetadata:
             self.device_type = detect_device_type_from_part_number(device_pn)
             self.capabilities = DeviceCapabilities.from_device_type(self.device_type)
 
+        # Protobuf carries device_sn as a numeric uint, but test
+        # doubles and a future schema change might pass a string.
+        # `device_sn != 0` evaluates to True for an empty string,
+        # which would clobber a previously-discovered serial with
+        # `""` (Qodo PR 17 pass 23 #1).
         device_sn = getattr(message, "device_sn", 0)
-        if device_sn != 0:
-            self.serial_number = str(device_sn)
+        if isinstance(device_sn, str):
+            sn_str = device_sn.strip()
+            if sn_str:
+                self.serial_number = sn_str
+        else:
+            try:
+                sn_int = int(device_sn)
+            except (TypeError, ValueError):
+                sn_int = 0
+            if sn_int != 0:
+                self.serial_number = str(sn_int)
 
         device_fw_rev = getattr(message, "device_fw_rev", "")
         if device_fw_rev and device_fw_rev.strip():
