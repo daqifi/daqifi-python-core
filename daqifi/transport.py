@@ -874,8 +874,16 @@ class _HidConnectedDevice:
                 "open_device(info) method to avoid this dependency."
             ) from exc
         handle = hid.device()
-        path = info.device_path.encode("utf-8") \
-            if isinstance(info.device_path, str) else info.device_path
+        # OS-provided HID paths can contain non-UTF-8 bytes on Linux
+        # (filesystem-encoded). `surrogateescape` round-trips those
+        # bytes losslessly so a strict UTF-8 encode doesn't refuse
+        # to open an otherwise-valid device (Qodo PR 17 pass 31 #1).
+        if isinstance(info.device_path, bytes):
+            path = info.device_path
+        else:
+            path = str(info.device_path).encode(
+                "utf-8", errors="surrogateescape"
+            )
         handle.open_path(path)
         return cls(hid, handle, info)
 
