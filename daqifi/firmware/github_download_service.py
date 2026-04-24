@@ -202,13 +202,35 @@ class GitHubFirmwareDownloadService(FirmwareDownloadService):
         )
         _report(progress, 85)
 
-        # Replace any existing extraction directory (mirrors upstream).
+        # Extract into a temp dir adjacent to the final location and
+        # then atomically swap. Avoids leaving a half-extracted tree
+        # at the user-visible path on partial failure (Qodo PR 17
+        # pass 27 #1) and prevents any pre-existing symlink at
+        # extract_path from being followed.
         if extract_path.exists():
             await asyncio.to_thread(shutil.rmtree, extract_path)
-        await asyncio.to_thread(_extract_zip_safely, zip_path, extract_path)
+        tmp_extract = Path(
+            await asyncio.to_thread(
+                tempfile.mkdtemp,
+                prefix=extract_path.name + ".",
+                dir=str(extract_path.parent),
+            )
+        )
+        try:
+            await asyncio.to_thread(_extract_zip_safely, zip_path, tmp_extract)
+            await asyncio.to_thread(tmp_extract.replace, extract_path)
+        finally:
+            if tmp_extract.exists() and tmp_extract != extract_path:
+                await asyncio.to_thread(
+                    shutil.rmtree, tmp_extract, ignore_errors=True
+                )
 
-        # Clean up the downloaded zip file.
-        await asyncio.to_thread(zip_path.unlink)
+        # Clean up the downloaded zip file. Best-effort — leftover
+        # zip files are cosmetic, not a hazard.
+        try:
+            await asyncio.to_thread(zip_path.unlink)
+        except Exception:
+            pass
         _report(progress, 100)
 
         return (extract_path, release.tag_name)
