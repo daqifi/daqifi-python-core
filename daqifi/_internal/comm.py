@@ -1148,17 +1148,33 @@ class DeviceMetadata:
         if mac:
             self.mac_address = mac
 
+        # Same hardening as the connection-info fields above (Qodo PR
+        # 17 pass 33 #1 / pass 32 #1) — non-numeric values would
+        # raise on the `> 0` comparison or the int() cast and drop
+        # the rest of the metadata update.
         analog_in_port_num = getattr(message, "analog_in_port_num", 0)
-        if analog_in_port_num > 0:
-            self.capabilities.analog_input_channels = int(analog_in_port_num)
+        try:
+            ai_int = int(analog_in_port_num)
+        except (TypeError, ValueError):
+            ai_int = 0
+        if ai_int > 0:
+            self.capabilities.analog_input_channels = ai_int
 
         analog_out_port_num = getattr(message, "analog_out_port_num", 0)
-        if analog_out_port_num > 0:
-            self.capabilities.analog_output_channels = int(analog_out_port_num)
+        try:
+            ao_int = int(analog_out_port_num)
+        except (TypeError, ValueError):
+            ao_int = 0
+        if ao_int > 0:
+            self.capabilities.analog_output_channels = ao_int
 
         digital_port_num = getattr(message, "digital_port_num", 0)
-        if digital_port_num > 0:
-            self.capabilities.digital_channels = int(digital_port_num)
+        try:
+            d_int = int(digital_port_num)
+        except (TypeError, ValueError):
+            d_int = 0
+        if d_int > 0:
+            self.capabilities.digital_channels = d_int
 
 
 class PowerState(IntEnum):
