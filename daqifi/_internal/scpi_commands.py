@@ -192,8 +192,25 @@ def get_stream_format() -> ScpiMessage:
 # ---- ADC / DIO ----
 
 def enable_adc_channels(channel_set_string: str) -> ScpiMessage:
-    """Enable ADC channels via decimal bitmask string (e.g. ``"84"`` enables ch 2/4/6)."""
-    return ScpiMessage(f"ENAble:VOLTage:DC {channel_set_string}")
+    """Enable ADC channels via decimal bitmask string (e.g. ``"84"`` enables ch 2/4/6).
+
+    The bitmask is interpolated raw into the SCPI command, so reject
+    any input that could break the command framing or inject a second
+    SCPI line (Qodo PR 17 pass 7 #5 — SCPI command injection hardening).
+    """
+    if channel_set_string is None:
+        raise TypeError("channel_set_string must not be None.")
+    s = channel_set_string.strip()
+    if not s:
+        raise ValueError("channel_set_string must not be empty.")
+    if "\r" in s or "\n" in s:
+        raise ValueError("channel_set_string must not contain CR/LF.")
+    # Accept hex digits since callers commonly pass "FF" / "FFFF".
+    if not all(c in "0123456789abcdefABCDEF" for c in s):
+        raise ValueError(
+            "channel_set_string must be a decimal or hex bitmask string."
+        )
+    return ScpiMessage(f"ENAble:VOLTage:DC {s}")
 
 
 def set_dio_port_direction(channel: int, direction: int) -> ScpiMessage:
@@ -201,8 +218,16 @@ def set_dio_port_direction(channel: int, direction: int) -> ScpiMessage:
     return ScpiMessage(f"DIO:PORt:DIRection {channel},{direction}")
 
 
-def set_dio_port_state(channel: int, value: float) -> ScpiMessage:
-    """Set channel state (0 = low, 1 = high)."""
+def set_dio_port_state(channel: int, value) -> ScpiMessage:  # type: ignore[no-untyped-def]
+    """Set channel state (0 = low, 1 = high).
+
+    Accepts ``int`` or ``bool``; rejects floats and other types so
+    e.g. ``1.5`` doesn't get sent to the firmware (Qodo PR 17 pass 7 #1).
+    """
+    if isinstance(value, bool):
+        value = 1 if value else 0
+    if not isinstance(value, int) or value not in (0, 1):
+        raise ValueError("value must be 0 or 1 (int or bool).")
     return ScpiMessage(f"DIO:PORt:STATe {channel},{value}")
 
 
@@ -265,7 +290,15 @@ def set_lan_firmware_update_mode() -> ScpiMessage:
 # ---- Misc ----
 
 def set_usb_transparency_mode(mode: int) -> ScpiMessage:
-    """Set USB transparency mode (0 = disabled, 1 = enabled, bypassing SCPI console)."""
+    """Set USB transparency mode (0 = disabled, 1 = enabled, bypassing SCPI console).
+
+    Reject anything outside {0, 1} so the firmware never sees an
+    undefined mode value (Qodo PR 17 pass 7 #3).
+    """
+    if isinstance(mode, bool) or not isinstance(mode, int):
+        raise TypeError("mode must be an int.")
+    if mode not in (0, 1):
+        raise ValueError("mode must be 0 or 1.")
     return ScpiMessage(f"SYSTem:USB:SetTransparentMode {mode}")
 
 

@@ -114,7 +114,17 @@ class TestParameterizedCommands:
         assert scpi_commands.set_dio_port_direction(1, 1).data == "DIO:PORt:DIRection 1,1"
 
     def test_set_dio_port_state(self):
-        assert scpi_commands.set_dio_port_state(2, 1.0).data == "DIO:PORt:STATe 2,1.0"
+        # Qodo PR 17 pass 7 #1: value must be int or bool, 0 or 1.
+        # Floats and out-of-range ints are rejected so the firmware
+        # never sees a non-binary level.
+        assert scpi_commands.set_dio_port_state(2, 1).data == "DIO:PORt:STATe 2,1"
+        assert scpi_commands.set_dio_port_state(3, 0).data == "DIO:PORt:STATe 3,0"
+        assert scpi_commands.set_dio_port_state(4, True).data == "DIO:PORt:STATe 4,1"
+        assert scpi_commands.set_dio_port_state(5, False).data == "DIO:PORt:STATe 5,0"
+        with pytest.raises(ValueError):
+            scpi_commands.set_dio_port_state(2, 1.0)
+        with pytest.raises(ValueError):
+            scpi_commands.set_dio_port_state(2, 2)
 
     def test_set_network_wifi_ssid(self):
         assert (

@@ -374,11 +374,28 @@ def _download_to_path_with_progress(
 
 
 def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
-    """Extract ``zip_path`` to ``extract_path`` with Zip-Slip protection."""
+    """Extract ``zip_path`` to ``extract_path`` with Zip-Slip protection.
+
+    Defense-in-depth: also reject Unix symlink entries. Python's
+    ``zipfile.extractall`` ignores symlink attributes by default and
+    extracts them as regular files containing the link target as
+    text — so a malicious archive can't sneak past directly — but
+    explicit rejection avoids surprises if Python ever changes that
+    behavior (Qodo PR 17 pass 7 #6).
+    """
     extract_path.mkdir(parents=True, exist_ok=True)
     full_target = extract_path.resolve()
     with zipfile.ZipFile(zip_path) as zf:
-        for member in zf.namelist():
+        for info in zf.infolist():
+            member = info.filename
+            # Symlink check: Unix create_system + mode bits 0o120000.
+            if info.create_system == 3:  # 3 = Unix
+                file_mode = (info.external_attr >> 16) & 0o170000
+                if file_mode == 0o120000:
+                    shutil.rmtree(extract_path, ignore_errors=True)
+                    raise RuntimeError(
+                        f"Zip archive contains symlink entry: {member}"
+                    )
             target_path = (extract_path / member).resolve()
             try:
                 target_path.relative_to(full_target)

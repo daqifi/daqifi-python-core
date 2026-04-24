@@ -586,11 +586,18 @@ class StreamMessageConsumer(Generic[T]):
                     with self._buffer_lock:
                         del self._message_buffer[: min(consumed, len(self._message_buffer))]
 
+                # When multiple messages came out of one parse call,
+                # we can't attribute the consumed bytes to any single
+                # message — sending the combined buffer to each would
+                # be misleading. Pass empty bytes in that case (Qodo
+                # PR 17 pass 7 #2).
+                raw_for_message = consumed_bytes if len(messages) == 1 else b""
+
                 for msg in messages:
                     try:
-                        self._on_message(msg, consumed_bytes)
+                        self._on_message(msg, raw_for_message)
                     except Exception as exc:
-                        self._on_error(exc, consumed_bytes)
+                        self._on_error(exc, raw_for_message)
             except Exception as exc:
                 if self._is_running:
                     self._on_error(exc)
