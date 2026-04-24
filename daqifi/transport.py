@@ -146,7 +146,11 @@ class TcpStreamTransport:
                 sock.settimeout(options.connection_timeout)
                 sock.connect((self._host, self._port))
                 # Switch off the connect-timeout so blocking reads can
-                # use socket.makefile's default timeout semantics.
+                # use socket.makefile's default semantics. We rely on
+                # `disconnect()` calling `socket.shutdown(SHUT_RDWR)`
+                # to interrupt any blocked `stream.read()` in the
+                # consumer thread — that's the "wakeup" mechanism for
+                # graceful stop without paying a per-iteration timeout.
                 sock.settimeout(None)
                 self._socket = sock
                 self._stream = sock.makefile("rwb", buffering=0)
@@ -183,6 +187,19 @@ class TcpStreamTransport:
         if not self.is_connected:
             return
         try:
+            # Shutdown both halves of the socket BEFORE closing it.
+            # This wakes any consumer thread blocked in
+            # `stream.read()` (it observes EOF instead of hanging
+            # forever), letting `StreamMessageConsumer.stop_safely()`
+            # actually stop the daemon thread. Without this the
+            # daemon thread leaks until process exit when sockets
+            # use `settimeout(None)` (Qodo PR 17 finding 5).
+            if self._socket is not None:
+                try:
+                    self._socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    # Already closed / not connected — non-fatal.
+                    pass
             if self._stream is not None:
                 self._stream.close()
             if self._socket is not None:

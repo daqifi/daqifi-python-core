@@ -480,22 +480,28 @@ class DaqifiDevice:
         # the protocol handler if it accepts the message.
         message = getattr(args, "message", None)
         wrapped = GenericInboundMessage(data=message.data if message is not None else None)
-        if self._protocol_handler is not None and self._protocol_handler.can_handle(wrapped):
-            # Synchronous version: we don't use asyncio elsewhere so
-            # invoke the handler directly. ProtobufProtocolHandler
-            # exposes handle_async; if it's a coroutine we run it
-            # to completion in a private event loop.
-            result = self._protocol_handler.handle_async(wrapped)
-            if hasattr(result, "__await__"):
-                import asyncio
+        if self._protocol_handler is None or not self._protocol_handler.can_handle(wrapped):
+            return
+        # Hot path: streaming pumps thousands of these per second.
+        # Prefer the synchronous `handle()` if the handler exposes it
+        # (ProtobufProtocolHandler does — see Qodo PR 17 finding 4).
+        # Fall back to the async path only for handlers that don't
+        # expose a sync alternative.
+        sync_handle = getattr(self._protocol_handler, "handle", None)
+        if callable(sync_handle):
+            sync_handle(wrapped)
+            return
+        result = self._protocol_handler.handle_async(wrapped)
+        if hasattr(result, "__await__"):
+            import asyncio
+            try:
+                loop = asyncio.new_event_loop()
                 try:
-                    loop = asyncio.new_event_loop()
-                    try:
-                        loop.run_until_complete(result)
-                    finally:
-                        loop.close()
-                except Exception:
-                    pass
+                    loop.run_until_complete(result)
+                finally:
+                    loop.close()
+            except Exception:
+                pass
 
     def _on_status_message_received(self, message: Any) -> None:
         # Fill metadata, populate channels, fan out to subscribers.

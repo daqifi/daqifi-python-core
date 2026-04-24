@@ -67,8 +67,14 @@ class ProtobufProtocolHandler:
             return False
         return _is_daqifi_out_message(message.data)
 
-    async def handle_async(self, message: InboundMessage[Any]) -> None:
-        """Dispatch ``message.data`` to the matching handler, if any."""
+    def handle(self, message: InboundMessage[Any]) -> None:
+        """Synchronous dispatch — preferred hot-path entry point.
+
+        ``handle_async`` exists for ``IProtocolHandler`` Protocol
+        compliance, but in this project the body never awaits, so the
+        sync version skips the cost of creating + tearing down an
+        event loop per inbound message (Qodo PR 17 finding 4).
+        """
         pb_message = message.data
         if not _is_daqifi_out_message(pb_message):
             return
@@ -76,7 +82,7 @@ class ProtobufProtocolHandler:
         message_type = self.detect_message_type(pb_message)
 
         # Wrap the dispatch so a misbehaving user callback can't crash the
-        # async receive loop. Log the traceback so the failure is still
+        # receive loop. Log the traceback so the failure is still
         # visible — a silent except would mask real bugs.
         try:
             if message_type is ProtobufMessageType.STATUS:
@@ -94,6 +100,13 @@ class ProtobufProtocolHandler:
             # ProtobufMessageType.UNKNOWN and any unmapped value: no-op.
         except Exception:
             _log.exception("Protocol handler callback raised for %s", message_type)
+
+    async def handle_async(self, message: InboundMessage[Any]) -> None:
+        """``IProtocolHandler`` Protocol compliance — delegates to
+        the sync :meth:`handle`. Kept as ``async def`` so static
+        type checks against the ``IProtocolHandler`` Protocol
+        succeed."""
+        self.handle(message)
 
     @staticmethod
     def detect_message_type(message: DaqifiOutMessage) -> ProtobufMessageType:

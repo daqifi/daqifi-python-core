@@ -480,7 +480,11 @@ class StreamMessageConsumer(Generic[T]):
         self._is_running = False
         if self._thread is not None:
             self._thread.join(timeout=1.0)
-        self._thread = None
+            # Qodo PR 17 finding 5: only drop the thread reference if
+            # it actually stopped. Keeping it lets a caller retry
+            # join / inspect is_alive instead of leaking the handle.
+            if not self._thread.is_alive():
+                self._thread = None
         with self._buffer_lock:
             self._message_buffer.clear()
 
@@ -493,7 +497,10 @@ class StreamMessageConsumer(Generic[T]):
         if thread is not None:
             thread.join(timeout=timeout_ms / 1000.0)
             stopped = not thread.is_alive()
-        self._thread = None
+        # Qodo PR 17 finding 5: don't drop the handle if the thread
+        # is still alive — caller may need to retry.
+        if stopped:
+            self._thread = None
         with self._buffer_lock:
             self._message_buffer.clear()
         return stopped
@@ -521,6 +528,14 @@ class StreamMessageConsumer(Generic[T]):
     # ---- internals ---------------------------------------------------------
 
     def _process_messages(self) -> None:
+        # `socket.timeout` is the canonical "no data within window"
+        # signal when the underlying transport is a TCP socket with a
+        # finite read timeout (TcpStreamTransport sets 1.0 s) — treat
+        # it as "loop back to check _is_running" rather than as an
+        # error to fan out via _on_error. Without this, every 1 s
+        # idle window would post a noisy "error" callback (Qodo PR 17
+        # finding 5).
+        import socket as _socket
         while self._is_running:
             try:
                 bytes_read = b""
@@ -530,6 +545,11 @@ class StreamMessageConsumer(Generic[T]):
                     # with non-blocking reads); coerce to empty bytes.
                     if bytes_read is None:
                         bytes_read = b""
+                except _socket.timeout:
+                    # Expected idle path — no data this window.
+                    if not self._is_running:
+                        return
+                    continue
                 except Exception as exc:
                     if not self._is_running:
                         return
