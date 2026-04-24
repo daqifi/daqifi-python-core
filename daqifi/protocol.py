@@ -84,12 +84,14 @@ class ProtobufProtocolHandler:
         if not _is_daqifi_out_message(pb_message):
             return
 
-        message_type = self.detect_message_type(pb_message)
-
-        # Wrap the dispatch so a misbehaving user callback can't crash the
-        # receive loop. Log the traceback so the failure is still
-        # visible — a silent except would mask real bugs.
+        # Wrap detection AND dispatch in the try/except — a malformed
+        # duck-typed payload could raise from inside detect_message_type
+        # (e.g. attribute access on an unexpected type), which would
+        # otherwise propagate up the consumer thread (Qodo PR 17 pass
+        # 8 #5). `message_type` may be unset if detection itself fails.
+        message_type: Optional["ProtobufMessageType"] = None
         try:
+            message_type = self.detect_message_type(pb_message)
             if message_type is ProtobufMessageType.STATUS:
                 if self._status_message_handler is not None:
                     self._status_message_handler(pb_message)
@@ -104,7 +106,10 @@ class ProtobufProtocolHandler:
                     self._error_message_handler(pb_message)
             # ProtobufMessageType.UNKNOWN and any unmapped value: no-op.
         except Exception:
-            _log.exception("Protocol handler callback raised for %s", message_type)
+            _log.exception(
+                "Protocol handler callback raised for %s",
+                message_type if message_type is not None else "UNKNOWN",
+            )
 
     async def handle_async(self, message: InboundMessage[Any]) -> None:
         """``IProtocolHandler`` Protocol compliance — delegates to

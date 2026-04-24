@@ -307,7 +307,25 @@ class DaqifiDevice:
                 raise NotImplementedError(
                     "Sending without a transport-backed stream is not supported."
                 )
-            stream.write(data)
+            # Loop on partial writes — unbuffered file-like objects
+            # (sock.makefile with buffering=0) may write fewer bytes
+            # than requested per call. Without the loop, the tail of
+            # the SCPI command can be silently dropped (Qodo PR 17
+            # pass 8 #4).
+            view = memoryview(data)
+            total_written = 0
+            while total_written < len(data):
+                written = stream.write(view[total_written:])
+                if written is None:
+                    # File-like objects sometimes return None to mean
+                    # "wrote everything"; trust them and break.
+                    break
+                if written <= 0:
+                    raise IOError(
+                        f"Stream write returned {written}; aborting "
+                        f"after {total_written} of {len(data)} bytes."
+                    )
+                total_written += written
             try:
                 stream.flush()
             except AttributeError:

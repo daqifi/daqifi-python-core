@@ -561,6 +561,13 @@ class StreamMessageConsumer(Generic[T]):
                     time.sleep(0.1)  # back off on error
                     continue
 
+                # `read()` may have blocked while a stop request flipped
+                # `_is_running`. Re-check before doing any further work
+                # so we don't fire user callbacks for messages that
+                # arrived after stop was requested (Qodo PR 17 pass 8 #3).
+                if not self._is_running:
+                    return
+
                 if not bytes_read:
                     time.sleep(0.01)
                     continue

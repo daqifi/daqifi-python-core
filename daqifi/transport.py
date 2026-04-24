@@ -582,8 +582,15 @@ class UdpTransport:
             try:
                 data, addr = sock.recvfrom(65535)  # type: ignore[union-attr]
                 return (data, addr)
-            except (socket.timeout, OSError):
+            except socket.timeout:
                 return None
+            except OSError as exc:
+                # Treat transient "no data right now" / "interrupted
+                # syscall" as timeout-like; surface real network
+                # errors to callers (Qodo PR 17 pass 8 #2).
+                if isinstance(exc, (BlockingIOError, InterruptedError)):
+                    return None
+                raise
         finally:
             try:
                 sock.settimeout(old_timeout)  # type: ignore[union-attr]
@@ -716,12 +723,18 @@ class HidLibraryTransport:
                 raise IOError(f"No HID device found for {target}.")
 
             chosen = candidates[0]
+            # Use getattr to detect the optional platform capability.
+            # Catching AttributeError around the call would also
+            # silently swallow any internal AttributeError raised
+            # *inside* open_device (Qodo PR 17 pass 8 #1).
+            open_device = getattr(self._platform, "open_device", None)
             try:
-                device = self._platform.open_device(chosen)  # type: ignore[attr-defined]
-            except AttributeError:
-                # Default platform doesn't have open_device; create the
-                # canonical hidapi-backed handle in-line.
-                device = _HidConnectedDevice.open_default(chosen)
+                if callable(open_device):
+                    device = open_device(chosen)
+                else:
+                    # Default platform doesn't expose open_device;
+                    # build the canonical hidapi-backed handle.
+                    device = _HidConnectedDevice.open_default(chosen)
             except Exception as exc:
                 raise IOError("Failed to open HID device.") from exc
 
