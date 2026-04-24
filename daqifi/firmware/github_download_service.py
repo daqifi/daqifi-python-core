@@ -20,6 +20,7 @@ Implementation notes:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import shutil
@@ -466,6 +467,18 @@ def _download_to_path_with_progress(
                     if total > 0:
                         pct = int(min(bytes_read / total, 1.0) * scale_to_percent)
                         _report(progress, pct)
+                # Flush + fsync so the bytes are durable BEFORE the
+                # atomic rename promises a complete file (Qodo PR 17
+                # pass 45 #3). A power loss between the rename and
+                # background writeback would otherwise leave a
+                # zero-or-partial-content file at the user-visible
+                # path. Best-effort: fsync isn't supported on all
+                # file objects (e.g. some test doubles).
+                try:
+                    fp.flush()
+                    os.fsync(fp.fileno())
+                except (OSError, AttributeError, io.UnsupportedOperation):
+                    pass
 
         if expected_size is not None and bytes_read != expected_size:
             raise RuntimeError(

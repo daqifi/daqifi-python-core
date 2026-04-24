@@ -349,7 +349,7 @@ class DaqifiDevice:
         self._is_disconnecting = True
         # Hoisted out of `try` so the `finally` block can branch on
         # whether the transport failed (Qodo PR 17 pass 26 #2).
-        transport_error: Optional[BaseException] = None
+        transport_error: Optional[Exception] = None
         try:
             if self._consumer is not None:
                 self._consumer.remove_message_received(self._on_inbound_message)
@@ -365,7 +365,12 @@ class DaqifiDevice:
             if self._transport is not None:
                 try:
                     self._transport.disconnect()
-                except BaseException as exc:
+                except Exception as exc:
+                    # Catch Exception (not BaseException) so signals
+                    # like KeyboardInterrupt / SystemExit still
+                    # propagate immediately rather than being
+                    # captured and re-raised after consumer cleanup
+                    # (Qodo PR 17 pass 45 #1).
                     transport_error = exc
 
             if self._consumer is not None:
