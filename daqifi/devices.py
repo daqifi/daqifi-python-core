@@ -325,6 +325,14 @@ class DaqifiDevice:
                 stopped = self._consumer.stop_safely()
                 if stopped is False:
                     self._consumer.stop()
+                # Explicitly close + clear so a stale consumer
+                # doesn't linger; the next connect() rebuilds it
+                # against the fresh stream (Qodo PR 17 pass 15 #1).
+                try:
+                    self._consumer.close()
+                except Exception:
+                    pass
+                self._consumer = None
         finally:
             self._set_status(ConnectionStatus.Disconnected)
             self._set_state(DeviceState.Disconnected)
