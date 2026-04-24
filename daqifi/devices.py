@@ -277,6 +277,17 @@ class DaqifiDevice:
             # pass 11 #1). The factory call is cheap; the
             # caller's `initialize()` re-registers handlers.
             if self._consumer is not None:
+                # Stop the daemon thread before closing — close()
+                # alone doesn't join the thread, so a reconnect
+                # would leak a zombie reader spinning on the OLD
+                # closed stream until process exit (Qodo PR 17
+                # pass 29 #3, mirroring disconnect()'s sequence).
+                try:
+                    stopped = self._consumer.stop_safely()
+                    if stopped is False:
+                        self._consumer.stop()
+                except Exception:
+                    pass
                 try:
                     self._consumer.close()
                 except Exception:

@@ -535,7 +535,6 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
                 or "/../" in normalized
                 or ":" in first_segment
             ):
-                shutil.rmtree(extract_path, ignore_errors=True)
                 raise RuntimeError(
                     f"Zip archive contains path traversal entry: {member}"
                 )
@@ -544,7 +543,6 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
             if info.create_system == 3:  # 3 = Unix
                 file_mode = (info.external_attr >> 16) & 0o170000
                 if file_mode == 0o120000:
-                    shutil.rmtree(extract_path, ignore_errors=True)
                     raise RuntimeError(
                         f"Zip archive contains symlink entry: {member}"
                     )
@@ -553,7 +551,6 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
             # Real bytes written are checked too (post-copy) since
             # `file_size` is attacker-controlled metadata.
             if info.file_size > _ZIP_MAX_SINGLE_FILE:
-                shutil.rmtree(extract_path, ignore_errors=True)
                 raise RuntimeError(
                     f"Zip entry {member!r} declared size "
                     f"({info.file_size}) exceeds per-file limit "
@@ -561,7 +558,6 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
                 )
             total_uncompressed += info.file_size
             if total_uncompressed > _ZIP_MAX_TOTAL_UNCOMPRESSED:
-                shutil.rmtree(extract_path, ignore_errors=True)
                 raise RuntimeError(
                     f"Zip archive total uncompressed size exceeds "
                     f"limit ({_ZIP_MAX_TOTAL_UNCOMPRESSED})."
@@ -571,10 +567,16 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
             try:
                 target_path.relative_to(full_target)
             except ValueError as exc:
-                shutil.rmtree(extract_path, ignore_errors=True)
                 raise RuntimeError(
                     f"Zip archive contains path traversal entry: {member}"
                 ) from exc
+            # Note (Qodo PR 17 pass 29 #1): cleanup of `extract_path`
+            # on validation failure is the CALLER's responsibility.
+            # The download path now extracts into a sibling tempdir
+            # and rmtree's it on exception (pass 27 #1), so blowing
+            # away `extract_path` here was both redundant and
+            # dangerous if someone called this function with a
+            # non-temp directory.
 
             validated.append((info, target_path))
 
@@ -597,8 +599,6 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
                         break
                     entry_written += len(chunk)
                     if entry_written > _ZIP_MAX_SINGLE_FILE:
-                        dst.close()
-                        shutil.rmtree(extract_path, ignore_errors=True)
                         raise RuntimeError(
                             f"Zip entry {info.filename!r} actual size "
                             f"exceeds per-file limit "
@@ -606,8 +606,6 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
                         )
                     bytes_written += len(chunk)
                     if bytes_written > _ZIP_MAX_TOTAL_UNCOMPRESSED:
-                        dst.close()
-                        shutil.rmtree(extract_path, ignore_errors=True)
                         raise RuntimeError(
                             f"Zip archive actual total uncompressed size "
                             f"exceeds limit "

@@ -255,16 +255,19 @@ def _detect_message_type(data: bytes) -> int:
 
 
 def _is_likely_text_command(data: bytes) -> bool:
+    # Decoding only the first 10 bytes (vs the full buffer) is enough
+    # for the prefix tests, and the line-ending check is cheaper as a
+    # raw byte compare. Avoids allocating a full str for every framing
+    # decision in the hot path (Qodo PR 17 pass 29 #2).
     head = data[:10].decode("ascii", errors="ignore")
-    full = data.decode("ascii", errors="ignore")
     head_upper = head.upper()
     return (
         head.startswith("*")
         or head.startswith("SYST")
         or head.startswith("CONF")
         or head_upper.startswith("READ")  # case-insensitive per upstream
-        or full.endswith("\r\n")
-        or full.endswith("\n")
+        or data.endswith(b"\r\n")
+        or data.endswith(b"\n")
     )
 
 
