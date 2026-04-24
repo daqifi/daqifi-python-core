@@ -291,32 +291,74 @@ def _report(progress: Optional[ProgressReporter], value: int) -> None:
 
 
 def _fetch_releases_from_api(api_url: str, user_agent: str) -> List[dict]:
-    req = urllib.request.Request(
-        api_url,
-        headers={"User-Agent": user_agent, "Accept": "application/vnd.github+json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            body = response.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 403:
-            reset_header = exc.headers.get("X-RateLimit-Reset")
-            if reset_header:
-                try:
-                    reset_time = datetime.fromtimestamp(
-                        int(reset_header), tz=timezone.utc
-                    )
-                    raise RuntimeError(
-                        f"GitHub API rate limit exceeded. Resets at "
-                        f"{reset_time.strftime('%Y-%m-%d %H:%M:%S %Z')}."
-                    ) from exc
-                except (ValueError, OverflowError):
-                    pass
-        raise
-    data = json.loads(body)
-    if not isinstance(data, list):
-        raise RuntimeError("Unexpected GitHub releases response shape.")
-    return data
+    """Fetch the full paginated list of releases.
+
+    GitHub paginates the releases API at 30 entries per page by
+    default. ``download_firmware_by_tag`` for an older tag silently
+    failed when the tag landed on page 2+ (Qodo PR 17 pass 22 #1).
+    Walk RFC-5988 ``Link: rel="next"`` headers until exhausted, with
+    ``per_page=100`` to minimize round-trips. Cap iterations at 50
+    pages (5000 releases) so a misbehaving server can't hang us
+    indefinitely.
+    """
+    from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+    def _with_per_page(url: str) -> str:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        qs.setdefault("per_page", ["100"])
+        return urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
+
+    def _next_link(link_header: Optional[str]) -> Optional[str]:
+        # `Link: <url1>; rel="next", <url2>; rel="last"` per RFC 5988.
+        if not link_header:
+            return None
+        for part in link_header.split(","):
+            part = part.strip()
+            if 'rel="next"' not in part:
+                continue
+            start = part.find("<")
+            end = part.find(">")
+            if 0 <= start < end:
+                return part[start + 1 : end]
+        return None
+
+    releases: List[dict] = []
+    next_url: Optional[str] = _with_per_page(api_url)
+    pages = 0
+    while next_url and pages < 50:
+        pages += 1
+        req = urllib.request.Request(
+            next_url,
+            headers={
+                "User-Agent": user_agent,
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                body = response.read()
+                next_url = _next_link(response.headers.get("Link"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                reset_header = exc.headers.get("X-RateLimit-Reset")
+                if reset_header:
+                    try:
+                        reset_time = datetime.fromtimestamp(
+                            int(reset_header), tz=timezone.utc
+                        )
+                        raise RuntimeError(
+                            f"GitHub API rate limit exceeded. Resets at "
+                            f"{reset_time.strftime('%Y-%m-%d %H:%M:%S %Z')}."
+                        ) from exc
+                    except (ValueError, OverflowError):
+                        pass
+            raise
+        data = json.loads(body)
+        if not isinstance(data, list):
+            raise RuntimeError("Unexpected GitHub releases response shape.")
+        releases.extend(data)
+    return releases
 
 
 def _download_to_path_with_progress(

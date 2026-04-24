@@ -249,42 +249,50 @@ class DaqifiDevice:
         self._set_state(DeviceState.Connecting)
 
         try:
-            if self._transport is not None:
-                self._transport.connect(retry_options=retry_options)
-                # Capture the stream once and validate it. A transport
-                # that returns None from `.stream` after a successful
-                # `.connect()` is broken — surface it now rather than
-                # letting StreamMessageConsumer crash later (Qodo PR
-                # 17 pass 4 #6).
-                stream = self._transport.stream
-                if stream is None:
-                    raise RuntimeError(
-                        "Transport reports connected but provided no "
-                        "stream; cannot start message consumer."
-                    )
-                # Always rebuild the consumer on connect: on a
-                # reconnect, the previous consumer references the
-                # OLD (closed) stream from the prior session, so its
-                # background reads would fail forever (Qodo PR 17
-                # pass 11 #1). The factory call is cheap; the
-                # caller's `initialize()` re-registers handlers.
-                if self._consumer is not None:
-                    try:
-                        self._consumer.close()
-                    except Exception:
-                        pass
-                    self._consumer = None
-
-                # Default factory decodes bytes into a real
-                # `DaqifiOutMessage` (see ``_default_message_factory``).
-                # Override per-device by passing ``message_factory``
-                # to the constructor — useful for tests that want
-                # raw-bytes passthrough or a custom proto class.
-                self._consumer = StreamMessageConsumer[Any](
-                    stream,
-                    ProtobufMessageParser(message_factory=self._message_factory),
+            # Refuse to connect without a transport. Previously this
+            # would silently transition to Connected with no stream,
+            # which then crashed any subsequent send/recv (Qodo PR 17
+            # pass 22 #2).
+            if self._transport is None:
+                raise RuntimeError(
+                    "No transport configured; cannot connect without "
+                    "a transport-backed stream."
                 )
-                self._consumer.start()
+            self._transport.connect(retry_options=retry_options)
+            # Capture the stream once and validate it. A transport
+            # that returns None from `.stream` after a successful
+            # `.connect()` is broken — surface it now rather than
+            # letting StreamMessageConsumer crash later (Qodo PR
+            # 17 pass 4 #6).
+            stream = self._transport.stream
+            if stream is None:
+                raise RuntimeError(
+                    "Transport reports connected but provided no "
+                    "stream; cannot start message consumer."
+                )
+            # Always rebuild the consumer on connect: on a
+            # reconnect, the previous consumer references the
+            # OLD (closed) stream from the prior session, so its
+            # background reads would fail forever (Qodo PR 17
+            # pass 11 #1). The factory call is cheap; the
+            # caller's `initialize()` re-registers handlers.
+            if self._consumer is not None:
+                try:
+                    self._consumer.close()
+                except Exception:
+                    pass
+                self._consumer = None
+
+            # Default factory decodes bytes into a real
+            # `DaqifiOutMessage` (see ``_default_message_factory``).
+            # Override per-device by passing ``message_factory``
+            # to the constructor — useful for tests that want
+            # raw-bytes passthrough or a custom proto class.
+            self._consumer = StreamMessageConsumer[Any](
+                stream,
+                ProtobufMessageParser(message_factory=self._message_factory),
+            )
+            self._consumer.start()
 
             self._set_status(ConnectionStatus.Connected)
             self._set_state(DeviceState.Connected)
