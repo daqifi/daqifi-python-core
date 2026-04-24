@@ -642,6 +642,12 @@ class StreamMessageConsumer(Generic[T]):
                 raw_for_message = consumed_bytes if len(messages) == 1 else b""
 
                 for msg in messages:
+                    # If stop() was called mid-batch (e.g. from a
+                    # handler), drop the remaining messages rather
+                    # than firing callbacks after shutdown begins
+                    # (Qodo PR 17 pass 32 #2).
+                    if not self._is_running:
+                        return
                     try:
                         self._on_message(msg, raw_for_message)
                     except Exception as exc:

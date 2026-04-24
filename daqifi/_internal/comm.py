@@ -1102,17 +1102,33 @@ class DeviceMetadata:
         if host_name and host_name.strip():
             self.host_name = host_name
 
+        # Tolerate non-numeric / out-of-range values from a stub or
+        # an unexpected protobuf shape — a failed cast on one field
+        # shouldn't drop the rest of the metadata update (Qodo PR 17
+        # pass 32 #1).
         device_port = getattr(message, "device_port", 0)
-        if device_port != 0:
-            self.device_port = int(device_port)
+        try:
+            port_int = int(device_port)
+        except (TypeError, ValueError):
+            port_int = 0
+        if 1 <= port_int <= 65535:
+            self.device_port = port_int
 
         wifi_security_mode = getattr(message, "wifi_security_mode", 0)
-        if wifi_security_mode > 0:
-            self.wifi_security_mode = wifi_security_mode
+        try:
+            sec_int = int(wifi_security_mode)
+        except (TypeError, ValueError):
+            sec_int = 0
+        if sec_int > 0:
+            self.wifi_security_mode = sec_int
 
         wifi_inf_mode = getattr(message, "wifi_inf_mode", 0)
-        if wifi_inf_mode > 0:
-            self.wifi_infrastructure_mode = wifi_inf_mode
+        try:
+            inf_int = int(wifi_inf_mode)
+        except (TypeError, ValueError):
+            inf_int = 0
+        if inf_int > 0:
+            self.wifi_infrastructure_mode = inf_int
 
         # IP / MAC decoding can raise on missing or oddly-typed
         # protobuf byte fields. Catch so a single decoder failure
