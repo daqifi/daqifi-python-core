@@ -236,23 +236,26 @@ class GitHubFirmwareDownloadService(FirmwareDownloadService):
         # (NTP step, DST transitions, manual clock set), so the TTL
         # is reliable on long-running services where the wall clock
         # might shift (Qodo PR 17 pass 20 #3).
-        # Fast path: cache fresh — no lock needed.
+        # Fast path: cache fresh — no lock needed. Hand callers a
+        # shallow copy so a downstream `.append/.pop/.clear` can't
+        # corrupt the shared cache for everyone else (Qodo PR 17
+        # pass 24 #3).
         now = time.monotonic()
         if cache.releases is not None and (now - cache.timestamp) < self._cache_ttl:
-            return cache.releases
+            return list(cache.releases)
         # Cache miss: serialize concurrent refreshers so only one
         # actually hits the GitHub API. Re-check inside the lock to
         # cover the case where a peer just finished refreshing.
         async with lock:
             now = time.monotonic()
             if cache.releases is not None and (now - cache.timestamp) < self._cache_ttl:
-                return cache.releases
+                return list(cache.releases)
             releases = await asyncio.to_thread(
                 _fetch_releases_from_api, api_url, self._user_agent
             )
-            cache.releases = releases
+            cache.releases = list(releases)
             cache.timestamp = time.monotonic()
-            return releases
+            return list(cache.releases)
 
     async def _download_file(
         self,

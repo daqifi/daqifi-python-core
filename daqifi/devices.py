@@ -384,33 +384,40 @@ class DaqifiDevice:
             # (sock.makefile with buffering=0) may write fewer bytes
             # than requested per call. Without the loop, the tail of
             # the SCPI command can be silently dropped (Qodo PR 17
-            # pass 8 #4).
-            view = memoryview(data)
-            total_written = 0
-            while total_written < len(data):
-                written = stream.write(view[total_written:])
-                if written is None:
-                    # `RawIOBase.write` returns None when the
-                    # underlying stream would block — that means
-                    # zero bytes were written, NOT "wrote
-                    # everything." Surface as IOError rather than
-                    # silently dropping the rest of the SCPI
-                    # command (Qodo PR 17 pass 11 #2).
-                    raise IOError(
-                        f"Stream.write() returned None at offset "
-                        f"{total_written} of {len(data)}; cannot "
-                        f"verify SCPI command was fully transmitted."
-                    )
-                if written <= 0:
-                    raise IOError(
-                        f"Stream write returned {written}; aborting "
-                        f"after {total_written} of {len(data)} bytes."
-                    )
-                total_written += written
+            # pass 8 #4). On any write failure, transition the device
+            # to Lost/Error so callers don't keep using a zombie
+            # connection (Qodo PR 17 pass 24 #2).
             try:
-                stream.flush()
-            except AttributeError:
-                pass
+                view = memoryview(data)
+                total_written = 0
+                while total_written < len(data):
+                    written = stream.write(view[total_written:])
+                    if written is None:
+                        # `RawIOBase.write` returns None when the
+                        # underlying stream would block — that means
+                        # zero bytes were written, NOT "wrote
+                        # everything." Surface as IOError rather than
+                        # silently dropping the rest of the SCPI
+                        # command (Qodo PR 17 pass 11 #2).
+                        raise IOError(
+                            f"Stream.write() returned None at offset "
+                            f"{total_written} of {len(data)}; cannot "
+                            f"verify SCPI command was fully transmitted."
+                        )
+                    if written <= 0:
+                        raise IOError(
+                            f"Stream write returned {written}; aborting "
+                            f"after {total_written} of {len(data)} bytes."
+                        )
+                    total_written += written
+                try:
+                    stream.flush()
+                except AttributeError:
+                    pass
+            except Exception:
+                self._set_status(ConnectionStatus.Lost)
+                self._set_state(DeviceState.Error)
+                raise
         else:
             raise NotImplementedError(
                 "Direct message sending without a string-typed ScpiMessage is "

@@ -168,9 +168,13 @@ class HidDeviceFinder:
                     device_path=hid.device_path,
                 )
                 results.append(info)
-                self._fire_discovered(info)
-            self._fire_completed()
-            return results
+        # Fire callbacks OUTSIDE the lock — a subscriber that calls
+        # back into this finder (or otherwise blocks) under the lock
+        # would deadlock the next discover() (Qodo PR 17 pass 24 #1).
+        for info in results:
+            self._fire_discovered(info)
+        self._fire_completed()
+        return results
 
     def close(self) -> None:
         self._disposed = True

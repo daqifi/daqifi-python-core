@@ -99,7 +99,19 @@ class TcpStreamTransport:
 
     @property
     def is_connected(self) -> bool:
-        return self._socket is not None and self._stream is not None
+        # Beyond the simple None-check, also verify the underlying
+        # FD is still open and the stream wrapper hasn't been
+        # closed — surfaces a closed-by-the-other-side socket as
+        # "not connected" instead of letting the next send/recv
+        # crash with a confusing OSError (Qodo PR 17 pass 24 #4).
+        if self._socket is None or self._stream is None:
+            return False
+        if getattr(self._stream, "closed", False):
+            return False
+        try:
+            return self._socket.fileno() != -1
+        except Exception:
+            return False
 
     @property
     def connection_info(self) -> str:
