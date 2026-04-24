@@ -463,58 +463,63 @@ class WiFiDeviceFinder:
         deadline = time.monotonic() + max(timeout.total_seconds(), 0.0)
         seen_ips: set = set()
         discovered: List[DeviceInfo] = []
-        with self._lock:
-            try:
-                if owns_transport:
-                    udp_transport = UdpTransport(local_port=0)
-                    # Mark opened_here BEFORE open() so the finally
-                    # block still closes the transport if open()
-                    # itself raises after partial socket creation
-                    # (Qodo PR 17 pass 39 #3).
-                    opened_here = True
-                    udp_transport.open()
+        try:
+            with self._lock:
+                try:
+                    if owns_transport:
+                        udp_transport = UdpTransport(local_port=0)
+                        # Mark opened_here BEFORE open() so the finally
+                        # block still closes the transport if open()
+                        # itself raises after partial socket creation
+                        # (Qodo PR 17 pass 39 #3).
+                        opened_here = True
+                        udp_transport.open()
 
-                # Broadcast both queries so devices on either firmware
-                # variant respond.
-                udp_transport.send_broadcast(self.DAQIFI_FINDER_QUERY, self._discovery_port)
-                udp_transport.send_broadcast(self.NATIVE_FINDER_QUERY, self._discovery_port)
+                    # Broadcast both queries so devices on either firmware
+                    # variant respond.
+                    udp_transport.send_broadcast(self.DAQIFI_FINDER_QUERY, self._discovery_port)
+                    udp_transport.send_broadcast(self.NATIVE_FINDER_QUERY, self._discovery_port)
 
-                while time.monotonic() < deadline:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    result = udp_transport.receive(timeout=timedelta(seconds=min(0.5, remaining)))
-                    if result is None:
-                        continue
-                    data, (ip, port) = result
-                    if ip in seen_ips:
-                        continue  # de-dup repeated responses from same device
-                    text = data.decode("utf-8", errors="replace")
-                    if _POWER_EVENT_MARKER in text:
-                        # Discovery requests echo a power-event line; skip.
-                        continue
-                    seen_ips.add(ip)
-                    info = DeviceInfo(
-                        name=text.strip().splitlines()[0] if text.strip() else f"DAQiFi-{ip}",
-                        serial_number="",
-                        firmware_version="",
-                        connection_type=ConnectionType.WIFI,
-                        device_type=DeviceType.UNKNOWN,
-                        ip_address=ip,
-                        port=9760,  # firmware listens on the SCPI TCP port
-                    )
-                    discovered.append(info)
-            finally:
-                if opened_here:
-                    try:
-                        udp_transport.close()
-                    except Exception:
-                        pass
-        # Fire callbacks OUTSIDE the lock — same deadlock concern
-        # as the HID/Serial finders (Qodo PR 17 pass 25 #2).
-        for info in discovered:
-            self._fire_discovered(info)
-        self._fire_completed()
+                    while time.monotonic() < deadline:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        result = udp_transport.receive(timeout=timedelta(seconds=min(0.5, remaining)))
+                        if result is None:
+                            continue
+                        data, (ip, port) = result
+                        if ip in seen_ips:
+                            continue  # de-dup repeated responses from same device
+                        text = data.decode("utf-8", errors="replace")
+                        if _POWER_EVENT_MARKER in text:
+                            # Discovery requests echo a power-event line; skip.
+                            continue
+                        seen_ips.add(ip)
+                        info = DeviceInfo(
+                            name=text.strip().splitlines()[0] if text.strip() else f"DAQiFi-{ip}",
+                            serial_number="",
+                            firmware_version="",
+                            connection_type=ConnectionType.WIFI,
+                            device_type=DeviceType.UNKNOWN,
+                            ip_address=ip,
+                            port=9760,  # firmware listens on the SCPI TCP port
+                        )
+                        discovered.append(info)
+                finally:
+                    if opened_here:
+                        try:
+                            udp_transport.close()
+                        except Exception:
+                            pass
+        finally:
+            # Fire callbacks OUTSIDE the lock — same deadlock concern
+            # as the HID/Serial finders (Qodo PR 17 pass 25 #2). Run
+            # in finally so subscribers waiting on _fire_completed
+            # still hear it even if the discovery loop itself raised
+            # (Qodo PR 17 pass 46 #2).
+            for info in discovered:
+                self._fire_discovered(info)
+            self._fire_completed()
         return discovered
 
     def close(self) -> None:

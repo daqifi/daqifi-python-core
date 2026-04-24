@@ -107,9 +107,12 @@ class LineBasedMessageParser:
                 # middle of a serial stream doesn't take down the whole
                 # parse — surface the partial text rather than raising.
                 message_text = line_data.decode(self._encoding, errors="replace")
-                stripped = message_text.strip()
-                if stripped:
-                    messages.append(InboundMessage(data=stripped))
+                # rstrip only the trailing CR/LF so leading/trailing
+                # whitespace inside a SCPI response (e.g. \"  X1234\")
+                # isn't silently mangled (Qodo PR 17 pass 46 #1).
+                cleaned = message_text.rstrip("\r\n")
+                if cleaned:
+                    messages.append(InboundMessage(data=cleaned))
 
             search_start = line_end_index + line_ending_len
             consumed_bytes = search_start

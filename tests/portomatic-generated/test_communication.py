@@ -54,15 +54,20 @@ class TestLineBasedMessageParser:
         assert [m.data for m in messages] == ["first", "second"]
         assert consumed == len(b"first\r\n\r\nsecond\r\n")
 
-    def test_whitespace_only_line_skipped(self):
+    def test_whitespace_only_line_preserved(self):
+        # Pass 46 #1: only line endings are stripped, not interior or
+        # leading/trailing whitespace — SCPI responses can contain
+        # whitespace-padded fields that callers depend on.
         parser = LineBasedMessageParser()
         messages, _ = parser.parse_messages(b"first\r\n   \r\nsecond\r\n")
-        assert [m.data for m in messages] == ["first", "second"]
+        assert [m.data for m in messages] == ["first", "   ", "second"]
 
-    def test_message_data_is_trimmed(self):
+    def test_message_data_preserves_inner_whitespace(self):
+        # Pass 46 #1: only \r\n is stripped; surrounding whitespace
+        # stays so a SCPI value like "  X1234  " round-trips intact.
         parser = LineBasedMessageParser()
         messages, _ = parser.parse_messages(b"  spaced  \r\n")
-        assert messages[0].data == "spaced"
+        assert messages[0].data == "  spaced  "
 
     def test_no_line_ending_returns_no_messages(self):
         parser = LineBasedMessageParser()
