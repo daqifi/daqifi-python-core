@@ -626,6 +626,25 @@ class StreamMessageConsumer(Generic[T]):
                     time.sleep(0.01)
                     continue
 
+                # Defensive: parsers are duck-typed (the project's
+                # IMessageParser is a Protocol). A faulty
+                # implementation that returns negative or out-of-bounds
+                # `consumed` could otherwise corrupt the message
+                # buffer or trap the consumer (Qodo PR 17 pass 47 #1).
+                if not isinstance(consumed, int) or consumed < 0 or consumed > len(snapshot):
+                    self._on_error(
+                        RuntimeError(
+                            f"Parser returned invalid consumed byte count: "
+                            f"{consumed!r} (buffer size: {len(snapshot)})"
+                        ),
+                        snapshot,
+                    )
+                    with self._buffer_lock:
+                        if self._message_buffer:
+                            del self._message_buffer[:1]
+                    time.sleep(0.01)
+                    continue
+
                 # Slice the buffer down to only the bytes the parser
                 # actually consumed — that's what callers expect as
                 # `raw_data`. Passing the full snapshot exposes
@@ -635,7 +654,7 @@ class StreamMessageConsumer(Generic[T]):
 
                 if consumed > 0:
                     with self._buffer_lock:
-                        del self._message_buffer[: min(consumed, len(self._message_buffer))]
+                        del self._message_buffer[:consumed]
 
                 # When multiple messages came out of one parse call,
                 # we can't attribute the consumed bytes to any single
