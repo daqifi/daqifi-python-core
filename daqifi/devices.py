@@ -491,17 +491,18 @@ class DaqifiDevice:
         if callable(sync_handle):
             sync_handle(wrapped)
             return
-        result = self._protocol_handler.handle_async(wrapped)
-        if hasattr(result, "__await__"):
-            import asyncio
-            try:
-                loop = asyncio.new_event_loop()
-                try:
-                    loop.run_until_complete(result)
-                finally:
-                    loop.close()
-            except Exception:
-                pass
+        # The streaming pipeline is wholly synchronous in this project.
+        # If a custom protocol handler exposes only the async method,
+        # fail loudly so the integrator either implements `handle()`
+        # or runs their own async dispatcher — silently spinning up
+        # a per-message event loop (the previous behavior) was a
+        # latency cliff at high stream rates (Qodo PR 17 pass 2 #2).
+        raise RuntimeError(
+            "Protocol handler must expose a synchronous `handle()` "
+            "method. Async-only handlers are not supported in the "
+            "streaming pipeline because creating an asyncio event loop "
+            "per inbound message destroys throughput at >100 Hz."
+        )
 
     def _on_status_message_received(self, message: Any) -> None:
         # Fill metadata, populate channels, fan out to subscribers.

@@ -430,15 +430,22 @@ class WiFiDeviceFinder:
             raise RuntimeError("WiFiDeviceFinder has been closed.")
 
         owns_transport = udp_transport is None
-        if owns_transport:
-            udp_transport = UdpTransport(local_port=0)
-            udp_transport.open()
+        # Track whether we actually opened the transport in THIS call,
+        # so a failure during open() doesn't try to close an unopened
+        # transport in finally — and so _fire_completed() always runs
+        # (Qodo PR 17 pass 2 #3).
+        opened_here = False
 
         deadline = time.time() + max(timeout.total_seconds(), 0.0)
         seen_ips: set = set()
         discovered: List[DeviceInfo] = []
         with self._lock:
             try:
+                if owns_transport:
+                    udp_transport = UdpTransport(local_port=0)
+                    udp_transport.open()
+                    opened_here = True
+
                 # Broadcast both queries so devices on either firmware
                 # variant respond.
                 udp_transport.send_broadcast(self.DAQIFI_FINDER_QUERY, self._discovery_port)
@@ -471,7 +478,7 @@ class WiFiDeviceFinder:
                     discovered.append(info)
                     self._fire_discovered(info)
             finally:
-                if owns_transport:
+                if opened_here:
                     try:
                         udp_transport.close()
                     except Exception:

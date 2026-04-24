@@ -136,6 +136,11 @@ class TcpStreamTransport:
         last_exc: Optional[BaseException] = None
 
         for attempt in range(1, max_attempts + 1):
+            # Track the locally-created socket separately from
+            # self._socket so a failure between socket() and the final
+            # self._socket = sock assignment doesn't leak the file
+            # descriptor (Qodo PR 17 pass 2 finding 1).
+            sock: Optional[socket.socket] = None
             try:
                 if attempt > 1:
                     delay = options.calculate_delay(attempt)
@@ -153,11 +158,27 @@ class TcpStreamTransport:
                 # graceful stop without paying a per-iteration timeout.
                 sock.settimeout(None)
                 self._socket = sock
-                self._stream = sock.makefile("rwb", buffering=0)
+                # Hand-off complete; subsequent failure paths should
+                # close via self._socket, not the local `sock`.
+                sock = None
+                self._stream = self._socket.makefile("rwb", buffering=0)
                 self._notify_status(True, None)
                 return
             except Exception as exc:
                 last_exc = exc
+                # Close whichever handle is alive: the local `sock`
+                # (failure before hand-off) or self._socket (failure
+                # after hand-off).
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+                if self._stream is not None:
+                    try:
+                        self._stream.close()
+                    except Exception:
+                        pass
                 if self._socket is not None:
                     try:
                         self._socket.close()

@@ -75,6 +75,11 @@ class ProtobufProtocolHandler:
         sync version skips the cost of creating + tearing down an
         event loop per inbound message (Qodo PR 17 finding 4).
         """
+        # Mirror `can_handle`'s defensive shape: a malformed event-args
+        # arrival (None / no `data` attr) shouldn't crash the consumer
+        # thread (Qodo PR 17 pass 2 #4).
+        if message is None or not hasattr(message, "data"):
+            return
         pb_message = message.data
         if not _is_daqifi_out_message(pb_message):
             return
