@@ -596,11 +596,14 @@ class DaqifiDevice:
         # `args` shape mirrors MessageReceivedEventArgs; route through
         # the protocol handler if it accepts the message.
         message = getattr(args, "message", None)
-        # Defensive: if a parser returns a raw payload instead of an
-        # InboundMessage wrapper, accept it directly (Qodo PR 17 pass
-        # 7 #4).
-        payload = getattr(message, "data", message)
-        wrapped = GenericInboundMessage(data=payload)
+        # If we already have an inbound envelope (anything exposing
+        # `.data`), preserve it so a custom parser's typed wrapper
+        # isn't discarded — only wrap a raw payload (Qodo PR 17 pass
+        # 25 #3, refining pass 7 #4).
+        if message is not None and hasattr(message, "data"):
+            wrapped = message
+        else:
+            wrapped = GenericInboundMessage(data=message)
         if self._protocol_handler is None or not self._protocol_handler.can_handle(wrapped):
             return
         # Hot path: streaming pumps thousands of these per second.

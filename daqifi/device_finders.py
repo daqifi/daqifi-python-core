@@ -266,25 +266,26 @@ class SerialDeviceFinder:
             raise RuntimeError("SerialDeviceFinder has been closed.")
 
         with self._lock:
-            try:
-                if port_filter is not None:
-                    ports = list(port_filter)
-                else:
-                    ports = SerialStreamTransport.get_available_port_names()
+            if port_filter is not None:
+                ports = list(port_filter)
+            else:
+                ports = SerialStreamTransport.get_available_port_names()
 
-                discovered: List[DeviceInfo] = []
-                for port_name in ports:
-                    try:
-                        info = self._try_get_device_info(port_name)
-                    except Exception:
-                        # Mirrors upstream "skip ports that fail" comment.
-                        info = None
-                    if info is not None:
-                        discovered.append(info)
-                        self._fire_discovered(info)
-                return discovered
-            finally:
-                self._fire_completed()
+            discovered: List[DeviceInfo] = []
+            for port_name in ports:
+                try:
+                    info = self._try_get_device_info(port_name)
+                except Exception:
+                    # Mirrors upstream "skip ports that fail" comment.
+                    info = None
+                if info is not None:
+                    discovered.append(info)
+        # Fire callbacks OUTSIDE the lock — same deadlock concern
+        # as the HID finder (Qodo PR 17 pass 25 #1 / pass 24 #1).
+        for info in discovered:
+            self._fire_discovered(info)
+        self._fire_completed()
+        return discovered
 
     def _try_get_device_info(self, port_name: str) -> Optional[DeviceInfo]:
         """Probe one port and return DeviceInfo if it looks like DAQiFi.
@@ -330,13 +331,15 @@ class SerialDeviceFinder:
                 port.write(scpi_commands.set_protobuf_stream_format().get_bytes())
                 time.sleep(0.1)
 
-                # GetDeviceInfo with retry.
-                deadline = time.time() + _SERIAL_RESPONSE_TIMEOUT_S
+                # GetDeviceInfo with retry. Use monotonic clock so a
+                # wall-clock jump (NTP / DST) can't corrupt the
+                # deadline math (Qodo PR 17 pass 25 #4).
+                deadline = time.monotonic() + _SERIAL_RESPONSE_TIMEOUT_S
                 last_send = 0.0
                 retry_count = 0
                 received = bytearray()
-                while time.time() < deadline:
-                    now = time.time()
+                while time.monotonic() < deadline:
+                    now = time.monotonic()
                     if now - last_send >= _SERIAL_RETRY_INTERVAL_S and retry_count < _SERIAL_MAX_RETRIES:
                         port.write(scpi_commands.get_device_info().get_bytes())
                         last_send = now
@@ -453,7 +456,11 @@ class WiFiDeviceFinder:
         # (Qodo PR 17 pass 2 #3).
         opened_here = False
 
-        deadline = time.time() + max(timeout.total_seconds(), 0.0)
+        # `time.monotonic()` is immune to wall-clock jumps — without
+        # this a NTP step or DST transition mid-discover would either
+        # extend the deadline forever or trip it instantly (Qodo PR
+        # 17 pass 25 #4).
+        deadline = time.monotonic() + max(timeout.total_seconds(), 0.0)
         seen_ips: set = set()
         discovered: List[DeviceInfo] = []
         with self._lock:
@@ -468,8 +475,8 @@ class WiFiDeviceFinder:
                 udp_transport.send_broadcast(self.DAQIFI_FINDER_QUERY, self._discovery_port)
                 udp_transport.send_broadcast(self.NATIVE_FINDER_QUERY, self._discovery_port)
 
-                while time.time() < deadline:
-                    remaining = deadline - time.time()
+                while time.monotonic() < deadline:
+                    remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
                     result = udp_transport.receive(timeout=timedelta(seconds=min(0.5, remaining)))
@@ -493,14 +500,17 @@ class WiFiDeviceFinder:
                         port=9760,  # firmware listens on the SCPI TCP port
                     )
                     discovered.append(info)
-                    self._fire_discovered(info)
             finally:
                 if opened_here:
                     try:
                         udp_transport.close()
                     except Exception:
                         pass
-                self._fire_completed()
+        # Fire callbacks OUTSIDE the lock — same deadlock concern
+        # as the HID/Serial finders (Qodo PR 17 pass 25 #2).
+        for info in discovered:
+            self._fire_discovered(info)
+        self._fire_completed()
         return discovered
 
     def close(self) -> None:
