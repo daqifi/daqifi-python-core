@@ -215,8 +215,22 @@ def enable_adc_channels(channel_set_string: str) -> ScpiMessage:
     return ScpiMessage(f"ENAble:VOLTage:DC {s}")
 
 
+def _validate_dio_channel(channel: int) -> None:
+    """Type + range validation shared by the DIO setters (Qodo PR 17
+    pass 14 #1+#2). Reject bool (int subclass), non-int, and negatives."""
+    if isinstance(channel, bool) or not isinstance(channel, int):
+        raise TypeError("channel must be an int.")
+    if channel < 0:
+        raise ValueError("channel must be non-negative.")
+
+
 def set_dio_port_direction(channel: int, direction: int) -> ScpiMessage:
     """Set channel direction (0 = input, 1 = output)."""
+    _validate_dio_channel(channel)
+    if isinstance(direction, bool) or not isinstance(direction, int):
+        raise TypeError("direction must be an int.")
+    if direction not in (0, 1):
+        raise ValueError("direction must be 0 or 1.")
     return ScpiMessage(f"DIO:PORt:DIRection {channel},{direction}")
 
 
@@ -226,6 +240,7 @@ def set_dio_port_state(channel: int, value) -> ScpiMessage:  # type: ignore[no-u
     Accepts ``int`` or ``bool``; rejects floats and other types so
     e.g. ``1.5`` doesn't get sent to the firmware (Qodo PR 17 pass 7 #1).
     """
+    _validate_dio_channel(channel)
     if isinstance(value, bool):
         value = 1 if value else 0
     if not isinstance(value, int) or value not in (0, 1):
