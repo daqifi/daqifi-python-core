@@ -210,28 +210,38 @@ class TcpStreamTransport:
         # Track whether the close path raised; status callbacks should
         # see the actual error rather than an immediately-following
         # `(False, None)` clean notification (Qodo PR 17 pass 4 #2).
+        # Each close attempt is individually try/excepted so a failed
+        # stream.close doesn't prevent socket.close from running and
+        # leaking the file descriptor (Qodo PR 17 pass 10 #3).
         disconnect_error: Optional[BaseException] = None
-        try:
-            # Shutdown both halves of the socket BEFORE closing it.
-            # This wakes any consumer thread blocked in
-            # `stream.read()` (it observes EOF instead of hanging
-            # forever), letting `StreamMessageConsumer.stop_safely()`
-            # actually stop the daemon thread. Without this the
-            # daemon thread leaks until process exit when sockets
-            # use `settimeout(None)` (Qodo PR 17 finding 5).
-            if self._socket is not None:
-                try:
-                    self._socket.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    # Already closed / not connected — non-fatal.
-                    pass
-            if self._stream is not None:
+
+        # Shutdown both halves of the socket BEFORE closing it.
+        # This wakes any consumer thread blocked in `stream.read()`
+        # (it observes EOF instead of hanging forever), letting
+        # `StreamMessageConsumer.stop_safely()` actually stop the
+        # daemon thread (Qodo PR 17 finding 5).
+        if self._socket is not None:
+            try:
+                self._socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                # Already closed / not connected — non-fatal.
+                pass
+
+        if self._stream is not None:
+            try:
                 self._stream.close()
-            if self._socket is not None:
+            except Exception as exc:
+                disconnect_error = disconnect_error or exc
+
+        if self._socket is not None:
+            try:
                 self._socket.close()
-        except Exception as exc:
-            disconnect_error = exc
-            raise
+            except Exception as exc:
+                disconnect_error = disconnect_error or exc
+
+        try:
+            if disconnect_error is not None:
+                raise disconnect_error
         finally:
             self._socket = None
             self._stream = None

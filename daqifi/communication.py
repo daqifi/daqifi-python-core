@@ -483,7 +483,12 @@ class StreamMessageConsumer(Generic[T]):
     def stop(self) -> None:
         self._is_running = False
         if self._thread is not None:
-            self._thread.join(timeout=1.0)
+            # Don't self-join — `thread.join()` from inside the
+            # thread it would join raises RuntimeError. This can
+            # happen if a user callback ends up calling stop() (Qodo
+            # PR 17 pass 10 #2).
+            if threading.current_thread() is not self._thread:
+                self._thread.join(timeout=1.0)
             # Qodo PR 17 finding 5: only drop the thread reference if
             # it actually stopped. Keeping it lets a caller retry
             # join / inspect is_alive instead of leaking the handle.
@@ -499,8 +504,14 @@ class StreamMessageConsumer(Generic[T]):
         thread = self._thread
         stopped = True
         if thread is not None:
-            thread.join(timeout=timeout_ms / 1000.0)
-            stopped = not thread.is_alive()
+            if threading.current_thread() is thread:
+                # Self-stop from inside a callback: report
+                # "couldn't stop synchronously" instead of
+                # raising on the join (Qodo PR 17 pass 10 #2).
+                stopped = False
+            else:
+                thread.join(timeout=timeout_ms / 1000.0)
+                stopped = not thread.is_alive()
         # Qodo PR 17 finding 5: don't drop the handle if the thread
         # is still alive — caller may need to retry.
         if stopped:
@@ -625,7 +636,15 @@ class StreamMessageConsumer(Generic[T]):
             timestamp=datetime.now(timezone.utc),
         )
         for h in list(self._message_handlers):
-            h(args)
+            # Per-handler isolation: a faulty subscriber must not
+            # prevent other subscribers from receiving the same
+            # message. Route exceptions to _on_error so they're
+            # observable instead of silently lost (Qodo PR 17 pass
+            # 10 #4). Mirrors the pattern in _on_error itself.
+            try:
+                h(args)
+            except Exception as exc:
+                self._on_error(exc, raw_data)
 
     def _on_error(self, error: BaseException, raw_data: Optional[bytes] = None) -> None:
         args = _ConsumerErrorArgs(

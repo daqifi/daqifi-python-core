@@ -74,7 +74,14 @@ class SdCardParseProgress:
 
 @dataclass(frozen=True)
 class SdCardDeviceConfiguration:
-    """Device snapshot used to fill in fields missing from the SD card file."""
+    """Device snapshot used to fill in fields missing from the SD card file.
+
+    Container fields use ``Tuple`` rather than ``List`` so the
+    "frozen" dataclass guarantee actually holds — a mutable list
+    inside a frozen dataclass is a footgun (Qodo PR 17 pass 10 #6).
+    Callers may pass any iterable; ``__post_init__`` coerces to
+    tuples for safety.
+    """
 
     analog_port_count: int
     digital_port_count: int
@@ -82,10 +89,25 @@ class SdCardDeviceConfiguration:
     device_serial_number: Optional[str] = None
     device_part_number: Optional[str] = None
     firmware_revision: Optional[str] = None
-    calibration_values: Optional[List[Tuple[float, float]]] = None  # (slope, intercept) per channel
+    # (slope, intercept) per channel
+    calibration_values: Optional[Tuple[Tuple[float, float], ...]] = None
     resolution: int = 0
-    port_range: Optional[List[float]] = None
-    internal_scale_m: Optional[List[float]] = None
+    port_range: Optional[Tuple[float, ...]] = None
+    internal_scale_m: Optional[Tuple[float, ...]] = None
+
+    def __post_init__(self) -> None:
+        # frozen=True bans normal attribute assignment, so fall
+        # through object.__setattr__ to coerce iterables → tuples.
+        if self.calibration_values is not None:
+            object.__setattr__(
+                self,
+                "calibration_values",
+                tuple(tuple(p) for p in self.calibration_values),
+            )
+        if self.port_range is not None:
+            object.__setattr__(self, "port_range", tuple(self.port_range))
+        if self.internal_scale_m is not None:
+            object.__setattr__(self, "internal_scale_m", tuple(self.internal_scale_m))
 
 
 @dataclass

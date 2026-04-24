@@ -83,7 +83,11 @@ class TestSdCardDeviceConfiguration:
             internal_scale_m=[1.0, 1.0],
         )
         assert cfg.device_serial_number == "SN001"
-        assert cfg.calibration_values == [(1.0, 0.0), (1.5, -0.1)]
+        # Container fields are coerced to tuples for true frozen
+        # immutability (Qodo PR 17 pass 10 #6).
+        assert cfg.calibration_values == ((1.0, 0.0), (1.5, -0.1))
+        assert cfg.port_range == (10.0, 5.0)
+        assert cfg.internal_scale_m == (1.0, 1.0)
 
     def test_is_frozen(self):
         cfg = SdCardDeviceConfiguration(0, 0, 0)

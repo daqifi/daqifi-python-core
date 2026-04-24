@@ -1098,11 +1098,21 @@ class DeviceMetadata:
         if wifi_inf_mode > 0:
             self.wifi_infrastructure_mode = wifi_inf_mode
 
-        ip = get_ip_address_string(message)
+        # IP / MAC decoding can raise on missing or oddly-typed
+        # protobuf byte fields. Catch so a single decoder failure
+        # doesn't drop the rest of the metadata update (Qodo PR 17
+        # pass 10 #5).
+        try:
+            ip = get_ip_address_string(message)
+        except Exception:
+            ip = ""
         if ip:
             self.ip_address = ip
 
-        mac = get_mac_address_string(message)
+        try:
+            mac = get_mac_address_string(message)
+        except Exception:
+            mac = ""
         if mac:
             self.mac_address = mac
 

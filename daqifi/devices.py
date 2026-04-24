@@ -281,6 +281,16 @@ class DaqifiDevice:
         try:
             if self._consumer is not None:
                 self._consumer.remove_message_received(self._on_inbound_message)
+
+            # Disconnect the transport BEFORE stopping the consumer
+            # so the underlying socket/stream close wakes any blocked
+            # read in the consumer thread (Qodo PR 17 pass 10 #1).
+            # Without this ordering, stop_safely() could time out
+            # waiting for a thread blocked in stream.read().
+            if self._transport is not None:
+                self._transport.disconnect()
+
+            if self._consumer is not None:
                 # If stop_safely times out (consumer thread blocked
                 # in a read), fall through to the harder stop() —
                 # otherwise the daemon thread leaks until process
@@ -288,8 +298,6 @@ class DaqifiDevice:
                 stopped = self._consumer.stop_safely()
                 if stopped is False:
                     self._consumer.stop()
-            if self._transport is not None:
-                self._transport.disconnect()
         finally:
             self._set_status(ConnectionStatus.Disconnected)
             self._set_state(DeviceState.Disconnected)
