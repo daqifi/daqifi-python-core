@@ -504,6 +504,17 @@ class DaqifiDevice:
             except Exception:
                 pass
         if self._transport is not None:
+            # Unsubscribe transport status callback before closing —
+            # otherwise a transport that outlives the device (e.g.
+            # passed in externally and reused) keeps a strong ref to
+            # this device's bound method, leaking it (Qodo PR 17 pass
+            # 28 #1).
+            try:
+                self._transport.remove_status_changed(
+                    self._on_transport_status_changed
+                )
+            except Exception:
+                pass
             try:
                 self._transport.close()
             except Exception:
