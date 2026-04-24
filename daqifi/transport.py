@@ -418,8 +418,12 @@ class SerialStreamTransport:
         raise RuntimeError("Connection failed after all retry attempts.")
 
     def disconnect(self) -> None:
-        if not self.is_connected:
-            return
+        # Idempotent disconnect: don't early-return on
+        # `not is_connected`. Match the TcpStreamTransport behavior
+        # so a half-open serial port still gets explicitly closed
+        # and the (False, ...) status event fires exactly once per
+        # disconnect() call (Qodo PR 17 pass 38 #1, mirroring pass
+        # 37 #1).
         # Same single-notification pattern as TcpStreamTransport (Qodo
         # PR 17 pass 6 #2): capture the close error so subscribers see
         # the actual failure instead of a clean (False, None) that
