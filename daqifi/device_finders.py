@@ -303,6 +303,19 @@ class SerialDeviceFinder:
                 port.dtr = True
                 time.sleep(_SERIAL_DEVICE_WAKEUP_DELAY_S)
 
+                # Drop any bytes the OS / device left in either buffer
+                # before the probe started. Without this, stale data
+                # from a prior session can be misread as a successful
+                # protobuf response (false-positive discovery), or
+                # garble our SCPI init writes (Qodo PR 17 pass 13 #3).
+                try:
+                    if hasattr(port, "reset_input_buffer"):
+                        port.reset_input_buffer()
+                    if hasattr(port, "reset_output_buffer"):
+                        port.reset_output_buffer()
+                except Exception:
+                    pass
+
                 # SCPI init sequence (matches DaqifiDevice.initialize).
                 port.write(scpi_commands.disable_device_echo().get_bytes())
                 time.sleep(0.1)

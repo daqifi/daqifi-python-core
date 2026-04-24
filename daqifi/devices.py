@@ -284,6 +284,21 @@ class DaqifiDevice:
             self._set_status(ConnectionStatus.Connected)
             self._set_state(DeviceState.Connected)
         except Exception:
+            # Setup failed mid-way. Tear down anything partially
+            # constructed so the transport doesn't leak file
+            # descriptors and the consumer thread doesn't keep
+            # spinning on a dead stream (Qodo PR 17 pass 13 #2).
+            if self._consumer is not None:
+                try:
+                    self._consumer.close()
+                except Exception:
+                    pass
+                self._consumer = None
+            if self._transport is not None:
+                try:
+                    self._transport.disconnect()
+                except Exception:
+                    pass
             self._set_status(ConnectionStatus.Disconnected)
             self._set_state(DeviceState.Disconnected)
             raise

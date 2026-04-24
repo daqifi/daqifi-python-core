@@ -334,15 +334,17 @@ def _download_to_path_with_progress(
     # GitHub redirect could otherwise point us at an arbitrary host
     # (Qodo PR 17 pass 12 #3 — SSRF defense for the firmware path).
     from urllib.parse import urlparse
-    parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise ValueError(f"Refusing to download non-HTTPS URL: {url}")
-    if parsed.hostname not in {
+    _ALLOWED_DOWNLOAD_HOSTS = {
         "github.com",
         "api.github.com",
         "objects.githubusercontent.com",
         "release-assets.githubusercontent.com",
-    }:
+        "codeload.github.com",
+    }
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Refusing to download non-HTTPS URL: {url}")
+    if parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
         raise ValueError(
             f"Refusing to download from unexpected host: {parsed.hostname}"
         )
@@ -356,6 +358,16 @@ def _download_to_path_with_progress(
     tmp = Path(tmp_path)
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
+            # urllib follows redirects transparently — re-validate the
+            # FINAL URL against the allowlist so an open-redirect on a
+            # GitHub host can't point us at an arbitrary destination
+            # (Qodo PR 17 pass 13 #1 — SSRF redirect defense).
+            final = urlparse(response.geturl())
+            if final.scheme != "https" or final.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
+                raise ValueError(
+                    f"Refusing redirected download to unexpected host: "
+                    f"{response.geturl()}"
+                )
             content_length = response.headers.get("Content-Length")
             # Use explicit `is not None` so a legitimate zero-byte
             # asset (expected_size == 0) doesn't fall through to the
