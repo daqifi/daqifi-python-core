@@ -277,6 +277,15 @@ class DaqifiDevice:
             # pass 11 #1). The factory call is cheap; the
             # caller's `initialize()` re-registers handlers.
             if self._consumer is not None:
+                # Unregister the message callback BEFORE stopping
+                # the consumer so an in-flight message can't be
+                # delivered to the old _on_inbound_message after
+                # the device starts rebuilding state for the new
+                # session (Qodo PR 17 pass 42 #1).
+                try:
+                    self._consumer.remove_message_received(self._on_inbound_message)
+                except Exception:
+                    pass
                 # Stop the daemon thread before closing — close()
                 # alone doesn't join the thread, so a reconnect
                 # would leak a zombie reader spinning on the OLD
