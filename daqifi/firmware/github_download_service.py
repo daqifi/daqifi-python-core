@@ -448,7 +448,13 @@ def _download_to_path_with_progress(
             if expected_size is not None:
                 total = expected_size
             else:
-                total = int(content_length) if content_length else -1
+                # A malformed/non-numeric Content-Length header would
+                # otherwise crash the download mid-flight; fall back to
+                # "unknown total" instead (Qodo PR 17 pass 36 #2).
+                try:
+                    total = int(content_length) if content_length else -1
+                except (TypeError, ValueError):
+                    total = -1
             bytes_read = 0
             with tmp.open("wb") as fp:
                 while True:

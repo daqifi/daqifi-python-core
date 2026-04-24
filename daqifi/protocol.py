@@ -6,6 +6,7 @@ Ported from upstream ``Daqifi.Core.Device.Protocol.ProtobufProtocolHandler``
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
@@ -65,13 +66,18 @@ class ProtobufProtocolHandler:
         # mistake, the coroutine returned here would never be awaited
         # and the body would never run. Log loudly so the misuse
         # surfaces immediately instead of becoming a silent dropped
-        # message (Qodo PR 17 pass 35 #1).
+        # message (Qodo PR 17 pass 35 #1). Also explicitly close()
+        # the coroutine so Python doesn't emit a noisy
+        # ``RuntimeWarning: coroutine '...' was never awaited`` and
+        # the frame is freed immediately (Qodo PR 17 pass 36 #1).
         result = cb(pb_message)
-        if result is not None and hasattr(result, "__await__"):
+        if inspect.isawaitable(result):
             _log.error(
                 "Protocol handler callback returned an awaitable; "
                 "callbacks must be synchronous (this message was dropped)."
             )
+            if inspect.iscoroutine(result):
+                result.close()
 
     def can_handle(self, message: InboundMessage[Any]) -> bool:
         """Return True iff ``message.data`` looks like a DaqifiOutMessage.
@@ -79,10 +85,19 @@ class ProtobufProtocolHandler:
         Duck-typed: presence of the ``device_status`` attribute is treated as
         the discriminator since the upstream type check (``is DaqifiOutMessage``)
         has no clean Python analog without coupling to a real protobuf class.
+
+        Uses ``try/getattr`` rather than ``hasattr`` so a misbehaving
+        property getter (raising any non-AttributeError exception) on
+        ``message.data`` can't crash the consumer thread (Qodo PR 17
+        pass 36 #3, mirroring pass 21 #3).
         """
-        if message is None or not hasattr(message, "data"):
+        if message is None:
             return False
-        return _is_daqifi_out_message(message.data)
+        try:
+            data = message.data
+        except Exception:
+            return False
+        return _is_daqifi_out_message(data)
 
     def handle(self, message: InboundMessage[Any]) -> None:
         """Synchronous dispatch — preferred hot-path entry point.
