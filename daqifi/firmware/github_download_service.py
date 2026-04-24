@@ -419,6 +419,23 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
     with zipfile.ZipFile(zip_path) as zf:
         for info in zf.infolist():
             member = info.filename
+            # Normalize backslashes to forward slashes BEFORE any
+            # validation. ZIP entries from Windows tooling can use
+            # backslash separators that bypass POSIX-style traversal
+            # checks (`/../`), so the same archive could be safe on
+            # Linux but exploitable on Windows or vice versa
+            # (Qodo PR 17 pass 16 #2 — cross-platform Zip-Slip).
+            normalized = member.replace("\\", "/")
+            if (
+                normalized.startswith("/")
+                or normalized.startswith("../")
+                or "/../" in normalized
+            ):
+                shutil.rmtree(extract_path, ignore_errors=True)
+                raise RuntimeError(
+                    f"Zip archive contains path traversal entry: {member}"
+                )
+
             # Symlink check: Unix create_system + mode bits 0o120000.
             if info.create_system == 3:  # 3 = Unix
                 file_mode = (info.external_attr >> 16) & 0o170000
@@ -427,7 +444,8 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
                     raise RuntimeError(
                         f"Zip archive contains symlink entry: {member}"
                     )
-            target_path = (extract_path / member).resolve()
+
+            target_path = (extract_path / normalized).resolve()
             try:
                 target_path.relative_to(full_target)
             except ValueError as exc:

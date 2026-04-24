@@ -314,8 +314,15 @@ class DaqifiDevice:
             # read in the consumer thread (Qodo PR 17 pass 10 #1).
             # Without this ordering, stop_safely() could time out
             # waiting for a thread blocked in stream.read().
+            # Capture any failure so we still run consumer cleanup
+            # below (Qodo PR 17 pass 16 #1) — without this, a
+            # transport.disconnect() raise leaked the daemon thread.
+            transport_error: Optional[BaseException] = None
             if self._transport is not None:
-                self._transport.disconnect()
+                try:
+                    self._transport.disconnect()
+                except BaseException as exc:
+                    transport_error = exc
 
             if self._consumer is not None:
                 # If stop_safely times out (consumer thread blocked
@@ -333,6 +340,10 @@ class DaqifiDevice:
                 except Exception:
                     pass
                 self._consumer = None
+
+            # Re-surface the transport error AFTER consumer cleanup.
+            if transport_error is not None:
+                raise transport_error
         finally:
             self._set_status(ConnectionStatus.Disconnected)
             self._set_state(DeviceState.Disconnected)
