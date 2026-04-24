@@ -121,13 +121,16 @@ class ProtobufProtocolHandler:
     @staticmethod
     def detect_message_type(message: DaqifiOutMessage) -> ProtobufMessageType:
         """Detect the type of a protobuf message based on its contents."""
+        # Check stream FIRST: a streaming frame can incidentally
+        # carry the port-count fields _is_status_message looks at,
+        # which would otherwise misclassify the frame as STATUS and
+        # send it down the wrong handler chain (Qodo PR 17 pass 18 #1).
+        if ProtobufProtocolHandler._is_stream_message(message):
+            return ProtobufMessageType.STREAM
+
         # Status messages contain device configuration information
         if ProtobufProtocolHandler._is_status_message(message):
             return ProtobufMessageType.STATUS
-
-        # Streaming messages contain analog/digital data with timestamps
-        if ProtobufProtocolHandler._is_stream_message(message):
-            return ProtobufMessageType.STREAM
 
         # SD card messages are typically text-based and handled separately
         # (placeholder - actual SD card messages come as text responses, not protobuf)

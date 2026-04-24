@@ -99,11 +99,15 @@ class SdCardDeviceConfiguration:
         # frozen=True bans normal attribute assignment, so fall
         # through object.__setattr__ to coerce iterables → tuples.
         if self.calibration_values is not None:
-            object.__setattr__(
-                self,
-                "calibration_values",
-                tuple(tuple(p) for p in self.calibration_values),
-            )
+            coerced = tuple(tuple(p) for p in self.calibration_values)
+            # Each entry must be a (slope, intercept) pair —
+            # downstream code unpacks two values (Qodo PR 17 pass 18 #2).
+            if any(len(pair) != 2 for pair in coerced):
+                raise ValueError(
+                    "calibration_values entries must be "
+                    "(slope, intercept) 2-tuples"
+                )
+            object.__setattr__(self, "calibration_values", coerced)
         if self.port_range is not None:
             object.__setattr__(self, "port_range", tuple(self.port_range))
         if self.internal_scale_m is not None:
