@@ -596,9 +596,19 @@ class DaqifiDevice:
                 pass
 
     def _populate_analog_channels(self, message: Any) -> int:
-        count = int(getattr(message, "analog_in_port_num", 0)
-                    or getattr(message, "AnalogInPortNum", 0))
-        if count == 0:
+        # Same int-cast hardening as the metadata path (Qodo PR 17
+        # pass 44 #1 / pass 32-33 #1) — a non-numeric stub value
+        # would otherwise crash here and skip channel population
+        # entirely.
+        raw_count = (
+            getattr(message, "analog_in_port_num", 0)
+            or getattr(message, "AnalogInPortNum", 0)
+        )
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0:
             return 0
         cal_b = self._field_list(message, "analog_in_cal_b", "AnalogInCalB")
         cal_m = self._field_list(message, "analog_in_cal_m", "AnalogInCalM")
@@ -608,8 +618,16 @@ class DaqifiDevice:
         ranges = self._field_list(
             message, "analog_in_port_range", "AnalogInPortRange"
         )
-        resolution = int(getattr(message, "analog_in_res", 0)
-                         or getattr(message, "AnalogInRes", 0)) or 65535
+        raw_res = (
+            getattr(message, "analog_in_res", 0)
+            or getattr(message, "AnalogInRes", 0)
+        )
+        try:
+            resolution = int(raw_res)
+        except (TypeError, ValueError):
+            resolution = 0
+        if resolution <= 0:
+            resolution = 65535
 
         for i in range(count):
             channel = AnalogChannel(
@@ -626,8 +644,18 @@ class DaqifiDevice:
         return count
 
     def _populate_digital_channels(self, message: Any) -> int:
-        count = int(getattr(message, "digital_port_num", 0)
-                    or getattr(message, "DigitalPortNum", 0))
+        # Same hardening as _populate_analog_channels (Qodo PR 17
+        # pass 44 #1) — non-numeric stubs would crash here.
+        raw_count = (
+            getattr(message, "digital_port_num", 0)
+            or getattr(message, "DigitalPortNum", 0)
+        )
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0:
+            return 0
         for i in range(count):
             self._channels.append(
                 DigitalChannel(index=i, name=f"DIO{i}", is_enabled=False)
