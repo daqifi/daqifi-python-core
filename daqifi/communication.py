@@ -179,9 +179,20 @@ class ProtobufMessageParser:
             return messages, consumed_bytes
 
         current_index = 0
-        retry_count = 0
 
-        while current_index < len(data) and retry_count < _MAX_RETRY_ATTEMPTS:
+        # NOTE: the original C# port had a `retry_count < _MAX_RETRY_ATTEMPTS`
+        # guard here to bail out after consecutive failures. That gate is
+        # actively harmful when the buffer contains SCPI text echoes
+        # (`DAQIFI> `, `**ERROR ...`, etc.) before any protobuf data:
+        # those bytes never parse, the parser bails after 3 retries with
+        # only ~3 bytes consumed, and the buffer keeps growing forever
+        # since the consumer only drops `consumed` bytes per call. The
+        # `current_index < len(data)` condition already bounds the loop —
+        # we always advance ≥1 byte on failure — so removing the retry
+        # gate keeps termination guaranteed while letting the parser
+        # scan past stale text bytes to reach valid frames behind them.
+        # Verified 2026-04-23 against NQ1 USB serial streaming.
+        while current_index < len(data):
             remaining = data[current_index:]
             message_length, prefix_bytes, is_malformed = _try_read_length_prefix(
                 remaining
@@ -191,14 +202,12 @@ class ProtobufMessageParser:
                 if is_malformed:
                     current_index += max(prefix_bytes, 1)
                     consumed_bytes = current_index
-                    retry_count += 1
                     continue
                 break  # need more data for length prefix
 
             if message_length <= 0 or message_length > _MAX_MESSAGE_SIZE_BYTES:
                 current_index += max(prefix_bytes, 1)
                 consumed_bytes = current_index
-                retry_count += 1
                 continue
 
             if len(remaining) < prefix_bytes + message_length:
@@ -210,12 +219,11 @@ class ProtobufMessageParser:
                 current_index += prefix_bytes + message_length
                 consumed_bytes = current_index
                 messages.append(ObjectInboundMessage(data=parsed))
-                retry_count = 0
             except Exception:
-                # Bad payload: advance one byte and retry, mirroring upstream.
+                # Bad payload: advance one byte and try again at the
+                # next offset (mirrors upstream resilience pattern).
                 current_index += 1
                 consumed_bytes = current_index
-                retry_count += 1
 
         return messages, consumed_bytes
 

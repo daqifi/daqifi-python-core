@@ -340,11 +340,25 @@ class DaqifiDevice:
             time.sleep(0.1)
             self.send(scpi_commands.set_protobuf_stream_format())
             time.sleep(0.1)
+            # Pin the stream output to the same transport we connected
+            # over. Without this, streaming bytes can be routed to the
+            # last-configured interface (e.g. WiFi) and the consumer on
+            # this transport sees nothing. Detected via duck typing on
+            # the transport's class name to avoid a circular import.
+            interface = self._stream_interface_for_transport()
+            if interface is not None:
+                self.send(scpi_commands.set_stream_interface(interface))
+                time.sleep(0.1)
 
             # Query device info -- the protobuf consumer dispatches the
             # response to OnStatusMessageReceived which fills metadata.
+            # 1.0s wait: NQ1 over USB CDC needs ~500 ms for the
+            # SYSInfoPB? push to land + parse + handler chain to fire;
+            # 0.5s was right at the threshold and metadata sometimes
+            # arrived just after initialize() returned (verified
+            # 2026-04-23 hardware test). Doubling provides margin.
             self.send(scpi_commands.get_device_info())
-            time.sleep(0.5)
+            time.sleep(1.0)
 
             self._is_initialized = True
             self._set_state(DeviceState.Ready)
@@ -533,6 +547,25 @@ class DaqifiDevice:
 
     def _set_state(self, value: DeviceState) -> None:
         self._state = value
+
+    def _stream_interface_for_transport(self) -> Optional[Any]:
+        """Pick the SCPI stream-interface enum that matches the
+        connected transport, so streaming data flows back over the
+        same channel the caller connected on. Returns None for
+        transports we don't recognise (caller can override with an
+        explicit ``set_stream_interface`` send).
+        """
+        from ._internal.scpi import StreamInterface
+        if self._transport is None:
+            return None
+        # Duck-type on class name to avoid a circular import on the
+        # concrete transport classes (devices.py is imported by them).
+        cls_name = type(self._transport).__name__
+        if cls_name == "SerialStreamTransport":
+            return StreamInterface.Usb
+        if cls_name == "TcpStreamTransport":
+            return StreamInterface.WiFi
+        return None
 
     def _raise_if_disposed(self) -> None:
         if self._disposed:

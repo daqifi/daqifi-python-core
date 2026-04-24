@@ -420,3 +420,68 @@ class TestDefaultMessageFactory:
         from daqifi.devices import _default_message_factory
         d = DaqifiStreamingDevice(name="dev")
         assert d._message_factory is _default_message_factory
+
+
+# ---- Stream interface auto-pin (#stream-route fix) ----------------------
+
+
+class _FakeSerialTransport(_FakeTransport):
+    """Transport whose class name matches `SerialStreamTransport` —
+    used to verify stream interface auto-pin to USB."""
+    pass
+
+_FakeSerialTransport.__name__ = "SerialStreamTransport"
+
+
+class _FakeTcpTransport(_FakeTransport):
+    """Same idea for the TCP path."""
+    pass
+
+_FakeTcpTransport.__name__ = "TcpStreamTransport"
+
+
+class TestStreamInterfaceAutoPin:
+    """Regression for the 2026-04-23 hardware finding: streaming bytes
+    were going to the wrong interface (last-configured one) because
+    `initialize()` didn't pin the stream interface to the connected
+    transport. Verifies the fix sends the right SCPI."""
+
+    def _scpi_text_sent(self, dev) -> str:
+        # Concatenated wire bytes for assertion convenience.
+        return b"".join(dev._transport.stream.written).decode("ascii", "replace")
+
+    def test_serial_transport_pins_stream_interface_to_usb(self):
+        t = _FakeSerialTransport()
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        dev.initialize()
+        # Look for the SCPI command `SYSTem:STReam:INTerface 0` in the
+        # bytes the device sent during initialize().
+        sent = self._scpi_text_sent(dev)
+        assert "SYSTem:STReam:INTerface 0" in sent, (
+            f"USB-transport device did not pin stream interface to 0; "
+            f"sent: {sent!r}"
+        )
+
+    def test_tcp_transport_pins_stream_interface_to_wifi(self):
+        t = _FakeTcpTransport()
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        dev.initialize()
+        sent = self._scpi_text_sent(dev)
+        assert "SYSTem:STReam:INTerface 1" in sent, (
+            f"TCP-transport device did not pin stream interface to 1; "
+            f"sent: {sent!r}"
+        )
+
+    def test_unknown_transport_omits_stream_interface(self):
+        # Unknown transport class — leave stream interface alone.
+        t = _FakeTransport()  # class name is "_FakeTransport"
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        dev.initialize()
+        sent = self._scpi_text_sent(dev)
+        assert "SYSTem:STReam:INTerface" not in sent, (
+            f"unknown transport should not send STReam:INTerface; "
+            f"sent: {sent!r}"
+        )
