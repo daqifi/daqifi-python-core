@@ -318,6 +318,9 @@ class DaqifiDevice:
 
     def disconnect(self) -> None:
         self._is_disconnecting = True
+        # Hoisted out of `try` so the `finally` block can branch on
+        # whether the transport failed (Qodo PR 17 pass 26 #2).
+        transport_error: Optional[BaseException] = None
         try:
             if self._consumer is not None:
                 self._consumer.remove_message_received(self._on_inbound_message)
@@ -330,7 +333,6 @@ class DaqifiDevice:
             # Capture any failure so we still run consumer cleanup
             # below (Qodo PR 17 pass 16 #1) — without this, a
             # transport.disconnect() raise leaked the daemon thread.
-            transport_error: Optional[BaseException] = None
             if self._transport is not None:
                 try:
                     self._transport.disconnect()
@@ -358,8 +360,15 @@ class DaqifiDevice:
             if transport_error is not None:
                 raise transport_error
         finally:
-            self._set_status(ConnectionStatus.Disconnected)
-            self._set_state(DeviceState.Disconnected)
+            # If the transport raised, leave the device in Lost/Error
+            # so observers can distinguish a clean disconnect from a
+            # forced one (Qodo PR 17 pass 26 #2).
+            if transport_error is None:
+                self._set_status(ConnectionStatus.Disconnected)
+                self._set_state(DeviceState.Disconnected)
+            else:
+                self._set_status(ConnectionStatus.Lost)
+                self._set_state(DeviceState.Error)
             self._is_initialized = False
             self._is_disconnecting = False
 
@@ -659,8 +668,30 @@ class DaqifiDevice:
     def _on_transport_status_changed(self, args: TransportStatusEventArgs) -> None:
         if args.is_connected:
             return
-        if self._status == ConnectionStatus.Connected and not self._is_disconnecting:
-            self._set_status(ConnectionStatus.Lost)
+        if self._is_disconnecting:
+            return
+        # Transport dropped unexpectedly: tear down the consumer so a
+        # daemon thread doesn't keep spinning on a dead stream after
+        # the device looks "Lost" to callers (Qodo PR 17 pass 26 #1).
+        if self._consumer is not None:
+            try:
+                self._consumer.remove_message_received(self._on_inbound_message)
+            except Exception:
+                pass
+            try:
+                stopped = self._consumer.stop_safely()
+                if stopped is False:
+                    self._consumer.stop()
+            except Exception:
+                pass
+            try:
+                self._consumer.close()
+            except Exception:
+                pass
+            self._consumer = None
+        self._is_initialized = False
+        self._set_status(ConnectionStatus.Lost)
+        self._set_state(DeviceState.Error)
 
     # ---- helpers ----------------------------------------------------------
 

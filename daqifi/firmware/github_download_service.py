@@ -498,10 +498,20 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
             # backslash separators that bypass POSIX-style traversal
             # checks (`/../`) (Qodo PR 17 pass 16 #2).
             normalized = member.replace("\\", "/")
+            # Reject absolute paths, parent traversal, UNC paths
+            # (`//host/share`), and Windows drive paths (`C:...`).
+            # The `target_path.relative_to(full_target)` check below
+            # already rejects these on most platforms, but
+            # explicit per-pattern rejection avoids depending on
+            # platform-specific resolve() behavior (Qodo PR 17 pass
+            # 26 #6).
+            first_segment = normalized.split("/", 1)[0]
             if (
                 normalized.startswith("/")
+                or normalized.startswith("//")
                 or normalized.startswith("../")
                 or "/../" in normalized
+                or ":" in first_segment
             ):
                 shutil.rmtree(extract_path, ignore_errors=True)
                 raise RuntimeError(
