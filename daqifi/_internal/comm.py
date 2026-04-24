@@ -184,9 +184,11 @@ class IDataSample(Protocol):
     def timestamp(self) -> datetime:
         ...
 
-    @property
-    def value(self) -> float:
-        ...
+    # Plain attribute (not a property) so type checkers recognize the
+    # writable shape promised by the docstring above. A property-only
+    # declaration is implicitly read-only to a Protocol consumer
+    # (Qodo PR 17 pass 30 #1).
+    value: float
 
 
 @dataclass

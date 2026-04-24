@@ -261,11 +261,14 @@ def _is_likely_text_command(data: bytes) -> bool:
     # decision in the hot path (Qodo PR 17 pass 29 #2).
     head = data[:10].decode("ascii", errors="ignore")
     head_upper = head.upper()
+    # SCPI commands are case-insensitive — match on head_upper for
+    # SYST/CONF/READ. `*` is literal (only standard form), so test
+    # against `head` directly (Qodo PR 17 pass 30 #2).
     return (
         head.startswith("*")
-        or head.startswith("SYST")
-        or head.startswith("CONF")
-        or head_upper.startswith("READ")  # case-insensitive per upstream
+        or head_upper.startswith("SYST")
+        or head_upper.startswith("CONF")
+        or head_upper.startswith("READ")
         or data.endswith(b"\r\n")
         or data.endswith(b"\n")
     )
