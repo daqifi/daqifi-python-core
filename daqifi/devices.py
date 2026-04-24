@@ -636,11 +636,20 @@ class DaqifiDevice:
         # `args` shape mirrors MessageReceivedEventArgs; route through
         # the protocol handler if it accepts the message.
         message = getattr(args, "message", None)
-        # If we already have an inbound envelope (anything exposing
-        # `.data`), preserve it so a custom parser's typed wrapper
-        # isn't discarded — only wrap a raw payload (Qodo PR 17 pass
-        # 25 #3, refining pass 7 #4).
-        if message is not None and hasattr(message, "data"):
+        # Preserve a real inbound envelope (custom parser wrapper),
+        # but DON'T treat a protobuf payload that incidentally exposes
+        # a `.data` field as one — wrapping it correctly is what lets
+        # ProtobufProtocolHandler.can_handle find DESCRIPTOR /
+        # device_status on the inner payload (Qodo PR 17 pass 40 #1,
+        # refining pass 25 #3 / pass 7 #4).
+        is_probably_protobuf = (
+            message is not None and hasattr(message, "DESCRIPTOR")
+        )
+        if (
+            message is not None
+            and hasattr(message, "data")
+            and not is_probably_protobuf
+        ):
             wrapped = message
         else:
             wrapped = GenericInboundMessage(data=message)
