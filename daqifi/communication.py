@@ -426,6 +426,13 @@ class StreamMessageConsumer(Generic[T]):
         self._parser = message_parser
         self._buffer_size = buffer_size
         self._message_buffer = bytearray()
+        # Hard cap to prevent unbounded growth if the parser
+        # consistently fails to consume bytes (e.g. fed garbage
+        # forever). When the buffer crosses this size, drop the
+        # oldest half — keeps memory bounded while preserving the
+        # most recent (most likely to be a valid frame head) bytes
+        # (Qodo PR 17 pass 17 #2).
+        self._max_buffer_bytes = 4 * 1024 * 1024  # 4 MiB
         self._is_running = False
         self._thread: Optional[threading.Thread] = None
         self._disposed = False
@@ -585,6 +592,14 @@ class StreamMessageConsumer(Generic[T]):
 
                 with self._buffer_lock:
                     self._message_buffer.extend(bytes_read)
+                    # Cap buffer growth — if the parser is making no
+                    # progress (constant failure), drop the oldest
+                    # half rather than running the host out of memory
+                    # (Qodo PR 17 pass 17 #2). The newest bytes are
+                    # the most likely to start a valid frame.
+                    if len(self._message_buffer) > self._max_buffer_bytes:
+                        drop = len(self._message_buffer) // 2
+                        del self._message_buffer[:drop]
                     snapshot = bytes(self._message_buffer)
 
                 try:

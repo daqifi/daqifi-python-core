@@ -417,14 +417,18 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
     extract_path.mkdir(parents=True, exist_ok=True)
     full_target = extract_path.resolve()
     with zipfile.ZipFile(zip_path) as zf:
+        # Two-pass: validate every entry first, then extract via
+        # explicit per-file copy using the *normalized* paths.
+        # `zipfile.extractall()` would re-resolve member.filename
+        # itself and on Windows could re-introduce the backslash
+        # path that bypassed our validation (Qodo PR 17 pass 17 #1).
+        validated: list[tuple[zipfile.ZipInfo, Path]] = []
         for info in zf.infolist():
             member = info.filename
             # Normalize backslashes to forward slashes BEFORE any
             # validation. ZIP entries from Windows tooling can use
             # backslash separators that bypass POSIX-style traversal
-            # checks (`/../`), so the same archive could be safe on
-            # Linux but exploitable on Windows or vice versa
-            # (Qodo PR 17 pass 16 #2 — cross-platform Zip-Slip).
+            # checks (`/../`) (Qodo PR 17 pass 16 #2).
             normalized = member.replace("\\", "/")
             if (
                 normalized.startswith("/")
@@ -449,12 +453,23 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
             try:
                 target_path.relative_to(full_target)
             except ValueError as exc:
-                # Path escapes the destination — abort + clean up.
                 shutil.rmtree(extract_path, ignore_errors=True)
                 raise RuntimeError(
                     f"Zip archive contains path traversal entry: {member}"
                 ) from exc
-        zf.extractall(extract_path)
+
+            validated.append((info, target_path))
+
+        # Extract via explicit per-file copy using the validated +
+        # normalized target paths. NOT zf.extractall — which would
+        # re-derive paths from the unnormalized member.filename.
+        for info, target_path in validated:
+            if info.is_dir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                continue
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src, target_path.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
 
 
 def _find_latest_release(
