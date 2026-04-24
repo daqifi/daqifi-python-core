@@ -56,6 +56,23 @@ class ProtobufProtocolHandler:
         self._sd_card_message_handler = sd_card_message_handler
         self._error_message_handler = error_message_handler
 
+    def _invoke_callback(
+        self,
+        cb: Callable[[DaqifiOutMessage], None],
+        pb_message: DaqifiOutMessage,
+    ) -> None:
+        # If an integrator hands us an ``async def`` callback by
+        # mistake, the coroutine returned here would never be awaited
+        # and the body would never run. Log loudly so the misuse
+        # surfaces immediately instead of becoming a silent dropped
+        # message (Qodo PR 17 pass 35 #1).
+        result = cb(pb_message)
+        if result is not None and hasattr(result, "__await__"):
+            _log.error(
+                "Protocol handler callback returned an awaitable; "
+                "callbacks must be synchronous (this message was dropped)."
+            )
+
     def can_handle(self, message: InboundMessage[Any]) -> bool:
         """Return True iff ``message.data`` looks like a DaqifiOutMessage.
 
@@ -94,16 +111,16 @@ class ProtobufProtocolHandler:
             message_type = self.detect_message_type(pb_message)
             if message_type is ProtobufMessageType.STATUS:
                 if self._status_message_handler is not None:
-                    self._status_message_handler(pb_message)
+                    self._invoke_callback(self._status_message_handler, pb_message)
             elif message_type is ProtobufMessageType.STREAM:
                 if self._stream_message_handler is not None:
-                    self._stream_message_handler(pb_message)
+                    self._invoke_callback(self._stream_message_handler, pb_message)
             elif message_type is ProtobufMessageType.SD_CARD:
                 if self._sd_card_message_handler is not None:
-                    self._sd_card_message_handler(pb_message)
+                    self._invoke_callback(self._sd_card_message_handler, pb_message)
             elif message_type is ProtobufMessageType.ERROR:
                 if self._error_message_handler is not None:
-                    self._error_message_handler(pb_message)
+                    self._invoke_callback(self._error_message_handler, pb_message)
             # ProtobufMessageType.UNKNOWN and any unmapped value: no-op.
         except Exception:
             _log.exception(
