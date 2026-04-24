@@ -232,20 +232,26 @@ class GitHubFirmwareDownloadService(FirmwareDownloadService):
     async def _get_releases_cached(
         self, cache: _Cache, api_url: str, lock: asyncio.Lock,
     ) -> List[dict]:
+        # `time.monotonic()` is immune to wall-clock adjustments
+        # (NTP step, DST transitions, manual clock set), so the TTL
+        # is reliable on long-running services where the wall clock
+        # might shift (Qodo PR 17 pass 20 #3).
         # Fast path: cache fresh — no lock needed.
-        if cache.releases is not None and (time.time() - cache.timestamp) < self._cache_ttl:
+        now = time.monotonic()
+        if cache.releases is not None and (now - cache.timestamp) < self._cache_ttl:
             return cache.releases
         # Cache miss: serialize concurrent refreshers so only one
         # actually hits the GitHub API. Re-check inside the lock to
         # cover the case where a peer just finished refreshing.
         async with lock:
-            if cache.releases is not None and (time.time() - cache.timestamp) < self._cache_ttl:
+            now = time.monotonic()
+            if cache.releases is not None and (now - cache.timestamp) < self._cache_ttl:
                 return cache.releases
             releases = await asyncio.to_thread(
                 _fetch_releases_from_api, api_url, self._user_agent
             )
             cache.releases = releases
-            cache.timestamp = time.time()
+            cache.timestamp = time.monotonic()
             return releases
 
     async def _download_file(
@@ -404,26 +410,43 @@ def _download_to_path_with_progress(
                 pass
 
 
+_ZIP_MAX_ENTRIES = 10_000
+_ZIP_MAX_TOTAL_UNCOMPRESSED = 256 * 1024 * 1024  # 256 MiB
+_ZIP_MAX_SINGLE_FILE = 64 * 1024 * 1024  # 64 MiB
+
+
 def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
     """Extract ``zip_path`` to ``extract_path`` with Zip-Slip protection.
 
-    Defense-in-depth: also reject Unix symlink entries. Python's
-    ``zipfile.extractall`` ignores symlink attributes by default and
-    extracts them as regular files containing the link target as
-    text — so a malicious archive can't sneak past directly — but
-    explicit rejection avoids surprises if Python ever changes that
-    behavior (Qodo PR 17 pass 7 #6).
+    Defense-in-depth: also reject Unix symlink entries and enforce
+    zip-bomb caps (entry count, per-file uncompressed size, total
+    uncompressed size). Python's ``zipfile.extractall`` ignores
+    symlink attributes by default and extracts them as regular files
+    containing the link target as text — so a malicious archive
+    can't sneak past directly — but explicit rejection avoids
+    surprises if Python ever changes that behavior (Qodo PR 17 pass
+    7 #6). Bomb caps reject archives whose declared uncompressed
+    sizes would blow past WiFi-firmware-realistic bounds before any
+    bytes are written (Qodo PR 17 pass 20 #6).
     """
     extract_path.mkdir(parents=True, exist_ok=True)
     full_target = extract_path.resolve()
     with zipfile.ZipFile(zip_path) as zf:
+        infolist = zf.infolist()
+        if len(infolist) > _ZIP_MAX_ENTRIES:
+            raise RuntimeError(
+                f"Zip archive entry count ({len(infolist)}) exceeds "
+                f"limit ({_ZIP_MAX_ENTRIES})."
+            )
+
         # Two-pass: validate every entry first, then extract via
         # explicit per-file copy using the *normalized* paths.
         # `zipfile.extractall()` would re-resolve member.filename
         # itself and on Windows could re-introduce the backslash
         # path that bypassed our validation (Qodo PR 17 pass 17 #1).
         validated: list[tuple[zipfile.ZipInfo, Path]] = []
-        for info in zf.infolist():
+        total_uncompressed = 0
+        for info in infolist:
             member = info.filename
             # Normalize backslashes to forward slashes BEFORE any
             # validation. ZIP entries from Windows tooling can use
@@ -449,6 +472,24 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
                         f"Zip archive contains symlink entry: {member}"
                     )
 
+            # Zip-bomb caps based on declared uncompressed sizes.
+            # Real bytes written are checked too (post-copy) since
+            # `file_size` is attacker-controlled metadata.
+            if info.file_size > _ZIP_MAX_SINGLE_FILE:
+                shutil.rmtree(extract_path, ignore_errors=True)
+                raise RuntimeError(
+                    f"Zip entry {member!r} declared size "
+                    f"({info.file_size}) exceeds per-file limit "
+                    f"({_ZIP_MAX_SINGLE_FILE})."
+                )
+            total_uncompressed += info.file_size
+            if total_uncompressed > _ZIP_MAX_TOTAL_UNCOMPRESSED:
+                shutil.rmtree(extract_path, ignore_errors=True)
+                raise RuntimeError(
+                    f"Zip archive total uncompressed size exceeds "
+                    f"limit ({_ZIP_MAX_TOTAL_UNCOMPRESSED})."
+                )
+
             target_path = (extract_path / normalized).resolve()
             try:
                 target_path.relative_to(full_target)
@@ -463,13 +504,39 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
         # Extract via explicit per-file copy using the validated +
         # normalized target paths. NOT zf.extractall — which would
         # re-derive paths from the unnormalized member.filename.
+        # Track real bytes written so a lying `file_size` header
+        # can't slip past the declared-size caps above.
+        bytes_written = 0
         for info, target_path in validated:
             if info.is_dir():
                 target_path.mkdir(parents=True, exist_ok=True)
                 continue
             target_path.parent.mkdir(parents=True, exist_ok=True)
+            entry_written = 0
             with zf.open(info, "r") as src, target_path.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
+                while True:
+                    chunk = src.read(_DOWNLOAD_BUFFER_SIZE)
+                    if not chunk:
+                        break
+                    entry_written += len(chunk)
+                    if entry_written > _ZIP_MAX_SINGLE_FILE:
+                        dst.close()
+                        shutil.rmtree(extract_path, ignore_errors=True)
+                        raise RuntimeError(
+                            f"Zip entry {info.filename!r} actual size "
+                            f"exceeds per-file limit "
+                            f"({_ZIP_MAX_SINGLE_FILE})."
+                        )
+                    bytes_written += len(chunk)
+                    if bytes_written > _ZIP_MAX_TOTAL_UNCOMPRESSED:
+                        dst.close()
+                        shutil.rmtree(extract_path, ignore_errors=True)
+                        raise RuntimeError(
+                            f"Zip archive actual total uncompressed size "
+                            f"exceeds limit "
+                            f"({_ZIP_MAX_TOTAL_UNCOMPRESSED})."
+                        )
+                    dst.write(chunk)
 
 
 def _find_latest_release(

@@ -238,14 +238,19 @@ class DaqifiDevice:
 
     # ---- lifecycle --------------------------------------------------------
 
-    def connect(self) -> None:
+    def connect(
+        self, retry_options: Optional[ConnectionRetryOptions] = None,
+    ) -> None:
+        # Accept retry_options so callers can request resilient
+        # connection behavior here rather than only at the
+        # transport layer (Qodo PR 17 pass 20 #1).
         self._raise_if_disposed()
         self._set_status(ConnectionStatus.Connecting)
         self._set_state(DeviceState.Connecting)
 
         try:
             if self._transport is not None:
-                self._transport.connect()
+                self._transport.connect(retry_options=retry_options)
                 # Capture the stream once and validate it. A transport
                 # that returns None from `.stream` after a successful
                 # `.connect()` is broken — surface it now rather than
@@ -881,11 +886,15 @@ class DaqifiDeviceFactory:
     ) -> DaqifiStreamingDevice:
         device: Optional[DaqifiStreamingDevice] = None
         try:
-            transport.connect(retry_options=retry_options)
+            # Construct the device first so its status callbacks are
+            # subscribed BEFORE the connection attempt — otherwise an
+            # early status event from the transport's connect would
+            # be missed. Then let device.connect() forward
+            # retry_options to the transport (Qodo PR 17 pass 20 #2).
             device = DaqifiStreamingDevice(
                 device_name, transport=transport, message_factory=message_factory,
             )
-            device.connect()
+            device.connect(retry_options=retry_options)
             if initialize_device:
                 device.initialize()
             return device
