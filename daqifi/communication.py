@@ -236,22 +236,33 @@ class _MessageTypeHint:
 
 
 def _detect_message_type(data: bytes) -> int:
-    """Heuristic: choose between text and protobuf parsing for ``data``."""
+    """Heuristic: choose between text and protobuf parsing for ``data``.
+
+    Sample the first 512 bytes rather than scanning the whole buffer.
+    The full-buffer pure-Python loop turns into an O(n²) per-dispatch
+    cost as the buffer grows; a 512-byte prefix is enough to make the
+    text-vs-protobuf decision because a protobuf frame's length-prefix
+    + payload header already lands inside that window (Qodo PR 17 pass
+    48 #1).
+    """
     if len(data) == 0:
         return _MessageTypeHint.UNCERTAIN
 
-    printable = sum(1 for b in data if 32 <= b <= 126)
-    if printable / len(data) > 0.8:
+    sample = data[:512]
+    sample_len = len(sample)
+
+    printable = sum(1 for b in sample if 32 <= b <= 126)
+    if printable / sample_len > 0.8:
         return _MessageTypeHint.LIKELY_TEXT
 
-    if len(data) > 3 and _is_likely_text_command(data):
+    if sample_len > 3 and _is_likely_text_command(sample):
         return _MessageTypeHint.LIKELY_TEXT
 
-    null_ratio = sum(1 for b in data if b == 0) / len(data)
+    null_ratio = sum(1 for b in sample if b == 0) / sample_len
     if null_ratio > 0.1:
         return _MessageTypeHint.LIKELY_PROTOBUF
 
-    if null_ratio > 0.05 and _is_likely_protobuf_data(data):
+    if null_ratio > 0.05 and _is_likely_protobuf_data(sample):
         return _MessageTypeHint.LIKELY_PROTOBUF
 
     return _MessageTypeHint.UNCERTAIN
