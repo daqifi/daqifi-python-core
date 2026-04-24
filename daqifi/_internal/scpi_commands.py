@@ -96,7 +96,10 @@ def set_sd_logging_file_name(file_name: str) -> ScpiMessage:
     """Set the logging file name (creates or appends)."""
     if not file_name or not file_name.strip():
         raise ValueError("Filename cannot be null or empty.")
-    return ScpiMessage(f"SYSTem:STORage:SD:LOGging {_scpi_quote(file_name)}")
+    # Firmware #311 rename: SCPI command was renamed from
+    # ``SYSTem:STORage:SD:LOGging`` to ``SYSTem:STORage:SD:FILE``
+    # (PR #5 on main). The query form (`?`) was NOT renamed.
+    return ScpiMessage(f"SYSTem:STORage:SD:FILE {_scpi_quote(file_name)}")
 
 
 def delete_sd_file(file_name: str) -> ScpiMessage:

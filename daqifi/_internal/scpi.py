@@ -101,7 +101,10 @@ class System:
     # SD Card
     SD_STATUS_QUERY = "SYST:STOR:SD:STAT?"
     SD_ENABLE_SET = "SYST:STOR:SD:ENAble"
-    SD_LOGGING_SET = "SYST:STOR:SD:LOGging"
+    # Firmware #311 renamed the logging-set SCPI command from
+    # ``SYST:STOR:SD:LOGging`` to ``SYST:STOR:SD:FILE`` (PR #5 on
+    # main). The query form was not renamed, so keep both.
+    SD_FILE_SET = "SYST:STOR:SD:FILE"
     SD_LOGGING_QUERY = "SYST:STOR:SD:LOGging?"
     SD_LIST_QUERY = "SYST:STOR:SD:LISt?"
     SD_GET = "SYST:STOR:SD:GET"
@@ -134,7 +137,7 @@ class System:
 
         The file is created if it doesn't exist, or appended to if it does.
         """
-        return f'{System.SD_LOGGING_SET} "{filename}"'
+        return f'{System.SD_FILE_SET} "{filename}"'
 
     @staticmethod
     def get_sd_file(filename: str) -> str:
@@ -219,8 +222,8 @@ class Streaming:
     FORMAT_QUERY = "SYSTem:STReam:FORmat?"
     INTERFACE_SET = "SYSTem:STReam:INTerface"  # 0=USB, 1=WiFi, 2=SD, 3=All
     INTERFACE_QUERY = "SYSTem:STReam:INTerface?"
-    STATS_QUERY = "SYSTem:STReam:Stats?"
-    STATS_CLEAR = "SYSTem:STReam:ClearStats"
+    STATS_QUERY = "SYSTem:STReam:STATS?"
+    STATS_CLEAR = "SYSTem:STReam:STATS:CLEar"
 
 
 # Response parsing utilities

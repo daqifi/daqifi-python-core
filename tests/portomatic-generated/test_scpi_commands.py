@@ -65,9 +65,10 @@ class TestParameterizedCommands:
         assert scpi_commands.get_sd_file("data.bin").data == 'SYSTem:STORage:SD:GET "data.bin"'
 
     def test_set_sd_logging_file_name(self):
+        # Firmware #311 rename: command updated to SD:FILE (was SD:LOGging).
         assert (
             scpi_commands.set_sd_logging_file_name("foo.bin").data
-            == 'SYSTem:STORage:SD:LOGging "foo.bin"'
+            == 'SYSTem:STORage:SD:FILE "foo.bin"'
         )
 
     def test_delete_sd_file(self):

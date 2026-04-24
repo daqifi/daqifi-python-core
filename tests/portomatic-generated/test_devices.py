@@ -320,7 +320,8 @@ class TestDaqifiStreamingDevice:
             assert any(b"SD:ENAble 1" in w for w in t.stream.written)
 
             sd.set_sd_logging_file_name("data.bin")
-            assert any(b'SD:LOGging "data.bin"' in w for w in t.stream.written)
+            # Firmware #311 rename: SD:LOGging → SD:FILE for the SET form.
+            assert any(b'SD:FILE "data.bin"' in w for w in t.stream.written)
 
             sd.disable_sd_card_logging()
             assert not sd.is_logging_to_sd_card

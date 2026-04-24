@@ -626,7 +626,7 @@ class NyquistDevice:
             # Now streaming will log to SD card
         """
         from ._internal.scpi import System
-        self._comm.send_command(f'{System.SD_LOGGING_SET} "{filename}"')
+        self._comm.send_command(f'{System.SD_FILE_SET} "{filename}"')
 
     def sd_benchmark(self, size_kb: int = 1024) -> dict:
         """
