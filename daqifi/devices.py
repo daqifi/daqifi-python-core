@@ -313,6 +313,15 @@ class DaqifiDevice:
             # descriptors and the consumer thread doesn't keep
             # spinning on a dead stream (Qodo PR 17 pass 13 #2).
             if self._consumer is not None:
+                # close() alone doesn't join the daemon thread, so
+                # stop it first — same pattern as disconnect() and
+                # the reconnect path (Qodo PR 17 pass 34 #1).
+                try:
+                    stopped = self._consumer.stop_safely()
+                    if stopped is False:
+                        self._consumer.stop()
+                except Exception:
+                    pass
                 try:
                     self._consumer.close()
                 except Exception:
