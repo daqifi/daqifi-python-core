@@ -217,8 +217,12 @@ class TcpStreamTransport:
         raise RuntimeError("Connection failed after all retry attempts.")
 
     def disconnect(self) -> None:
-        if not self.is_connected:
-            return
+        # Idempotent disconnect: don't early-return on
+        # `not self.is_connected`. A peer-closed connection still
+        # has a half-open socket that needs explicit close, and
+        # callers / device-state observers depend on a definitive
+        # disconnect event firing exactly once per disconnect()
+        # call (Qodo PR 17 pass 37 #1).
         # Track whether the close path raised; status callbacks should
         # see the actual error rather than an immediately-following
         # `(False, None)` clean notification (Qodo PR 17 pass 4 #2).

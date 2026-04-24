@@ -78,6 +78,18 @@ class ProtobufProtocolHandler:
             )
             if inspect.iscoroutine(result):
                 result.close()
+            else:
+                # Future / Task / asyncio.ensure_future result —
+                # cancel so it doesn't keep running detached in
+                # the background (Qodo PR 17 pass 37 #3).
+                cancel = getattr(result, "cancel", None)
+                if callable(cancel):
+                    try:
+                        cancel()
+                    except Exception:
+                        _log.exception(
+                            "Failed to cancel returned awaitable."
+                        )
 
     def can_handle(self, message: InboundMessage[Any]) -> bool:
         """Return True iff ``message.data`` looks like a DaqifiOutMessage.
@@ -108,11 +120,15 @@ class ProtobufProtocolHandler:
         event loop per inbound message (Qodo PR 17 finding 4).
         """
         # Mirror `can_handle`'s defensive shape: a malformed event-args
-        # arrival (None / no `data` attr) shouldn't crash the consumer
-        # thread (Qodo PR 17 pass 2 #4).
-        if message is None or not hasattr(message, "data"):
+        # arrival (None / property raising on .data) shouldn't crash
+        # the consumer thread (Qodo PR 17 pass 37 #2, refining pass
+        # 2 #4 + pass 36 #3).
+        if message is None:
             return
-        pb_message = message.data
+        try:
+            pb_message = message.data
+        except Exception:
+            return
         if not _is_daqifi_out_message(pb_message):
             return
 
