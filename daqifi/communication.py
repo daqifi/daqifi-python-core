@@ -580,6 +580,15 @@ class StreamMessageConsumer(Generic[T]):
                     messages, consumed = self._parser.parse_messages(snapshot)
                 except Exception as exc:
                     self._on_error(exc, snapshot)
+                    # Force forward progress so a parser that
+                    # consistently raises on a particular byte
+                    # sequence doesn't trap the consumer in an
+                    # infinite re-parse loop with unbounded buffer
+                    # growth (Qodo PR 17 pass 9 #2).
+                    with self._buffer_lock:
+                        if self._message_buffer:
+                            del self._message_buffer[:1]
+                    time.sleep(0.01)
                     continue
 
                 # Slice the buffer down to only the bytes the parser

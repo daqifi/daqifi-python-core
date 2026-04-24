@@ -281,7 +281,13 @@ class DaqifiDevice:
         try:
             if self._consumer is not None:
                 self._consumer.remove_message_received(self._on_inbound_message)
-                self._consumer.stop_safely()
+                # If stop_safely times out (consumer thread blocked
+                # in a read), fall through to the harder stop() —
+                # otherwise the daemon thread leaks until process
+                # exit (Qodo PR 17 pass 9 #1).
+                stopped = self._consumer.stop_safely()
+                if stopped is False:
+                    self._consumer.stop()
             if self._transport is not None:
                 self._transport.disconnect()
         finally:

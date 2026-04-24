@@ -789,14 +789,19 @@ class HidLibraryTransport:
     def close(self) -> None:
         if self._disposed:
             return
-        self._disposed = True
-        device = self._connected_device
-        self._clear_connection_state()
-        try:
-            if device is not None:
-                device.close()
-        except Exception:
-            pass
+        # Hold both locks so concurrent connect() / read() / write()
+        # can't observe a half-cleared state mid-close. Mirrors the
+        # locking shape disconnect() already uses (Qodo PR 17 pass 9 #3).
+        with self._connection_lock:
+            with self._io_lock:
+                device = self._connected_device
+                self._clear_connection_state()
+                self._disposed = True
+                try:
+                    if device is not None:
+                        device.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def _timeout_ms(value: timedelta) -> int:
