@@ -186,5 +186,14 @@ def _is_daqifi_out_message(value: object) -> bool:
 
     Accepts anything carrying the ``device_status`` field, which is the
     universal discriminator across status / stream / error variants.
+    Uses ``getattr`` inside a ``try/except`` rather than ``hasattr``
+    so a property getter that raises a non-AttributeError exception
+    can't crash the consumer thread (Qodo PR 17 pass 21 #3).
     """
-    return value is not None and hasattr(value, "device_status")
+    if value is None:
+        return False
+    try:
+        getattr(value, "device_status")
+    except Exception:
+        return False
+    return True

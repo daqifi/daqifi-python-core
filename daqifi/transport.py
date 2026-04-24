@@ -886,12 +886,13 @@ class _HidConnectedDevice:
         # or empty list on timeout. Read up to a HID full-speed report
         # (64 bytes) plus headroom. Positional args: the C-extension
         # binding doesn't support kwargs across all hidapi versions
-        # (Qodo PR 17 pass 6 #4).
+        # (Qodo PR 17 pass 6 #4). Return ``b""`` on timeout to match
+        # pyserial / standard Python I/O semantics — exceptions for
+        # routine no-data conditions force callers to wrap every read
+        # in try/except (Qodo PR 17 pass 21 #1).
         result = self._handle.read(64, timeout_ms)
         if not result:
-            raise TimeoutError(
-                f"Timed out waiting for HID data after {timeout_ms} ms."
-            )
+            return b""
         return bytes(result)
 
     def close(self) -> None:
