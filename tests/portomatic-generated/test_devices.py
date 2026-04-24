@@ -39,8 +39,13 @@ class _FakeStream:
     def __init__(self):
         self.written: list = []
 
-    def write(self, data: bytes) -> None:
-        self.written.append(bytes(data))
+    def write(self, data: bytes) -> int:
+        # Return the byte count so DaqifiDevice.send's write loop
+        # can verify full transmission (Qodo PR 17 pass 11 #2 made
+        # `None` from write() raise IOError).
+        b = bytes(data)
+        self.written.append(b)
+        return len(b)
 
     def flush(self) -> None:
         pass

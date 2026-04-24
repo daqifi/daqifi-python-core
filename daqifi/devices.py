@@ -257,16 +257,28 @@ class DaqifiDevice:
                         "Transport reports connected but provided no "
                         "stream; cannot start message consumer."
                     )
-                if self._consumer is None:
-                    # Default factory decodes bytes into a real
-                    # `DaqifiOutMessage` (see ``_default_message_factory``).
-                    # Override per-device by passing ``message_factory``
-                    # to the constructor — useful for tests that want
-                    # raw-bytes passthrough or a custom proto class.
-                    self._consumer = StreamMessageConsumer[Any](
-                        stream,
-                        ProtobufMessageParser(message_factory=self._message_factory),
-                    )
+                # Always rebuild the consumer on connect: on a
+                # reconnect, the previous consumer references the
+                # OLD (closed) stream from the prior session, so its
+                # background reads would fail forever (Qodo PR 17
+                # pass 11 #1). The factory call is cheap; the
+                # caller's `initialize()` re-registers handlers.
+                if self._consumer is not None:
+                    try:
+                        self._consumer.close()
+                    except Exception:
+                        pass
+                    self._consumer = None
+
+                # Default factory decodes bytes into a real
+                # `DaqifiOutMessage` (see ``_default_message_factory``).
+                # Override per-device by passing ``message_factory``
+                # to the constructor — useful for tests that want
+                # raw-bytes passthrough or a custom proto class.
+                self._consumer = StreamMessageConsumer[Any](
+                    stream,
+                    ProtobufMessageParser(message_factory=self._message_factory),
+                )
                 self._consumer.start()
 
             self._set_status(ConnectionStatus.Connected)
@@ -331,9 +343,17 @@ class DaqifiDevice:
             while total_written < len(data):
                 written = stream.write(view[total_written:])
                 if written is None:
-                    # File-like objects sometimes return None to mean
-                    # "wrote everything"; trust them and break.
-                    break
+                    # `RawIOBase.write` returns None when the
+                    # underlying stream would block — that means
+                    # zero bytes were written, NOT "wrote
+                    # everything." Surface as IOError rather than
+                    # silently dropping the rest of the SCPI
+                    # command (Qodo PR 17 pass 11 #2).
+                    raise IOError(
+                        f"Stream.write() returned None at offset "
+                        f"{total_written} of {len(data)}; cannot "
+                        f"verify SCPI command was fully transmitted."
+                    )
                 if written <= 0:
                     raise IOError(
                         f"Stream write returned {written}; aborting "
