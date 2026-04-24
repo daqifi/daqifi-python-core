@@ -67,14 +67,30 @@ def get_sd_file_list() -> ScpiMessage:
     return ScpiMessage("SYSTem:STORage:SD:LIST?")
 
 
+def _scpi_quote(value: str) -> str:
+    """Quote ``value`` as a SCPI string literal.
+
+    SCPI uses double-quotes around string parameters; escape any
+    embedded double-quote with a backslash, and reject CR/LF since
+    those would terminate the SCPI command and let downstream input
+    inject a second command (Qodo PR 17 pass 6 #7+#8).
+    """
+    if value is None:
+        raise TypeError("SCPI string value must not be None.")
+    if "\r" in value or "\n" in value:
+        raise ValueError("SCPI string must not contain CR/LF characters.")
+    escaped = value.replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def get_sd_file(file_name: str) -> ScpiMessage:
     """Retrieve a specific file from the SD card."""
-    return ScpiMessage(f'SYSTem:STORage:SD:GET "{file_name}"')
+    return ScpiMessage(f"SYSTem:STORage:SD:GET {_scpi_quote(file_name)}")
 
 
 def set_sd_logging_file_name(file_name: str) -> ScpiMessage:
     """Set the logging file name (creates or appends)."""
-    return ScpiMessage(f'SYSTem:STORage:SD:LOGging "{file_name}"')
+    return ScpiMessage(f"SYSTem:STORage:SD:LOGging {_scpi_quote(file_name)}")
 
 
 def delete_sd_file(file_name: str) -> ScpiMessage:
@@ -85,7 +101,7 @@ def delete_sd_file(file_name: str) -> ScpiMessage:
     """
     if not file_name or not file_name.strip():
         raise ValueError("Filename cannot be null or empty.")
-    return ScpiMessage(f'SYSTem:STORage:SD:DELete "{file_name}"')
+    return ScpiMessage(f"SYSTem:STORage:SD:DELete {_scpi_quote(file_name)}")
 
 
 def format_sd_card() -> ScpiMessage:
@@ -138,7 +154,18 @@ def get_stream_interface() -> ScpiMessage:
 
 
 def start_streaming(frequency: int) -> ScpiMessage:
-    """Start streaming at ``frequency`` Hz (1-1000)."""
+    """Start streaming at ``frequency`` Hz (1-1000).
+
+    Raises ``ValueError`` if ``frequency`` is outside the firmware's
+    accepted range so the bug surfaces here rather than as silent
+    no-streaming behaviour on the device (Qodo PR 17 pass 6 #5).
+    """
+    # Reject bool explicitly: bool is an int subclass in Python so
+    # `True/False` would otherwise pass the range check as 1/0.
+    if isinstance(frequency, bool) or not isinstance(frequency, int):
+        raise TypeError("frequency must be an int.")
+    if frequency < 1 or frequency > 1000:
+        raise ValueError("frequency must be between 1 and 1000 Hz.")
     return ScpiMessage(f"SYSTem:StartStreamData {frequency}")
 
 
@@ -200,7 +227,7 @@ def set_network_wifi_mode_existing() -> ScpiMessage:
 
 
 def set_network_wifi_ssid(ssid: str) -> ScpiMessage:
-    return ScpiMessage(f'SYSTem:COMMunicate:LAN:SSID "{ssid}"')
+    return ScpiMessage(f"SYSTem:COMMunicate:LAN:SSID {_scpi_quote(ssid)}")
 
 
 def set_network_wifi_security_open() -> ScpiMessage:
@@ -212,7 +239,7 @@ def set_network_wifi_security_wpa() -> ScpiMessage:
 
 
 def set_network_wifi_password(password: str) -> ScpiMessage:
-    return ScpiMessage(f'SYSTem:COMMunicate:LAN:PASs "{password}"')
+    return ScpiMessage(f"SYSTem:COMMunicate:LAN:PASs {_scpi_quote(password)}")
 
 
 def disable_network_lan() -> ScpiMessage:

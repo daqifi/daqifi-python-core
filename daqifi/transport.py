@@ -394,15 +394,20 @@ class SerialStreamTransport:
     def disconnect(self) -> None:
         if not self.is_connected:
             return
+        # Same single-notification pattern as TcpStreamTransport (Qodo
+        # PR 17 pass 6 #2): capture the close error so subscribers see
+        # the actual failure instead of a clean (False, None) that
+        # immediately overwrites the (False, exc) from the except path.
+        disconnect_error: Optional[BaseException] = None
         try:
             if self._serial is not None:
                 self._serial.close()
         except Exception as exc:
-            self._notify_status(False, exc)
+            disconnect_error = exc
             raise
         finally:
             self._serial = None
-            self._notify_status(False, None)
+            self._notify_status(False, disconnect_error)
 
     def close(self) -> None:
         if self._disposed:
@@ -532,15 +537,18 @@ class UdpTransport:
             if not self._disposed:
                 self._disposed = True
             return
+        # Same single-notification pattern as TcpStreamTransport (Qodo
+        # PR 17 pass 6 #3): one (False, error|None) call instead of two.
+        close_error: Optional[BaseException] = None
         try:
             self._socket.close()  # type: ignore[union-attr]
         except Exception as exc:
-            self._notify_status(False, exc)
+            close_error = exc
             raise
         finally:
             self._socket = None
             self._disposed = True
-            self._notify_status(False, None)
+            self._notify_status(False, close_error)
 
     def send_broadcast(self, data: bytes, port: int) -> None:
         self._raise_if_disposed()
@@ -846,10 +854,12 @@ class _HidConnectedDevice:
         return written == len(data)
 
     def read(self, timeout_ms: int) -> bytes:
-        # hidapi `read(max_length, timeout_ms=None)` returns a list[int]
+        # hidapi `read(max_length, timeout_ms)` returns a list[int]
         # or empty list on timeout. Read up to a HID full-speed report
-        # (64 bytes) plus headroom.
-        result = self._handle.read(64, timeout_ms=timeout_ms)
+        # (64 bytes) plus headroom. Positional args: the C-extension
+        # binding doesn't support kwargs across all hidapi versions
+        # (Qodo PR 17 pass 6 #4).
+        result = self._handle.read(64, timeout_ms)
         if not result:
             raise TimeoutError(
                 f"Timed out waiting for HID data after {timeout_ms} ms."

@@ -318,33 +318,38 @@ class CompositeMessageParser:
 
         hint = _detect_message_type(data)
 
+        # Critical: return whenever EITHER messages OR consumed > 0.
+        # A parser may legitimately advance through ignorable bytes
+        # (blank lines, malformed prefixes) without producing a
+        # message; dropping that progress causes the consumer's
+        # buffer to grow without bound (Qodo PR 17 pass 6 #1).
         if hint == _MessageTypeHint.LIKELY_PROTOBUF:
             wrapped, consumed = self._try_protobuf(data)
-            if wrapped:
+            if wrapped or consumed:
                 return wrapped, consumed
 
         if hint == _MessageTypeHint.LIKELY_TEXT:
             wrapped, consumed = self._try_text(data)
-            if wrapped:
+            if wrapped or consumed:
                 return wrapped, consumed
 
         # Heuristics uncertain or first attempt failed -- try the other.
         if hint != _MessageTypeHint.LIKELY_TEXT:
             wrapped, consumed = self._try_text(data)
-            if wrapped:
+            if wrapped or consumed:
                 return wrapped, consumed
 
         if hint != _MessageTypeHint.LIKELY_PROTOBUF:
             wrapped, consumed = self._try_protobuf(data)
-            if wrapped:
+            if wrapped or consumed:
                 return wrapped, consumed
 
         return [], 0
 
     def _try_text(self, data: bytes) -> Tuple[List[ObjectInboundMessage], int]:
         text_messages, consumed = self._text_parser.parse_messages(data)
-        if not text_messages:
-            return [], 0
+        # Return consumed even when no messages — caller decides whether
+        # to drain the buffer (see parse_messages dispatch above).
         wrapped = [ObjectInboundMessage(data=m.data) for m in text_messages]
         return wrapped, consumed
 
@@ -352,9 +357,8 @@ class CompositeMessageParser:
         self, data: bytes
     ) -> Tuple[List[ObjectInboundMessage], int]:
         protobuf_messages, consumed = self._protobuf_parser.parse_messages(data)
-        if not protobuf_messages:
-            return [], 0
         # ProtobufMessageParser already wraps in ObjectInboundMessage.
+        # Return consumed even when no messages (see _try_text above).
         return list(protobuf_messages), consumed
 
 
@@ -571,15 +575,22 @@ class StreamMessageConsumer(Generic[T]):
                     self._on_error(exc, snapshot)
                     continue
 
+                # Slice the buffer down to only the bytes the parser
+                # actually consumed — that's what callers expect as
+                # `raw_data`. Passing the full snapshot exposes
+                # trailing unparsed bytes that don't belong to any
+                # of the produced messages (Qodo PR 17 pass 6 #6).
+                consumed_bytes = snapshot[:consumed] if consumed > 0 else b""
+
                 if consumed > 0:
                     with self._buffer_lock:
                         del self._message_buffer[: min(consumed, len(self._message_buffer))]
 
                 for msg in messages:
                     try:
-                        self._on_message(msg, snapshot)
+                        self._on_message(msg, consumed_bytes)
                     except Exception as exc:
-                        self._on_error(exc, snapshot)
+                        self._on_error(exc, consumed_bytes)
             except Exception as exc:
                 if self._is_running:
                     self._on_error(exc)
