@@ -566,6 +566,12 @@ class UdpTransport:
         if not self.is_open:
             if not self._disposed:
                 self._disposed = True
+                # Fire a definitive (False, None) so observers see a
+                # consistent "closed" event even when close() is
+                # called on an already-closed transport (Qodo PR 17
+                # pass 41 #2, mirroring the TCP/Serial idempotent
+                # disconnect pattern).
+                self._notify_status(False, None)
             return
         # Same single-notification pattern as TcpStreamTransport (Qodo
         # PR 17 pass 6 #3): one (False, error|None) call instead of two.

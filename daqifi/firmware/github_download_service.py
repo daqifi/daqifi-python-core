@@ -526,6 +526,14 @@ def _extract_zip_safely(zip_path: Path, extract_path: Path) -> None:
             # backslash separators that bypass POSIX-style traversal
             # checks (`/../`) (Qodo PR 17 pass 16 #2).
             normalized = member.replace("\\", "/")
+            # Reject NUL bytes — POSIX truncates paths at the first
+            # NUL, so an entry like ``"safe.txt\x00../etc/passwd"``
+            # could land outside extract_path even after the
+            # path-traversal checks pass (Qodo PR 17 pass 41 #1).
+            if "\x00" in normalized:
+                raise RuntimeError(
+                    f"Zip archive contains NUL byte in entry name: {member!r}"
+                )
             # Reject absolute paths, parent traversal, UNC paths
             # (`//host/share`), and Windows drive paths (`C:...`).
             # The `target_path.relative_to(full_target)` check below
