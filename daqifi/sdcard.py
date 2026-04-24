@@ -59,6 +59,8 @@ class SdCardFileInfo:
     def __post_init__(self) -> None:
         if self.file_name is None:
             raise TypeError("file_name must not be None")
+        if not self.file_name.strip():
+            raise ValueError("file_name must not be empty or whitespace")
 
 
 @dataclass(frozen=True)

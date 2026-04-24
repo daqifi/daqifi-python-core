@@ -207,6 +207,10 @@ class TcpStreamTransport:
     def disconnect(self) -> None:
         if not self.is_connected:
             return
+        # Track whether the close path raised; status callbacks should
+        # see the actual error rather than an immediately-following
+        # `(False, None)` clean notification (Qodo PR 17 pass 4 #2).
+        disconnect_error: Optional[BaseException] = None
         try:
             # Shutdown both halves of the socket BEFORE closing it.
             # This wakes any consumer thread blocked in
@@ -226,12 +230,14 @@ class TcpStreamTransport:
             if self._socket is not None:
                 self._socket.close()
         except Exception as exc:
-            self._notify_status(False, exc)
+            disconnect_error = exc
             raise
         finally:
             self._socket = None
             self._stream = None
-            self._notify_status(False, None)
+            # Single notification with the captured error (or None on
+            # clean disconnect). No double-fire on failure paths.
+            self._notify_status(False, disconnect_error)
 
     def close(self) -> None:
         if self._disposed:
@@ -490,6 +496,10 @@ class UdpTransport:
         self._raise_if_disposed()
         if self.is_open:
             return
+        # Track local socket separately from self._socket so a failure
+        # before the hand-off line doesn't leak the file descriptor
+        # (Qodo PR 17 pass 4 — same pattern as TCP transport pass 2).
+        sock: Optional[socket.socket] = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -500,8 +510,14 @@ class UdpTransport:
                 pass
             sock.bind(("", self._configured_port))
             self._socket = sock
+            sock = None
             self._notify_status(True, None)
         except Exception as exc:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
             if self._socket is not None:
                 try:
                     self._socket.close()

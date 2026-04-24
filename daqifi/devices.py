@@ -246,6 +246,17 @@ class DaqifiDevice:
         try:
             if self._transport is not None:
                 self._transport.connect()
+                # Capture the stream once and validate it. A transport
+                # that returns None from `.stream` after a successful
+                # `.connect()` is broken — surface it now rather than
+                # letting StreamMessageConsumer crash later (Qodo PR
+                # 17 pass 4 #6).
+                stream = self._transport.stream
+                if stream is None:
+                    raise RuntimeError(
+                        "Transport reports connected but provided no "
+                        "stream; cannot start message consumer."
+                    )
                 if self._consumer is None:
                     # Default factory decodes bytes into a real
                     # `DaqifiOutMessage` (see ``_default_message_factory``).
@@ -253,7 +264,7 @@ class DaqifiDevice:
                     # to the constructor — useful for tests that want
                     # raw-bytes passthrough or a custom proto class.
                     self._consumer = StreamMessageConsumer[Any](
-                        self._transport.stream,
+                        stream,
                         ProtobufMessageParser(message_factory=self._message_factory),
                     )
                 self._consumer.start()

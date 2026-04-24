@@ -90,6 +90,12 @@ class GitHubFirmwareDownloadService(FirmwareDownloadService):
         self._user_agent = user_agent
         self._firmware_cache = _Cache()
         self._wifi_cache = _Cache()
+        # Per-cache locks so two concurrent callers waiting on a cache
+        # miss don't both fire the GitHub API request — risks
+        # rate-limit pressure. The second caller awaits the first's
+        # in-flight fetch and uses its result (Qodo PR 17 pass 4 #3).
+        self._firmware_cache_lock = asyncio.Lock()
+        self._wifi_cache_lock = asyncio.Lock()
 
     # ---- public Protocol surface ------------------------------------------
 
@@ -215,25 +221,32 @@ class GitHubFirmwareDownloadService(FirmwareDownloadService):
 
     async def _get_firmware_releases(self) -> List[dict]:
         return await self._get_releases_cached(
-            self._firmware_cache, self._firmware_api_url
+            self._firmware_cache, self._firmware_api_url, self._firmware_cache_lock,
         )
 
     async def _get_wifi_releases(self) -> List[dict]:
         return await self._get_releases_cached(
-            self._wifi_cache, self._wifi_api_url
+            self._wifi_cache, self._wifi_api_url, self._wifi_cache_lock,
         )
 
     async def _get_releases_cached(
-        self, cache: _Cache, api_url: str
+        self, cache: _Cache, api_url: str, lock: asyncio.Lock,
     ) -> List[dict]:
+        # Fast path: cache fresh — no lock needed.
         if cache.releases is not None and (time.time() - cache.timestamp) < self._cache_ttl:
             return cache.releases
-        releases = await asyncio.to_thread(
-            _fetch_releases_from_api, api_url, self._user_agent
-        )
-        cache.releases = releases
-        cache.timestamp = time.time()
-        return releases
+        # Cache miss: serialize concurrent refreshers so only one
+        # actually hits the GitHub API. Re-check inside the lock to
+        # cover the case where a peer just finished refreshing.
+        async with lock:
+            if cache.releases is not None and (time.time() - cache.timestamp) < self._cache_ttl:
+                return cache.releases
+            releases = await asyncio.to_thread(
+                _fetch_releases_from_api, api_url, self._user_agent
+            )
+            cache.releases = releases
+            cache.timestamp = time.time()
+            return releases
 
     async def _download_file(
         self,
@@ -325,7 +338,13 @@ def _download_to_path_with_progress(
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
             content_length = response.headers.get("Content-Length")
-            total = expected_size or (int(content_length) if content_length else -1)
+            # Use explicit `is not None` so a legitimate zero-byte
+            # asset (expected_size == 0) doesn't fall through to the
+            # Content-Length fallback (Qodo PR 17 pass 4 #5).
+            if expected_size is not None:
+                total = expected_size
+            else:
+                total = int(content_length) if content_length else -1
             bytes_read = 0
             with tmp.open("wb") as fp:
                 while True:
