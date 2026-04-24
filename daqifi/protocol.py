@@ -176,16 +176,19 @@ class ProtobufProtocolHandler:
         if ProtobufProtocolHandler._is_stream_message(message):
             return ProtobufMessageType.STREAM
 
+        # Check ERROR before STATUS: a fault frame from the device
+        # can carry port-count fields too (e.g. an init failure
+        # mid-discovery), and routing it as STATUS would silently
+        # drop the error notification (Qodo PR 17 pass 39 #2).
+        if getattr(message, "device_status", 0) != 0:
+            return ProtobufMessageType.ERROR
+
         # Status messages contain device configuration information
         if ProtobufProtocolHandler._is_status_message(message):
             return ProtobufMessageType.STATUS
 
         # SD card messages are typically text-based and handled separately
         # (placeholder - actual SD card messages come as text responses, not protobuf)
-
-        # Error messages contain a non-zero device status
-        if getattr(message, "device_status", 0) != 0:
-            return ProtobufMessageType.ERROR
 
         return ProtobufMessageType.UNKNOWN
 

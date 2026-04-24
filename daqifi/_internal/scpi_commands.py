@@ -87,11 +87,15 @@ def _scpi_quote(value: str) -> str:
 
 def get_sd_file(file_name: str) -> ScpiMessage:
     """Retrieve a specific file from the SD card."""
+    if not file_name or not file_name.strip():
+        raise ValueError("Filename cannot be null or empty.")
     return ScpiMessage(f"SYSTem:STORage:SD:GET {_scpi_quote(file_name)}")
 
 
 def set_sd_logging_file_name(file_name: str) -> ScpiMessage:
     """Set the logging file name (creates or appends)."""
+    if not file_name or not file_name.strip():
+        raise ValueError("Filename cannot be null or empty.")
     return ScpiMessage(f"SYSTem:STORage:SD:LOGging {_scpi_quote(file_name)}")
 
 

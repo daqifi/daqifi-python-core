@@ -467,8 +467,12 @@ class WiFiDeviceFinder:
             try:
                 if owns_transport:
                     udp_transport = UdpTransport(local_port=0)
-                    udp_transport.open()
+                    # Mark opened_here BEFORE open() so the finally
+                    # block still closes the transport if open()
+                    # itself raises after partial socket creation
+                    # (Qodo PR 17 pass 39 #3).
                     opened_here = True
+                    udp_transport.open()
 
                 # Broadcast both queries so devices on either firmware
                 # variant respond.
