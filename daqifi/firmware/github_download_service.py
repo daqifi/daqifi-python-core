@@ -404,6 +404,15 @@ def _fetch_releases_from_api(api_url: str, user_agent: str) -> List[dict]:
         if not isinstance(data, list):
             raise RuntimeError("Unexpected GitHub releases response shape.")
         releases.extend(data)
+    # If the loop hit the page cap with more pages still pending,
+    # surface that explicitly — silently truncating to the first
+    # 50 pages would hide newer/older tags from
+    # download_firmware_by_tag (Qodo PR 17 pass 50 #1).
+    if next_url is not None:
+        raise RuntimeError(
+            "GitHub releases pagination exceeded safety cap (50 pages); "
+            "raise the cap or narrow the query."
+        )
     return releases
 
 
