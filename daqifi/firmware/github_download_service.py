@@ -329,6 +329,21 @@ def _fetch_releases_from_api(api_url: str, user_agent: str) -> List[dict]:
     """
     from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+    # Mirror the download-path SSRF defense (Qodo PR 17 pass 13 #1)
+    # for the API path too — a malicious Link header or an open
+    # redirect on api.github.com could otherwise point the next
+    # iteration at an arbitrary host (Qodo PR 17 pass 49 #4).
+    _ALLOWED_API_HOSTS = {"api.github.com"}
+
+    def _validate_api_url(url: str) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            raise ValueError(f"Refusing non-HTTPS GitHub API URL: {url}")
+        if parsed.hostname not in _ALLOWED_API_HOSTS:
+            raise ValueError(
+                f"Refusing unexpected GitHub API host: {parsed.hostname}"
+            )
+
     def _with_per_page(url: str) -> str:
         parsed = urlparse(url)
         qs = parse_qs(parsed.query)
@@ -353,6 +368,7 @@ def _fetch_releases_from_api(api_url: str, user_agent: str) -> List[dict]:
     next_url: Optional[str] = _with_per_page(api_url)
     pages = 0
     while next_url and pages < 50:
+        _validate_api_url(next_url)
         pages += 1
         req = urllib.request.Request(
             next_url,
@@ -363,6 +379,10 @@ def _fetch_releases_from_api(api_url: str, user_agent: str) -> List[dict]:
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
+                # Re-validate the FINAL URL after any redirects so an
+                # open redirect on api.github.com can't smuggle us
+                # over to an internal host.
+                _validate_api_url(response.geturl())
                 body = response.read()
                 next_url = _next_link(response.headers.get("Link"))
         except urllib.error.HTTPError as exc:

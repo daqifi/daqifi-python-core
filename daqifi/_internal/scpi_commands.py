@@ -119,8 +119,12 @@ def set_sd_max_file_size(num_bytes: int) -> ScpiMessage:
     """Set max file size before auto-split. ``num_bytes=0`` means default (3.9 GB).
 
     Mirrors C# ``ArgumentOutOfRangeException`` -> ``ValueError`` (project
-    convention).
+    convention). Rejects bool inputs (which subclass int in Python) so
+    ``True`` / ``False`` aren't formatted into the SCPI command as
+    ``\"True\"`` / ``\"False\"`` (Qodo PR 17 pass 49 #2).
     """
+    if isinstance(num_bytes, bool) or not isinstance(num_bytes, int):
+        raise TypeError("num_bytes must be an int.")
     if num_bytes < 0:
         raise ValueError("Max file size cannot be negative.")
     return ScpiMessage(f"SYSTem:STORage:SD:MAXSize {num_bytes}")
@@ -132,6 +136,8 @@ def get_sd_max_file_size() -> ScpiMessage:
 
 def run_sd_benchmark(size: int) -> ScpiMessage:
     """Run an SD-card write-speed benchmark of ``size`` bytes."""
+    if isinstance(size, bool) or not isinstance(size, int):
+        raise TypeError("size must be an int.")
     if size <= 0:
         raise ValueError("Benchmark size must be positive.")
     return ScpiMessage(f"SYSTem:STORage:SD:BENCHmark {size}")

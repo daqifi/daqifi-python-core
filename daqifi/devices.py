@@ -352,7 +352,13 @@ class DaqifiDevice:
         transport_error: Optional[Exception] = None
         try:
             if self._consumer is not None:
-                self._consumer.remove_message_received(self._on_inbound_message)
+                # Wrap unsubscription so a buggy handler-list raises
+                # don't skip the transport disconnect + consumer
+                # teardown below (Qodo PR 17 pass 49 #1).
+                try:
+                    self._consumer.remove_message_received(self._on_inbound_message)
+                except Exception:
+                    pass
 
             # Disconnect the transport BEFORE stopping the consumer
             # so the underlying socket/stream close wakes any blocked
