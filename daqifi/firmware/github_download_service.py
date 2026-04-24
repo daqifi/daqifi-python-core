@@ -328,6 +328,25 @@ def _download_to_path_with_progress(
     and atomically renames on success so a crash mid-download leaves
     no half-file at the user-visible location.
     """
+    # Reject anything that isn't HTTPS to a known GitHub release host.
+    # The release dictionaries come from GitHub's own API but are
+    # untrusted at the URL level — a tampered cache or a future
+    # GitHub redirect could otherwise point us at an arbitrary host
+    # (Qodo PR 17 pass 12 #3 — SSRF defense for the firmware path).
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Refusing to download non-HTTPS URL: {url}")
+    if parsed.hostname not in {
+        "github.com",
+        "api.github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }:
+        raise ValueError(
+            f"Refusing to download from unexpected host: {parsed.hostname}"
+        )
+
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
     target.parent.mkdir(parents=True, exist_ok=True)
 

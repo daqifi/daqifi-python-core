@@ -70,16 +70,18 @@ def get_sd_file_list() -> ScpiMessage:
 def _scpi_quote(value: str) -> str:
     """Quote ``value`` as a SCPI string literal.
 
-    SCPI uses double-quotes around string parameters; escape any
-    embedded double-quote with a backslash, and reject CR/LF since
-    those would terminate the SCPI command and let downstream input
-    inject a second command (Qodo PR 17 pass 6 #7+#8).
+    SCPI strings are double-quote delimited; embedded double-quotes
+    are escaped by doubling them (``"`` → ``""``), per IEEE 488.2 /
+    SCPI-99 §7.7. Reject CR/LF since those would terminate the SCPI
+    command and allow injecting a second command line (Qodo PR 17
+    pass 6 #7+#8 + pass 12 #1: was previously using backslash escape
+    which is non-standard and parsers reject).
     """
     if value is None:
         raise TypeError("SCPI string value must not be None.")
     if "\r" in value or "\n" in value:
         raise ValueError("SCPI string must not contain CR/LF characters.")
-    escaped = value.replace('"', '\\"')
+    escaped = value.replace('"', '""')
     return f'"{escaped}"'
 
 
