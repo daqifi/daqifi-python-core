@@ -146,11 +146,18 @@ def _drain(serial_obj, timeout: float) -> bytes:
     deadline = time.monotonic() + timeout
     buf = bytearray()
     while time.monotonic() < deadline:
-        n = serial_obj.in_waiting
-        if n > 0:
-            buf.extend(serial_obj.read(n))
-        else:
-            time.sleep(0.005)
+        try:
+            n = serial_obj.in_waiting
+            if n > 0:
+                buf.extend(serial_obj.read(n))
+            else:
+                time.sleep(0.005)
+        except Exception:
+            # Serial I/O failure during a drain (e.g. port closed
+            # mid-teardown by a parent fixture) — return what we
+            # have rather than letting the exception propagate and
+            # mask the real test outcome.
+            break
     return bytes(buf)
 
 
@@ -404,25 +411,38 @@ def wire_capture(serial_transport: SerialStreamTransport, request):
         # per-byte.
         fh.flush()
 
-    yield _record
-
-    fh.close()
-    size = out_path.stat().st_size
-    if size == 0:
-        # Don't litter the captures dir with empty files.
-        out_path.unlink()
-    else:
+    try:
+        yield _record
+    finally:
+        # Each step in the cleanup is independently guarded so a
+        # disk-full / permission / race failure doesn't leak the
+        # file handle or kill pytest's own teardown.
         try:
-            shown = out_path.relative_to(captures_dir.parent.parent.parent)
-        except ValueError:
-            # captures_dir.parent.parent.parent is the project root in
-            # the in-tree layout, but a CI worker that mounts the repo
-            # under a non-standard path (or a captures_dir symlinked
-            # elsewhere) could break the relative_to invariant. Fall
-            # back to the absolute path so teardown stays diagnostic
-            # rather than crashy.
-            shown = out_path
-        print(f"\n[wire_capture] {size} bytes -> {shown}")
+            fh.close()
+        except Exception:
+            pass
+        try:
+            size = out_path.stat().st_size
+        except Exception:
+            return
+        if size == 0:
+            # Don't litter the captures dir with empty files.
+            try:
+                out_path.unlink()
+            except Exception:
+                pass
+        else:
+            try:
+                shown = out_path.relative_to(captures_dir.parent.parent.parent)
+            except ValueError:
+                # captures_dir.parent.parent.parent is the project root in
+                # the in-tree layout, but a CI worker that mounts the repo
+                # under a non-standard path (or a captures_dir symlinked
+                # elsewhere) could break the relative_to invariant. Fall
+                # back to the absolute path so teardown stays diagnostic
+                # rather than crashy.
+                shown = out_path
+            print(f"\n[wire_capture] {size} bytes -> {shown}")
 
 
 @pytest.fixture
