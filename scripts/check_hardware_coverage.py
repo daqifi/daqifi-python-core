@@ -116,11 +116,15 @@ def collect_public_symbols() -> Set[str]:
             # Module-level constants / dataclasses without methods land
             # via the class branch above — leave plain values alone.
 
+    import_failures: list[str] = []
+
     for mod_name in TOP_MODULES:
         try:
             mod = importlib.import_module(mod_name)
         except Exception as exc:
-            print(f"WARN: could not import {mod_name}: {exc}", file=sys.stderr)
+            msg = f"could not import {mod_name}: {exc}"
+            print(f"WARN: {msg}", file=sys.stderr)
+            import_failures.append(msg)
             continue
         _scan(mod)
 
@@ -128,18 +132,32 @@ def collect_public_symbols() -> Set[str]:
     try:
         fw_pkg = importlib.import_module(FIRMWARE_PACKAGE)
     except Exception as exc:
-        print(f"WARN: could not import {FIRMWARE_PACKAGE}: {exc}", file=sys.stderr)
+        msg = f"could not import {FIRMWARE_PACKAGE}: {exc}"
+        print(f"WARN: {msg}", file=sys.stderr)
+        import_failures.append(msg)
     else:
-        for finder, sub_name, ispkg in pkgutil.iter_modules(fw_pkg.__path__):
+        for _, sub_name, _ispkg in pkgutil.iter_modules(fw_pkg.__path__):
             if sub_name.startswith("_"):
                 continue
             try:
                 sub = importlib.import_module(f"{FIRMWARE_PACKAGE}.{sub_name}")
             except Exception as exc:
-                print(f"WARN: could not import firmware.{sub_name}: {exc}",
-                      file=sys.stderr)
+                msg = f"could not import {FIRMWARE_PACKAGE}.{sub_name}: {exc}"
+                print(f"WARN: {msg}", file=sys.stderr)
+                import_failures.append(msg)
                 continue
             _scan(sub)
+
+    if not symbols:
+        print(
+            "ERROR: no symbols collected; daqifi imports likely failed entirely",
+            file=sys.stderr,
+        )
+        if import_failures:
+            print("Import failures:", file=sys.stderr)
+            for f in import_failures:
+                print(f"  - {f}", file=sys.stderr)
+        sys.exit(2)
 
     return symbols
 

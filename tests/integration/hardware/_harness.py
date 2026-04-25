@@ -65,7 +65,12 @@ class FastReader:
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=timeout)
-            self._thread = None
+            # Only drop the reference if the thread actually stopped —
+            # if join() timed out, keeping the handle lets a caller
+            # inspect is_alive() / retry the join instead of leaking
+            # the thread silently.
+            if not self._thread.is_alive():
+                self._thread = None
 
     def _loop(self) -> None:
         while self._running:

@@ -144,6 +144,9 @@ def _drain(serial_obj, timeout: float) -> bytes:
     return bytes(buf)
 
 
+_DRAIN_EMPTY_BUDGET = 5
+
+
 def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
     """Pop SYST:ERR? until the queue reports 'No error' or cap is reached.
 
@@ -155,11 +158,23 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
     bytes for the canonical 'No error' marker before falling back to
     text decoding, so leftover protobuf stream bytes (or any other
     non-ASCII junk in the buffer) can't mask a clean queue.
+
+    Anti-hang escape hatch: if the device returns ``_DRAIN_EMPTY_BUDGET``
+    consecutive empty reads, treat the queue as drained rather than
+    spinning ``max_iterations × _drain.timeout`` seconds (~60s) waiting
+    for a response that's never coming.
     """
     popped: List[str] = []
+    empty_reads = 0
     for _ in range(max_iterations):
         _send_scpi(serial_obj, "SYST:ERR?", delay=0.05)
         raw = _drain(serial_obj, timeout=0.2)
+        if not raw:
+            empty_reads += 1
+            if empty_reads >= _DRAIN_EMPTY_BUDGET:
+                return popped
+            continue
+        empty_reads = 0
         if _SCPI_NO_ERROR_RE.search(raw):
             return popped
         text = raw.decode("ascii", errors="replace")
