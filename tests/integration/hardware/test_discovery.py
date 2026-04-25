@@ -49,10 +49,17 @@ def _expected_wifi_sn() -> str:
 # ---- DeviceFinder (serial-only, IDN-based) ---------------------------------
 
 
-def test_device_finder_get_serial_ports_returns_list() -> None:
+def test_device_finder_get_serial_ports_returns_list(
+    device_info: DiscoveryDeviceInfo,
+) -> None:
     """The static helper returns a list — possibly empty on a host with
     no serial ports, possibly noisy on Windows (returns COM1..COM255
-    candidates without verifying they exist)."""
+    candidates without verifying they exist).
+
+    Takes ``device_info`` only to honor the directory's
+    skip-collect-when-no-device contract; the helper itself is static
+    and doesn't need an open device."""
+    del device_info  # noqa: just gates the test on hardware presence
     ports = DeviceFinder.get_serial_ports()
     assert isinstance(ports, list)
     # On the test rig at least our port is real; sanity-check the type.
@@ -104,7 +111,10 @@ def test_device_finder_discover_with_variant_filter(
 # ---- SerialDeviceFinder (protobuf-based serial probe) ----------------------
 
 
-def test_serial_device_finder_init_rejects_invalid_baud() -> None:
+def test_serial_device_finder_init_rejects_invalid_baud(
+    device_info: DiscoveryDeviceInfo,
+) -> None:
+    del device_info  # noqa: just gates the test on hardware presence
     with pytest.raises(ValueError, match="baud_rate"):
         SerialDeviceFinder(baud_rate=0)
     with pytest.raises(ValueError, match="baud_rate"):
@@ -173,8 +183,11 @@ def test_serial_device_finder_remove_handlers_silences_callbacks(
     assert completed == []
 
 
-def test_serial_device_finder_close_is_idempotent_and_blocks_discover() -> None:
+def test_serial_device_finder_close_is_idempotent_and_blocks_discover(
+    device_info: DiscoveryDeviceInfo,
+) -> None:
     """close() can be called repeatedly; afterward discover() raises."""
+    del device_info  # noqa: just gates the test on hardware presence
     finder = SerialDeviceFinder(baud_rate=115200)
     finder.close()
     finder.close()  # idempotent
@@ -185,14 +198,20 @@ def test_serial_device_finder_close_is_idempotent_and_blocks_discover() -> None:
 # ---- WiFiDeviceFinder ------------------------------------------------------
 
 
-def test_wifi_device_finder_init_rejects_invalid_port() -> None:
+def test_wifi_device_finder_init_rejects_invalid_port(
+    device_info: DiscoveryDeviceInfo,
+) -> None:
+    del device_info  # noqa: just gates the test on hardware presence
     with pytest.raises(ValueError, match="discovery_port"):
         WiFiDeviceFinder(discovery_port=0)
     with pytest.raises(ValueError, match="discovery_port"):
         WiFiDeviceFinder(discovery_port=70000)
 
 
-def test_wifi_device_finder_close_is_idempotent_and_blocks_discover() -> None:
+def test_wifi_device_finder_close_is_idempotent_and_blocks_discover(
+    device_info: DiscoveryDeviceInfo,
+) -> None:
+    del device_info  # noqa: just gates the test on hardware presence
     finder = WiFiDeviceFinder()
     finder.close()
     finder.close()
