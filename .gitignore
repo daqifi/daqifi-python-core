@@ -39,6 +39,9 @@ htmlcov/
 .tox/
 testing/suites/test_config.yaml  # Exclude config files with credentials
 
+# Hardware-test wire captures (raw serial bytes — local-only diagnostics)
+tests/integration/captures/
+
 # OS
 .DS_Store
 Thumbs.db
