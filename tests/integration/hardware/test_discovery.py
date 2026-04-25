@@ -99,15 +99,23 @@ def test_device_finder_discover_with_variant_filter(
 ) -> None:
     """The ``variant`` filter only includes matching boards. Our COM7
     unit is a Nyquist1 (verified via memory + the smoke test)."""
+    expected_port = device_info.port.strip()
+
     nq1 = DeviceFinder.discover(variant=BoardVariant.NQ1)
     assert isinstance(nq1, list)
     assert len(nq1) >= 1
     assert all(d.variant == BoardVariant.NQ1 for d in nq1)
-    # No NQ3 on this rig — the filter must actually return an empty
-    # list (a vacuous `all(... for d in nq3)` would pass even on a
-    # broken filter that returned every device).
+    # Our COM7 unit must appear in the NQ1 result.
+    assert any(d.port.strip() == expected_port for d in nq1)
+
+    # The NQ3 filter must (a) only contain NQ3 devices, and (b) NOT
+    # contain our NQ1 unit. This survives a developer machine that
+    # happens to have both an NQ1 and an NQ3 attached, where a
+    # vacuous `assert nq3 == []` would falsely fail.
     nq3 = DeviceFinder.discover(variant=BoardVariant.NQ3)
-    assert nq3 == []
+    assert isinstance(nq3, list)
+    assert all(d.variant == BoardVariant.NQ3 for d in nq3)
+    assert not any(d.port.strip() == expected_port for d in nq3)
 
 
 # ---- SerialDeviceFinder (protobuf-based serial probe) ----------------------
