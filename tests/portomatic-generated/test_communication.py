@@ -54,15 +54,20 @@ class TestLineBasedMessageParser:
         assert [m.data for m in messages] == ["first", "second"]
         assert consumed == len(b"first\r\n\r\nsecond\r\n")
 
-    def test_whitespace_only_line_skipped(self):
+    def test_whitespace_only_line_preserved(self):
+        # Pass 46 #1: only line endings are stripped, not interior or
+        # leading/trailing whitespace — SCPI responses can contain
+        # whitespace-padded fields that callers depend on.
         parser = LineBasedMessageParser()
         messages, _ = parser.parse_messages(b"first\r\n   \r\nsecond\r\n")
-        assert [m.data for m in messages] == ["first", "second"]
+        assert [m.data for m in messages] == ["first", "   ", "second"]
 
-    def test_message_data_is_trimmed(self):
+    def test_message_data_preserves_inner_whitespace(self):
+        # Pass 46 #1: only \r\n is stripped; surrounding whitespace
+        # stays so a SCPI value like "  X1234  " round-trips intact.
         parser = LineBasedMessageParser()
         messages, _ = parser.parse_messages(b"  spaced  \r\n")
-        assert messages[0].data == "spaced"
+        assert messages[0].data == "  spaced  "
 
     def test_no_line_ending_returns_no_messages(self):
         parser = LineBasedMessageParser()
@@ -103,3 +108,65 @@ class TestLineBasedMessageParser:
         assert len(messages) == 1
         assert "abc" in messages[0].data
         assert consumed == len(bad)
+
+
+# ---- ProtobufMessageParser: text-prefix resilience -----------------------
+
+
+class TestProtobufMessageParserTextPrefixResilience:
+    """Regression for the 2026-04-23 hardware finding: USB serial puts
+    SCPI text echoes (``DAQIFI> ``, ``**ERROR ...``) into the buffer
+    ahead of valid protobuf streaming frames. The parser must scan past
+    them rather than bailing after a small retry budget — otherwise
+    the consumer's buffer grows unbounded and no streaming messages
+    ever surface."""
+
+    def _make_parser(self, factory=None):
+        from daqifi.communication import ProtobufMessageParser
+        if factory is None:
+            factory = lambda b: b  # accept anything for byte-level checks
+        return ProtobufMessageParser(message_factory=factory)
+
+    def test_scans_past_failures_without_retry_limit(self):
+        # Regression for the 2026-04-23 finding: the original parser had
+        # `retry_count < _MAX_RETRY_ATTEMPTS` (= 3) which meant after 3
+        # consecutive parse failures the loop would bail with a tiny
+        # `consumed` value, leaving the rest of the buffer untouched.
+        # On real hardware the buffer often has long SCPI text echoes
+        # (`DAQIFI> ...`) ahead of valid protobuf frames; with the gate
+        # the parser never reached the valid frame.
+        #
+        # Rejector factory raises for every payload — simulates the
+        # text-prefix case where every prefix-byte advance fails.
+        # The parser MUST keep scanning to the end of `data` rather
+        # than stopping early. Concretely: `consumed` should equal
+        # `len(data)` after a full scan.
+        def reject(_):
+            raise ValueError("not a protobuf frame")
+        parser = self._make_parser(factory=reject)
+        # Each byte is a small length-prefix that triggers a slice +
+        # parse attempt; rejector causes failure each time.
+        data = bytes([5, 1, 2, 3, 4, 5,    # 1 frame attempt
+                      5, 1, 2, 3, 4, 5,    # 2 attempts
+                      5, 1, 2, 3, 4, 5,    # 3 attempts (was bail point)
+                      5, 1, 2, 3, 4, 5,    # 4 attempts
+                      5, 1, 2, 3, 4, 5])   # 5 attempts — must reach end
+        _, consumed = parser.parse_messages(data)
+        # Old retry-limit bug capped consumed at ~3 bytes. Post-fix,
+        # parser scans the full buffer (with normal "wait for more
+        # data" behaviour at the trailing edge if a frame can't fit).
+        # Either way, consumed should be much larger than the old gate.
+        assert consumed > 10, (
+            f"parser stopped early at {consumed}/{len(data)} after "
+            f"only a few failures — the retry-limit gate is back"
+        )
+
+    def test_parses_many_back_to_back_frames(self):
+        # 50 valid frames, no text noise. Validates the basic
+        # length-prefix + payload loop runs to completion.
+        parser = self._make_parser()  # permissive factory
+        frame = bytes([3, 0xaa, 0xbb, 0xcc])
+        data = frame * 50
+        messages, consumed = parser.parse_messages(data)
+        assert len(messages) == 50
+        assert consumed == len(data)

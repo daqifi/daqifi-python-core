@@ -5,7 +5,10 @@ from dataclasses import dataclass
 
 import pytest
 
+from daqifi.enums import WifiMode, WifiSecurityType
 from daqifi.network import (
+    NetworkConfigurable,
+    NetworkConfiguration,
     format_ipv4,
     format_mac,
     get_gateway_string,
@@ -128,3 +131,84 @@ class TestMessageHelpers:
         ):
             with pytest.raises(TypeError):
                 fn(None)
+
+
+# -- NetworkConfiguration --------------------------------------------------
+
+
+@pytest.mark.portomatic_generated
+class TestNetworkConfiguration:
+    def test_default_construction(self):
+        cfg = NetworkConfiguration()
+        assert cfg.mode == WifiMode.SELF_HOSTED
+        assert cfg.security_type == WifiSecurityType.WPA_PSK_PHRASE
+        assert cfg.ssid == ""
+        assert cfg.password == ""
+
+    def test_keyword_construction(self):
+        cfg = NetworkConfiguration(
+            mode=WifiMode.EXISTING_NETWORK,
+            security_type=WifiSecurityType.NONE,
+            ssid="lab-wifi",
+            password="secret123",
+        )
+        assert cfg.mode == WifiMode.EXISTING_NETWORK
+        assert cfg.ssid == "lab-wifi"
+        assert cfg.password == "secret123"
+
+    def test_is_mutable(self):
+        cfg = NetworkConfiguration()
+        cfg.ssid = "new-net"
+        cfg.password = "newpw"
+        assert cfg.ssid == "new-net"
+        assert cfg.password == "newpw"
+
+    def test_clone_returns_independent_copy(self):
+        original = NetworkConfiguration(
+            mode=WifiMode.EXISTING_NETWORK,
+            security_type=WifiSecurityType.WPA_PSK_PHRASE,
+            ssid="lab",
+            password="abc",
+        )
+        copy = original.clone()
+        assert copy is not original
+        assert copy == original
+        copy.ssid = "edited"
+        assert original.ssid == "lab"  # original untouched
+
+    def test_clone_returns_same_type(self):
+        assert isinstance(NetworkConfiguration().clone(), NetworkConfiguration)
+
+
+# -- NetworkConfigurable Protocol ------------------------------------------
+
+
+@pytest.mark.portomatic_generated
+class TestNetworkConfigurableProtocol:
+    def test_runtime_checkable(self):
+        # An object exposing the right surface should pass isinstance.
+        class _Stub:
+            @property
+            def network_configuration(self):  # noqa: D401 - test stub
+                return NetworkConfiguration()
+
+            async def update_network_configuration(self, configuration):
+                return None
+
+            def prepare_sd_interface(self):
+                return None
+
+            def prepare_lan_interface(self):
+                return None
+
+        assert isinstance(_Stub(), NetworkConfigurable)
+
+    def test_missing_method_fails_isinstance(self):
+        class _Incomplete:
+            @property
+            def network_configuration(self):
+                return NetworkConfiguration()
+
+            # Missing the prepare_* and update_ methods.
+
+        assert not isinstance(_Incomplete(), NetworkConfigurable)

@@ -4,7 +4,69 @@ SCPI command definitions and utilities for Nyquist devices.
 Provides command constants and response parsing functions.
 """
 
+from enum import IntEnum
 from typing import Optional, List
+
+
+class ChannelType(IntEnum):
+    """Type of a channel."""
+    Digital = 0  # Digital channel (binary on/off)
+    Analog = 1   # Analog channel (continuous value)
+
+
+class ChannelDirection(IntEnum):
+    """Direction of data flow for a channel."""
+    Input = 0    # Input channel (reads data from device)
+    Output = 1   # Output channel (writes data to device)
+    Unknown = 2  # Unknown or uninitialized direction
+
+
+class ConnectionStatus(IntEnum):
+    """Connection status of a device.
+
+    Ports the C# ``ConnectionStatus`` enum from
+    ``Daqifi.Core/Device/ConnectionStatus.cs``. Uses ``IntEnum`` to match
+    the local convention established by :class:`ChannelType` and
+    :class:`ChannelDirection` (the project standardizes on ``IntEnum`` --
+    5 usages tree-wide -- over plain ``Enum``). Enum-member casing follows
+    the upstream PascalCase, again mirroring the sibling enums above.
+    """
+    Disconnected = 0  # The device is disconnected
+    Connecting = 1    # The device is in the process of connecting
+    Connected = 2     # The device is connected
+    Lost = 3          # The device connection has been lost
+    Retrying = 4      # The device is retrying connection after a failure
+    Failed = 5        # The device connection failed after all retry attempts
+
+
+class DeviceState(IntEnum):
+    """Operational state of a DAQiFi device.
+
+    Ports the C# ``DeviceState`` enum from
+    ``Daqifi.Core/Device/DeviceState.cs``. Distinct from
+    :class:`ConnectionStatus` -- ``State`` tracks the high-level
+    lifecycle (Initializing, Ready, Streaming, Error) while ``Status``
+    tracks the transport-level connection (Disconnected, Connecting,
+    Lost, ...).
+    """
+    Disconnected = 0  # not connected or has been disconnected
+    Connecting = 1    # in the process of connecting
+    Connected = 2     # connected but not yet initialized
+    Initializing = 3  # running initialization sequence
+    Ready = 4         # fully initialized and ready
+    Streaming = 5     # actively streaming data
+    Error = 6         # encountered an error
+
+
+class StreamInterface(IntEnum):
+    """Target interface for data streaming.
+
+    Values correspond to firmware SCPI ``SYSTem:STReam:INTerface`` parameter.
+    """
+    Usb = 0      # Stream data over USB
+    WiFi = 1     # Stream data over WiFi
+    SdCard = 2   # Stream data to the SD card
+    All = 3      # Stream data to all interfaces simultaneously
 
 
 # System commands
@@ -14,6 +76,8 @@ class System:
     RST = "*RST"
     ERR = "SYST:ERR?"
     INFO = "SYST:INFO?"
+    REBOOT = "SYST:REBOOT"
+    FORCE_BOOTLOADER = "SYST:FORceBoot"
 
     # Power management
     POWER_STATE_QUERY = "SYST:POW:STAT?"
@@ -37,13 +101,55 @@ class System:
     # SD Card
     SD_STATUS_QUERY = "SYST:STOR:SD:STAT?"
     SD_ENABLE_SET = "SYST:STOR:SD:ENAble"
+    # Firmware #311 renamed the logging-set SCPI command from
+    # ``SYST:STOR:SD:LOGging`` to ``SYST:STOR:SD:FILE`` (PR #5 on
+    # main). The query form was not renamed, so keep both.
     SD_FILE_SET = "SYST:STOR:SD:FILE"
+    SD_LOGGING_QUERY = "SYST:STOR:SD:LOGging?"
     SD_LIST_QUERY = "SYST:STOR:SD:LISt?"
     SD_GET = "SYST:STOR:SD:GET"
     SD_DELETE = "SYST:STOR:SD:DELete"
     SD_FORMAT = "SYST:STOR:SD:FORmat"
     SD_BENCHMARK = "SYST:STOR:SD:BENCHmark"
     SD_BENCHMARK_QUERY = "SYST:STOR:SD:BENCHmark?"
+
+    @staticmethod
+    def get_sd_logging_state() -> str:
+        """Build query to get the current SD card logging state."""
+        return System.SD_LOGGING_QUERY
+
+    @staticmethod
+    def enable_storage_sd() -> str:
+        """Build command to enable SD card logging.
+
+        Note: LAN must be disabled first to enable SD card logging.
+        """
+        return f"{System.SD_ENABLE_SET} 1"
+
+    @staticmethod
+    def get_sd_file_list() -> str:
+        """Build query to get the list of files on the SD card."""
+        return System.SD_LIST_QUERY
+
+    @staticmethod
+    def set_sd_logging_filename(filename: str) -> str:
+        """Build command to set the SD card logging file name.
+
+        The file is created if it doesn't exist, or appended to if it does.
+        """
+        return f'{System.SD_FILE_SET} "{filename}"'
+
+    @staticmethod
+    def get_sd_file(filename: str) -> str:
+        """Build command to retrieve a specific file from the SD card."""
+        return f'{System.SD_GET} "{filename}"'
+
+    @staticmethod
+    def delete_sd_file(filename: str) -> str:
+        """Build command to delete a file from the SD card."""
+        if not filename or not filename.strip():
+            raise ValueError("Filename cannot be null or empty.")
+        return f'{System.SD_DELETE} "{filename}"'
 
 
 # Analog input (ADC) commands

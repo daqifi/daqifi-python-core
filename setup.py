@@ -46,6 +46,12 @@ setup(
     python_requires=">=3.8",
     install_requires=[
         "pyserial>=3.5",
+        # protobuf is required by the generated DaqifiOutMessage_pb2
+        # module (daqifi/_internal/proto/) that DaqifiDevice's default
+        # message factory imports to decode device status / streaming
+        # frames. The runtime version validation baked into the
+        # generated module requires protobuf 5.28+ (protoc 6.31.x output).
+        "protobuf>=5.28,<7.0",
     ],
     extras_require={
         "dev": [

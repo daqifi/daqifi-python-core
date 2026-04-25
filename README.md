@@ -400,6 +400,17 @@ Timeout waiting for samples
 - Verify sample rate is valid for device
 - Check serial port connection is stable
 
+## Architecture
+
+`NyquistDevice` (the API documented above) is the high-level
+convenience layer. A lower-level set of building blocks ported
+directly from the C# `Daqifi.Core` library (transports, device
+finders, `DaqifiStreamingDevice`, SCPI command factories) is also
+available under `daqifi.transport`, `daqifi.devices`,
+`daqifi.device_finders`, and `daqifi._internal.scpi_commands`. See
+[PORT_NOTES.md](./PORT_NOTES.md) for the layer diagram and module
+index.
+
 ## License
 
 MIT License - Copyright (c) DAQiFi

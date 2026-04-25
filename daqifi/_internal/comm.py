@@ -8,10 +8,12 @@ Not intended for direct use - use the public API instead.
 import serial
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import IO, Any, Callable, Generic, List, Optional, Protocol, TypeVar, runtime_checkable
+from datetime import datetime, timedelta, timezone
+from typing import IO, Any, Callable, Generic, List, Optional, Protocol, Sequence, Tuple, TypeVar, runtime_checkable
 from enum import IntEnum
 import builtins
+
+from .scpi import ConnectionStatus
 
 
 T = TypeVar("T")
@@ -182,9 +184,11 @@ class IDataSample(Protocol):
     def timestamp(self) -> datetime:
         ...
 
-    @property
-    def value(self) -> float:
-        ...
+    # Plain attribute (not a property) so type checkers recognize the
+    # writable shape promised by the docstring above. A property-only
+    # declaration is implicitly read-only to a Protocol consumer
+    # (Qodo PR 17 pass 30 #1).
+    value: float
 
 
 @dataclass
@@ -290,6 +294,24 @@ class ScpiMessage:
             return command.encode("ascii")
         except UnicodeEncodeError as exc:
             raise ValueError("SCPI command must be ASCII.") from exc
+
+
+@runtime_checkable
+class MessageParser(Protocol[T]):
+    """Structural protocol for message parsers.
+
+    Ports the C# ``IMessageParser<T>`` interface from
+    ``Daqifi.Core/Communication/Consumers/IMessageParser.cs``. A parser
+    consumes raw bytes and returns parsed messages plus the number of
+    bytes consumed. The ``out int consumedBytes`` upstream parameter
+    becomes the second tuple element since Python has no ``out`` params
+    (mirrors :class:`LineBasedMessageParser`).
+    """
+
+    def parse_messages(
+        self, data: bytes
+    ) -> Tuple[List["IInboundMessage[T]"], int]:
+        ...
 
 
 @runtime_checkable
@@ -528,6 +550,294 @@ class MessageConsumer(Protocol[T]):
         ...
 
 
+@dataclass
+class DeviceStatusEventArgs:
+    """Payload for :class:`Device` ``StatusChanged`` callbacks.
+
+    Ports the C# ``DeviceStatusEventArgs`` (subclass of ``EventArgs``).
+    Python uses plain callables instead of the .NET event pattern, so
+    the sender argument is dropped -- subscribers already know who they
+    subscribed to (mirrors :class:`TransportStatusEventArgs`).
+    """
+
+    status: ConnectionStatus
+
+
+@runtime_checkable
+class Device(Protocol):
+    """Structural protocol for all DAQiFi devices.
+
+    Ports the C# ``IDevice`` interface from
+    ``Daqifi.Core/Device/IDevice.cs``. The base contract every device --
+    serial, USB-HID, TCP, UDP -- satisfies. Implementations expose
+    identity (name, ip), connection lifecycle, status notifications, and
+    outbound messaging.
+
+    **Lifecycle:** the upstream ``Connect``/``Disconnect`` are sync;
+    Python keeps the same pair (the project is wholly synchronous --
+    see :class:`StreamTransport` for the rationale).
+
+    **Status notifications:** the upstream ``event
+    EventHandler<DeviceStatusEventArgs>`` becomes a list of plain
+    callbacks via :meth:`add_status_changed` / :meth:`remove_status_changed`,
+    matching the established pattern across this module.
+
+    **Message receipt:** the upstream ``event
+    EventHandler<MessageReceivedEventArgs>`` becomes
+    :meth:`add_message_received` / :meth:`remove_message_received`.
+    """
+
+    @property
+    def name(self) -> str:
+        ...
+
+    @property
+    def ip_address(self) -> Optional[str]:
+        """IPv4 address string, or ``None`` for non-network transports."""
+        ...
+
+    @property
+    def is_connected(self) -> bool:
+        ...
+
+    @property
+    def status(self) -> ConnectionStatus:
+        ...
+
+    def add_status_changed(
+        self, handler: Callable[[DeviceStatusEventArgs], None]
+    ) -> None:
+        ...
+
+    def remove_status_changed(
+        self, handler: Callable[[DeviceStatusEventArgs], None]
+    ) -> None:
+        ...
+
+    def add_message_received(
+        self, handler: Callable[[MessageReceivedEventArgs[Any]], None]
+    ) -> None:
+        ...
+
+    def remove_message_received(
+        self, handler: Callable[[MessageReceivedEventArgs[Any]], None]
+    ) -> None:
+        ...
+
+    def connect(self) -> None:
+        ...
+
+    def disconnect(self) -> None:
+        ...
+
+    def send(self, message: "OutboundMessage[Any]") -> None:
+        ...
+
+
+@runtime_checkable
+class StreamingDevice(Device, Protocol):
+    """Structural protocol for a device that supports data streaming.
+
+    Ports the C# ``IStreamingDevice`` interface from
+    ``Daqifi.Core/Device/IStreamingDevice.cs`` (extends ``IDevice``).
+    Adds a streaming-frequency control plus start/stop hooks for the
+    sample stream.
+    """
+
+    @property
+    def streaming_frequency(self) -> int:
+        """Streaming frequency in Hz."""
+        ...
+
+    @streaming_frequency.setter
+    def streaming_frequency(self, value: int) -> None:
+        ...
+
+    @property
+    def is_streaming(self) -> bool:
+        ...
+
+    def start_streaming(self) -> None:
+        ...
+
+    def stop_streaming(self) -> None:
+        ...
+
+
+@runtime_checkable
+class HidDeviceEnumerator(Protocol):
+    """Structural protocol for HID device discovery.
+
+    Ports the C# ``IHidDeviceEnumerator`` interface from
+    ``Daqifi.Core/Communication/Transport/IHidDeviceEnumerator.cs``.
+    Used by bootloader/firmware-update flows to find candidate USB-HID
+    devices.
+
+    **Sync only:** the upstream signature is ``Task<IReadOnlyList<...>>``;
+    per the project convention (no asyncio) this is exposed as a sync
+    method returning a ``Sequence[HidDeviceInfo]``.
+    """
+
+    def enumerate(
+        self,
+        vendor_id: Optional[int] = None,
+        product_id: Optional[int] = None,
+    ) -> "Sequence[HidDeviceInfo]":
+        ...
+
+
+@runtime_checkable
+class HidTransport(Protocol):
+    """Structural protocol for USB HID bootloader communication.
+
+    Ports the C# ``IHidTransport`` interface from
+    ``Daqifi.Core/Communication/Transport/IHidTransport.cs``. Provides
+    connect/disconnect, raw read/write of HID report payloads, and
+    timeouts.
+
+    **Sync only:** upstream declares paired sync + async APIs; per the
+    project convention only the sync pair is exposed (mirrors
+    :class:`StreamTransport`).
+
+    **Lifecycle:** ``IDisposable`` -> :meth:`close`.
+
+    **Timeouts:** ``TimeSpan`` -> :class:`datetime.timedelta` (the
+    Pythonic equivalent that preserves microsecond precision).
+    """
+
+    @property
+    def is_connected(self) -> bool:
+        ...
+
+    @property
+    def vendor_id(self) -> Optional[int]:
+        """USB VID of the connected device, or ``None`` when disconnected."""
+        ...
+
+    @property
+    def product_id(self) -> Optional[int]:
+        """USB PID of the connected device, or ``None`` when disconnected."""
+        ...
+
+    @property
+    def serial_number(self) -> Optional[str]:
+        ...
+
+    @property
+    def device_path(self) -> Optional[str]:
+        ...
+
+    @property
+    def read_timeout(self) -> timedelta:
+        ...
+
+    @read_timeout.setter
+    def read_timeout(self, value: timedelta) -> None:
+        ...
+
+    @property
+    def write_timeout(self) -> timedelta:
+        ...
+
+    @write_timeout.setter
+    def write_timeout(self, value: timedelta) -> None:
+        ...
+
+    def connect(
+        self,
+        vendor_id: int,
+        product_id: int,
+        serial_number: Optional[str] = None,
+    ) -> None:
+        ...
+
+    def write(self, data: bytes) -> None:
+        ...
+
+    def read(self, timeout: Optional[timedelta] = None) -> bytes:
+        ...
+
+    def disconnect(self) -> None:
+        ...
+
+    def close(self) -> None:
+        ...
+
+
+# UDP endpoint as a plain ``(host, port)`` tuple -- the Pythonic
+# equivalent of ``System.Net.IPEndPoint`` (matches socket-module
+# conventions; e.g. ``socket.sendto(data, (host, port))``).
+UdpEndPoint = Tuple[str, int]
+
+
+@runtime_checkable
+class UdpTransport(Protocol):
+    """Structural protocol for UDP broadcast/unicast transport.
+
+    Ports the C# ``IUdpTransport`` interface from
+    ``Daqifi.Core/Communication/Transport/IUdpTransport.cs``. Used
+    primarily for device discovery and UDP-based messaging.
+
+    **Sync only:** upstream declares paired sync + async APIs; per the
+    project convention only the sync pair is exposed.
+
+    **Endpoints:** upstream uses ``System.Net.IPEndPoint``; the Python
+    port follows the standard library's ``(host, port)`` tuple
+    convention (see :data:`UdpEndPoint`).
+
+    **Status notifications:** ``event
+    EventHandler<TransportStatusEventArgs>`` -> add/remove pair.
+
+    **Lifecycle:** ``IDisposable`` -> :meth:`close`.
+    """
+
+    @property
+    def is_open(self) -> bool:
+        ...
+
+    @property
+    def connection_info(self) -> str:
+        ...
+
+    def add_status_changed(
+        self, handler: Callable[[TransportStatusEventArgs], None]
+    ) -> None:
+        ...
+
+    def remove_status_changed(
+        self, handler: Callable[[TransportStatusEventArgs], None]
+    ) -> None:
+        ...
+
+    def open(self) -> None:
+        ...
+
+    def close(self) -> None:
+        ...
+
+    def send_broadcast(self, data: bytes, port: int) -> None:
+        """Broadcast ``data`` to ``port`` on the default broadcast address."""
+        ...
+
+    def send_broadcast_to(self, data: bytes, end_point: UdpEndPoint) -> None:
+        """Broadcast ``data`` to a specific endpoint.
+
+        Mirrors the C# overload ``SendBroadcastAsync(byte[], IPEndPoint)``.
+        Python doesn't dispatch on argument types, so the targeted
+        variant gets a distinct name.
+        """
+        ...
+
+    def send_unicast(self, data: bytes, end_point: UdpEndPoint) -> None:
+        ...
+
+    def receive(
+        self, timeout: Optional[timedelta] = None
+    ) -> Optional[Tuple[bytes, UdpEndPoint]]:
+        """Receive one datagram. Returns ``None`` on timeout."""
+        ...
+
+
 @dataclass(frozen=True)
 class HidDeviceInfo:
     """Metadata for a discovered HID device.
@@ -623,6 +933,20 @@ class DeviceType(IntEnum):
     NYQUIST_1 = 1
     NYQUIST_2 = 2
     NYQUIST_3 = 3
+
+
+class ConnectionType(IntEnum):
+    """Transport over which a discovered device speaks.
+
+    Ports the C# ``ConnectionType`` enum from
+    ``Daqifi.Core/Device/Discovery/IDeviceInfo.cs``. ``IntEnum`` matches
+    the local convention established by :class:`DeviceType`.
+    """
+
+    UNKNOWN = 0
+    WIFI = 1     # WiFi/TCP connection
+    SERIAL = 2   # Serial/USB connection
+    HID = 3      # USB HID (bootloader mode)
 
 
 @dataclass
@@ -744,9 +1068,23 @@ class DeviceMetadata:
             self.device_type = detect_device_type_from_part_number(device_pn)
             self.capabilities = DeviceCapabilities.from_device_type(self.device_type)
 
+        # Protobuf carries device_sn as a numeric uint, but test
+        # doubles and a future schema change might pass a string.
+        # `device_sn != 0` evaluates to True for an empty string,
+        # which would clobber a previously-discovered serial with
+        # `""` (Qodo PR 17 pass 23 #1).
         device_sn = getattr(message, "device_sn", 0)
-        if device_sn != 0:
-            self.serial_number = str(device_sn)
+        if isinstance(device_sn, str):
+            sn_str = device_sn.strip()
+            if sn_str:
+                self.serial_number = sn_str
+        else:
+            try:
+                sn_int = int(device_sn)
+            except (TypeError, ValueError):
+                sn_int = 0
+            if sn_int != 0:
+                self.serial_number = str(sn_int)
 
         device_fw_rev = getattr(message, "device_fw_rev", "")
         if device_fw_rev and device_fw_rev.strip():
@@ -764,37 +1102,79 @@ class DeviceMetadata:
         if host_name and host_name.strip():
             self.host_name = host_name
 
+        # Tolerate non-numeric / out-of-range values from a stub or
+        # an unexpected protobuf shape — a failed cast on one field
+        # shouldn't drop the rest of the metadata update (Qodo PR 17
+        # pass 32 #1).
         device_port = getattr(message, "device_port", 0)
-        if device_port != 0:
-            self.device_port = int(device_port)
+        try:
+            port_int = int(device_port)
+        except (TypeError, ValueError):
+            port_int = 0
+        if 1 <= port_int <= 65535:
+            self.device_port = port_int
 
         wifi_security_mode = getattr(message, "wifi_security_mode", 0)
-        if wifi_security_mode > 0:
-            self.wifi_security_mode = wifi_security_mode
+        try:
+            sec_int = int(wifi_security_mode)
+        except (TypeError, ValueError):
+            sec_int = 0
+        if sec_int > 0:
+            self.wifi_security_mode = sec_int
 
         wifi_inf_mode = getattr(message, "wifi_inf_mode", 0)
-        if wifi_inf_mode > 0:
-            self.wifi_infrastructure_mode = wifi_inf_mode
+        try:
+            inf_int = int(wifi_inf_mode)
+        except (TypeError, ValueError):
+            inf_int = 0
+        if inf_int > 0:
+            self.wifi_infrastructure_mode = inf_int
 
-        ip = get_ip_address_string(message)
+        # IP / MAC decoding can raise on missing or oddly-typed
+        # protobuf byte fields. Catch so a single decoder failure
+        # doesn't drop the rest of the metadata update (Qodo PR 17
+        # pass 10 #5).
+        try:
+            ip = get_ip_address_string(message)
+        except Exception:
+            ip = ""
         if ip:
             self.ip_address = ip
 
-        mac = get_mac_address_string(message)
+        try:
+            mac = get_mac_address_string(message)
+        except Exception:
+            mac = ""
         if mac:
             self.mac_address = mac
 
+        # Same hardening as the connection-info fields above (Qodo PR
+        # 17 pass 33 #1 / pass 32 #1) — non-numeric values would
+        # raise on the `> 0` comparison or the int() cast and drop
+        # the rest of the metadata update.
         analog_in_port_num = getattr(message, "analog_in_port_num", 0)
-        if analog_in_port_num > 0:
-            self.capabilities.analog_input_channels = int(analog_in_port_num)
+        try:
+            ai_int = int(analog_in_port_num)
+        except (TypeError, ValueError):
+            ai_int = 0
+        if ai_int > 0:
+            self.capabilities.analog_input_channels = ai_int
 
         analog_out_port_num = getattr(message, "analog_out_port_num", 0)
-        if analog_out_port_num > 0:
-            self.capabilities.analog_output_channels = int(analog_out_port_num)
+        try:
+            ao_int = int(analog_out_port_num)
+        except (TypeError, ValueError):
+            ao_int = 0
+        if ao_int > 0:
+            self.capabilities.analog_output_channels = ao_int
 
         digital_port_num = getattr(message, "digital_port_num", 0)
-        if digital_port_num > 0:
-            self.capabilities.digital_channels = int(digital_port_num)
+        try:
+            d_int = int(digital_port_num)
+        except (TypeError, ValueError):
+            d_int = 0
+        if d_int > 0:
+            self.capabilities.digital_channels = d_int
 
 
 class PowerState(IntEnum):

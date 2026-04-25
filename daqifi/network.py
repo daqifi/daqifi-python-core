@@ -17,7 +17,10 @@ each named field. In Python we keep both shapes:
 """
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Optional, Protocol, runtime_checkable
+
+from daqifi.enums import WifiMode, WifiSecurityType
 
 
 __all__ = [
@@ -29,6 +32,8 @@ __all__ = [
     "get_gateway_string",
     "get_primary_dns_string",
     "get_secondary_dns_string",
+    "NetworkConfiguration",
+    "NetworkConfigurable",
 ]
 
 
@@ -98,3 +103,79 @@ def get_secondary_dns_string(message: Any) -> str:
     """Return `message.secondary_dns` formatted as dotted-decimal IPv4."""
     _require_message(message)
     return format_ipv4(message.secondary_dns)
+
+
+@dataclass
+class NetworkConfiguration:
+    """Network configuration settings for a DAQiFi device.
+
+    Ports the C# ``NetworkConfiguration`` class from
+    ``Daqifi.Core/Device/Network/NetworkConfiguration.cs``. Mutable —
+    the upstream type exposes ``get; set;`` properties so callers can
+    build the configuration up stepwise before calling
+    ``UpdateNetworkConfigurationAsync``.
+
+    Defaults match the upstream parameterless constructor:
+    ``SelfHosted`` mode + ``WpaPskPhrase`` security + empty SSID +
+    empty password.
+    """
+
+    mode: WifiMode = WifiMode.SELF_HOSTED
+    security_type: WifiSecurityType = WifiSecurityType.WPA_PSK_PHRASE
+    ssid: str = ""
+    password: str = ""
+
+    def clone(self) -> "NetworkConfiguration":
+        """Return a new ``NetworkConfiguration`` with the same field values.
+
+        Mirrors the C# ``Clone()`` method — a shallow copy that lets
+        callers stage edits without mutating the live device config.
+        """
+        return NetworkConfiguration(
+            mode=self.mode,
+            security_type=self.security_type,
+            ssid=self.ssid,
+            password=self.password,
+        )
+
+
+@runtime_checkable
+class NetworkConfigurable(Protocol):
+    """Protocol for devices that support network configuration.
+
+    Pythonic name for the C# ``INetworkConfigurable`` interface from
+    ``Daqifi.Core/Device/Network/INetworkConfigurable.cs`` (the ``I``
+    prefix is dropped to match the rest of this codebase's protocols).
+
+    The C# method ``UpdateNetworkConfigurationAsync`` returns ``Task``;
+    here it's an ``async def`` so callers can await it identically.
+    """
+
+    @property
+    def network_configuration(self) -> NetworkConfiguration:
+        """Current network configuration on the device."""
+        ...
+
+    async def update_network_configuration(
+        self,
+        configuration: NetworkConfiguration,
+    ) -> None:
+        """Apply ``configuration`` to the device.
+
+        Stops any active streaming, sends the WiFi mode + SSID + security
+        type + password commands, applies the LAN settings, waits for
+        the WiFi module to restart, re-enables LAN, then persists the
+        configuration so it survives a reboot.
+
+        Note: SD card and LAN share the same SPI bus on the hardware —
+        the implementation handles the interface switching automatically.
+        """
+        ...
+
+    def prepare_sd_interface(self) -> None:
+        """Disable LAN so the SD card can use the shared SPI bus."""
+        ...
+
+    def prepare_lan_interface(self) -> None:
+        """Disable the SD card so LAN can use the shared SPI bus."""
+        ...
