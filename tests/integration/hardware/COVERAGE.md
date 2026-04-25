@@ -36,12 +36,12 @@ public API forces a test or a documented skip).
 
 ## daqifi.communication
 
-- [ ] `StreamMessageConsumer.start` — background reader spins up against real bytes (B4)
-- [ ] `StreamMessageConsumer.stop` — clean halt + thread join (B4)
-- [ ] `StreamMessageConsumer.stop_safely` — bounded-timeout stop (B4)
-- [ ] `StreamMessageConsumer.add_message_received` — events fire per-frame (B4)
-- [ ] `StreamMessageConsumer.queued_message_count` — accurate during/after stream (B4)
-- [ ] `StreamMessageConsumer.clear_buffer` — drops in-flight bytes (B4)
+- [x] `StreamMessageConsumer.start` — background reader spins up against real bytes (B4)
+- [x] `StreamMessageConsumer.stop` — clean halt + thread join (B4)
+- [x] `StreamMessageConsumer.stop_safely` — bounded-timeout stop (B4)
+- [x] `StreamMessageConsumer.add_message_received` — events fire per-frame (B4)
+- [x] `StreamMessageConsumer.queued_message_count` — accurate during/after stream (B4)
+- [ ] `StreamMessageConsumer.clear_buffer` — drops in-flight bytes (B4 — deferred to B6 streaming-lifecycle slice)
 - [~] `LineBasedMessageParser.parse_messages` — pure parser; unit tests
 - [~] `ProtobufMessageParser.parse_messages` — pure parser; unit tests
 - [~] `CompositeMessageParser.parse_messages` — pure parser; unit tests
@@ -236,7 +236,8 @@ out the remaining members the shorthand glossed over (added pass
 ### B4 — streaming (round out)
 
 - [ ] `StreamManager.buffer` — exposed property; covered alongside the StreamManager block
-- [ ] `StreamMessageConsumer.is_running` / `StreamMessageConsumer.close` / `StreamMessageConsumer.add_error_occurred` / `StreamMessageConsumer.remove_error_occurred` / `StreamMessageConsumer.remove_message_received`
+- [ ] `StreamMessageConsumer.is_running` / `StreamMessageConsumer.add_error_occurred` / `StreamMessageConsumer.remove_error_occurred` (B4 — deferred; not exercised by current B4 tests, planned for B6)
+- [x] `StreamMessageConsumer.close` / `StreamMessageConsumer.remove_message_received` (B4)
 
 ### B6 — streaming lifecycle (round out)
 
@@ -261,4 +262,4 @@ out the remaining members the shorthand glossed over (added pass
 
 ---
 
-_Last updated: Qodo /improve pass 9 (per-symbol enforcement)._
+_Last updated: B4 — single-channel streaming + StreamMessageConsumer (skips StreamManager facade and clear_buffer; deferred to B6)._
