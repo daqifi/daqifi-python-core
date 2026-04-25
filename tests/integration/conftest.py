@@ -160,31 +160,40 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
     non-ASCII junk in the buffer) can't mask a clean queue.
 
     Anti-hang escape hatch: if the device returns ``_DRAIN_EMPTY_BUDGET``
-    consecutive empty reads, treat the queue as drained rather than
-    spinning ``max_iterations × _drain.timeout`` seconds (~60s) waiting
-    for a response that's never coming.
+    consecutive *unproductive* reads (truly empty OR full of bytes that
+    don't contain a SCPI error payload — e.g. a stream that's still
+    flushing protobuf frames into the buffer), treat the queue as
+    drained rather than spinning ``max_iterations × _drain.timeout``
+    seconds (~60s) waiting for a response that's never coming.
     """
     popped: List[str] = []
-    empty_reads = 0
+    unproductive_reads = 0
     for _ in range(max_iterations):
         _send_scpi(serial_obj, "SYST:ERR?", delay=0.05)
         raw = _drain(serial_obj, timeout=0.2)
         if not raw:
-            empty_reads += 1
-            if empty_reads >= _DRAIN_EMPTY_BUDGET:
+            unproductive_reads += 1
+            if unproductive_reads >= _DRAIN_EMPTY_BUDGET:
                 return popped
             continue
-        empty_reads = 0
         if _SCPI_NO_ERROR_RE.search(raw):
             return popped
         text = raw.decode("ascii", errors="replace")
+        found_error_line = False
         for line in text.split("\r\n"):
             line = line.strip()
             if not line or line.startswith("SYST:ERR?") or line == "DAQIFI>":
                 continue
             if _SCPI_ERROR_LINE_RE.match(line):
                 popped.append(line)
+                found_error_line = True
                 break
+        if found_error_line:
+            unproductive_reads = 0
+        else:
+            unproductive_reads += 1
+            if unproductive_reads >= _DRAIN_EMPTY_BUDGET:
+                return popped
     return popped
 
 
