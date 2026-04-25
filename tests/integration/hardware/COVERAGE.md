@@ -200,4 +200,65 @@ public API forces a test or a documented skip).
 
 ---
 
-_Last updated: Phase A landing._
+## Per-symbol explicit listings
+
+The earlier sections use the doc shorthand
+``\`Foo.method_a\` / \`method_b\` / \`method_c\``. The coverage script
+still enforces every symbol individually, so this section spells
+out the remaining members the shorthand glossed over (added pass
+9 after the script's class-name fallback was removed).
+
+### Pure logic (no hardware needed)
+
+- [~] `Crc16.crc` / `Crc16.high` / `Crc16.low` — CRC16 accumulator state; pure
+- [~] `IntelHexParser.parse_hex_records` / `IntelHexParser.parse_records` — pure parser
+- [~] `FirmwareVersion.is_pre_release` — pure property derived from the parsed version
+- [~] `Pic32BootloaderProtocol.create_request_version_message` / `Pic32BootloaderProtocol.create_erase_flash_message` / `Pic32BootloaderProtocol.create_program_flash_message` / `Pic32BootloaderProtocol.create_jump_to_application_message` / `Pic32BootloaderProtocol.decode_version_response` / `Pic32BootloaderProtocol.decode_program_flash_response` / `Pic32BootloaderProtocol.decode_erase_flash_response` / `Pic32BootloaderProtocol.parse_hex_file` — pure framing helpers; tested as part of the bootloader unit tests
+- [~] `ProtobufProtocolHandler.can_handle` / `ProtobufProtocolHandler.handle_async` — concrete impl of `IProtocolHandler`; routed via `DaqifiDevice.send` and exercised implicitly by every B2 hardware test
+- [~] `SampleBuffer.to_dict` — pure data transform; covered alongside `to_csv` / `to_json` / `to_dataframe` in B15
+- [~] `TimestampProcessor.process_timestamp` / `TimestampProcessor.reset` / `TimestampProcessor.reset_all` / `TimestampProcessor.tick_period` — pure rollover handler; unit-tested
+- [~] `AnalogInputChannel.index` / `AnalogOutputChannel.index` / `DigitalIOChannel.index` — index property; pure
+- [~] `NetworkConfigurable.network_configuration` — Protocol attribute; tested via concrete `DaqifiStreamingDevice` in B12
+
+### Gated (destructive or external network)
+
+- [d] `FirmwareDownloadService.check_for_update` / `FirmwareDownloadService.download_firmware_by_tag` / `FirmwareDownloadService.download_latest_firmware` / `FirmwareDownloadService.download_wifi_firmware` / `FirmwareDownloadService.get_latest_release` / `FirmwareDownloadService.get_latest_wifi_release` / `FirmwareDownloadService.invalidate_cache` — needs network + GitHub API; B13 firmware-update slice
+
+### B2 — DaqifiDevice (round out the existing slice)
+
+- [ ] `DaqifiDevice.add_message_received` / `DaqifiDevice.remove_message_received` / `DaqifiDevice.add_status_changed` / `DaqifiDevice.remove_status_changed` / `DaqifiDevice.remove_channels_populated`
+- [ ] `DaqifiDevice.close` / `DaqifiDevice.is_connected` / `DaqifiDevice.name` / `DaqifiDevice.ip_address` / `DaqifiDevice.state` / `DaqifiDevice.status` / `DaqifiDevice.transport`
+
+### B3 — discovery (round out)
+
+- [ ] `SerialDeviceFinder.close` / `SerialDeviceFinder.remove_device_discovered` / `SerialDeviceFinder.remove_discovery_completed`
+
+### B4 — streaming (round out)
+
+- [ ] `StreamManager.buffer` — exposed property; covered alongside the StreamManager block
+- [ ] `StreamMessageConsumer.is_running` / `StreamMessageConsumer.close` / `StreamMessageConsumer.add_error_occurred` / `StreamMessageConsumer.remove_error_occurred` / `StreamMessageConsumer.remove_message_received`
+
+### B6 — streaming lifecycle (round out)
+
+- [ ] `DaqifiStreamingDevice.is_logging_to_sd_card` / `DaqifiStreamingDevice.sd_card_files` — properties readable via the streaming-device facade
+
+### B10 — SD card (round out)
+
+- [ ] `NyquistDevice.sd_get_file_size`
+- [ ] `SdCardOperations.is_logging_to_sd_card` / `SdCardOperations.sd_card_files` / `SdCardOperations.get_sd_card_files` / `SdCardOperations.start_sd_card_logging` / `SdCardOperations.stop_sd_card_logging`
+
+### B11 — SD card destructive (round out, gated)
+
+- [d] `SdCardOperations.delete_sd_card_file` / `SdCardOperations.format_sd_card`
+
+### Skipped (no test rig)
+
+- [s] `TcpStreamTransport.add_status_changed` / `TcpStreamTransport.remove_status_changed` / `TcpStreamTransport.close` / `TcpStreamTransport.connection_info` / `TcpStreamTransport.disconnect` / `TcpStreamTransport.is_connected` / `TcpStreamTransport.stream` — no TCP-bridged Nyquist test rig
+- [s] `HidLibraryTransport.connect` / `HidLibraryTransport.disconnect` / `HidLibraryTransport.close` / `HidLibraryTransport.read` / `HidLibraryTransport.write` / `HidLibraryTransport.is_connected` / `HidLibraryTransport.vendor_id` / `HidLibraryTransport.product_id` / `HidLibraryTransport.serial_number` / `HidLibraryTransport.device_path` / `HidLibraryTransport.read_timeout` / `HidLibraryTransport.write_timeout` — needs bootloader-mode HID device; B13 firmware-update only
+- [s] `HidDeviceFinder.close` / `HidDeviceFinder.add_device_discovered` / `HidDeviceFinder.remove_device_discovered` / `HidDeviceFinder.add_discovery_completed` / `HidDeviceFinder.remove_discovery_completed` — paired with HidLibraryTransport above
+- [s] `WiFiDeviceFinder.close` / `WiFiDeviceFinder.add_device_discovered` / `WiFiDeviceFinder.remove_device_discovered` / `WiFiDeviceFinder.add_discovery_completed` / `WiFiDeviceFinder.remove_discovery_completed` — needs WiFi-attached Nyquist on local LAN
+- [ ] `UdpTransport.open` / `UdpTransport.close` / `UdpTransport.is_open` / `UdpTransport.local_port` / `UdpTransport.connection_info` / `UdpTransport.send_broadcast_to` / `UdpTransport.send_unicast` / `UdpTransport.add_status_changed` / `UdpTransport.remove_status_changed` — exercised indirectly by `WiFiDeviceFinder.discover()` in B3 (when WiFi rig becomes available)
+
+---
+
+_Last updated: Qodo /improve pass 9 (per-symbol enforcement)._

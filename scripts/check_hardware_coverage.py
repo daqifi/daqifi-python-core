@@ -207,8 +207,7 @@ def main() -> int:
     needed = collect_public_symbols()
     listed = parse_coverage_doc(COVERAGE_DOC)
 
-    missing = sorted(s for s in needed if s not in listed
-                     and s.split(".", 1)[0] not in listed)
+    missing = sorted(s for s in needed if s not in listed)
 
     print(f"Public symbols discovered: {len(needed)}")
     print(f"Symbols listed in COVERAGE.md: {len(listed)}")
