@@ -112,7 +112,20 @@ def serial_transport(device_info: DeviceInfo) -> Iterator[SerialStreamTransport]
         os_rx_buffer_bytes=65536,
         os_tx_buffer_bytes=65536,
     )
-    transport.connect()
+    try:
+        transport.connect()
+    except Exception as exc:
+        # Connection raised — release any partial state and route
+        # to the same skip-or-fail policy the rest of the fixture
+        # uses for "device not available".
+        try:
+            transport.disconnect()
+        except Exception:
+            pass
+        msg = f"failed to connect to device on port {port!r}: {exc}"
+        if _required():
+            pytest.fail(msg)
+        pytest.skip(msg)
     if not transport.is_connected or transport.stream is None:
         # connect() raises on failure on most paths, but guard the
         # belt-and-suspenders case so a downstream test gets a clear
@@ -122,7 +135,10 @@ def serial_transport(device_info: DeviceInfo) -> Iterator[SerialStreamTransport]
             transport.disconnect()
         except Exception:
             pass
-        pytest.skip(f"failed to connect to device on port {port!r}")
+        msg = f"failed to connect to device on port {port!r}"
+        if _required():
+            pytest.fail(msg)
+        pytest.skip(msg)
     try:
         yield transport
     finally:

@@ -98,10 +98,19 @@ def test_short_streaming_smoke(
         serial_obj.write(b"SYSTem:StartStreamData 100\r")
         serial_obj.flush()
         time.sleep(1.0)
-        serial_obj.write(b"SYSTem:StopStreamData\r")
-        serial_obj.flush()
-        time.sleep(0.3)
     finally:
+        # Always stop streaming on the way out — if the test body
+        # raised mid-window, leaking an active stream into the
+        # subsequent firmware_stats_diff.close() snapshot would
+        # corrupt the SYST:STR:STATS? read with leftover protobuf
+        # bytes. Best-effort because we're already in a teardown
+        # path and a raise here would mask the original failure.
+        try:
+            serial_obj.write(b"SYSTem:StopStreamData\r")
+            serial_obj.flush()
+            time.sleep(0.3)
+        except Exception:
+            pass
         reader.stop()
         firmware_stats_diff.close()
 
