@@ -429,11 +429,19 @@ class StreamMessageConsumer(Generic[T]):
     thread, mirroring upstream's resilience.
     """
 
+    # Match SerialStreamTransport.DEFAULT_OS_RX_BUFFER_BYTES so a
+    # single `stream.read()` call empties the OS-level USB CDC buffer
+    # in one syscall when it's full. Reading in smaller chunks would
+    # need multiple syscalls per drain — tolerable, but adds context-
+    # switch overhead and slightly raises the chance of an OS-level
+    # overflow if the parse path stalls between reads.
+    DEFAULT_BUFFER_SIZE = 64 * 1024
+
     def __init__(
         self,
         stream: IO[bytes],
         message_parser: Any,  # Duck-typed: anything with parse_messages(bytes)
-        buffer_size: int = 4096,
+        buffer_size: int = DEFAULT_BUFFER_SIZE,
         is_wifi_device: bool = False,
     ) -> None:
         if stream is None:  # type: ignore[unreachable]

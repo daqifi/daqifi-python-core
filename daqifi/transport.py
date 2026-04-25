@@ -303,6 +303,14 @@ class SerialStreamTransport:
     promptly, mirroring upstream behaviour.
     """
 
+    # OS-level USB CDC RX buffer hint for `set_buffer_size` (Windows
+    # only — pyserial's call wraps Win32 SetupComm; other platforms
+    # ignore it). 64 KiB is large enough to absorb a ~30 ms streaming
+    # burst at 100 kHz × 2-byte samples without dropping, which is
+    # well past the firmware's documented 1 ms read-cadence floor.
+    DEFAULT_OS_RX_BUFFER_BYTES = 64 * 1024
+    DEFAULT_OS_TX_BUFFER_BYTES = 64 * 1024
+
     def __init__(
         self,
         port_name: str,
@@ -312,9 +320,15 @@ class SerialStreamTransport:
         stop_bits: float = serial.STOPBITS_ONE,
         enable_dtr: bool = True,
         enable_rts: bool = False,
+        os_rx_buffer_bytes: int = DEFAULT_OS_RX_BUFFER_BYTES,
+        os_tx_buffer_bytes: int = DEFAULT_OS_TX_BUFFER_BYTES,
     ) -> None:
         if not port_name:
             raise ValueError("port_name cannot be empty.")
+        if os_rx_buffer_bytes <= 0:
+            raise ValueError("os_rx_buffer_bytes must be positive.")
+        if os_tx_buffer_bytes <= 0:
+            raise ValueError("os_tx_buffer_bytes must be positive.")
         self._port_name = port_name
         self._baud_rate = baud_rate
         self._parity = parity
@@ -322,6 +336,8 @@ class SerialStreamTransport:
         self._stop_bits = stop_bits
         self._enable_dtr = enable_dtr
         self._enable_rts = enable_rts
+        self._os_rx_buffer_bytes = os_rx_buffer_bytes
+        self._os_tx_buffer_bytes = os_tx_buffer_bytes
         self._serial: Optional[serial.Serial] = None
         self._disposed = False
         self._status_handlers: List[Callable[[TransportStatusEventArgs], None]] = []
@@ -385,6 +401,26 @@ class SerialStreamTransport:
                 # pyserial 3.5 supports setting these after open().
                 self._serial.dtr = self._enable_dtr
                 self._serial.rts = self._enable_rts
+
+                # Bump the OS-level USB CDC driver buffers (Windows
+                # SetupComm, no-op on Linux/macOS where the kernel
+                # owns the URB allocation). A larger driver buffer
+                # absorbs streaming bursts that would otherwise drop
+                # if the consumer thread takes a context-switch hit
+                # mid-parse — firmware drops if the host doesn't read
+                # within ~1 ms (per daqifi-python-test-suite/
+                # test_harness.py:106 FastReader notes).
+                set_buffer_size = getattr(self._serial, "set_buffer_size", None)
+                if callable(set_buffer_size):
+                    try:
+                        set_buffer_size(
+                            rx_size=self._os_rx_buffer_bytes,
+                            tx_size=self._os_tx_buffer_bytes,
+                        )
+                    except (OSError, NotImplementedError):
+                        # Linux + macOS pyserial don't implement this;
+                        # silently fall back to the kernel default.
+                        pass
 
                 # Mirror upstream: drop ReadTimeout to 500ms post-open
                 # so consumer threads can be stopped promptly.

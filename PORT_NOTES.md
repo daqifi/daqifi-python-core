@@ -116,6 +116,35 @@ filed; see
 [#142](https://github.com/cptkoolbeenz/portomatic/issues/142),
 [#143](https://github.com/cptkoolbeenz/portomatic/issues/143).
 
+## USB CDC buffer sizing
+
+`SerialStreamTransport` requests a 64 KiB OS-level RX/TX buffer via
+pyserial's `set_buffer_size()` after open, and `StreamMessageConsumer`
+reads in matching 64 KiB chunks so a single syscall drains the OS
+buffer when full. The defaults are exposed as constructor parameters
+(`os_rx_buffer_bytes`, `os_tx_buffer_bytes`, `buffer_size`) for
+callers that want to tune.
+
+**Why it matters.** The DAQiFi firmware's USB CDC writer drops bytes
+if the host doesn't read within roughly 1 ms (per
+`daqifi-python-test-suite/test_harness.py:106`'s `FastReader` notes).
+The OS-level buffer is the cushion that absorbs scheduling jitter
+between the device emitting a burst and the consumer thread waking
+to drain it. A small driver buffer + slow read = drops.
+
+**Platform behavior.**
+
+- **Windows.** `pyserial`'s `set_buffer_size()` calls Win32
+  `SetupComm()`, which the `usbser.sys` driver honors. Larger
+  buffers are real.
+- **Linux / WSL2.** `pyserial` on Linux raises `NotImplementedError`
+  for `set_buffer_size()`; the call is caught and ignored. The
+  `cdc_acm` kernel driver allocates URBs based on the device's USB
+  endpoint MaxPacketSize and a fixed `NR_URBS` (default 16). Tuning
+  requires kernel-side changes — see follow-up ticket for the
+  benchmark-driven recommendation.
+- **macOS.** Similar to Linux — pyserial's call is a no-op.
+
 ## Known coverage-classifier quirks (cosmetic, not real port gaps)
 
 - `ScpiMessageProducer` shows as **missing** in the coverage report —
