@@ -313,7 +313,12 @@ def clean_device(serial_transport: SerialStreamTransport):
     time.sleep(0.2)
     _drain(serial_obj, timeout=0.2)
 
-    _drain_scpi_errors(serial_obj)
+    pre = _drain_scpi_errors(serial_obj)
+    if any(e.startswith("DRAIN_INCONCLUSIVE,") for e in pre):
+        pytest.fail(
+            "clean_device: unable to confirm SCPI error queue cleared "
+            "during pre-init drain:\n  " + "\n  ".join(pre)
+        )
     _send_scpi(serial_obj, "SYSTem:StopStreamData", delay=0.5)
     _drain(serial_obj, timeout=0.3)
     _send_scpi(serial_obj, "ENAble:VOLTage:DC 0", delay=0.2)
@@ -324,7 +329,12 @@ def clean_device(serial_transport: SerialStreamTransport):
     # rather than letting it taint the queue.
     _send_scpi(serial_obj, "SYSTem:STReam:INTerface 0", delay=0.2)
     _drain(serial_obj, timeout=0.2)
-    _drain_scpi_errors(serial_obj)
+    post = _drain_scpi_errors(serial_obj)
+    if any(e.startswith("DRAIN_INCONCLUSIVE,") for e in post):
+        pytest.fail(
+            "clean_device: unable to confirm SCPI error queue cleared "
+            "after init sequence:\n  " + "\n  ".join(post)
+        )
 
     yield serial_transport
 

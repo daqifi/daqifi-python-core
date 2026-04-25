@@ -63,8 +63,12 @@ class FastReader:
         self._running = True
         self.bytes_received = 0
         self._on_chunk = on_chunk
-        self._thread = threading.Thread(target=self._loop, daemon=True,
-                                        name="FastReader")
+        # Clear any stale exception from a prior start/stop cycle so a
+        # FastReader instance can be reused without leaking state.
+        self.last_exception = None
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="FastReader"
+        )
         self._thread.start()
 
     def stop(self, timeout: float = 3.0) -> None:

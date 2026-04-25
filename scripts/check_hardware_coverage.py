@@ -222,7 +222,17 @@ def parse_coverage_doc(path: Path) -> Set[str]:
 
 
 def main() -> int:
-    strict = "--strict" in sys.argv
+    strict = False
+    for arg in sys.argv[1:]:
+        if arg == "--strict":
+            strict = True
+        elif arg in ("-h", "--help"):
+            print(__doc__)
+            return 0
+        else:
+            print(f"ERROR: unknown argument: {arg}", file=sys.stderr)
+            print("usage: check_hardware_coverage.py [--strict]", file=sys.stderr)
+            return 2
 
     needed = collect_public_symbols()
     listed = parse_coverage_doc(COVERAGE_DOC)
