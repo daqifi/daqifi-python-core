@@ -15,6 +15,7 @@ high-level ``device`` fixture for use by tests under
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,19 @@ import pytest
 from daqifi.device import NyquistDevice
 from daqifi.discovery import DeviceFinder, DeviceInfo
 from daqifi.transport import SerialStreamTransport
+
+
+# Match the canonical 'no-error' reply against the raw bytes — robust
+# against leftover binary stream data (protobuf frames, partial UTF-8)
+# that may share the read window with a SCPI reply just after a stream
+# stops. ``\b`` boundaries keep us from matching e.g. '120,"No error in
+# stream"' if firmware ever emits something looser.
+_SCPI_NO_ERROR_RE = re.compile(rb'\b0\s*,\s*"No error"')
+
+# A SCPI error payload has the shape `<int>,"<message>"`. Anything
+# else in the response window (echo, prompt, stray binary) is not a
+# valid error to record.
+_SCPI_ERROR_LINE_RE = re.compile(r'^-?\d+\s*,\s*".*"$')
 
 
 def _required() -> bool:
@@ -136,21 +150,26 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
     Returns the popped error strings (empty if the queue was clean).
     Mirrors the design from the new daqifi-python-core#22 ticket: the
     caller owns the popped errors and decides whether to log/raise.
+
+    Robust against binary noise in the read window — checks the raw
+    bytes for the canonical 'No error' marker before falling back to
+    text decoding, so leftover protobuf stream bytes (or any other
+    non-ASCII junk in the buffer) can't mask a clean queue.
     """
     popped: List[str] = []
     for _ in range(max_iterations):
         _send_scpi(serial_obj, "SYST:ERR?", delay=0.05)
         raw = _drain(serial_obj, timeout=0.2)
-        text = raw.decode("ascii", errors="replace")
-        if '0,"No error"' in text:
+        if _SCPI_NO_ERROR_RE.search(raw):
             return popped
-        # Strip echo + prompt, keep the data line(s)
+        text = raw.decode("ascii", errors="replace")
         for line in text.split("\r\n"):
             line = line.strip()
             if not line or line.startswith("SYST:ERR?") or line == "DAQIFI>":
                 continue
-            popped.append(line)
-            break
+            if _SCPI_ERROR_LINE_RE.match(line):
+                popped.append(line)
+                break
     return popped
 
 
