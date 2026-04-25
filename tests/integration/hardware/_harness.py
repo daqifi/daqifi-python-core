@@ -50,6 +50,12 @@ class FastReader:
         self._thread: Optional[threading.Thread] = None
         self.bytes_received = 0
         self._on_chunk: Optional[Callable[[bytes], None]] = None
+        # Latest exception caught inside _loop. The reader is a daemon
+        # and intentionally never dies on errors (so the test can
+        # observe a bytes_received plateau) — but a caller debugging a
+        # streaming failure needs a way to see what the daemon
+        # actually swallowed.
+        self.last_exception: Optional[BaseException] = None
 
     def start(self, on_chunk: Optional[Callable[[bytes], None]] = None) -> None:
         if self._running:
@@ -82,14 +88,17 @@ class FastReader:
                     if self._on_chunk is not None:
                         try:
                             self._on_chunk(bytes(data))
-                        except Exception:
+                        except Exception as exc:
                             # Reader thread must not die on callback errors.
-                            pass
+                            self.last_exception = exc
                 else:
                     time.sleep(self.POLL_INTERVAL_S)
-            except Exception:
+            except Exception as exc:
                 # Hardware errors are surfaced by the caller observing
-                # bytes_received plateau; don't crash the daemon.
+                # bytes_received plateau; don't crash the daemon. Also
+                # record the exception so a failing test can introspect
+                # what went wrong (vs. just seeing a count of zero).
+                self.last_exception = exc
                 time.sleep(0.01)
 
 

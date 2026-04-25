@@ -187,22 +187,28 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
             if unproductive_reads >= _DRAIN_EMPTY_BUDGET:
                 break
             continue
-        if _SCPI_NO_ERROR_RE.search(raw):
-            saw_no_error = True
-            break
+        # Parse error lines BEFORE checking for the no-error marker —
+        # a single read window can carry replies to several SYST:ERR?
+        # round-trips, so the last byte sequence might be `0,"No error"`
+        # while earlier bytes contain real errors. Breaking on the
+        # marker first would silently drop those earlier errors.
+        # _SCPI_ERROR_LINE_RE also matches the no-error line itself
+        # (it's `0,"No error"` — same shape as a SCPI error reply),
+        # so explicitly filter that variant out of the popped list.
         text = raw.decode("ascii", errors="replace")
         found_any_error_line = False
         for line in text.split("\r\n"):
             line = line.strip()
             if not line or line.startswith("SYST:ERR?") or line == "DAQIFI>":
                 continue
+            if _SCPI_NO_ERROR_RE.search(line.encode("ascii", errors="replace")):
+                continue
             if _SCPI_ERROR_LINE_RE.match(line):
-                # Append every error line found in the read window —
-                # don't break on the first, because a single drain read
-                # can carry the reply to multiple SYST:ERR? round-trips
-                # if the device is fast (we'd silently drop the rest).
                 popped.append(line)
                 found_any_error_line = True
+        if _SCPI_NO_ERROR_RE.search(raw):
+            saw_no_error = True
+            break
         if found_any_error_line:
             unproductive_reads = 0
         else:
@@ -232,6 +238,15 @@ def error_drainer(serial_transport: SerialStreamTransport):
 
     pre = _drain_scpi_errors(serial_obj)
     if pre:
+        # If we couldn't confirm the queue actually drained (saw the
+        # synthetic DRAIN_INCONCLUSIVE sentinel), the device is in an
+        # unknown state and downstream test assertions would be unsafe
+        # to trust — fail the setup loudly instead.
+        if any(e.startswith("DRAIN_INCONCLUSIVE,") for e in pre):
+            pytest.fail(
+                "unable to confirm clean SCPI error queue before test:\n  "
+                + "\n  ".join(pre)
+            )
         # Pre-existing errors aren't the test's fault — log via print
         # so they show up under `pytest -s` but don't fail.
         print(f"\n[error_drainer] pre-test drained {len(pre)} stale error(s):")
