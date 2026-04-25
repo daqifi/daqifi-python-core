@@ -34,14 +34,18 @@ def pytest_collection_modifyitems(config, items):
     in every file. ``hardware_destructive`` and ``hardware_slow`` still
     need to be applied explicitly per test.
 
-    Uses ``Path.is_relative_to`` (Python 3.9+) so a sibling like
-    ``tests/integration/hardware_extras/`` doesn't false-match a raw
-    string prefix.
+    Compares paths via ``Path.is_relative_to`` on 3.9+ and falls back
+    to ``_HARDWARE_DIR in path.parents`` on 3.8 (the project's lowest
+    supported Python; setup.py declares ``python_requires=">=3.8"``).
     """
     for item in items:
         try:
             item_path = Path(str(item.fspath)).resolve()
-            is_under_hw = item_path.is_relative_to(_HARDWARE_DIR)
+            try:
+                is_under_hw = item_path.is_relative_to(_HARDWARE_DIR)
+            except AttributeError:
+                # Python 3.8 fallback — is_relative_to was added in 3.9.
+                is_under_hw = _HARDWARE_DIR in item_path.parents
         except (ValueError, OSError):
             is_under_hw = False
         if is_under_hw:

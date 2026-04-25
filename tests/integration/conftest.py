@@ -254,6 +254,14 @@ def clean_device(serial_transport: SerialStreamTransport):
     """
     serial_obj = serial_transport.stream  # type: ignore[union-attr]
 
+    # Brief CDC settle window — the OS / pyserial dance to open the
+    # port can leave a few stray bytes in the receive buffer (boot
+    # banner, stale streaming output from a prior session). Drain
+    # them before issuing the first SCPI command so they don't get
+    # mistaken for a SCPI reply.
+    time.sleep(0.2)
+    _drain(serial_obj, timeout=0.2)
+
     _drain_scpi_errors(serial_obj)
     _send_scpi(serial_obj, "SYSTem:StopStreamData", delay=0.5)
     _drain(serial_obj, timeout=0.3)
