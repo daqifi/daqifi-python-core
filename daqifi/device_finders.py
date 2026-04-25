@@ -76,6 +76,11 @@ class DeviceInfo:
     port: Optional[int] = None
     device_path: Optional[str] = None
     is_power_on: bool = True
+    # WiFi-only: hyphen-separated upper-hex MAC ("AA-BB-CC-DD-EE-FF")
+    # decoded from the device's protobuf discovery response. Empty
+    # for non-WiFi finders or when the device pre-dates protobuf
+    # discovery responses.
+    mac_address: str = ""
 
 
 @dataclass(frozen=True)
@@ -388,6 +393,93 @@ _DAQIFI_FINDER_QUERY = b"DAQiFi?\r\n"
 _DEFAULT_DISCOVERY_PORT = 30303
 _WIFI_DEFAULT_TIMEOUT_S = 5.0
 _POWER_EVENT_MARKER = "Power event occurred"
+_DEFAULT_SCPI_TCP_PORT = 9760
+
+
+def _try_parse_protobuf_response(data: bytes) -> Optional[Any]:
+    """Decode a UDP discovery response as a `DaqifiOutMessage`.
+
+    Mirrors the C# upstream's
+    ``DaqifiOutMessage.Parser.ParseDelimitedFrom(stream)`` —
+    firmware emits a varint length prefix followed by the protobuf
+    payload. Returns ``None`` if neither the length-prefixed nor a
+    bare-payload decode yields a message with at least one identity
+    field; callers should then fall back to the legacy text parse.
+    """
+    if not data:
+        return None
+    try:
+        from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+    except Exception:
+        return None
+
+    # Length-prefixed first — that's what the firmware sends.
+    from daqifi.communication import _try_read_length_prefix
+    length, prefix_bytes, malformed = _try_read_length_prefix(data)
+    if length is not None and not malformed and length > 0:
+        end = prefix_bytes + length
+        if end <= len(data):
+            try:
+                msg = DaqifiOutMessage.FromString(data[prefix_bytes:end])
+                if _has_identity_field(msg):
+                    return msg
+            except Exception:
+                pass
+
+    # Fallback: some firmware variants may send the bare payload.
+    # Reject all-default decodes — random text often parses to an
+    # empty protobuf because every field is optional in proto3.
+    try:
+        msg = DaqifiOutMessage.FromString(data)
+    except Exception:
+        return None
+    return msg if _has_identity_field(msg) else None
+
+
+def _has_identity_field(message: Any) -> bool:
+    """Did protobuf decoding actually populate an identifying field?
+
+    Used as the false-positive guard for `_try_parse_protobuf_response`
+    — proto3 has no required fields, so plain text often decodes to
+    a zero-valued message that we must reject.
+    """
+    return bool(
+        (getattr(message, "host_name", "") or "").strip()
+        or (getattr(message, "device_pn", "") or "").strip()
+        or (getattr(message, "device_fw_rev", "") or "").strip()
+        or getattr(message, "device_sn", 0)
+        or getattr(message, "mac_addr", b"")
+    )
+
+
+def _coerce_serial_number(value: Any) -> str:
+    """Convert a `device_sn` field (uint64 or str) to a display string."""
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        as_int = int(value)
+    except (TypeError, ValueError):
+        return ""
+    return str(as_int) if as_int else ""
+
+
+def _coerce_device_port(value: Any) -> int:
+    """Validate `device_port` and fall back to firmware default."""
+    try:
+        as_int = int(value)
+    except (TypeError, ValueError):
+        as_int = 0
+    if 1 <= as_int <= 65535:
+        return as_int
+    return _DEFAULT_SCPI_TCP_PORT
+
+
+def _device_type_from_part_number(device_pn: str) -> str:
+    """Map firmware-reported part number to the finder's DeviceType."""
+    pn = (device_pn or "").strip().lower()
+    if pn.startswith("nq"):
+        return DeviceType.NYQUIST
+    return DeviceType.UNKNOWN
 
 
 class WiFiDeviceFinder:
@@ -461,7 +553,11 @@ class WiFiDeviceFinder:
         # extend the deadline forever or trip it instantly (Qodo PR
         # 17 pass 25 #4).
         deadline = time.monotonic() + max(timeout.total_seconds(), 0.0)
-        seen_ips: set = set()
+        # De-dupe by MAC when the device's protobuf carries one
+        # (matches the C# IsDuplicateDevice helper); else fall back
+        # to source IP. Using a single set with a "mac:..." / "ip:..."
+        # prefix keeps the two namespaces from colliding.
+        seen_keys: set = set()
         discovered: List[DeviceInfo] = []
         try:
             with self._lock:
@@ -488,22 +584,30 @@ class WiFiDeviceFinder:
                         if result is None:
                             continue
                         data, (ip, port) = result
-                        if ip in seen_ips:
-                            continue  # de-dup repeated responses from same device
                         text = data.decode("utf-8", errors="replace")
                         if _POWER_EVENT_MARKER in text:
                             # Discovery requests echo a power-event line; skip.
                             continue
-                        seen_ips.add(ip)
-                        info = DeviceInfo(
-                            name=text.strip().splitlines()[0] if text.strip() else f"DAQiFi-{ip}",
-                            serial_number="",
-                            firmware_version="",
-                            connection_type=ConnectionType.WIFI,
-                            device_type=DeviceType.UNKNOWN,
-                            ip_address=ip,
-                            port=9760,  # firmware listens on the SCPI TCP port
+                        # Skip our own broadcast echoes — some networks
+                        # loop them back, and parsing them as a device
+                        # would yield a self-referential phantom hit.
+                        if (
+                            self.DAQIFI_FINDER_QUERY in data
+                            or self.NATIVE_FINDER_QUERY in data
+                        ):
+                            continue
+
+                        info = self._build_device_info(data, text, ip)
+                        # Dedupe key: prefer MAC (matches C#
+                        # IsDuplicateDevice), else IP.
+                        key = (
+                            f"mac:{info.mac_address}"
+                            if info.mac_address
+                            else f"ip:{ip}"
                         )
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
                         discovered.append(info)
                 finally:
                     if opened_here:
@@ -521,6 +625,53 @@ class WiFiDeviceFinder:
                 self._fire_discovered(info)
             self._fire_completed()
         return discovered
+
+    @staticmethod
+    def _build_device_info(data: bytes, text: str, ip: str) -> DeviceInfo:
+        """Translate one UDP datagram into a `DeviceInfo`.
+
+        Tries the firmware's length-prefixed protobuf framing first
+        (matches C# `WiFiDeviceFinder.ParseDeviceInfo`), then falls
+        back to the legacy text-only response shape so older firmware
+        and stub devices that just echo "DaqifiNyq1\\r\\n" still
+        discover.
+        """
+        pb = _try_parse_protobuf_response(data)
+        if pb is not None:
+            try:
+                from daqifi.network import get_mac_address_string
+                mac = get_mac_address_string(pb)
+            except Exception:
+                mac = ""
+            host_name = (getattr(pb, "host_name", "") or "").strip()
+            fw_rev = (getattr(pb, "device_fw_rev", "") or "").strip()
+            try:
+                is_power_on = int(getattr(pb, "pwr_status", 1)) == 1
+            except (TypeError, ValueError):
+                is_power_on = True
+            return DeviceInfo(
+                name=host_name or f"DAQiFi-{ip}",
+                serial_number=_coerce_serial_number(getattr(pb, "device_sn", 0)),
+                firmware_version=fw_rev,
+                connection_type=ConnectionType.WIFI,
+                device_type=_device_type_from_part_number(getattr(pb, "device_pn", "")),
+                ip_address=ip,
+                port=_coerce_device_port(getattr(pb, "device_port", 0)),
+                mac_address=mac,
+                is_power_on=is_power_on,
+            )
+
+        stripped = text.strip()
+        return DeviceInfo(
+            name=stripped.splitlines()[0] if stripped else f"DAQiFi-{ip}",
+            serial_number="",
+            firmware_version="",
+            connection_type=ConnectionType.WIFI,
+            device_type=DeviceType.UNKNOWN,
+            ip_address=ip,
+            port=_DEFAULT_SCPI_TCP_PORT,
+            mac_address="",
+        )
 
     def close(self) -> None:
         self._disposed = True

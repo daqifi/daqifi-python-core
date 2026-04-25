@@ -202,6 +202,148 @@ class TestWiFiDeviceFinder:
             assert results[0].ip_address == "127.0.0.1"
             assert results[0].port == 9760
             assert "DaqifiNyq1" in results[0].name
+            # Text-only legacy response carries no MAC.
+            assert results[0].mac_address == ""
+            assert results[0].serial_number == ""
+            assert results[0].firmware_version == ""
         finally:
             responder.shutdown()
             responder.join(timeout=1.0)
+
+
+# ---- WiFiDeviceFinder protobuf parsing ---------------------------------------
+
+
+def _make_protobuf_response(
+    *,
+    host_name: str = "DaqifiNq1-AABBCC",
+    device_pn: str = "NQ1",
+    device_fw_rev: str = "3.4.6b1",
+    device_sn: int = 1234567,
+    device_port: int = 9760,
+    mac_addr: bytes = bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]),
+    ip_addr: bytes = bytes([192, 168, 1, 42]),
+    pwr_status: int = 1,
+    length_prefix: bool = True,
+) -> bytes:
+    """Build a `DaqifiOutMessage` UDP discovery payload for tests."""
+    from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+    from google.protobuf.internal.encoder import _VarintBytes
+
+    m = DaqifiOutMessage()
+    if host_name:
+        m.host_name = host_name
+    if device_pn:
+        m.device_pn = device_pn
+    if device_fw_rev:
+        m.device_fw_rev = device_fw_rev
+    if device_sn:
+        m.device_sn = device_sn
+    if device_port:
+        m.device_port = device_port
+    if mac_addr:
+        m.mac_addr = mac_addr
+    if ip_addr:
+        m.ip_addr = ip_addr
+    if pwr_status is not None:
+        m.pwr_status = pwr_status
+    payload = m.SerializeToString()
+    if length_prefix:
+        return _VarintBytes(len(payload)) + payload
+    return payload
+
+
+def _run_finder_against_payload(payload: bytes):
+    """Spin up a UDP responder that returns `payload`, run discover()."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock_port = sock.getsockname()[1]
+    responder = _UdpResponderThread(sock, payload)
+    responder.start()
+    try:
+        udp = UdpTransport()
+        udp.open()
+        try:
+            def _stub_broadcast(data, port):
+                udp.send_unicast(data, ("127.0.0.1", sock_port))
+            udp.send_broadcast = _stub_broadcast  # type: ignore[assignment]
+            f = WiFiDeviceFinder(discovery_port=sock_port)
+            return f.discover(
+                timeout=timedelta(milliseconds=500),
+                udp_transport=udp,
+            )
+        finally:
+            udp.close()
+    finally:
+        responder.shutdown()
+        responder.join(timeout=1.0)
+
+
+class TestWiFiDeviceFinderProtobuf:
+    def test_length_prefixed_protobuf_extracts_identity(self):
+        results = _run_finder_against_payload(_make_protobuf_response())
+        assert len(results) == 1
+        info = results[0]
+        assert info.connection_type == ConnectionType.WIFI
+        assert info.device_type == DeviceType.NYQUIST
+        assert info.name == "DaqifiNq1-AABBCC"
+        assert info.serial_number == "1234567"
+        assert info.firmware_version == "3.4.6b1"
+        assert info.mac_address == "AA-BB-CC-DD-EE-FF"
+        assert info.port == 9760
+        assert info.ip_address == "127.0.0.1"
+        assert info.is_power_on is True
+
+    def test_bare_protobuf_payload_falls_through(self):
+        # Some firmware variants ship the protobuf without a varint
+        # prefix. The bare-payload fallback should still extract.
+        results = _run_finder_against_payload(
+            _make_protobuf_response(length_prefix=False)
+        )
+        assert len(results) == 1
+        assert results[0].mac_address == "AA-BB-CC-DD-EE-FF"
+        assert results[0].serial_number == "1234567"
+
+    def test_invalid_device_port_falls_back_to_default(self):
+        results = _run_finder_against_payload(
+            _make_protobuf_response(device_port=0)
+        )
+        assert len(results) == 1
+        assert results[0].port == 9760
+
+    def test_powered_off_is_reflected(self):
+        results = _run_finder_against_payload(
+            _make_protobuf_response(pwr_status=0)
+        )
+        assert len(results) == 1
+        assert results[0].is_power_on is False
+
+    def test_unknown_part_number_maps_to_unknown_type(self):
+        results = _run_finder_against_payload(
+            _make_protobuf_response(device_pn="WidgetPro")
+        )
+        assert len(results) == 1
+        assert results[0].device_type == DeviceType.UNKNOWN
+
+    def test_dedupes_by_mac_when_protobuf_present(self):
+        # Two protobuf responses from the same MAC (but the test
+        # responder always replies from 127.0.0.1, so IP-only dedupe
+        # would also collapse — the assertion is that the MAC dedupe
+        # path runs and produces exactly one result).
+        results = _run_finder_against_payload(_make_protobuf_response())
+        assert len(results) == 1
+        assert results[0].mac_address == "AA-BB-CC-DD-EE-FF"
+
+    def test_unparseable_payload_falls_back_to_text(self):
+        # Random ASCII that can't decode as a meaningful protobuf
+        # — the text-fallback path should still produce a DeviceInfo.
+        results = _run_finder_against_payload(b"DaqifiNyq1\r\n")
+        assert len(results) == 1
+        assert "DaqifiNyq1" in results[0].name
+        assert results[0].mac_address == ""
+
+    def test_query_echo_is_skipped(self):
+        # If the device (or a network loopback) echoes our own
+        # broadcast back, we must NOT report it as a device.
+        results = _run_finder_against_payload(b"DAQiFi?\r\n")
+        assert results == []
