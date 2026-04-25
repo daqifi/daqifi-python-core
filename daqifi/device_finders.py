@@ -25,7 +25,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from ._internal.comm import HidDeviceInfo
 from ._internal.scpi import StreamInterface
@@ -396,6 +396,30 @@ _POWER_EVENT_MARKER = "Power event occurred"
 _DEFAULT_SCPI_TCP_PORT = 9760
 
 
+def _read_varint32(data: bytes) -> Tuple[Optional[int], int]:
+    """Decode a protobuf varint32 from the head of ``data``.
+
+    Returns ``(value, bytes_read)`` on success, or ``(None, bytes_read)``
+    if the encoding is incomplete (truncated) or malformed (varint
+    longer than 5 bytes). Inlined here rather than imported from
+    `daqifi.communication._try_read_length_prefix` to keep
+    `device_finders` decoupled from another module's private helper —
+    the encoding is a 5-line spec and duplicating it is cheaper than
+    coupling to a private name across modules.
+    """
+    value = 0
+    shift = 0
+    for i in range(5):
+        if i >= len(data):
+            return None, i  # truncated
+        b = data[i]
+        value |= (b & 0x7F) << shift
+        if (b & 0x80) == 0:
+            return value, i + 1
+        shift += 7
+    return None, 5  # malformed (no terminating byte in 5 bytes)
+
+
 def _try_parse_protobuf_response(data: bytes) -> Optional[Any]:
     """Decode a UDP discovery response as a `DaqifiOutMessage`.
 
@@ -419,9 +443,8 @@ def _try_parse_protobuf_response(data: bytes) -> Optional[Any]:
     # whose first byte happens to look like a valid varint length
     # would otherwise enter the delimited path with leftover bytes
     # silently truncated (Qodo PR 19 review bug #6).
-    from daqifi.communication import _try_read_length_prefix
-    length, prefix_bytes, malformed = _try_read_length_prefix(data)
-    if length is not None and not malformed and length > 0:
+    length, prefix_bytes = _read_varint32(data)
+    if length is not None and length > 0:
         if prefix_bytes + length == len(data):
             try:
                 msg = DaqifiOutMessage.FromString(data[prefix_bytes:])

@@ -17,6 +17,7 @@ in ``_internal/comm.py``).
 from __future__ import annotations
 
 import io
+import logging
 import socket
 import threading
 import time
@@ -32,6 +33,8 @@ from ._internal.comm import (
     UdpEndPoint,
 )
 from ._internal.hid_enumerator import HidApiPlatform, HidPlatform
+
+_log = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -417,18 +420,23 @@ class SerialStreamTransport:
                             rx_size=self._os_rx_buffer_bytes,
                             tx_size=self._os_tx_buffer_bytes,
                         )
-                    except Exception:
+                    except Exception as buffer_exc:
                         # Best-effort tuning hint: Linux/macOS pyserial
                         # raise NotImplementedError, Windows can raise
                         # OSError if the requested size exceeds driver
                         # limits, and some pyserial backends raise
                         # SerialException (not OSError) — catch broadly
                         # so a buffer-sizing failure can't abort an
-                        # otherwise-successful port open. The outer
-                        # `except Exception` in this connect() loop
-                        # would otherwise swallow + re-raise, breaking
-                        # the connection (Qodo PR 19 review bug #5).
-                        pass
+                        # otherwise-successful port open. Debug-log
+                        # the failure so a Windows-side performance
+                        # regression can still be diagnosed.
+                        _log.debug(
+                            "set_buffer_size(rx=%d, tx=%d) failed on %s: %s",
+                            self._os_rx_buffer_bytes,
+                            self._os_tx_buffer_bytes,
+                            self._port_name,
+                            buffer_exc,
+                        )
 
                 # Mirror upstream: drop ReadTimeout to 500ms post-open
                 # so consumer threads can be stopped promptly.

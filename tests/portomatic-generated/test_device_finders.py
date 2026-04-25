@@ -214,6 +214,22 @@ class TestWiFiDeviceFinder:
 # ---- WiFiDeviceFinder protobuf parsing ---------------------------------------
 
 
+def _encode_varint(value: int) -> bytes:
+    """Encode `value` as a protobuf varint.
+
+    Inlined here so the tests don't depend on
+    `google.protobuf.internal.encoder._VarintBytes` — that's a private
+    symbol whose location/signature is not part of protobuf's public
+    API contract.
+    """
+    out = bytearray()
+    while value > 0x7F:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value & 0x7F)
+    return bytes(out)
+
+
 def _make_protobuf_response(
     *,
     host_name: str = "DaqifiNq1-AABBCC",
@@ -228,7 +244,6 @@ def _make_protobuf_response(
 ) -> bytes:
     """Build a `DaqifiOutMessage` UDP discovery payload for tests."""
     from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
-    from google.protobuf.internal.encoder import _VarintBytes
 
     m = DaqifiOutMessage()
     if host_name:
@@ -249,7 +264,7 @@ def _make_protobuf_response(
         m.pwr_status = pwr_status
     payload = m.SerializeToString()
     if length_prefix:
-        return _VarintBytes(len(payload)) + payload
+        return _encode_varint(len(payload)) + payload
     return payload
 
 
