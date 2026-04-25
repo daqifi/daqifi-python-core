@@ -199,13 +199,25 @@ def parse_coverage_doc(path: Path) -> Set[str]:
         current_prefix: str | None = None
         for name_match in name_pattern.finditer(row_body):
             token = name_match.group(1)
-            listed.add(token)
             if "." in token:
+                # Fully-qualified — record the dotted name and the
+                # class prefix (so later bare tokens in the same row
+                # can attach to it).
+                listed.add(token)
                 current_prefix = token.split(".", 1)[0]
                 listed.add(current_prefix)
             elif current_prefix is not None:
-                # Bare name inherits the prefix from the row.
+                # Bare name attached to the row's class prefix; do
+                # NOT also add the bare token by itself — that would
+                # falsely mark a global symbol of the same name as
+                # listed (e.g. a row mentioning `NyquistDevice.variant
+                # / manufacturer` would otherwise mark a hypothetical
+                # module-level `manufacturer` function as covered).
                 listed.add(f"{current_prefix}.{token}")
+            else:
+                # No prefix context: it's a standalone module-level
+                # symbol (function, enum, dataclass).
+                listed.add(token)
     return listed
 
 

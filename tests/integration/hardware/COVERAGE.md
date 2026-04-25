@@ -165,7 +165,7 @@ public API forces a test or a documented skip).
 - [~] `BoardVariant` / `WifiMode` / `WifiSecurityType` / `FirmwareUpdateState` / `ProtobufMessageType` / `SdCardLogFormat` / `ConnectionType` / `DeviceType` / `StreamState` — enums; pure
 - [~] `FirmwareVersion.compare` / `FirmwareVersion.try_parse` / `FirmwareVersion.try_parse_lines` — pure parser; unit-tested
 - [~] `compare` / `try_parse` / `try_parse_lines` — module-level convenience aliases of the above
-- [~] `Sample` / `TimestampResult` / `InboundMessage` / `ObjectInboundMessage` / `DeviceInfo` (in `discovery.py` AND `device_finders.py`) / `DeviceDiscoveredEventArgs` / `ChannelsPopulatedEventArgs` / `DigitalChannel` / `AnalogChannel` — frozen dataclasses; pure
+- [~] `Sample` / `TimestampResult` / `InboundMessage` / `ObjectInboundMessage` / `DeviceInfo` (defined in both discovery.py and device_finders.py) / `DeviceDiscoveredEventArgs` / `ChannelsPopulatedEventArgs` / `DigitalChannel` / `AnalogChannel` — frozen dataclasses; pure
 - [~] `IProtocolHandler.can_handle` / `IProtocolHandler.handle_async` — Protocol base; tested via `ProtobufProtocolHandler`
 - [~] `ChannelCollection` / `ChannelCollection.channels` — generic base; concrete subclasses (AnalogInputs/Outputs/DigitalIO) are exercised under `daqifi.channels`
 - [~] `FirmwareUpdateException` / `FirmwareUpdateProgress` / `FirmwareUpdateStateChangedEventArgs` / `FirmwareUpdateServiceOptions` / `FirmwareUpdateServiceOptions.get_state_timeout` / `FirmwareUpdateServiceOptions.validate` — pure config + events; unit-tested
