@@ -351,6 +351,12 @@ def wire_capture(serial_transport: SerialStreamTransport, request):
 
     def _record(chunk: bytes) -> None:
         fh.write(chunk)
+        # Flush per chunk so a mid-test crash still leaves the captured
+        # bytes on disk for post-mortem promotion to a wire fixture.
+        # Cost is negligible: FastReader hands off whole-buffer chunks
+        # (typically <=64 KiB) at ~10 Hz max during streaming, not
+        # per-byte.
+        fh.flush()
 
     yield _record
 
