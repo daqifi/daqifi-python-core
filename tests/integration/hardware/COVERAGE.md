@@ -66,14 +66,14 @@ public API forces a test or a documented skip).
 
 ## daqifi.devices
 
-- [ ] `DaqifiDevice.connect` (B2)
-- [ ] `DaqifiDevice.disconnect` (B2)
-- [ ] `DaqifiDevice.send` (B2 — implicit; used by every test)
-- [ ] `DaqifiDevice.initialize` (B2)
-- [ ] `DaqifiDevice.metadata` populated post-init (B2)
-- [ ] `DaqifiDevice.channels` populated via `populate_channels_from_status` (B2)
-- [ ] `DaqifiDevice.timestamp_frequency` (B2)
-- [ ] `DaqifiDevice.add_channels_populated` event fires once on init (B2)
+- [x] `DaqifiDevice.connect` (B2)
+- [x] `DaqifiDevice.disconnect` (B2)
+- [x] `DaqifiDevice.send` (B2 — implicit; used by every test)
+- [x] `DaqifiDevice.initialize` (B2)
+- [x] `DaqifiDevice.metadata` populated post-init (B2)
+- [x] `DaqifiDevice.channels` populated via `populate_channels_from_status` (B2)
+- [x] `DaqifiDevice.timestamp_frequency` (B2)
+- [x] `DaqifiDevice.add_channels_populated` event fires once on init (B2)
 - [ ] `DaqifiStreamingDevice.start_streaming` / `stop_streaming` (B6)
 - [ ] `DaqifiStreamingDevice.is_streaming` / `streaming_frequency` (B6)
 - [ ] `DaqifiStreamingDevice.is_usb_connection` (B6)
@@ -82,7 +82,7 @@ public API forces a test or a documented skip).
 - [ ] `DaqifiStreamingDevice.set_wifi_ssid` / `set_wifi_password` / `set_wifi_mode_self_hosted` / `set_wifi_mode_existing` (B12)
 - [d] `DaqifiStreamingDevice.apply_network_configuration` / `save_network_configuration` (B12)
 - [ ] `DaqifiStreamingDevice.request_lan_chip_info` (B12)
-- [ ] `DaqifiDeviceFactory.connect_serial` (B2)
+- [x] `DaqifiDeviceFactory.connect_serial` (B2)
 - [ ] `DaqifiDeviceFactory.connect_tcp` (s — needs TCP Nyquist; defer)
 
 ## daqifi.device_finders
@@ -226,8 +226,8 @@ out the remaining members the shorthand glossed over (added pass
 
 ### B2 — DaqifiDevice (round out the existing slice)
 
-- [ ] `DaqifiDevice.add_message_received` / `DaqifiDevice.remove_message_received` / `DaqifiDevice.add_status_changed` / `DaqifiDevice.remove_status_changed` / `DaqifiDevice.remove_channels_populated`
-- [ ] `DaqifiDevice.close` / `DaqifiDevice.is_connected` / `DaqifiDevice.name` / `DaqifiDevice.ip_address` / `DaqifiDevice.state` / `DaqifiDevice.status` / `DaqifiDevice.transport`
+- [x] `DaqifiDevice.add_message_received` / `DaqifiDevice.remove_message_received` / `DaqifiDevice.add_status_changed` / `DaqifiDevice.remove_status_changed` / `DaqifiDevice.remove_channels_populated`
+- [x] `DaqifiDevice.close` / `DaqifiDevice.is_connected` / `DaqifiDevice.name` / `DaqifiDevice.ip_address` / `DaqifiDevice.state` / `DaqifiDevice.status` / `DaqifiDevice.transport`
 
 ### B3 — discovery (round out)
 
