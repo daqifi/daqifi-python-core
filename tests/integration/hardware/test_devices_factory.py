@@ -118,13 +118,6 @@ def test_close_then_close_is_idempotent(device_info: DeviceInfo) -> None:
 
 
 # ---- Event subscription surface --------------------------------------------
-#
-# These tests open their own short-lived devices, so they MUST run before
-# any test that activates the module-scoped ``factory_device`` fixture
-# below — pytest holds COM7 open for the lifetime of that fixture, and
-# a second open against the same port will raise PermissionError. Pytest
-# runs tests in source order within a file, so keeping event tests above
-# the module-fixture-using property tests is the entire ordering trick.
 
 
 def test_channels_populated_event_fires_during_initialize(
@@ -208,28 +201,40 @@ def test_message_received_handlers_fire_during_initialize(
         dev.close()
 
 
-# ---- Property tests (share a module-scoped device) -------------------------
+# ---- Property tests (share a snapshot of a closed device) ------------------
 #
-# Defined LAST so the module-scoped fixture activates only after every
-# function-scoped test above has already opened + closed COM7.
+# The fixture opens + initializes the device, captures the post-init
+# values that property tests need, then closes the device IMMEDIATELY —
+# yielding the (now-closed) device. Closing in the fixture rather than
+# at module teardown means the port isn't held open across tests, so
+# this fixture is safe under reordering, parallel runs, and selective
+# `-k` execution. Post-close reads of `metadata`, `channels`,
+# `timestamp_frequency`, `transport`, and `is_usb_connection` still
+# return the values they had at close time (the close path doesn't
+# reset them).
 
 
 @pytest.fixture(scope="module")
 def factory_device(device_info: DeviceInfo) -> Iterator[DaqifiStreamingDevice]:
-    """One connect + initialize per test module — the property
-    assertions all read from this single live device. Holds COM7 for
-    the duration of the property tests."""
+    """One connect + initialize per test module; the device is closed
+    before yielding so the COM port is free for any concurrent or
+    subsequent test. Property assertions read post-close values."""
     dev = _open_factory_device(device_info.port)
     try:
+        # Capture is implicit: just close immediately. Property reads
+        # below look at the dataclass fields that survive close().
+        dev.close()
         yield dev
     finally:
+        # Defensive: close() is idempotent; this runs even if the test
+        # body raised before the yield was reached.
         dev.close()
 
 
 def test_metadata_populated_after_initialize(
     factory_device: DaqifiStreamingDevice,
 ) -> None:
-    """After initialize(), the SYS:INFO? response has been parsed and
+    """After initialize(), the SYS:INFO? response was parsed and
     DeviceMetadata reflects the real firmware/hardware identity."""
     md = factory_device.metadata
     # Firmware version is the strongest signal that the protobuf
@@ -249,7 +254,7 @@ def test_channels_populated_after_initialize(
     factory_device: DaqifiStreamingDevice,
 ) -> None:
     """populate_channels_from_status, invoked from the status-message
-    handler, should have produced a non-empty channel list."""
+    handler, produced a non-empty channel list before the close."""
     channels = factory_device.channels
     assert len(channels) > 0, "no channels populated after initialize()"
     # Returns a snapshot list (not the internal one).
@@ -271,6 +276,8 @@ def test_timestamp_frequency_populated_after_initialize(
 def test_transport_is_serial_stream_transport(
     factory_device: DaqifiStreamingDevice,
 ) -> None:
-    """The factory built and injected a SerialStreamTransport."""
+    """The factory built and injected a SerialStreamTransport. The
+    transport reference survives close() — only the underlying port
+    is released — so the type check is still meaningful here."""
     assert isinstance(factory_device.transport, SerialStreamTransport)
     assert factory_device.is_usb_connection is True
