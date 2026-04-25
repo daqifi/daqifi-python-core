@@ -89,12 +89,17 @@ def test_short_streaming_smoke(
     firmware_stats_diff.open()
     try:
         # Wake + enable ch0 (already done by clean_device but explicit
-        # for the streaming-startup record).
+        # for the streaming-startup record). Each write is followed by
+        # flush() so pyserial / OS buffering doesn't delay the SCPI
+        # command past its accompanying sleep window.
         serial_obj.write(b"ENAble:VOLTage:DC 1\r")
+        serial_obj.flush()
         time.sleep(0.2)
         serial_obj.write(b"SYSTem:StartStreamData 100\r")
+        serial_obj.flush()
         time.sleep(1.0)
         serial_obj.write(b"SYSTem:StopStreamData\r")
+        serial_obj.flush()
         time.sleep(0.3)
     finally:
         reader.stop()

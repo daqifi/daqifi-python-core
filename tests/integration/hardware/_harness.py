@@ -144,6 +144,14 @@ class StreamingMeasurement:
 
     def open_window(self) -> None:
         with self._lock:
+            # Reset window-scoped state so an instance can be reused
+            # across multiple measurement windows. ``bytes_total`` and
+            # ``first_byte_at`` are session-scoped (set on the first
+            # observed byte) and intentionally retained across windows.
+            self.bytes_window = 0
+            self.frames_window = 0
+            self._leftover = bytearray()
+            self.window_ended_at = None
             self.window_started_at = time.monotonic()
             self._measuring = True
 
