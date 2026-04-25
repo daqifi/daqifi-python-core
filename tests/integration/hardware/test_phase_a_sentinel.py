@@ -3,7 +3,8 @@
 These tests don't aim for coverage on any particular daqifi module.
 They exercise the hardware-test scaffolding:
 
-* ``streaming_device`` connects via ``DaqifiDeviceFactory.connect_serial``
+* ``serial_transport`` opens a raw ``SerialStreamTransport`` with no
+  consumer attached, so tests own the read end of the stream
 * ``clean_device`` brings the device to a known-clean state (Standby
   woken, errors drained, channels disabled)
 * ``error_drainer`` returns popped errors and asserts a clean queue
@@ -66,14 +67,21 @@ def test_wire_capture_persists_bytes(clean_device, wire_capture):
 
 
 @pytest.mark.hardware_slow
-def test_short_streaming_smoke(clean_device, firmware_stats_diff, wire_capture):
+def test_short_streaming_smoke(
+    clean_device, firmware_stats_diff, wire_capture, error_drainer
+):
     """1-second stream at 100 Hz proves the full pipeline runs zero-drop.
 
     Marked ``hardware_slow`` not because 1s is slow but because anything
     that actually streams data has a higher blast radius than a static
     SCPI roundtrip — keep it out of the default ``-m hardware`` run when
     a tester wants the snappy subset.
+
+    The ``error_drainer`` parameter assures any SCPI errors raised
+    during streaming (e.g. an unrecognised channel-enable form) fail
+    the test rather than being silently absorbed into the queue.
     """
+    _ = error_drainer  # presence triggers the post-test queue assertion
     serial_obj = clean_device.stream
     reader = FastReader(serial_obj)
     reader.start(on_chunk=wire_capture)
