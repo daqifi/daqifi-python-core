@@ -24,7 +24,7 @@ the typed factory and belong in a future raw-SCPI slice.
 from __future__ import annotations
 
 import time
-from typing import List, Optional
+from typing import List
 
 import pytest
 
@@ -254,15 +254,15 @@ def test_all_sixteen_channels_decode_rate_under_5_pct(
 
     The 5 % bound here is a deliberate compromise:
 
-    * Loose enough that the suite stays green at the historically-
-      observed ~16 % rate is **not** tolerated — if the rate stays at
-      the diagnostic level, the test fails and the follow-up issue
-      stays open. (Bound was set after a clean run on COM7 confirmed
-      the production parser path actually delivers ~0 % when paired
-      with the wake/echo/format init the ``clean_device`` fixture
-      now covers — see PR #28 Qodo bug-1 fix.)
-    * Tight enough that a future regression that drops 5 %+ of
-      multi-channel payloads has somewhere visible to fail.
+    * Tight enough that the historical ~16 % diagnostic rate fails the
+      test loudly — if the rate ever returns to that level the suite
+      will surface it instead of silently passing. (The bound was set
+      after a clean run on COM7 confirmed the production parser path
+      actually delivers ~0 % when paired with the wake/echo/format
+      init the ``clean_device`` fixture now covers — see PR #28 Qodo
+      bug-1 fix.)
+    * Loose enough that a one-off ~1 % blip from CDC scheduling jitter
+      doesn't make the test flaky on the developer rig.
 
     A future PR that proves the rate is consistently ~0 % across
     multiple firmwares should tighten this bound (and probably fold
