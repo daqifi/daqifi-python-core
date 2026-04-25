@@ -105,6 +105,14 @@ def test_short_streaming_smoke(
         reader.stop()
         firmware_stats_diff.close()
 
+    # Surface anything the daemon swallowed before evaluating the
+    # byte counters — a callback exception that hides bytes from
+    # wire_capture would manifest as "got only X bytes" without
+    # this assertion, sending the reader into a debugging rabbit
+    # hole when the real problem is downstream of FastReader.
+    assert reader.last_exception is None, (
+        f"FastReader caught and swallowed {reader.last_exception!r}"
+    )
     firmware_stats_diff.assert_no_drops()
     # Got at least *some* bytes — exact count varies with startup latency.
     assert reader.bytes_received > 100, (

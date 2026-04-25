@@ -121,6 +121,12 @@ class StreamingMeasurement:
     populated.
     """
 
+    # Cap _leftover to bound memory if the stream is misaligned
+    # (e.g. firmware sends a varint with bogus length and we keep
+    # carrying buffered bytes forward forever waiting for a frame
+    # boundary that never arrives).
+    _LEFTOVER_MAX_BYTES = 1024 * 1024  # 1 MiB
+
     def __init__(self, count_pb_frames: bool = True):
         self._count_pb = count_pb_frames
         self._measuring = False
@@ -179,6 +185,14 @@ class StreamingMeasurement:
                 self.bytes_window += len(data)
                 if self._count_pb:
                     self._leftover.extend(data)
+                    if len(self._leftover) > self._LEFTOVER_MAX_BYTES:
+                        # Misaligned/corrupt stream — drop the buffer
+                        # rather than carry forever waiting for a frame
+                        # boundary. The session-scoped bytes_total
+                        # counter is unaffected; only frame counting
+                        # resets.
+                        self._leftover = bytearray()
+                        return
                     frames, leftover = _count_pb_frames(bytes(self._leftover))
                     self.frames_window += frames
                     self._leftover = bytearray(leftover)
