@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 
-_HARDWARE_DIR = str(Path(__file__).resolve().parent)
+_HARDWARE_DIR = Path(__file__).resolve().parent
 
 
 def pytest_collection_modifyitems(config, items):
@@ -33,7 +33,16 @@ def pytest_collection_modifyitems(config, items):
     Saves callers from sprinkling ``pytestmark = pytest.mark.hardware``
     in every file. ``hardware_destructive`` and ``hardware_slow`` still
     need to be applied explicitly per test.
+
+    Uses ``Path.is_relative_to`` (Python 3.9+) so a sibling like
+    ``tests/integration/hardware_extras/`` doesn't false-match a raw
+    string prefix.
     """
     for item in items:
-        if str(item.fspath).startswith(_HARDWARE_DIR):
+        try:
+            item_path = Path(str(item.fspath)).resolve()
+            is_under_hw = item_path.is_relative_to(_HARDWARE_DIR)
+        except (ValueError, OSError):
+            is_under_hw = False
+        if is_under_hw:
             item.add_marker(pytest.mark.hardware)
