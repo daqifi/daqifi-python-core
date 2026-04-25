@@ -12,7 +12,6 @@ instance and disconnects in a finally block; the session-scoped
 from __future__ import annotations
 
 import sys
-import time
 from typing import List
 
 import pytest
@@ -249,7 +248,14 @@ def test_status_callback_exception_does_not_break_other_callbacks(
 # ---- Port-not-found error path ---------------------------------------------
 
 
-def test_connect_to_missing_port_raises_and_fires_error_status() -> None:
+def test_connect_to_missing_port_raises_and_fires_error_status(
+    device_info: DeviceInfo,
+) -> None:
+    """Even though this test only opens a fake port, it lives in
+    tests/integration/hardware/ and therefore takes ``device_info`` so
+    the directory's documented skip-collect-when-no-device contract
+    holds."""
+    del device_info  # noqa: just gates the test on hardware presence
     fake = "COM_DOES_NOT_EXIST_999" if sys.platform == "win32" else "/dev/ttyDOES_NOT_EXIST_999"
     events: List[TransportStatusEventArgs] = []
     t = SerialStreamTransport(port_name=fake)
@@ -272,19 +278,34 @@ def test_connect_to_missing_port_raises_and_fires_error_status() -> None:
     assert isinstance(error_events[0].error, serial.SerialException)
 
 
-def test_connect_no_retry_fails_fast_on_missing_port() -> None:
-    """A no-retry policy on a missing port should raise on the first
-    attempt without burning seconds on retry-loop delays."""
+def test_connect_no_retry_skips_retry_sleep(
+    device_info: DeviceInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A no-retry policy must never invoke the retry-loop sleep, even
+    when the open fails. We assert this deterministically by patching
+    ``time.sleep`` in the transport module instead of measuring wall
+    clock — the open path's OS/driver latency is environment-dependent
+    and can blow past any timing budget."""
+    del device_info  # noqa: just gates the test on hardware presence
+    sleep_calls: List[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    # Patch the module-level binding the retry loop actually calls.
+    import daqifi.transport as transport_mod
+
+    monkeypatch.setattr(transport_mod.time, "sleep", fake_sleep)
+
     fake = "COM_DOES_NOT_EXIST_999" if sys.platform == "win32" else "/dev/ttyDOES_NOT_EXIST_999"
     t = SerialStreamTransport(port_name=fake)
-    started = time.monotonic()
     try:
         with pytest.raises(serial.SerialException):
             t.connect(retry_options=ConnectionRetryOptions.no_retry())
     finally:
         t.close()
-    # Single attempt — should be well under 1 second even with timeouts.
-    assert (time.monotonic() - started) < 2.0
+    # No retry delays must have fired (the no_retry policy disables them).
+    assert sleep_calls == [], f"unexpected retry sleeps: {sleep_calls!r}"
 
 
 # ---- Retry options (happy path with retries enabled) -----------------------
