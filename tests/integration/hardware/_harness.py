@@ -71,11 +71,18 @@ class FastReader:
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=timeout)
-            # Only drop the reference if the thread actually stopped —
-            # if join() timed out, keeping the handle lets a caller
-            # inspect is_alive() / retry the join instead of leaking
-            # the thread silently.
-            if not self._thread.is_alive():
+            if self._thread.is_alive():
+                # Don't raise — would mask the original test failure.
+                # Don't drop the reference — caller may want to retry
+                # the join. But DO record the timeout in
+                # last_exception so a test that asserts
+                # `reader.last_exception is None` (see PR #23 pass 18)
+                # surfaces the leak instead of silently moving on.
+                if self.last_exception is None:
+                    self.last_exception = RuntimeError(
+                        f"FastReader thread did not stop within {timeout}s"
+                    )
+            else:
                 self._thread = None
 
     def _loop(self) -> None:

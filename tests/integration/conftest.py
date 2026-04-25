@@ -202,13 +202,21 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
         # _SCPI_ERROR_LINE_RE also matches the no-error line itself
         # (it's `0,"No error"` — same shape as a SCPI error reply),
         # so explicitly filter that variant out of the popped list.
-        text = raw.decode("ascii", errors="replace")
+        # Bytes-first split + strict-ASCII per-line decode avoids the
+        # case where errors="replace" would substitute a `\ufffd` into
+        # the middle of an otherwise-parseable line and trip up the
+        # _SCPI_ERROR_LINE_RE shape check.
         found_any_error_line = False
-        for line in text.split("\r\n"):
-            line = line.strip()
-            if not line or line.startswith("SYST:ERR?") or line == "DAQIFI>":
+        for raw_line in raw.split(b"\r\n"):
+            raw_line = raw_line.strip()
+            if not raw_line or raw_line == b"DAQIFI>" or raw_line.startswith(b"SYST:ERR?"):
                 continue
-            if _SCPI_NO_ERROR_RE.search(line.encode("ascii", errors="replace")):
+            if _SCPI_NO_ERROR_RE.search(raw_line):
+                continue
+            try:
+                line = raw_line.decode("ascii", errors="strict")
+            except UnicodeDecodeError:
+                # Binary noise — not a SCPI reply, skip.
                 continue
             if _SCPI_ERROR_LINE_RE.match(line):
                 popped.append(line)
@@ -267,6 +275,14 @@ def error_drainer(serial_transport: SerialStreamTransport):
 
     post = _drain_scpi_errors(serial_obj)
     if post:
+        # Differentiate the inconclusive case (device unresponsive)
+        # from real test-introduced errors so the failure report
+        # points at the right culprit.
+        if any(e.startswith("DRAIN_INCONCLUSIVE,") for e in post):
+            pytest.fail(
+                "unable to confirm SCPI error queue drained after test:\n  "
+                + "\n  ".join(post)
+            )
         formatted = "\n  ".join(post)
         pytest.fail(
             f"test left {len(post)} SCPI error(s) in the device queue:\n  {formatted}"
