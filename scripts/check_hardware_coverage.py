@@ -63,7 +63,15 @@ def _public_members(module) -> Iterable[tuple[str, object]]:
     for name, value in inspect.getmembers(module):
         if not _is_public_name(name):
             continue
-        # Only emit symbols defined in this module (skip re-exports).
+        # Cheap pre-filter: an attribute that advertises a different
+        # __module__ than ours is a re-export. inspect.getmodule walks
+        # the resolved code object and is more thorough but doesn't
+        # always populate (returns None for some C-extension objects),
+        # so the __module__ check rejects the obvious cases first and
+        # the inspect.getmodule check handles the long tail.
+        value_mod = getattr(value, "__module__", None)
+        if value_mod is not None and value_mod != module.__name__:
+            continue
         try:
             origin = inspect.getmodule(value)
         except Exception:

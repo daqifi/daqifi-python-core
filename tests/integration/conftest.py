@@ -178,16 +178,18 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
     """
     popped: List[str] = []
     unproductive_reads = 0
+    saw_no_error = False
     for _ in range(max_iterations):
         _send_scpi(serial_obj, "SYST:ERR?", delay=0.05)
         raw = _drain(serial_obj, timeout=0.2)
         if not raw:
             unproductive_reads += 1
             if unproductive_reads >= _DRAIN_EMPTY_BUDGET:
-                return popped
+                break
             continue
         if _SCPI_NO_ERROR_RE.search(raw):
-            return popped
+            saw_no_error = True
+            break
         text = raw.decode("ascii", errors="replace")
         found_any_error_line = False
         for line in text.split("\r\n"):
@@ -206,7 +208,15 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
         else:
             unproductive_reads += 1
             if unproductive_reads >= _DRAIN_EMPTY_BUDGET:
-                return popped
+                break
+    if not saw_no_error:
+        # Surface the indeterminate-state case as a synthetic error so
+        # error_drainer's post-test assertion fails loudly. Better than
+        # returning [] (which looks identical to a clean queue) when
+        # the device never confirmed the queue was actually drained.
+        popped.append(
+            'DRAIN_INCONCLUSIVE,"did not observe 0,\\"No error\\" before giving up"'
+        )
     return popped
 
 
