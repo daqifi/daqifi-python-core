@@ -113,6 +113,16 @@ def serial_transport(device_info: DeviceInfo) -> Iterator[SerialStreamTransport]
         os_tx_buffer_bytes=65536,
     )
     transport.connect()
+    if not transport.is_connected or transport.stream is None:
+        # connect() raises on failure on most paths, but guard the
+        # belt-and-suspenders case so a downstream test gets a clear
+        # skip message instead of an AttributeError trying to read
+        # bytes off a None stream.
+        try:
+            transport.disconnect()
+        except Exception:
+            pass
+        pytest.skip(f"failed to connect to device on port {port!r}")
     try:
         yield transport
     finally:
