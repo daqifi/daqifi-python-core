@@ -103,9 +103,11 @@ def test_device_finder_discover_with_variant_filter(
     assert isinstance(nq1, list)
     assert len(nq1) >= 1
     assert all(d.variant == BoardVariant.NQ1 for d in nq1)
-    # An impossible variant returns nothing.
+    # No NQ3 on this rig — the filter must actually return an empty
+    # list (a vacuous `all(... for d in nq3)` would pass even on a
+    # broken filter that returned every device).
     nq3 = DeviceFinder.discover(variant=BoardVariant.NQ3)
-    assert all(d.variant == BoardVariant.NQ3 for d in nq3)
+    assert nq3 == []
 
 
 # ---- SerialDeviceFinder (protobuf-based serial probe) ----------------------
