@@ -90,8 +90,7 @@ def main() -> int:
         print("error queue cleared\n")
 
         # 2. Identify and read state
-        idn, err = ser.query(cmds.ScpiMessage("*IDN?").data
-                             if False else "*IDN?")
+        idn, err = ser.query("*IDN?")
         print(f"  *IDN? -> {idn!r}  err: {err!r}")
         run_step("*IDN?", is_no_error(err))
 
