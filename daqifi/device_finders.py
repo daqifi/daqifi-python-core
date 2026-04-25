@@ -414,13 +414,17 @@ def _try_parse_protobuf_response(data: bytes) -> Optional[Any]:
         return None
 
     # Length-prefixed first — that's what the firmware sends.
+    # UDP discovery datagrams carry exactly one frame, so require an
+    # exact match on `prefix + length == len(data)` — a bare payload
+    # whose first byte happens to look like a valid varint length
+    # would otherwise enter the delimited path with leftover bytes
+    # silently truncated (Qodo PR 19 review bug #6).
     from daqifi.communication import _try_read_length_prefix
     length, prefix_bytes, malformed = _try_read_length_prefix(data)
     if length is not None and not malformed and length > 0:
-        end = prefix_bytes + length
-        if end <= len(data):
+        if prefix_bytes + length == len(data):
             try:
-                msg = DaqifiOutMessage.FromString(data[prefix_bytes:end])
+                msg = DaqifiOutMessage.FromString(data[prefix_bytes:])
                 if _has_identity_field(msg):
                     return msg
             except Exception:

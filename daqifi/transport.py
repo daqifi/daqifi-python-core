@@ -417,9 +417,17 @@ class SerialStreamTransport:
                             rx_size=self._os_rx_buffer_bytes,
                             tx_size=self._os_tx_buffer_bytes,
                         )
-                    except (OSError, NotImplementedError):
-                        # Linux + macOS pyserial don't implement this;
-                        # silently fall back to the kernel default.
+                    except Exception:
+                        # Best-effort tuning hint: Linux/macOS pyserial
+                        # raise NotImplementedError, Windows can raise
+                        # OSError if the requested size exceeds driver
+                        # limits, and some pyserial backends raise
+                        # SerialException (not OSError) — catch broadly
+                        # so a buffer-sizing failure can't abort an
+                        # otherwise-successful port open. The outer
+                        # `except Exception` in this connect() loop
+                        # would otherwise swallow + re-raise, breaking
+                        # the connection (Qodo PR 19 review bug #5).
                         pass
 
                 # Mirror upstream: drop ReadTimeout to 500ms post-open
