@@ -14,6 +14,7 @@ high-level ``device`` fixture for use by tests under
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import time
@@ -178,6 +179,12 @@ def _drain(serial_obj, timeout: float) -> bytes:
 
 
 _DRAIN_EMPTY_BUDGET = 5
+# Wall-clock cap: even if the iteration counter says we have budget
+# left, never spin _drain_scpi_errors past this many seconds. Belt
+# alongside the iteration cap — protects against pathological cases
+# where each iteration somehow runs longer than its 0.25s normal cost
+# (slow Windows VM scheduler, paging, etc.).
+_DRAIN_MAX_SECONDS = 5.0
 
 
 def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
@@ -202,7 +209,10 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
     popped: List[str] = []
     unproductive_reads = 0
     saw_no_error = False
+    started_at = time.monotonic()
     for _ in range(max_iterations):
+        if (time.monotonic() - started_at) >= _DRAIN_MAX_SECONDS:
+            break
         _send_scpi(serial_obj, "SYST:ERR?", delay=0.05)
         raw = _drain(serial_obj, timeout=0.2)
         if not raw:
@@ -438,9 +448,18 @@ def wire_capture(serial_transport: SerialStreamTransport, request):
     """
     captures_dir = Path(__file__).resolve().parent / "captures"
     captures_dir.mkdir(parents=True, exist_ok=True)
-    test_id = request.node.name.replace("[", "_").replace("]", "").replace("/", "_")
+    # Strict allowlist for the file-name component: only [A-Za-z0-9_.-]
+    # passes through. Heavy parametrization can produce node names
+    # with brackets, slashes, quotes, or non-ASCII (especially on
+    # Windows where some chars are reserved). Long ids get
+    # hash-suffixed to stay under the per-component path limit.
+    raw_id = request.node.nodeid
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_id).strip("_") or "test"
+    if len(safe) > 120:
+        digest = hashlib.sha1(raw_id.encode("utf-8")).hexdigest()[:10]
+        safe = f"{safe[:100]}_{digest}"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_path = captures_dir / f"{test_id}-{stamp}.bin"
+    out_path = captures_dir / f"{safe}-{stamp}.bin"
 
     fh = out_path.open("wb")
 

@@ -153,14 +153,15 @@ def main() -> int:
 
         # 9. Read streaming data for 1.5s
         time.sleep(0.2)
-        data = b""
+        data = bytearray()
         deadline = time.time() + 1.5
         while time.time() < deadline:
             n = ser._inner._serial.in_waiting
             if n > 0:
-                data += ser._inner._serial.read(n)
+                data.extend(ser._inner._serial.read(n))
             else:
                 time.sleep(0.001)
+        data = bytes(data)
         print(f"\n  streamed {len(data)} bytes in 1.5s @ 100 Hz")
         if 0 < len(data) < 200:
             print("  hex preview:")

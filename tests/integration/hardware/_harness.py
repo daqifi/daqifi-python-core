@@ -204,18 +204,30 @@ class StreamingMeasurement:
                         # resets.
                         self._leftover = bytearray()
                         return
-                    frames, leftover = _count_pb_frames(bytes(self._leftover))
+                    # Pass a memoryview + in-place delete so a long
+                    # streaming session doesn't pay an O(n) copy of
+                    # the leftover buffer on every chunk.
+                    frames, consumed = _count_pb_frames(memoryview(self._leftover))
                     self.frames_window += frames
-                    self._leftover = bytearray(leftover)
+                    if consumed:
+                        del self._leftover[:consumed]
 
 
-def _count_pb_frames(buf: bytes) -> tuple[int, bytes]:
+def _count_pb_frames(buf) -> tuple[int, int]:
     """Count complete protobuf length-delimited frames in ``buf``.
 
-    Returns ``(frame_count, leftover_bytes)``. Leftover is the trailing
-    partial-frame bytes that the next call should prepend.
+    Returns ``(frame_count, bytes_consumed)``. ``bytes_consumed`` is
+    the offset of the first incomplete frame's varint; the caller
+    should drop bytes [:bytes_consumed] and keep the tail for the
+    next call.
 
-    Mirrors `StreamingMeasurement._count_pb_frames` from the test suite.
+    Accepts any sequence supporting ``len()`` and ``__getitem__``
+    (bytes / bytearray / memoryview) so the caller can pass a
+    memoryview to avoid the O(n) buffer copy on every chunk.
+
+    Mirrors `StreamingMeasurement._count_pb_frames` from the test
+    suite (which returns the leftover bytes; we return the consumed
+    offset instead for memoryview compatibility).
     """
     frames = 0
     i = 0
@@ -231,20 +243,20 @@ def _count_pb_frames(buf: bytes) -> tuple[int, bytes]:
             varint_bytes += 1
             if varint_bytes > 10:
                 # Corrupt varint (protobuf spec max is 10 bytes for uint64).
-                return frames, buf[varint_start:]
+                return frames, varint_start
             length |= (b & 0x7F) << shift
             shift += 7
             if not (b & 0x80):
                 break
         else:
             # Ran out of bytes mid-varint.
-            return frames, buf[varint_start:]
+            return frames, varint_start
         if i + length > n:
-            return frames, buf[varint_start:]
+            return frames, varint_start
         # length == 0 is a valid empty length-delimited message per the
         # protobuf wire spec — count it (the upstream test_harness.py
         # version skipped these and undercounted streams that emit
         # them, e.g. heartbeat / keepalive frames).
         i += length
         frames += 1
-    return frames, b""
+    return frames, n
