@@ -94,23 +94,30 @@ def collect_public_symbols() -> Set[str]:
         for name, value in _public_members(module):
             if inspect.isclass(value):
                 symbols.add(name)
-                # Skip Exception subclasses' inherited noise.
-                is_exc = issubclass(value, BaseException)
-                # Only add members defined IN this class (not inherited),
-                # so we don't enumerate every BaseException attr.
+                # Only enumerate members defined ON this class (not inherited).
+                # Without this universal guard, inherited @property descriptors
+                # on non-Exception classes would also get added — the previous
+                # version only skipped inherited members for Exception subclasses,
+                # so e.g. `AnalogInputs.channels` inherited from a generic
+                # `ChannelCollection` would be falsely listed as needing its own
+                # coverage entry.
                 own_attrs = set(value.__dict__.keys())
                 for member_name, member in inspect.getmembers(value):
                     if not _is_public_name(member_name):
                         continue
                     if member_name in _INHERITED_NOISE:
                         continue
-                    if is_exc and member_name not in own_attrs:
+                    if member_name not in own_attrs:
                         continue
-                    if inspect.isfunction(member) or isinstance(member, property):
+                    # Unwrap staticmethod / classmethod descriptors so they
+                    # match inspect.isfunction below.
+                    raw = value.__dict__.get(member_name, member)
+                    if isinstance(raw, (staticmethod, classmethod)):
+                        raw = raw.__func__
+                    if inspect.isfunction(raw) or isinstance(member, property):
                         symbols.add(f"{name}.{member_name}")
-                    elif inspect.ismethod(member) or callable(member):
-                        if member_name in own_attrs and not member_name.startswith("__"):
-                            symbols.add(f"{name}.{member_name}")
+                    elif callable(member) and not member_name.startswith("__"):
+                        symbols.add(f"{name}.{member_name}")
             elif inspect.isfunction(value):
                 symbols.add(name)
             # Module-level constants / dataclasses without methods land
