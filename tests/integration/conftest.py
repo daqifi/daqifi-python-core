@@ -189,16 +189,19 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
         if _SCPI_NO_ERROR_RE.search(raw):
             return popped
         text = raw.decode("ascii", errors="replace")
-        found_error_line = False
+        found_any_error_line = False
         for line in text.split("\r\n"):
             line = line.strip()
             if not line or line.startswith("SYST:ERR?") or line == "DAQIFI>":
                 continue
             if _SCPI_ERROR_LINE_RE.match(line):
+                # Append every error line found in the read window —
+                # don't break on the first, because a single drain read
+                # can carry the reply to multiple SYST:ERR? round-trips
+                # if the device is fast (we'd silently drop the rest).
                 popped.append(line)
-                found_error_line = True
-                break
-        if found_error_line:
+                found_any_error_line = True
+        if found_any_error_line:
             unproductive_reads = 0
         else:
             unproductive_reads += 1
@@ -384,7 +387,17 @@ def wire_capture(serial_transport: SerialStreamTransport, request):
         # Don't litter the captures dir with empty files.
         out_path.unlink()
     else:
-        print(f"\n[wire_capture] {size} bytes -> {out_path.relative_to(captures_dir.parent.parent.parent)}")
+        try:
+            shown = out_path.relative_to(captures_dir.parent.parent.parent)
+        except ValueError:
+            # captures_dir.parent.parent.parent is the project root in
+            # the in-tree layout, but a CI worker that mounts the repo
+            # under a non-standard path (or a captures_dir symlinked
+            # elsewhere) could break the relative_to invariant. Fall
+            # back to the absolute path so teardown stays diagnostic
+            # rather than crashy.
+            shown = out_path
+        print(f"\n[wire_capture] {size} bytes -> {shown}")
 
 
 @pytest.fixture

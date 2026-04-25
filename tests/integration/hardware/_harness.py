@@ -205,10 +205,12 @@ def _count_pb_frames(buf: bytes) -> tuple[int, bytes]:
         else:
             # Ran out of bytes mid-varint.
             return frames, buf[varint_start:]
-        if length == 0:
-            continue
         if i + length > n:
             return frames, buf[varint_start:]
+        # length == 0 is a valid empty length-delimited message per the
+        # protobuf wire spec — count it (the upstream test_harness.py
+        # version skipped these and undercounted streams that emit
+        # them, e.g. heartbeat / keepalive frames).
         i += length
         frames += 1
     return frames, b""
