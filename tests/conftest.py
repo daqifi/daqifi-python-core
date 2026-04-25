@@ -13,3 +13,17 @@ def pytest_configure(config):
         "markers",
         "portomatic_generated: test was scaffolded by the portomatic apply prompt",
     )
+    config.addinivalue_line(
+        "markers",
+        "hardware: requires a connected DAQiFi device (set DAQIFI_DEVICE_PORT=COMx)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "hardware_destructive: performs destructive ops (SD format, firmware flash, "
+        "factory reset). Requires DAQIFI_DESTRUCTIVE_OK=1 to run.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "hardware_slow: hardware test that takes >30s (long-window streaming, "
+        "multi-rate sweeps).",
+    )
