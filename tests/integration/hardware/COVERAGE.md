@@ -30,8 +30,8 @@ public API forces a test or a documented skip).
 - [x] `SerialStreamTransport.stream` — exposes underlying serial.Serial (B1)
 - [x] `SerialStreamTransport.get_available_port_names` — enumerates ports (B1)
 - [ ] `TcpStreamTransport.connect` (s — needs TCP-bridged Nyquist; defer)
-- [ ] `UdpTransport.send_broadcast` — used by WiFiDeviceFinder (B3)
-- [ ] `UdpTransport.receive` — UDP discovery datagram (B3)
+- [x] `UdpTransport.send_broadcast` — used by WiFiDeviceFinder (B3)
+- [x] `UdpTransport.receive` — UDP discovery datagram (B3)
 - [ ] `HidLibraryTransport` (s — needs HID/bootloader; covered by B13 firmware update)
 
 ## daqifi.communication
@@ -87,16 +87,16 @@ public API forces a test or a documented skip).
 
 ## daqifi.device_finders
 
-- [ ] `SerialDeviceFinder.discover` (B3)
-- [ ] `SerialDeviceFinder.add_device_discovered` / `add_discovery_completed` (B3)
-- [ ] `WiFiDeviceFinder.discover` (s — needs WiFi-attached Nyquist on local LAN)
+- [x] `SerialDeviceFinder.discover` (B3)
+- [x] `SerialDeviceFinder.add_device_discovered` / `add_discovery_completed` (B3)
+- [x] `WiFiDeviceFinder.discover` (B3)
 - [ ] `HidDeviceFinder.discover` (s — needs bootloader-mode device; B13)
 
 ## daqifi.discovery
 
-- [ ] `DeviceFinder.discover` (B3)
-- [ ] `DeviceFinder.discover_first` (B3 — already used by `device_info` fixture)
-- [ ] `DeviceFinder.get_serial_ports` (B3)
+- [x] `DeviceFinder.discover` (B3)
+- [x] `DeviceFinder.discover_first` (B3 — already used by `device_info` fixture)
+- [x] `DeviceFinder.get_serial_ports` (B3)
 
 ## daqifi.channels
 
@@ -231,7 +231,7 @@ out the remaining members the shorthand glossed over (added pass
 
 ### B3 — discovery (round out)
 
-- [ ] `SerialDeviceFinder.close` / `SerialDeviceFinder.remove_device_discovered` / `SerialDeviceFinder.remove_discovery_completed`
+- [x] `SerialDeviceFinder.close` / `SerialDeviceFinder.remove_device_discovered` / `SerialDeviceFinder.remove_discovery_completed`
 
 ### B4 — streaming (round out)
 
@@ -256,7 +256,7 @@ out the remaining members the shorthand glossed over (added pass
 - [s] `TcpStreamTransport.add_status_changed` / `TcpStreamTransport.remove_status_changed` / `TcpStreamTransport.close` / `TcpStreamTransport.connection_info` / `TcpStreamTransport.disconnect` / `TcpStreamTransport.is_connected` / `TcpStreamTransport.stream` — no TCP-bridged Nyquist test rig
 - [s] `HidLibraryTransport.connect` / `HidLibraryTransport.disconnect` / `HidLibraryTransport.close` / `HidLibraryTransport.read` / `HidLibraryTransport.write` / `HidLibraryTransport.is_connected` / `HidLibraryTransport.vendor_id` / `HidLibraryTransport.product_id` / `HidLibraryTransport.serial_number` / `HidLibraryTransport.device_path` / `HidLibraryTransport.read_timeout` / `HidLibraryTransport.write_timeout` — needs bootloader-mode HID device; B13 firmware-update only
 - [s] `HidDeviceFinder.close` / `HidDeviceFinder.add_device_discovered` / `HidDeviceFinder.remove_device_discovered` / `HidDeviceFinder.add_discovery_completed` / `HidDeviceFinder.remove_discovery_completed` — paired with HidLibraryTransport above
-- [s] `WiFiDeviceFinder.close` / `WiFiDeviceFinder.add_device_discovered` / `WiFiDeviceFinder.remove_device_discovered` / `WiFiDeviceFinder.add_discovery_completed` / `WiFiDeviceFinder.remove_discovery_completed` — needs WiFi-attached Nyquist on local LAN
+- [x] `WiFiDeviceFinder.close` / `WiFiDeviceFinder.add_device_discovered` / `WiFiDeviceFinder.remove_device_discovered` / `WiFiDeviceFinder.add_discovery_completed` / `WiFiDeviceFinder.remove_discovery_completed` (B3 — WiFi-attached Nyquists confirmed on local LAN)
 - [ ] `UdpTransport.open` / `UdpTransport.close` / `UdpTransport.is_open` / `UdpTransport.local_port` / `UdpTransport.connection_info` / `UdpTransport.send_broadcast_to` / `UdpTransport.send_unicast` / `UdpTransport.add_status_changed` / `UdpTransport.remove_status_changed` — exercised indirectly by `WiFiDeviceFinder.discover()` in B3 (when WiFi rig becomes available)
 
 ---
