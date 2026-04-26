@@ -369,10 +369,21 @@ def find_concrete_impls_for_protocol(
     """
     if proto.kind != "protocol":
         return []
+    # Only require concrete impls to satisfy STUB Protocol members.
+    # Protocol methods with non-stub bodies act as defaults (would
+    # be inherited if the Protocol were used as a mixin), so a
+    # concrete class doesn't strictly need to override them. Today's
+    # daqifi Protocols are all 100% stub members so this filter has
+    # no behavioral impact, but it keeps the audit correct if a
+    # future Protocol introduces a default impl.
     required = {
         m.name
         for m in proto.members.values()
-        if m.kind in ("method", "property") and not m.name.startswith("_")
+        if (
+            m.kind in ("method", "property")
+            and not m.name.startswith("_")
+            and m.is_stub
+        )
     }
     if not required:
         return []

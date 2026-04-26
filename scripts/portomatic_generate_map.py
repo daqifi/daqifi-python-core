@@ -414,13 +414,30 @@ def cs_to_py_member_name(cs_name: str, *, enum_value: bool = False) -> str:
 
 def _yaml_escape(value: str) -> str:
     """Quote if the value contains characters that would break bare YAML
-    (colons, leading/trailing whitespace, special chars). Otherwise
-    emit bare for readability."""
+    (colons, leading/trailing whitespace, special chars, control
+    chars). Otherwise emit bare for readability.
+
+    Control-character handling matters because the minimal YAML
+    reader in this script + ``portomatic_audit.py`` is line-based —
+    a literal newline in a value would split it across two YAML
+    "rows" and corrupt the parse on the next regen-then-load cycle.
+    """
     if value == "":
         return "''"
-    if any(ch in value for ch in ":#&*!|>'\"%@`,?[]{}\n") or value[0] in "-?:" or value != value.strip():
-        # Use double-quoted with minimal escaping.
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    if (
+        any(ch in value for ch in ":#&*!|>'\"%@`,?[]{}\n\r\t")
+        or value[0] in "-?:"
+        or value != value.strip()
+    ):
+        # Use double-quoted form + escape control chars so the
+        # output stays single-line and round-trip safe.
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
         return f'"{escaped}"'
     return value
 
