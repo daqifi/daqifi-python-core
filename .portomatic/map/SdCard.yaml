@@ -138,10 +138,13 @@ symbols:
   - upstream: DownloadSdCardFileAsync
     downstream: download_sd_card_file
     relation: one_to_one
-  - upstream: <downstream-only:download_sd_card_file_to_temp>
+  - upstream: DownloadSdCardFileAsync
     downstream: download_sd_card_file_to_temp
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: 'C# overload resolution distinguishes the two DownloadSdCardFileAsync
+      variants by parameter list (with/without destination stream). Python doesn''t
+      dispatch on parameter types, so the no-destination overload is renamed to
+      download_sd_card_file_to_temp.'
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardCsvFileParser
@@ -266,15 +269,20 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardFileListParser
     file: src/Daqifi.Core/Device/SdCard/SdCardFileListParser.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: function
+    qualified: daqifi.sdcard.parse_sd_card_file_list
+    file: daqifi/sdcard.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: 'C# uses a static-class container with a public ParseFileList method.
+    The Python port collapses the static-class wrapper into a top-level function,
+    matching idiomatic Python module surface.'
   members:
   - upstream: ParseFileList
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_sd_card_file_list
+    relation: one_to_one
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardFileParser
