@@ -195,11 +195,33 @@ def test_streaming_device_satisfies_sd_card_operations_protocol() -> None:
 
 @pytest.mark.parametrize(
     "bad_name",
-    ['has"quote.bin', "has\nnewline.bin", "has\rreturn.bin", "has;semi.bin"],
+    [
+        'has"quote.bin',
+        "has\nnewline.bin",
+        "has\rreturn.bin",
+        "has;semi.bin",
+        "with/slash.bin",
+        "with\\backslash.bin",
+    ],
 )
 def test_validate_sd_card_file_name_rejects_smuggle_chars(bad_name: str) -> None:
     with pytest.raises(ValueError, match="invalid characters"):
         _validate_sd_card_file_name(bad_name)
+
+
+@pytest.mark.parametrize(
+    "bad_name", ["", "   ", " leading.bin", "trailing.bin "],
+)
+def test_validate_sd_card_file_name_rejects_blank_or_whitespace(bad_name: str) -> None:
+    with pytest.raises(ValueError):
+        _validate_sd_card_file_name(bad_name)
+
+
+def test_validate_sd_card_file_name_rejects_traversal() -> None:
+    with pytest.raises(ValueError, match="path-traversal"):
+        _validate_sd_card_file_name("..hidden.bin")
+    with pytest.raises(ValueError, match="path-traversal"):
+        _validate_sd_card_file_name("foo..bar.bin")
 
 
 def test_validate_sd_card_file_name_accepts_normal_names() -> None:

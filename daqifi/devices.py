@@ -101,17 +101,31 @@ class DigitalChannel:
     is_enabled: bool = False
 
 
-# Filename hygiene shared by SD-card mutating ops. Mirrors the C#
-# ``DaqifiStreamingDevice.ValidateSdCardFileName`` private helper:
-# quote / newline / semicolon would let a caller smuggle SCPI tokens.
-_SD_FORBIDDEN_FILENAME_CHARS = ('"', '\n', '\r', ';')
+# Filename hygiene shared by SD-card mutating ops. Quote / newline /
+# semicolon mirror the C# ``DaqifiStreamingDevice.ValidateSdCardFileName``
+# guard (would let a caller smuggle SCPI tokens). Forward + back slash
+# are added on the Python side to block path-traversal attempts that
+# the firmware's path parser might honor — defense-in-depth, the C#
+# port doesn't bother because callers there always go through a
+# higher-level API.
+_SD_FORBIDDEN_FILENAME_CHARS = ('"', '\n', '\r', ';', '/', '\\')
 
 
 def _validate_sd_card_file_name(file_name: str) -> None:
+    if file_name is None or not file_name.strip():
+        raise ValueError("file_name must not be empty.")
+    if file_name != file_name.strip():
+        raise ValueError(
+            "file_name must not have leading or trailing whitespace."
+        )
+    if ".." in file_name:
+        raise ValueError(
+            "file_name must not contain path-traversal segments ('..')."
+        )
     if any(ch in file_name for ch in _SD_FORBIDDEN_FILENAME_CHARS):
         raise ValueError(
             "file_name contains invalid characters. Quotes, newlines, "
-            "and semicolons are not allowed."
+            "semicolons, and path separators are not allowed."
         )
 
 
