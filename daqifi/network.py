@@ -148,15 +148,18 @@ class NetworkConfigurable(Protocol):
     prefix is dropped to match the rest of this codebase's protocols).
 
     The C# method ``UpdateNetworkConfigurationAsync`` returns ``Task``;
-    here it's an ``async def`` so callers can await it identically.
+    the Python port collapses async to sync to match the rest of the
+    facade surface (``set_wifi_*``, ``apply_network_configuration``,
+    etc. are all sync). Callers that want async dispatch can wrap with
+    ``asyncio.to_thread``.
     """
 
     @property
     def network_configuration(self) -> NetworkConfiguration:
-        """Current network configuration on the device."""
+        """Most recently applied network configuration on the device."""
         ...
 
-    async def update_network_configuration(
+    def update_network_configuration(
         self,
         configuration: NetworkConfiguration,
     ) -> None:
