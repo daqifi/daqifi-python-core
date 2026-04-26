@@ -89,7 +89,14 @@ def test_streaming_frequency_default_and_setter(
     device_info: DeviceInfo,
 ) -> None:
     """``streaming_frequency`` defaults to 100 Hz, accepts positive
-    ints, and rejects zero / negative. Setter coerces to int."""
+    ints, and rejects zero / negative.
+
+    NB: the setter does NOT currently reject ``bool`` (a Python int
+    subclass) the way ``scpi_commands.start_streaming`` does. This
+    asymmetry is intentionally NOT exercised here — locking the loose
+    behavior in via assertion would make a future tightening of the
+    facade harder. Tracked as a follow-up for the production code, not
+    something this tests-only PR should reach into."""
     dev = _open_factory_device(device_info.port)
     try:
         # Default per :class:`DaqifiStreamingDevice.__init__`.
@@ -98,16 +105,12 @@ def test_streaming_frequency_default_and_setter(
         dev.streaming_frequency = 250
         assert dev.streaming_frequency == 250
 
-        # Coerces a numeric type that survives the int() round-trip.
-        dev.streaming_frequency = True  # bool is an int subclass => 1
-        assert dev.streaming_frequency == 1
-
         with pytest.raises(ValueError, match="must be positive"):
             dev.streaming_frequency = 0
         with pytest.raises(ValueError, match="must be positive"):
             dev.streaming_frequency = -100
         # Setter must not have mutated state on the failing assignments.
-        assert dev.streaming_frequency == 1
+        assert dev.streaming_frequency == 250
     finally:
         dev.close()
 
@@ -261,16 +264,28 @@ def test_n_restart_cycles_no_firmware_drops(
     _drain(serial_obj, timeout=0.2)
 
     firmware_stats_diff.open()
-    for _ in range(cycles):
-        _send(serial_obj, scpi_commands.start_streaming(rate_hz).data)
-        time.sleep(duration_s)
-        _send(serial_obj, scpi_commands.stop_streaming().data, delay=0.2)
-        # Drain the in-flight bytes so the next cycle's firmware-side
-        # buffers start fresh — without this the per-cycle queue
-        # pressure compounds and a transient drop could be hidden by
-        # an earlier cycle clearing.
-        _drain(serial_obj, timeout=0.3)
-    firmware_stats_diff.close()
+    try:
+        for _ in range(cycles):
+            _send(serial_obj, scpi_commands.start_streaming(rate_hz).data)
+            time.sleep(duration_s)
+            _send(serial_obj, scpi_commands.stop_streaming().data, delay=0.2)
+            # Drain the in-flight bytes so the next cycle's firmware-side
+            # buffers start fresh — without this the per-cycle queue
+            # pressure compounds and a transient drop could be hidden by
+            # an earlier cycle clearing.
+            _drain(serial_obj, timeout=0.3)
+    finally:
+        # Always stop streaming + drain on the way out: if anything in
+        # the cycle loop raised, leaking an active stream into the
+        # ``firmware_stats_diff.close()`` snapshot would corrupt the
+        # SYST:STR:STATS? read with leftover protobuf bytes (mirrors
+        # the established pattern in test_phase_a_sentinel.py).
+        try:
+            _send(serial_obj, scpi_commands.stop_streaming().data, delay=0.3)
+            _drain(serial_obj, timeout=0.3)
+        except Exception:
+            pass
+        firmware_stats_diff.close()
 
     firmware_stats_diff.assert_no_drops()
 
@@ -356,7 +371,13 @@ def test_consumer_clear_buffer_drops_queued_bytes(clean_device) -> None:
             scpi_commands.enable_adc_channels("1").data, delay=0.2,
         )
 
-        # Scenario 1: message-buffer path.
+        # Scenario 1: message-buffer path. Run the consumer with a
+        # parser that never consumes bytes so the internal buffer
+        # accumulates. STOP streaming + the consumer thread BEFORE
+        # calling ``clear_buffer`` so the post-clear check is
+        # deterministic — otherwise the still-running thread can append
+        # bytes between our clear and our assert, making the strict
+        # equality flaky.
         consumer.start()
         try:
             _send(serial_obj, scpi_commands.start_streaming(200).data)
@@ -377,18 +398,27 @@ def test_consumer_clear_buffer_drops_queued_bytes(clean_device) -> None:
                 "either streaming did not engage or the consumer thread "
                 "is starved"
             )
+            # Quiesce both producer (firmware) and consumer (read
+            # thread) before the clear so no fresh bytes can land
+            # between clear_buffer() and the post-check.
+            _send(serial_obj, scpi_commands.stop_streaming().data, delay=0.3)
+            assert consumer.stop_safely(timeout_ms=1000) is True
+            # The consumer's stop() / stop_safely() already clears the
+            # message buffer as part of shutdown — but clear_buffer()
+            # under the load-bearing contract MUST hold the buffer at
+            # zero for any further reads. After the explicit clear,
+            # queued_message_count must be 0 deterministically (the
+            # thread is no longer running, so nothing can re-fill it).
             consumer.clear_buffer()
-            # Accept "shrunk" rather than "exactly zero" — a fresh read
-            # can land between clear_buffer() and our check. The
-            # load-bearing assertion is "clear_buffer dropped what was
-            # there at the time of the call".
-            queued_after = consumer.queued_message_count
-            assert queued_after < queued_before, (
-                f"clear_buffer did not shrink the buffer "
-                f"(before={queued_before}, after={queued_after})"
+            assert consumer.queued_message_count == 0, (
+                f"clear_buffer left {consumer.queued_message_count} bytes "
+                f"in the message buffer after consumer stop "
+                f"(was {queued_before} before the stop+clear)"
             )
         finally:
-            _send(serial_obj, scpi_commands.stop_streaming().data, delay=0.3)
+            # Belt-and-suspenders: stop_safely above should already have
+            # halted the thread; this finally only matters if the
+            # earlier asserts raised before we reached it.
             consumer.stop()
 
         # Scenario 2: in_waiting drain. Stream with the consumer
@@ -456,6 +486,14 @@ def test_consumer_error_handler_fires_when_parser_raises(
     try:
         consumer.start()
         _drive_brief_streaming(serial_obj)
+        # Poll up to 2 s for the consumer thread to land at least one
+        # read+parse pass and route the parser's exception through the
+        # error-handler chain. Without this synchronization the test
+        # races the background thread on the first read iteration
+        # (whose blocking pyserial read can take up to 0.5 s).
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not errors:
+            time.sleep(0.05)
     finally:
         consumer.stop()
         consumer.close()
