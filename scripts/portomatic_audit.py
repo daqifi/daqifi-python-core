@@ -466,9 +466,19 @@ def audit_shard_map(
         if ds_class and ds_class.kind == "protocol":
             impls = find_concrete_impls_for_protocol(ds_class, all_classes)
             if not impls:
+                # Count only `ported` contract members — that's what
+                # a concrete impl actually has to satisfy. Including
+                # `downstream-only` rows in the count would inflate
+                # the diagnostic (those are Python-side additions
+                # that aren't part of the upstream contract).
                 method_count = sum(
-                    1 for m in (sym.get("members") or [])
-                    if isinstance(m, dict) and m.get("downstream_kind") in ("method", "property")
+                    1
+                    for m in (sym.get("members") or [])
+                    if (
+                        isinstance(m, dict)
+                        and m.get("relation") == "ported"
+                        and m.get("downstream_kind") in ("method", "property")
+                    )
                 )
                 drift.append(
                     {
