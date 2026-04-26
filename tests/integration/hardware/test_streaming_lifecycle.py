@@ -28,6 +28,7 @@ from typing import Any, List, Tuple
 import pytest
 
 from daqifi._internal import scpi_commands
+from daqifi._internal.scpi import DeviceState
 from daqifi.communication import (
     CompositeMessageParser,
     StreamMessageConsumer,
@@ -146,11 +147,9 @@ def test_initial_sd_state_is_idle(device_info: DeviceInfo) -> None:
 def test_start_stop_flips_is_streaming(device_info: DeviceInfo) -> None:
     """``start_streaming`` flips ``is_streaming`` True; ``stop_streaming``
     flips it back. State must transition Ready → Streaming → Ready."""
-    from daqifi._internal.scpi import DeviceState  # local: scoped import
-
     dev = _open_factory_device(device_info.port)
     try:
-        # Bias to a low rate so a tight start/stop window doesn't flood
+        # Bias to a low rate so a tight start/stop window does not flood
         # the consumer.
         dev.streaming_frequency = 100
 
@@ -179,8 +178,6 @@ def test_stop_streaming_is_idempotent(device_info: DeviceInfo) -> None:
     repeatedly after a real stop, must not raise. ``is_streaming``
     stays False across the calls and the device state never advances
     past Ready."""
-    from daqifi._internal.scpi import DeviceState
-
     dev = _open_factory_device(device_info.port)
     try:
         # Cold stop — never started.
