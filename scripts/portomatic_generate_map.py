@@ -522,7 +522,41 @@ def _read_yaml_minimal(path: Path) -> dict:
     raw text of nested sections we want to round-trip
     (divergences, backlog, hal_pairs, notes, rationale).
 
-    NOT a real YAML parser — best-effort fallback only."""
+    NOT a real YAML parser — best-effort fallback only. Coerces
+    scalars to Python types (None/bool/int/float/str) so the
+    downstream merge logic, which checks ``if ex.get(key) is not
+    None``, works correctly when this fallback path is taken."""
+    def _coerce_scalar(value: str):
+        if value == "" or value == "null" or value == "~":
+            return None
+        if value == "[]":
+            return []
+        if value == "{}":
+            return {}
+        if value == "true":
+            return True
+        if value == "false":
+            return False
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            s = value[1:-1]
+            # Reverse the escaping that _yaml_escape applied so the
+            # round-trip stays clean.
+            return (
+                s.replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+                .replace('\\"', '"')
+                .replace("\\\\", "\\")
+            )
+        try:
+            if "." in value:
+                return float(value)
+            return int(value)
+        except ValueError:
+            return value
+
     out: dict = {}
     text = path.read_text(encoding="utf-8")
     for line in text.splitlines():
@@ -530,7 +564,7 @@ def _read_yaml_minimal(path: Path) -> dict:
             k, _, v = line.partition(":")
             v = v.strip()
             if v and not v.endswith(":"):
-                out[k.strip()] = v
+                out[k.strip()] = _coerce_scalar(v)
     return out
 
 
@@ -561,11 +595,21 @@ def generate_map(shard: str, py_index: Dict[str, PySymbol]) -> dict:
     # to their own shard maps).
     cs_files = sorted(upstream_dir.glob("*.cs"))
 
+    # Gather every C# symbol in the shard up front so the per-symbol
+    # collapse-detection (interface + concrete-class -> single Python
+    # Protocol) has the full sibling list at row-generation time.
+    all_cs_symbols_in_shard: List[CsSymbol] = []
+    cs_symbols_per_file: Dict[Path, List[CsSymbol]] = {}
+    for cs_path in cs_files:
+        cs_symbols = parse_cs_file(cs_path)
+        cs_symbols_per_file[cs_path] = cs_symbols
+        all_cs_symbols_in_shard.extend(cs_symbols)
+
     files: List[dict] = []
     symbols: List[dict] = []
 
     for cs_path in cs_files:
-        cs_symbols = parse_cs_file(cs_path)
+        cs_symbols = cs_symbols_per_file[cs_path]
         # Best-effort downstream-file resolution: if any of the C# symbols
         # in this file have a Python match, use that match's file as the
         # downstream pointer. Otherwise leave null.
@@ -587,7 +631,7 @@ def generate_map(shard: str, py_index: Dict[str, PySymbol]) -> dict:
             }
         )
         for cs_sym in cs_symbols:
-            symbols.append(symbol_row(cs_sym, py_index))
+            symbols.append(symbol_row(cs_sym, py_index, all_cs_symbols_in_shard))
 
     return {
         "schema_version": 2,
@@ -608,9 +652,63 @@ def cs_sym_file_rel(path: Path) -> str:
     return str(path.relative_to(UPSTREAM_ROOT.parent.parent)).replace("\\", "/")
 
 
-def symbol_row(cs_sym: CsSymbol, py_index: Dict[str, PySymbol]) -> dict:
+def _other_cs_symbol_maps_here(
+    cs_sym: CsSymbol, py_name: str, all_cs_symbols_in_shard: List[CsSymbol]
+) -> bool:
+    """True if some OTHER C# symbol in this shard auto-maps to the
+    same Python class — typical case is the C# I-prefixed interface
+    + the concrete class both name-mapping to a single Python Protocol.
+
+    The Python port collapses C# interface + concrete-class pairs
+    into a single Protocol per upstream surface; the concrete C#
+    class has no Python equivalent. Marking it divergent here keeps
+    the audit's protocol-no-impl signal accurate (the class would
+    otherwise look like a Protocol-without-impl at audit time)."""
+    for other in all_cs_symbols_in_shard:
+        if other is cs_sym:
+            continue
+        if cs_to_py_type_name(other.name) == py_name and other.kind == "interface":
+            return True
+    return False
+
+
+def symbol_row(
+    cs_sym: CsSymbol,
+    py_index: Dict[str, PySymbol],
+    all_cs_symbols_in_shard: Optional[List[CsSymbol]] = None,
+) -> dict:
     py_name = cs_to_py_type_name(cs_sym.name)
     py = py_index.get(py_name)
+    # Collapse-detection: if a C# class auto-maps to the same Python
+    # class as a sibling C# interface, mark the class divergent so we
+    # don't double-count the impl. Without this, audits report the
+    # Python Protocol as "no concrete impl" because the auto-mapped
+    # impl is itself a Protocol (not a real concrete class).
+    if (
+        py
+        and cs_sym.kind in ("class", "struct", "record")
+        and py.kind == "protocol"
+        and all_cs_symbols_in_shard is not None
+        and _other_cs_symbol_maps_here(cs_sym, py_name, all_cs_symbols_in_shard)
+    ):
+        return {
+            "upstream": {
+                "kind": cs_sym.kind,
+                "qualified": cs_sym.qualified,
+                "file": cs_sym_file_rel(cs_sym.file),
+            },
+            "downstream": None,
+            "relation": "divergent",
+            "last_synced_sha": None,
+            "notes": None,
+            "rationale": (
+                f"Python collapses the C# {cs_sym.kind} {cs_sym.name} + its "
+                f"sibling I{cs_sym.name} interface into a single "
+                f"{py.qualified} Protocol. No concrete Python class is "
+                f"maintained for the {cs_sym.kind} side."
+            ),
+            "members": [],
+        }
     members = []
     py_methods = set(py.members) if py else set()
     seen_py: set[str] = set()
@@ -720,8 +818,14 @@ def merge_into_existing(generated: dict, existing: dict) -> dict:
                 if ex.get(key) is not None:
                     f[key] = ex[key]
             # Preserve a manual relation override (e.g. "divergent" with rationale).
+            # When relation is divergent/dropped, ALSO preserve the
+            # original downstream pointer — operator may have set it
+            # to null deliberately ("no Python equivalent"), and
+            # auto-discovered name matches shouldn't override that.
             if ex.get("relation") in ("divergent", "dropped") and ex.get("rationale"):
                 f["relation"] = ex["relation"]
+                if "downstream" in ex:
+                    f["downstream"] = ex["downstream"]
     if isinstance(existing.get("symbols"), list):
         ex_symbols = {}
         for s in existing["symbols"]:
@@ -734,8 +838,15 @@ def merge_into_existing(generated: dict, existing: dict) -> dict:
             for key in ("notes", "rationale", "last_synced_sha"):
                 if ex.get(key) is not None:
                     s[key] = ex[key]
+            # Same downstream-preservation as above for files: when the
+            # operator marked a symbol divergent/dropped (with rationale),
+            # honor their downstream pointer (often null) instead of
+            # letting the name-match heuristic auto-link to a class
+            # they intentionally said doesn't apply.
             if ex.get("relation") in ("divergent", "dropped") and ex.get("rationale"):
                 s["relation"] = ex["relation"]
+                if "downstream" in ex:
+                    s["downstream"] = ex["downstream"]
             # Member-level preservation. Manual ``rationale`` / ``notes``
             # / ``relation`` overrides on individual members must
             # survive regeneration — without this, the operator's

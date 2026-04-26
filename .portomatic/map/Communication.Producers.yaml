@@ -82,63 +82,12 @@ symbols:
       kind: class
       qualified: Daqifi.Core.Communication.Producers.MessageProducer
       file: src/Daqifi.Core/Communication/Producers/MessageProducer.cs
-    downstream:
-      kind: protocol
-      qualified: daqifi._internal.comm.MessageProducer
-      file: daqifi/_internal/comm.py
-    relation: ported
+    downstream: null
+    relation: divergent
     last_synced_sha: null
     notes: null
-    rationale: null
-    members:
-      - upstream: Start
-        upstream_kind: method
-        downstream: start
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Stop
-        upstream_kind: method
-        downstream: stop
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: StopSafely
-        upstream_kind: method
-        downstream: stop_safely
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Send
-        upstream_kind: method
-        downstream: send
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Dispose
-        upstream_kind: method
-        downstream: dispose
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: close
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: is_running
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: queued_message_count
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
+    rationale: "Python collapses the C# class MessageProducer + its sibling IMessageProducer interface into a single daqifi._internal.comm.MessageProducer Protocol. No concrete Python class is maintained for the class side."
+    members: []
   - upstream:
       kind: class
       qualified: Daqifi.Core.Communication.Producers.ScpiMessageProducer
@@ -242,4 +191,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T07:26:46.112722+00:00"
+updated_at: "2026-04-26T08:17:56.768151+00:00"

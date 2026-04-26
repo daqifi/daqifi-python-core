@@ -890,106 +890,13 @@ symbols:
       kind: class
       qualified: Daqifi.Core.Communication.Transport.UdpTransport
       file: src/Daqifi.Core/Communication/Transport/UdpTransport.cs
-    downstream:
-      kind: protocol
-      qualified: daqifi._internal.comm.UdpTransport
-      file: daqifi/_internal/comm.py
-    relation: ported
+    downstream: null
+    relation: divergent
     last_synced_sha: null
     notes: null
-    rationale: null
-    members:
-      - upstream: LocalPort
-        upstream_kind: property
-        downstream: local_port
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: ConnectionInfo
-        upstream_kind: property
-        downstream: connection_info
-        downstream_kind: property
-        relation: ported
-        rationale: null
-      - upstream: StatusChanged
-        upstream_kind: event
-        downstream: status_changed
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: OpenAsync
-        upstream_kind: method
-        downstream: open
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: CloseAsync
-        upstream_kind: method
-        downstream: close
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: SendBroadcastAsync
-        upstream_kind: method
-        downstream: send_broadcast
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: SendUnicastAsync
-        upstream_kind: method
-        downstream: send_unicast
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Open
-        upstream_kind: method
-        downstream: open
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Close
-        upstream_kind: method
-        downstream: close
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Dispose
-        upstream_kind: method
-        downstream: dispose
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: add_status_changed
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: is_open
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: receive
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: remove_status_changed
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: send_broadcast_to
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
+    rationale: "Python collapses the C# class UdpTransport + its sibling IUdpTransport interface into a single daqifi._internal.comm.UdpTransport Protocol. No concrete Python class is maintained for the class side."
+    members: []
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T07:26:46.155264+00:00"
+updated_at: "2026-04-26T08:17:56.805072+00:00"

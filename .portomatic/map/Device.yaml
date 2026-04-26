@@ -487,20 +487,20 @@ symbols:
       - upstream: UpdateNetworkConfigurationAsync
         upstream_kind: method
         downstream: update_network_configuration
-        downstream_kind: null
-        relation: missing
+        downstream_kind: method
+        relation: ported
         rationale: null
       - upstream: PrepareSdInterface
         upstream_kind: method
         downstream: prepare_sd_interface
-        downstream_kind: null
-        relation: missing
+        downstream_kind: method
+        relation: ported
         rationale: null
       - upstream: PrepareLanInterface
         upstream_kind: method
         downstream: prepare_lan_interface
-        downstream_kind: null
-        relation: missing
+        downstream_kind: method
+        relation: ported
         rationale: null
       - upstream: GetSdCardFilesAsync
         upstream_kind: method
@@ -577,6 +577,12 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: is_usb_connection
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: network_configuration
         downstream_kind: method
         relation: downstream-only
         rationale: null
@@ -1331,4 +1337,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T07:26:46.222000+00:00"
+updated_at: "2026-04-26T08:17:56.866093+00:00"
