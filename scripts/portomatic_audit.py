@@ -398,18 +398,41 @@ def find_concrete_impls_for_protocol(
     }
     if not required:
         return []
+
+    # Build a simple-name → [classes] index so we can resolve base
+    # classes when walking the inheritance chain. Imperfect (name
+    # collisions across modules go undisambiguated), but accurate
+    # enough to dramatically reduce false-negative protocol-no-impl
+    # reports — without it we'd flag concrete classes that satisfy
+    # the contract via inherited methods rather than direct impls.
+    by_name: Dict[str, List[PyClass]] = defaultdict(list)
+    for c in all_classes:
+        by_name[c.name].append(c)
+
+    def effective_member_names(c: PyClass) -> Set[str]:
+        """Return every non-stub method/property name reachable on
+        ``c`` via the inheritance chain (DFS over ``c.bases``)."""
+        seen: Set[str] = set()
+        stack: List[PyClass] = [c]
+        visited: Set[str] = set()
+        while stack:
+            cur = stack.pop()
+            if cur.qualified in visited:
+                continue
+            visited.add(cur.qualified)
+            for mm in cur.members.values():
+                if mm.kind in ("method", "property") and not mm.is_stub:
+                    seen.add(mm.name)
+            for b in cur.bases:
+                for base_cls in by_name.get(b, []):
+                    stack.append(base_cls)
+        return seen
+
     impls: List[PyClass] = []
     for cls in all_classes:
-        if cls is proto:
+        if cls is proto or cls.kind == "protocol":
             continue
-        if cls.kind == "protocol":
-            continue
-        cls_member_names = {
-            m.name
-            for m in cls.members.values()
-            if m.kind in ("method", "property") and not m.is_stub
-        }
-        if required.issubset(cls_member_names):
+        if required.issubset(effective_member_names(cls)):
             impls.append(cls)
     return impls
 

@@ -177,13 +177,13 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: EXISTING_NETWORK
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: SELF_HOSTED
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
   - upstream:
@@ -202,16 +202,16 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: NONE
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: WPA_PSK_PHRASE
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:33:21.080298+00:00"
+updated_at: "2026-04-26T08:39:13.800852+00:00"

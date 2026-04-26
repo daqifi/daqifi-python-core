@@ -29,7 +29,7 @@ files:
     rationale: null
     last_synced_sha: null
   - upstream: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
-    downstream: daqifi/device_finders.py
+    downstream: daqifi/_internal/comm.py
     relation: ported
     notes: null
     rationale: null
@@ -160,7 +160,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: device_type
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
   - upstream:
@@ -215,13 +215,13 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: DEFAULT_PRODUCT_ID
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: DEFAULT_VENDOR_ID
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
@@ -391,7 +391,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: device_type
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
   - upstream:
@@ -422,13 +422,13 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: NYQUIST_2
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: NYQUIST_3
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
   - upstream:
@@ -465,7 +465,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: HID
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
   - upstream:
@@ -599,13 +599,13 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: DAQIFI_FINDER_QUERY
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: NATIVE_FINDER_QUERY
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
@@ -647,4 +647,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:33:21.035423+00:00"
+updated_at: "2026-04-26T08:39:13.757045+00:00"

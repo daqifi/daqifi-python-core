@@ -292,7 +292,7 @@ class PySymbol:
     kind: str  # "class" | "protocol" | "dataclass" | "enum"
     module: str  # daqifi.network
     file_rel: str  # daqifi/network.py
-    members: List[str]  # method + property names
+    members: Dict[str, str]  # name -> kind ("method" | "property" | "field" | "value")
 
 
 def parse_python_package(root: Path) -> Dict[str, PySymbol]:
@@ -319,7 +319,7 @@ def parse_python_package(root: Path) -> Dict[str, PySymbol]:
             if node.name.startswith("_"):
                 continue
             kind = _classify_python_class(node)
-            members = _collect_public_methods(node)
+            members = _collect_public_methods(node, is_enum=(kind == "enum"))
             sym = PySymbol(
                 qualified=f"{module_path}.{node.name}",
                 name=node.name,
@@ -354,26 +354,44 @@ def _classify_python_class(node: ast.ClassDef) -> str:
     return "class"
 
 
-def _collect_public_methods(node: ast.ClassDef) -> List[str]:
+def _collect_public_methods(
+    node: ast.ClassDef, *, is_enum: bool
+) -> Dict[str, str]:
     """Collect every public method, property, dataclass field, and enum
-    value name on a Python class — the surface a C# member could map
-    to. Skips private (``_foo``) names except dunder ``__init__``."""
-    out: List[str] = []
+    value on a Python class — the surface a C# member could map to —
+    keyed by name with kind tags so downstream rows get the right
+    ``downstream_kind`` (was hardcoded to ``method``).
+
+    Skips private (``_foo``) names except dunder ``__init__``.
+    """
+    out: Dict[str, str] = {}
     for item in node.body:
         if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if item.name.startswith("_") and item.name != "__init__":
                 continue
-            out.append(item.name)
+            # Detect @property / @cached_property to distinguish from methods.
+            kind = "method"
+            for d in item.decorator_list:
+                deco_name = (
+                    d.id if isinstance(d, ast.Name)
+                    else d.attr if isinstance(d, ast.Attribute)
+                    else None
+                )
+                if deco_name in ("property", "cached_property"):
+                    kind = "property"
+                    break
+            out[item.name] = kind
         elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-            # Dataclass-style annotated field: ``mode: WifiMode = ...``
             name = item.target.id
             if not name.startswith("_"):
-                out.append(name)
+                # An annotated assignment in an enum body is the enum
+                # value; in a dataclass body it's a field. Distinguish
+                # so the downstream row carries the right kind tag.
+                out[name] = "value" if is_enum else "field"
         elif isinstance(item, ast.Assign):
-            # Enum value or class-level constant: ``MODE = "value"``
             for tgt in item.targets:
                 if isinstance(tgt, ast.Name) and not tgt.id.startswith("_"):
-                    out.append(tgt.id)
+                    out[tgt.id] = "value" if is_enum else "field"
     return out
 
 
@@ -730,21 +748,35 @@ def generate_map(shard: str, py_index: Dict[str, PySymbol]) -> dict:
         cs_symbols_per_file[cs_path] = cs_symbols
         all_cs_symbols_in_shard.extend(cs_symbols)
 
+    from collections import defaultdict as _defaultdict
+
     files: List[dict] = []
     symbols: List[dict] = []
 
     for cs_path in cs_files:
         cs_symbols = cs_symbols_per_file[cs_path]
-        # Best-effort downstream-file resolution: if any of the C# symbols
-        # in this file have a Python match, use that match's file as the
-        # downstream pointer. Otherwise leave null.
-        ds_files = []
+        # Downstream-file resolution: collect every Python file that
+        # one of this C# file's symbols maps to. Pick the majority
+        # winner so a file with one stray name match doesn't override
+        # the dominant target. Leave null if there's a tie (caller
+        # would get an arbitrary pick from sorting otherwise) — that
+        # signal of "ambiguous mapping" is more useful than a wrong
+        # auto-pick.
+        ds_files: List[str] = []
         for cs_sym in cs_symbols:
             py_name = cs_to_py_type_name(cs_sym.name)
             py = py_index.get(py_name)
             if py:
                 ds_files.append(py.file_rel)
-        ds_file = ds_files[0] if ds_files else None
+        ds_file: Optional[str] = None
+        if ds_files:
+            counts: Dict[str, int] = _defaultdict(int)
+            for f in ds_files:
+                counts[f] += 1
+            best_file, best_n = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+            # Only commit when there's a clear winner.
+            if list(counts.values()).count(best_n) == 1:
+                ds_file = best_file
         files.append(
             {
                 "upstream": cs_sym_file_rel(cs_path),
@@ -835,7 +867,11 @@ def symbol_row(
             "members": [],
         }
     members = []
-    py_methods = set(py.members) if py else set()
+    # py.members is now a dict of {name: kind}; py_methods stays a set
+    # of names for the existence-check, but py_member_kind looks up
+    # the actual kind so downstream rows carry the right tag.
+    py_methods: set[str] = set(py.members.keys()) if py else set()
+    py_member_kind: Dict[str, str] = py.members if py else {}
     seen_py: set[str] = set()
     for m in cs_sym.members:
         # Constructors don't have a 1:1 Python equivalent (we use
@@ -887,7 +923,9 @@ def symbol_row(
                 }
             )
     # Python-only members on this class — flag as undocumented for the
-    # auditor to triage.
+    # auditor to triage. Look up the actual member kind on the Python
+    # side so an enum value doesn't get tagged ``method`` (Qodo PR #36
+    # pass 8 #3+#4).
     if py:
         for extra in sorted(py_methods - seen_py):
             members.append(
@@ -895,7 +933,7 @@ def symbol_row(
                     "upstream": None,
                     "upstream_kind": None,
                     "downstream": extra,
-                    "downstream_kind": "method",
+                    "downstream_kind": py_member_kind.get(extra, "method"),
                     "relation": "downstream-only",
                     "rationale": None,
                 }

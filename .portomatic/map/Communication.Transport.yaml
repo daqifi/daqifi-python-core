@@ -348,7 +348,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: is_connected
-        downstream_kind: method
+        downstream_kind: property
         relation: downstream-only
         rationale: null
   - upstream:
@@ -719,13 +719,13 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: DEFAULT_OS_RX_BUFFER_BYTES
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: DEFAULT_OS_TX_BUFFER_BYTES
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
@@ -749,7 +749,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: is_connected
-        downstream_kind: method
+        downstream_kind: property
         relation: downstream-only
         rationale: null
       - upstream: null
@@ -846,7 +846,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: is_connected
-        downstream_kind: method
+        downstream_kind: property
         relation: downstream-only
         rationale: null
       - upstream: null
@@ -899,4 +899,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:33:20.907376+00:00"
+updated_at: "2026-04-26T08:39:13.631477+00:00"

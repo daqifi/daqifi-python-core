@@ -85,7 +85,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: ERROR
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
   - upstream:
@@ -134,4 +134,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:33:21.110300+00:00"
+updated_at: "2026-04-26T08:39:13.833069+00:00"

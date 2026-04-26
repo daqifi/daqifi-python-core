@@ -177,7 +177,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: index
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
   - upstream:
@@ -208,7 +208,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: Unknown
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
   - upstream:
@@ -233,7 +233,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: Analog
-        downstream_kind: method
+        downstream_kind: value
         relation: downstream-only
         rationale: null
   - upstream:
@@ -343,7 +343,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: index
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
   - upstream:
@@ -410,25 +410,25 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: direction
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: index
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: is_enabled
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: name
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
   - upstream:
@@ -542,25 +542,25 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: direction
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: index
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: is_enabled
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: name
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
   - upstream:
@@ -598,4 +598,4 @@ backlog:
     discovered_at_sha: HEAD
     priority: low
 hal_pairs: []
-updated_at: "2026-04-26T08:33:20.715543+00:00"
+updated_at: "2026-04-26T08:39:13.441454+00:00"

@@ -23,8 +23,8 @@ files:
     rationale: null
     last_synced_sha: null
   - upstream: src/Daqifi.Core/Communication/Consumers/LineBasedMessageParser.cs
-    downstream: daqifi/communication.py
-    relation: ported
+    downstream: null
+    relation: missing
     notes: null
     rationale: null
     last_synced_sha: null
@@ -402,7 +402,7 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: DEFAULT_BUFFER_SIZE
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
@@ -432,13 +432,13 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: is_running
-        downstream_kind: method
+        downstream_kind: property
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: queued_message_count
-        downstream_kind: method
+        downstream_kind: property
         relation: downstream-only
         rationale: null
       - upstream: null
@@ -456,4 +456,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:33:20.799867+00:00"
+updated_at: "2026-04-26T08:39:13.525963+00:00"

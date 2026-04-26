@@ -212,61 +212,61 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: analog_port_count
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: calibration_values
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: device_part_number
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: device_serial_number
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: digital_port_count
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: firmware_revision
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: internal_scale_m
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: port_range
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: resolution
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: timestamp_frequency
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
   - upstream:
@@ -285,25 +285,25 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: duration
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: file_name
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: file_path
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: file_size
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
   - upstream:
@@ -575,19 +575,19 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: bytes_read
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: messages_read
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: total_bytes
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
   - upstream:
@@ -606,16 +606,16 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: bytes_received
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: file_name
-        downstream_kind: method
+        downstream_kind: field
         relation: downstream-only
         rationale: null
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:33:21.145832+00:00"
+updated_at: "2026-04-26T08:39:13.871577+00:00"
