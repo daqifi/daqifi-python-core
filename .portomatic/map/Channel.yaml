@@ -42,7 +42,7 @@ files:
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Channel/IAnalogChannel.cs
   downstream: daqifi/devices.py
-  relation: dropped
+  relation: divergent
   notes: null
   rationale: Python uses duck typing; no separate interface file.
   last_synced_sha: null
@@ -210,10 +210,10 @@ symbols:
     kind: class
     qualified: daqifi.devices.DigitalChannel
     file: daqifi/devices.py
-  relation: one_to_one
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: Same as AnalogChannel — Python DigitalIOChannel is SCPI-delegated.
   members:
   - upstream: ChannelNumber
     downstream: channel_number
@@ -257,10 +257,10 @@ symbols:
     kind: class
     qualified: daqifi.devices.AnalogChannel
     file: daqifi/devices.py
-  relation: one_to_one
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: Python uses duck typing; no separate interface file.
   members:
   - upstream: MinValue
     downstream: min_value
