@@ -993,8 +993,18 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.set_sd_logging_file_name(file_name))
 
     def request_sd_card_file_list(self) -> None:
-        """Send the LIST? command. Fire-and-forget — use
-        :meth:`get_sd_card_files` for the parsed-response flow."""
+        """Low-level helper — emit ``SD:LIST?`` only, do nothing else.
+
+        **Most callers want :meth:`get_sd_card_files`** (which wraps
+        the LIST? + parse + ``_sd_card_files`` cache update flow).
+        This method is fire-and-forget by design — it does NOT update
+        ``_sd_card_files`` because the consumer pipeline is currently
+        protobuf-only and the text reply isn't surfaced through
+        :meth:`add_message_received` callbacks
+        (daqifi-python-core#16). When that lands, this method can be
+        wired to update state too; until then, use the higher-level
+        helper.
+        """
         self.send(scpi_commands.get_sd_file_list())
         time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
 
