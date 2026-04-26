@@ -100,11 +100,11 @@ public API forces a test or a documented skip).
 
 ## daqifi.channels
 
-- [ ] `AnalogInputs.__getitem__` / `__len__` / `__iter__` (B7)
-- [ ] `AnalogInputs.configure_channels` (B7)
-- [ ] `AnalogInputs.enable_all` / `disable_all` (B7)
-- [ ] `AnalogInputChannel.enabled` (get + set) (B7)
-- [ ] `AnalogInputChannel.range` (get + set) (B7)
+- [x] `AnalogInputs.__getitem__` / `__len__` / `__iter__` (B7)
+- [x] `AnalogInputs.configure_channels` (B7)
+- [x] `AnalogInputs.enable_all` / `disable_all` (B7)
+- [x] `AnalogInputChannel.enabled` (get + set) (B7)
+- [x] `AnalogInputChannel.range` (get + set) (B7)
 - [ ] `AnalogOutputs.__getitem__` / `__len__` / `__iter__` (s — Nq3 only)
 - [ ] `AnalogOutputs.set_voltages` (s — Nq3 only)
 - [ ] `AnalogOutputs.enable_all` / `disable_all` (s — Nq3 only)
@@ -262,10 +262,32 @@ out the remaining members the shorthand glossed over (added pass
 
 ---
 
-_Last updated: B6 — streaming-lifecycle slice. Checked off
-`DaqifiStreamingDevice.start_streaming` / `stop_streaming` /
-`is_streaming` / `streaming_frequency` / `is_usb_connection` /
-`is_logging_to_sd_card` / `sd_card_files`, plus the deferred
-`StreamMessageConsumer.is_running` / `clear_buffer` /
-`add_error_occurred` / `remove_error_occurred` symbols. Adds the
-N-restart firmware-drop-counter regression guard._
+_Last updated: B7 — analog-input channels slice. Checked off
+`AnalogInputs.__getitem__` / `__len__` / `__iter__` /
+`configure_channels` / `enable_all` / `disable_all`, plus
+`AnalogInputChannel.enabled` / `range` (get + set). Cross-checks
+every per-channel ``enabled`` GETTER against the firmware-side
+bitmask returned by ``ENABle:VOLTage:DC?`` after raw-SCPI
+bitmask writes. NQ1 range setter raises
+``FeatureNotSupportedError``._
+
+_**Production bugs surfaced (logged for a follow-up production
+PR; tests-only-PR rule keeps fixes out of B7):**_
+
+_1. ``AnalogInputChannel.enabled`` SETTER sends malformed SCPI —_
+   _``CONFigure:ADC:CHANnel <ch> <val>`` (space-separated)_
+   _instead of the comma-separated form the firmware accepts._
+   _The malformed command is silently dropped (no error queued)_
+   _and ``SerialInterface.send_set`` independently returns False_
+   _due to a SYST:ERR? response-buffering race, so the setter_
+   _raises ``CommandError``. xfailed:_
+   _``test_per_channel_enabled_setter_reflects_in_firmware_bitmask``,_
+   _``test_enable_all_sets_full_bitmask``,_
+   _``test_disable_all_clears_bitmask``,_
+   _``test_configure_channels_enables_listed_channels_on_nq3``._
+
+_2. ``AnalogInputs.configure_channels`` writes ``range`` BEFORE_
+   _``enabled``, so on NQ1 it raises ``FeatureNotSupportedError``_
+   _and never reaches the enabled write — fully unusable on NQ1._
+   _Documented + asserted by_
+   _``test_configure_channels_raises_on_nq1_due_to_range_setter``._
