@@ -88,9 +88,16 @@ def parse_sd_card_file_list(lines: Iterable[str]) -> List["SdCardFileInfo"]:
     """Parse text lines from the device's SD-card LIST? response.
 
     Ports ``Daqifi.Core/Device/SdCard/SdCardFileListParser.cs``. Skips
-    blank lines, SCPI error responses, and entries containing control
-    characters. Strips a leading ``"Daqifi/"`` directory prefix and any
-    trailing size column when present.
+    blank lines, SCPI error responses, ``DAQIFI>`` / ``OK`` noise lines
+    that may have leaked past the capture path, and entries containing
+    control characters. Strips a leading ``"Daqifi/"`` directory prefix
+    and any trailing size column when present.
+
+    The DAQIFI/OK skips are defense-in-depth — the
+    ``_execute_raw_text_capture`` helper already strips a leading
+    ``DAQIFI>`` prompt, but this function is a public parser that may
+    receive lines from arbitrary callers who didn't go through that
+    helper.
     """
     out: List[SdCardFileInfo] = []
     for raw in lines:
@@ -100,6 +107,8 @@ def parse_sd_card_file_list(lines: Iterable[str]) -> List["SdCardFileInfo"]:
         if not line:
             continue
         upper = line.upper()
+        if upper in ("DAQIFI>", "OK"):
+            continue
         if upper.startswith("**ERROR") or upper.startswith("ERROR"):
             continue
         # Some firmwares append "<path> <size>" — keep the first whitespace token.

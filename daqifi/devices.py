@@ -1711,6 +1711,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
         report ``Disconnected`` until ``prepare_lan_interface`` is
         called again.
 
+        Sleeps ``_SD_INTERFACE_SETTLE_DELAY_S`` between the LAN-disable
+        and SD-enable commands so the firmware's SPI-bus arbiter has
+        time to release+acquire the bus. Without the gap, the very
+        next SD-card SCPI command can hit firmware error -200
+        (Execution error). Centralizing the sleep here means callers
+        like :meth:`format_sd_card` get the right timing for free.
+
         Side effect — re-enables the SD card SCPI module. This does
         NOT automatically resume an SD logging session; callers must
         explicitly call :meth:`enable_sd_card_logging` to begin
@@ -1719,7 +1726,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
         doesn't restart logging on the firmware side.
         """
         self.send(scpi_commands.disable_network_lan())
+        time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
         self.send(scpi_commands.enable_storage_sd())
+        time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
 
     # ---- Lower-level WiFi setters (escape hatch for fine-grained control) -
 
