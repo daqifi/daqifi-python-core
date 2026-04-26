@@ -252,6 +252,36 @@ class TestStartSdCardLogging:
         finally:
             sd.disconnect()
 
+    def test_rollback_restores_lan_on_partial_failure(self) -> None:
+        # If a SCPI step in the middle of the configure-then-start
+        # sequence raises, LAN must be re-enabled before the exception
+        # propagates (Qodo PR #41 finding 8).
+        sd = _make_device_with_serial_facade()
+        try:
+            # Inject a failure between the LAN-disable and the start.
+            real_send = sd.send
+            seen: list = []
+
+            def failing_send(msg) -> None:
+                seen.append(getattr(msg, "data", str(msg)))
+                if "SD:FILE" in seen[-1]:
+                    raise RuntimeError("simulated mid-sequence failure")
+                real_send(msg)
+
+            sd.send = failing_send  # type: ignore[assignment]
+            with pytest.raises(RuntimeError, match="simulated"):
+                sd.start_sd_card_logging(file_name="rollback.bin")
+
+            written = b"".join(sd._transport.stream.written)
+            # LAN was disabled, then re-enabled on rollback.
+            assert b"LAN:ENAbled 0" in written
+            assert b"LAN:ENAbled 1" in written
+            # State flags remained in their pre-call state.
+            assert sd.is_logging_to_sd_card is False
+            assert sd.is_streaming is False
+        finally:
+            sd.disconnect()
+
 
 # ---- stop_sd_card_logging --------------------------------------------------
 
@@ -288,6 +318,16 @@ class TestFormatSdCard:
         with pytest.raises(RuntimeError, match="not connected"):
             sd.format_sd_card()
 
+    def test_requires_usb_transport(self) -> None:
+        # Format disables LAN to take the SPI bus — refuse over LAN
+        # so the call doesn't sever its own control connection.
+        sd = _make_device_with_serial_facade(usb=False)
+        try:
+            with pytest.raises(RuntimeError, match="USB"):
+                sd.format_sd_card()
+        finally:
+            sd.disconnect()
+
     def test_blocked_while_logging(self) -> None:
         sd = _make_device_with_serial_facade()
         try:
@@ -297,13 +337,17 @@ class TestFormatSdCard:
         finally:
             sd.disconnect()
 
-    def test_dispatches_format_command(self) -> None:
+    def test_dispatches_format_command_with_lan_disable_first(self) -> None:
         sd = _make_device_with_serial_facade()
         try:
             sd.format_sd_card()
             written = b"".join(sd._transport.stream.written)
-            assert b"SD:ENAble 1" in written
-            assert b"SD:FORmat" in written
+            # Must disable LAN before enabling SD (precondition on
+            # enable_storage_sd) — Qodo PR #41 finding 7.
+            lan_off = written.find(b"LAN:ENAbled 0")
+            sd_on = written.find(b"SD:ENAble 1")
+            sd_format = written.find(b"SD:FORmat")
+            assert lan_off >= 0 and sd_on > lan_off and sd_format > sd_on
         finally:
             sd.disconnect()
 
@@ -316,6 +360,16 @@ class TestDeleteSdCardFile:
         sd = DaqifiStreamingDevice(name="x", transport=None)
         with pytest.raises(RuntimeError, match="not connected"):
             sd.delete_sd_card_file("x.bin")
+
+    def test_requires_usb_transport(self) -> None:
+        # Delete uses prepare_sd_interface (disables LAN) — Qodo
+        # PR #41 finding 4.
+        sd = _make_device_with_serial_facade(usb=False)
+        try:
+            with pytest.raises(RuntimeError, match="USB"):
+                sd.delete_sd_card_file("x.bin")
+        finally:
+            sd.disconnect()
 
     def test_blocked_while_logging(self) -> None:
         sd = _make_device_with_serial_facade()
@@ -371,6 +425,16 @@ class TestGetSdCardFiles:
         sd = DaqifiStreamingDevice(name="x", transport=None)
         with pytest.raises(RuntimeError, match="not connected"):
             sd.get_sd_card_files()
+
+    def test_requires_usb_transport(self) -> None:
+        # get_sd_card_files uses prepare_sd_interface (disables LAN)
+        # — Qodo PR #41 finding 4.
+        sd = _make_device_with_serial_facade(usb=False)
+        try:
+            with pytest.raises(RuntimeError, match="USB"):
+                sd.get_sd_card_files()
+        finally:
+            sd.disconnect()
 
     def test_returns_parsed_list_and_caches(self) -> None:
         listing = b"DAQIFI> log_20260101_010101.bin\r\nlog_20260101_020202.bin\r\n"
@@ -456,6 +520,36 @@ class TestDownloadSdCardFile:
         assert progress_calls  # at least one progress event
         assert progress_calls[-1].bytes_received == len(payload)
         assert progress_calls[-1].file_name == "log_x.bin"
+
+    def test_idle_timeout_aborts_when_no_bytes_arrive(self) -> None:
+        # No response_map → no bytes ever flow back. Drop the idle
+        # timeout so the test exits in <1s rather than 30s.
+        sd = _make_device_with_serial_facade()
+        sd._SD_DOWNLOAD_IDLE_TIMEOUT_S = 0.5
+        try:
+            with pytest.raises(TimeoutError, match="stalled"):
+                sd.download_sd_card_file("log_idle.bin", BytesIO())
+        finally:
+            sd.disconnect()
+
+    def test_total_cap_aborts_even_with_continuous_drip(self) -> None:
+        # Continuous data without an EOF marker must still fall over
+        # once the total cap elapses (Qodo PR #41 finding 5).
+        from io import BytesIO
+
+        # Trigger fires a single drip; subsequent idle reads see nothing.
+        # Use a short total cap + idle cap > 0 to give the loop one
+        # iteration of "data arrived" before the total cap expires.
+        sd = _make_device_with_serial_facade(
+            response_map={b"SD:GET": b"DAQIFI> trickle-without-eof"}
+        )
+        sd._SD_DOWNLOAD_TIMEOUT_S = 0.3
+        sd._SD_DOWNLOAD_IDLE_TIMEOUT_S = 5.0
+        try:
+            with pytest.raises(TimeoutError):
+                sd.download_sd_card_file("log_drip.bin", BytesIO())
+        finally:
+            sd.disconnect()
 
     def test_eof_marker_split_across_chunks(self) -> None:
         payload = b"abcdefghij"

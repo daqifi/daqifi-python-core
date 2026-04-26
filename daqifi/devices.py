@@ -13,12 +13,15 @@ thread that delivers parsed protobuf messages via callback.
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
 from typing import IO, Any, Callable, List, Optional, Sequence
+
+_log = logging.getLogger(__name__)
 
 from ._internal.comm import (
     ConnectionRetryOptions,
@@ -877,9 +880,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
     _WIFI_MODULE_RESTART_DELAY_S = 2.0
     _SD_INTERFACE_SETTLE_DELAY_S = 0.1
-    # Default SD-card download timeout matches the C# 30-min cap; large
-    # log files at low USB CDC throughput can run a while.
+    # Total wall-clock cap for an SD-card download. Matches the C#
+    # SdCardFileReceiver default — large log files at low USB CDC
+    # throughput can take a while, but 30 min is the upper bound.
     _SD_DOWNLOAD_TIMEOUT_S = 30 * 60
+    # Idle timeout: if no bytes arrive for this long, give up even if
+    # we're still under the total cap. Catches stuck transfers that
+    # never reach EOF without waiting the full 30 min.
+    _SD_DOWNLOAD_IDLE_TIMEOUT_S = 30.0
     # Match the C# SdCardFileReceiver buffer size — 16 KiB is enough to
     # absorb a USB CDC burst without making the EOF-marker scan window
     # uselessly large.
@@ -1031,27 +1039,43 @@ class DaqifiStreamingDevice(DaqifiDevice):
             )
         _validate_sd_card_file_name(log_file_name)
 
-        self.send(scpi_commands.disable_network_lan())
-        time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
-
-        self.send(scpi_commands.enable_storage_sd())
-        time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
-
-        self.send(scpi_commands.set_stream_interface(StreamInterface.SdCard))
-        time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
-
-        self.send(scpi_commands.set_sd_logging_file_name(log_file_name))
-        time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
-
-        # SdCardLogFormat integer values map 1:1 to SYSTem:STReam:FORmat
-        self.send(ScpiMessage(f"SYSTem:STReam:FORmat {int(format)}"))
-        time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
-
-        if channel_mask and channel_mask.strip():
-            self.send(scpi_commands.enable_adc_channels(channel_mask))
+        # Wrap the configure-then-start sequence in try/except so a
+        # partial failure (e.g. set_sd_logging_file_name times out
+        # after LAN was already disabled) doesn't strand the device
+        # with LAN off and SD half-configured. On success we exit with
+        # LAN intentionally disabled — that's the steady state for
+        # SD logging and matches the C# impl's post-condition.
+        try:
+            self.send(scpi_commands.disable_network_lan())
             time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
 
-        self.send(scpi_commands.start_streaming(self._streaming_frequency))
+            self.send(scpi_commands.enable_storage_sd())
+            time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+
+            self.send(scpi_commands.set_stream_interface(StreamInterface.SdCard))
+            time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+
+            self.send(scpi_commands.set_sd_logging_file_name(log_file_name))
+            time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+
+            # SdCardLogFormat integer values map 1:1 to SYSTem:STReam:FORmat
+            self.send(ScpiMessage(f"SYSTem:STReam:FORmat {int(format)}"))
+            time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+
+            if channel_mask and channel_mask.strip():
+                self.send(scpi_commands.enable_adc_channels(channel_mask))
+                time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+
+            self.send(scpi_commands.start_streaming(self._streaming_frequency))
+        except Exception:
+            if self.is_connected:
+                try:
+                    self.prepare_lan_interface()
+                except Exception:
+                    # Best-effort recovery; surface the original error.
+                    pass
+            raise
+
         self._is_logging_to_sd = True
         self._is_streaming = True
         self._set_state(DeviceState.Streaming)
@@ -1087,6 +1111,15 @@ class DaqifiStreamingDevice(DaqifiDevice):
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
+        # SD ops disable LAN to grab the shared SPI bus — refusing on
+        # non-USB transports keeps the call from severing the caller's
+        # control connection mid-operation.
+        if not self.is_usb_connection:
+            raise RuntimeError(
+                "SD card operations require a USB/serial connection. "
+                "The SD card and WiFi/LAN share the SPI bus, so SD "
+                "operations cannot be performed over a network connection."
+            )
         if self._is_logging_to_sd:
             raise RuntimeError("Cannot delete files while logging to SD card.")
         if file_name is None or not file_name.strip():
@@ -1117,22 +1150,39 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._sd_card_files = parse_sd_card_file_list(lines)
 
     def format_sd_card(self) -> None:
-        """Erase the entire SD card."""
+        """Erase the entire SD card.
+
+        Routes through ``prepare_sd_interface`` so the LAN-disable
+        precondition documented on ``enable_storage_sd`` is honored
+        (LAN must be off before SD takes the SPI bus).
+        """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
+        if not self.is_usb_connection:
+            raise RuntimeError(
+                "SD card operations require a USB/serial connection. "
+                "The SD card and WiFi/LAN share the SPI bus, so SD "
+                "operations cannot be performed over a network connection."
+            )
         if self._is_logging_to_sd:
             raise RuntimeError("Cannot format SD card while logging.")
 
         self.send(scpi_commands.stop_streaming())
         self._is_streaming = False
 
-        self.send(scpi_commands.enable_storage_sd())
+        self.prepare_sd_interface()
         self.send(scpi_commands.format_sd_card())
 
     def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
         """Fetch + return the SD-card file listing (and refresh the cache)."""
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
+        if not self.is_usb_connection:
+            raise RuntimeError(
+                "SD card operations require a USB/serial connection. "
+                "The SD card and WiFi/LAN share the SPI bus, so SD "
+                "operations cannot be performed over a network connection."
+            )
 
         self.send(scpi_commands.stop_streaming())
         self._is_streaming = False
@@ -1346,11 +1396,18 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     pass
                 try:
                     consumer.start()
-                except Exception:
-                    # Restart failure shouldn't mask the original
-                    # capture exception — surface it but don't raise
-                    # over a successful capture.
-                    pass
+                except Exception as restart_exc:
+                    # Don't raise over a successful capture (would
+                    # swallow the caller's actual return value), but a
+                    # silent failure leaves the protobuf pipeline dead
+                    # — log loudly so the regression is visible.
+                    _log.exception(
+                        "raw-capture: failed to restart protobuf "
+                        "consumer after SD-card op; protobuf message "
+                        "dispatch will be dead until the next "
+                        "reconnect. Underlying error: %s",
+                        restart_exc,
+                    )
 
     def _receive_sd_file(
         self,
@@ -1369,7 +1426,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
         """
         marker = END_OF_FILE_MARKER
         marker_len = len(marker)
-        deadline = time.monotonic() + self._SD_DOWNLOAD_TIMEOUT_S
+        # Two deadlines: a hard total cap (so a trickling stream can't
+        # run forever) AND an idle cap (so a stuck stream gives up
+        # quickly without waiting the full total).
+        start = time.monotonic()
+        total_deadline = start + self._SD_DOWNLOAD_TIMEOUT_S
+        idle_deadline = start + self._SD_DOWNLOAD_IDLE_TIMEOUT_S
         head_buf = bytearray()
         head_done = False
         bytes_written = 0
@@ -1385,7 +1447,20 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     return bytes(buf[idx + len(prompt):])
             return bytes(buf)
 
-        while time.monotonic() < deadline:
+        while True:
+            now = time.monotonic()
+            if now >= total_deadline:
+                raise TimeoutError(
+                    f"SD card file download exceeded total cap of "
+                    f"{self._SD_DOWNLOAD_TIMEOUT_S:.0f}s "
+                    f"({bytes_written} bytes written, no EOF marker)."
+                )
+            if now >= idle_deadline:
+                raise TimeoutError(
+                    f"SD card file download stalled for "
+                    f"{self._SD_DOWNLOAD_IDLE_TIMEOUT_S:.0f}s with no "
+                    f"data ({bytes_written} bytes written, no EOF marker)."
+                )
             in_waiting = getattr(raw_stream, "in_waiting", 0) or 0
             if not in_waiting:
                 time.sleep(self._SD_DOWNLOAD_POLL_INTERVAL_S)
@@ -1394,10 +1469,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
             if not chunk:
                 time.sleep(self._SD_DOWNLOAD_POLL_INTERVAL_S)
                 continue
-            # Reset deadline whenever data arrives — same idea as the C#
-            # CTS getting kicked, but using monotonic deadlines keeps it
-            # simple in sync code.
-            deadline = time.monotonic() + self._SD_DOWNLOAD_TIMEOUT_S
+            # Reset only the idle deadline on incoming data — the total
+            # deadline stays fixed at start + total_timeout so a slow
+            # trickle still aborts after the documented cap.
+            idle_deadline = time.monotonic() + self._SD_DOWNLOAD_IDLE_TIMEOUT_S
 
             # Buffer the head until we've seen enough bytes to clip the
             # echo + prompt prefix; only ~200 bytes are needed in practice.
@@ -1431,12 +1506,6 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
             if progress is not None:
                 progress(SdCardTransferProgress(bytes_written, file_name))
-
-        raise TimeoutError(
-            f"SD card file download timed out after "
-            f"{self._SD_DOWNLOAD_TIMEOUT_S:.0f}s "
-            f"({bytes_written} bytes written, no EOF marker)."
-        )
 
     # ---- Network facade (NetworkConfigurable Protocol impl) ---------------
 
