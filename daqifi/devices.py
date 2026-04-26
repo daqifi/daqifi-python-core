@@ -950,12 +950,35 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
     @property
     def network_configuration(self) -> NetworkConfiguration:
-        """Most recently applied network configuration.
+        """Most recently applied network configuration **as tracked by
+        this Python object**.
 
-        Returns a clone so callers can mutate without affecting the
-        live device state — matches the C# ``NetworkConfiguration``
-        getter, which returns the internal field by reference but the
-        Python convention is to defensively copy.
+        This is a process-local snapshot, not a live query of the
+        device. It's updated at the end of every successful
+        :meth:`update_network_configuration` call, mirroring the C#
+        ``DaqifiStreamingDevice._networkConfiguration`` field which
+        is similarly process-local.
+
+        ``DaqifiStreamingDevice`` cannot currently surface text-shaped
+        SCPI query replies (the streaming-device's protobuf consumer
+        eats them — see daqifi-python-core#16), so we cannot
+        round-trip ``SYST:COMM:LAN:SSID? / NETTYPE? / SECURITY?`` to
+        rebuild the configuration from the live device state. Once
+        #16 is resolved, this property should be reworked to query
+        and reconcile.
+
+        Caveats — the snapshot can drift from the device's actual
+        config if:
+
+        * The device is reconfigured out-of-band (another process,
+          firmware reset, factory reset).
+        * The Python object is freshly constructed against an already-
+          provisioned device — the snapshot defaults to the upstream
+          parameterless-constructor shape rather than the device's
+          stored config.
+
+        Returns a defensive copy so callers can mutate without
+        affecting the live snapshot.
         """
         return self._network_configuration.clone()
 
@@ -1035,9 +1058,15 @@ class DaqifiStreamingDevice(DaqifiDevice):
         network operation that requires the WiFi module to be active
         (scan, associate, transmit). ``update_network_configuration``
         calls it automatically after ``APPLY``.
+
+        Side effect — the SD card SCPI module is disabled, which also
+        stops any active SD logging on the device. We update
+        ``_is_logging_to_sd`` to keep ``is_logging_to_sd_card`` in
+        sync with the firmware's actual state.
         """
         self.send(scpi_commands.disable_storage_sd())
         self.send(scpi_commands.enable_network_lan())
+        self._is_logging_to_sd = False
 
     def prepare_sd_interface(self) -> None:
         """Hand the shared SPI bus to the SD card.
@@ -1046,6 +1075,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
         card operation. Note: while the SD card has the bus, WiFi will
         report ``Disconnected`` until ``prepare_lan_interface`` is
         called again.
+
+        Side effect — re-enables the SD card SCPI module. This does
+        NOT automatically resume an SD logging session; callers must
+        explicitly call :meth:`enable_sd_card_logging` to begin
+        logging again. The ``_is_logging_to_sd`` flag is updated on
+        that call, not here, since enabling the SD interface alone
+        doesn't restart logging on the firmware side.
         """
         self.send(scpi_commands.disable_network_lan())
         self.send(scpi_commands.enable_storage_sd())
