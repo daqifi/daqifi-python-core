@@ -370,7 +370,8 @@ full workflow with extract commands + the categorical drift table.
 
 **Historical note** — earlier in the port, this repo carried two
 pilot scripts (`scripts/portomatic_generate_map.py` /
-`portomatic_audit.py`) that reimplemented the equivalent features.
+`scripts/portomatic_audit.py`) that reimplemented the equivalent
+features.
 Once `portomatic map suggest` and `portomatic map audit` shipped
 upstream (see
 [`portomatic#155`](https://github.com/cptkoolbeenz/portomatic/pull/155)),

@@ -133,6 +133,10 @@ symbols:
   - upstream: ToString
     downstream: to_string
     relation: not_yet_ported
+  - upstream: <downstream-only:index>
+    downstream: index
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Channel.ChannelDirection
@@ -152,6 +156,10 @@ symbols:
   - upstream: Output
     downstream: Output
     relation: one_to_one
+  - upstream: <downstream-only:Unknown>
+    downstream: Unknown
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Channel.ChannelType
@@ -168,6 +176,10 @@ symbols:
   - upstream: Digital
     downstream: Digital
     relation: one_to_one
+  - upstream: <downstream-only:Analog>
+    downstream: Analog
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Channel.DataSample
@@ -233,6 +245,10 @@ symbols:
   - upstream: ToString
     downstream: to_string
     relation: not_yet_ported
+  - upstream: <downstream-only:index>
+    downstream: index
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Channel.IAnalogChannel
@@ -270,6 +286,22 @@ symbols:
   - upstream: GetScaledValue
     downstream: get_scaled_value
     relation: not_yet_ported
+  - upstream: <downstream-only:index>
+    downstream: index
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:direction>
+    downstream: direction
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_enabled>
+    downstream: is_enabled
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:name>
+    downstream: name
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Channel.IChannel
@@ -342,6 +374,22 @@ symbols:
   - upstream: IsHigh
     downstream: is_high
     relation: not_yet_ported
+  - upstream: <downstream-only:index>
+    downstream: index
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:direction>
+    downstream: direction
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_enabled>
+    downstream: is_enabled
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:name>
+    downstream: name
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Channel.SampleReceivedEventArgs

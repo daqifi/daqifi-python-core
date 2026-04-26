@@ -54,6 +54,10 @@ symbols:
   - upstream: Send
     downstream: send
     relation: one_to_one
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Producers.MessageProducer

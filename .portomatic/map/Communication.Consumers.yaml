@@ -69,6 +69,10 @@ symbols:
   - upstream: ParseMessages
     downstream: parse_messages
     relation: one_to_one
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Consumers.ObjectInboundMessage
@@ -122,6 +126,26 @@ symbols:
   - upstream: ClearBuffer
     downstream: clear_buffer
     relation: one_to_one
+  - upstream: <downstream-only:add_error_occurred>
+    downstream: add_error_occurred
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_message_received>
+    downstream: add_message_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_error_occurred>
+    downstream: remove_error_occurred
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_message_received>
+    downstream: remove_message_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Communication.Consumers.IMessageParser
@@ -154,6 +178,10 @@ symbols:
   - upstream: ParseMessages
     downstream: parse_messages
     relation: one_to_one
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Consumers.TextInboundMessage
@@ -230,6 +258,10 @@ symbols:
   - upstream: ParseMessages
     downstream: parse_messages
     relation: one_to_one
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Consumers.StreamMessageConsumer
@@ -267,6 +299,42 @@ symbols:
   - upstream: Dispose
     downstream: dispose
     relation: not_yet_ported
+  - upstream: <downstream-only:DEFAULT_BUFFER_SIZE>
+    downstream: DEFAULT_BUFFER_SIZE
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_error_occurred>
+    downstream: add_error_occurred
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_message_received>
+    downstream: add_message_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_running>
+    downstream: is_running
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:queued_message_count>
+    downstream: queued_message_count
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_error_occurred>
+    downstream: remove_error_occurred
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_message_received>
+    downstream: remove_message_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []

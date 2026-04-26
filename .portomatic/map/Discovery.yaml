@@ -115,6 +115,10 @@ symbols:
   - upstream: ToString
     downstream: to_string
     relation: not_yet_ported
+  - upstream: <downstream-only:device_type>
+    downstream: device_type
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Discovery.HidDeviceFinder
@@ -146,6 +150,38 @@ symbols:
   - upstream: Dispose
     downstream: dispose
     relation: not_yet_ported
+  - upstream: <downstream-only:DEFAULT_PRODUCT_ID>
+    downstream: DEFAULT_PRODUCT_ID
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:DEFAULT_VENDOR_ID>
+    downstream: DEFAULT_VENDOR_ID
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_device_discovered>
+    downstream: add_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_discovery_completed>
+    downstream: add_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_device_discovered>
+    downstream: remove_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_discovery_completed>
+    downstream: remove_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Device.Discovery.IDeviceFinder
@@ -168,6 +204,14 @@ symbols:
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
+  - upstream: <downstream-only:discover_first>
+    downstream: discover_first
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:get_serial_ports>
+    downstream: get_serial_ports
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Device.Discovery.IDeviceInfo
@@ -217,6 +261,10 @@ symbols:
   - upstream: DevicePath
     downstream: device_path
     relation: one_to_one
+  - upstream: <downstream-only:device_type>
+    downstream: device_type
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Device.Discovery.DeviceType
@@ -236,6 +284,14 @@ symbols:
   - upstream: Nyquist1
     downstream: NYQUIST_1
     relation: one_to_one
+  - upstream: <downstream-only:NYQUIST_2>
+    downstream: NYQUIST_2
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:NYQUIST_3>
+    downstream: NYQUIST_3
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Device.Discovery.ConnectionType
@@ -258,6 +314,10 @@ symbols:
   - upstream: Serial
     downstream: SERIAL
     relation: one_to_one
+  - upstream: <downstream-only:HID>
+    downstream: HID
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Discovery.SerialDeviceFinder
@@ -283,6 +343,30 @@ symbols:
   - upstream: Dispose
     downstream: dispose
     relation: not_yet_ported
+  - upstream: <downstream-only:add_device_discovered>
+    downstream: add_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_discovery_completed>
+    downstream: add_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_device_discovered>
+    downstream: remove_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_discovery_completed>
+    downstream: remove_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Discovery.WiFiDeviceFinder
@@ -317,6 +401,38 @@ symbols:
   - upstream: Dispose
     downstream: dispose
     relation: not_yet_ported
+  - upstream: <downstream-only:DAQIFI_FINDER_QUERY>
+    downstream: DAQIFI_FINDER_QUERY
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:NATIVE_FINDER_QUERY>
+    downstream: NATIVE_FINDER_QUERY
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_device_discovered>
+    downstream: add_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_discovery_completed>
+    downstream: add_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_device_discovered>
+    downstream: remove_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_discovery_completed>
+    downstream: remove_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []

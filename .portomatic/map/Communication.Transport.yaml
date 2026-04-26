@@ -117,6 +117,18 @@ symbols:
   - upstream: CalculateDelay
     downstream: calculate_delay
     relation: one_to_one
+  - upstream: <downstream-only:fast>
+    downstream: fast
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:no_retry>
+    downstream: no_retry
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:resilient>
+    downstream: resilient
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.HidDeviceInfo
@@ -164,6 +176,10 @@ symbols:
   - upstream: EnumerateAsync
     downstream: enumerate
     relation: one_to_one
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.HidLibraryTransport
@@ -222,6 +238,18 @@ symbols:
   - upstream: Dispose
     downstream: dispose
     relation: not_yet_ported
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_connected>
+    downstream: is_connected
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Communication.Transport.IHidDeviceEnumerator
@@ -296,6 +324,10 @@ symbols:
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Communication.Transport.IStreamTransport
@@ -333,6 +365,18 @@ symbols:
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
+  - upstream: <downstream-only:add_status_changed>
+    downstream: add_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_status_changed>
+    downstream: remove_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Communication.Transport.IUdpTransport
@@ -373,6 +417,22 @@ symbols:
   - upstream: Close
     downstream: close
     relation: one_to_one
+  - upstream: <downstream-only:add_status_changed>
+    downstream: add_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:receive>
+    downstream: receive
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_status_changed>
+    downstream: remove_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:send_broadcast_to>
+    downstream: send_broadcast_to
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.SerialStreamTransport
@@ -413,6 +473,34 @@ symbols:
   - upstream: Dispose
     downstream: dispose
     relation: not_yet_ported
+  - upstream: <downstream-only:DEFAULT_OS_RX_BUFFER_BYTES>
+    downstream: DEFAULT_OS_RX_BUFFER_BYTES
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:DEFAULT_OS_TX_BUFFER_BYTES>
+    downstream: DEFAULT_OS_TX_BUFFER_BYTES
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_status_changed>
+    downstream: add_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_connected>
+    downstream: is_connected
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_status_changed>
+    downstream: remove_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.TcpStreamTransport
@@ -453,6 +541,26 @@ symbols:
   - upstream: Dispose
     downstream: dispose
     relation: not_yet_ported
+  - upstream: <downstream-only:add_status_changed>
+    downstream: add_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_connected>
+    downstream: is_connected
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_status_changed>
+    downstream: remove_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.TransportStatusEventArgs

@@ -33,6 +33,10 @@ symbols:
   - upstream: SdCard
     downstream: SdCard
     relation: one_to_one
+  - upstream: <downstream-only:All>
+    downstream: All
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences:
 - id: DIV-002
   upstream_path: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs

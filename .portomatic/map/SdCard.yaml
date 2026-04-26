@@ -138,6 +138,10 @@ symbols:
   - upstream: DownloadSdCardFileAsync
     downstream: download_sd_card_file
     relation: one_to_one
+  - upstream: <downstream-only:download_sd_card_file_to_temp>
+    downstream: download_sd_card_file_to_temp
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardCsvFileParser
@@ -170,6 +174,46 @@ symbols:
   - upstream: FromDevice
     downstream: from_device
     relation: not_yet_ported
+  - upstream: <downstream-only:analog_port_count>
+    downstream: analog_port_count
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:calibration_values>
+    downstream: calibration_values
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:device_part_number>
+    downstream: device_part_number
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:device_serial_number>
+    downstream: device_serial_number
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:digital_port_count>
+    downstream: digital_port_count
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:firmware_revision>
+    downstream: firmware_revision
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:internal_scale_m>
+    downstream: internal_scale_m
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:port_range>
+    downstream: port_range
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:resolution>
+    downstream: resolution
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:timestamp_frequency>
+    downstream: timestamp_frequency
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardDownloadResult
@@ -182,7 +226,23 @@ symbols:
   last_synced_sha: null
   notes: null
   rationale: null
-  members: []
+  members:
+  - upstream: <downstream-only:duration>
+    downstream: duration
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:file_name>
+    downstream: file_name
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:file_path>
+    downstream: file_path
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:file_size>
+    downstream: file_size
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardFileInfo
@@ -376,7 +436,19 @@ symbols:
   last_synced_sha: null
   notes: null
   rationale: null
-  members: []
+  members:
+  - upstream: <downstream-only:bytes_read>
+    downstream: bytes_read
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:messages_read>
+    downstream: messages_read
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:total_bytes>
+    downstream: total_bytes
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardTransferProgress
@@ -389,7 +461,15 @@ symbols:
   last_synced_sha: null
   notes: null
   rationale: null
-  members: []
+  members:
+  - upstream: <downstream-only:bytes_received>
+    downstream: bytes_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:file_name>
+    downstream: file_name
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []

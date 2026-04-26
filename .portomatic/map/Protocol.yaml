@@ -64,6 +64,10 @@ symbols:
   - upstream: SdCard
     downstream: SD_CARD
     relation: one_to_one
+  - upstream: <downstream-only:ERROR>
+    downstream: ERROR
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Protocol.ProtobufProtocolHandler
@@ -86,6 +90,14 @@ symbols:
   - upstream: DetectMessageType
     downstream: detect_message_type
     relation: one_to_one
+  - upstream: <downstream-only:handle_async>
+    downstream: handle_async
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []

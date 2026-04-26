@@ -128,7 +128,15 @@ symbols:
   last_synced_sha: null
   notes: null
   rationale: null
-  members: []
+  members:
+  - upstream: <downstream-only:EXISTING_NETWORK>
+    downstream: EXISTING_NETWORK
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:SELF_HOSTED>
+    downstream: SELF_HOSTED
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Device.Network.WifiSecurityType
@@ -141,7 +149,15 @@ symbols:
   last_synced_sha: null
   notes: null
   rationale: null
-  members: []
+  members:
+  - upstream: <downstream-only:NONE>
+    downstream: NONE
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:WPA_PSK_PHRASE>
+    downstream: WPA_PSK_PHRASE
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []

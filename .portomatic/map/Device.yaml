@@ -163,6 +163,10 @@ symbols:
   - upstream: Retrying
     downstream: Retrying
     relation: one_to_one
+  - upstream: <downstream-only:Failed>
+    downstream: Failed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.DaqifiDevice
@@ -218,6 +222,54 @@ symbols:
   - upstream: PopulateChannelsFromStatus
     downstream: populate_channels_from_status
     relation: one_to_one
+  - upstream: <downstream-only:add_channels_populated>
+    downstream: add_channels_populated
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_message_received>
+    downstream: add_message_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_status_changed>
+    downstream: add_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:channels>
+    downstream: channels
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_connected>
+    downstream: is_connected
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_channels_populated>
+    downstream: remove_channels_populated
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_message_received>
+    downstream: remove_message_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_status_changed>
+    downstream: remove_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:send>
+    downstream: send
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:transport>
+    downstream: transport
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.DaqifiDeviceFactory
@@ -304,6 +356,74 @@ symbols:
   - upstream: DownloadSdCardFileAsync
     downstream: download_sd_card_file
     relation: not_yet_ported
+  - upstream: <downstream-only:apply_network_configuration>
+    downstream: apply_network_configuration
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:delete_sd_file>
+    downstream: delete_sd_file
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:disable_sd_card_logging>
+    downstream: disable_sd_card_logging
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:enable_sd_card_logging>
+    downstream: enable_sd_card_logging
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_logging_to_sd_card>
+    downstream: is_logging_to_sd_card
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_usb_connection>
+    downstream: is_usb_connection
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:network_configuration>
+    downstream: network_configuration
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:request_lan_chip_info>
+    downstream: request_lan_chip_info
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:request_sd_card_file_list>
+    downstream: request_sd_card_file_list
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:save_network_configuration>
+    downstream: save_network_configuration
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_card_files>
+    downstream: sd_card_files
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:set_sd_logging_file_name>
+    downstream: set_sd_logging_file_name
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:set_wifi_mode_existing>
+    downstream: set_wifi_mode_existing
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:set_wifi_mode_self_hosted>
+    downstream: set_wifi_mode_self_hosted
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:set_wifi_password>
+    downstream: set_wifi_password
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:set_wifi_ssid>
+    downstream: set_wifi_ssid
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.DeviceCapabilities
@@ -366,6 +486,18 @@ symbols:
   - upstream: InitializeDevice
     downstream: initialize_device
     relation: one_to_one
+  - upstream: <downstream-only:default>
+    downstream: default
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:fast>
+    downstream: fast
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:resilient>
+    downstream: resilient
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.DeviceMetadata
@@ -452,6 +584,10 @@ symbols:
   - upstream: Streaming
     downstream: Streaming
     relation: one_to_one
+  - upstream: <downstream-only:Error>
+    downstream: Error
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.DeviceStatusEventArgs
@@ -490,6 +626,10 @@ symbols:
   - upstream: Nyquist2
     downstream: NYQUIST_2
     relation: one_to_one
+  - upstream: <downstream-only:NYQUIST_3>
+    downstream: NYQUIST_3
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.DeviceTypeDetector
@@ -540,6 +680,26 @@ symbols:
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
+  - upstream: <downstream-only:add_message_received>
+    downstream: add_message_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_status_changed>
+    downstream: add_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_message_received>
+    downstream: remove_message_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_status_changed>
+    downstream: remove_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:send>
+    downstream: send
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Device.IStreamingDevice
@@ -590,6 +750,14 @@ symbols:
   - upstream: ResetAll
     downstream: reset_all
     relation: one_to_one
+  - upstream: <downstream-only:DEFAULT_TICK_PERIOD>
+    downstream: DEFAULT_TICK_PERIOD
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.MessageReceivedEventArgs
@@ -606,6 +774,14 @@ symbols:
   - upstream: Message
     downstream: message
     relation: one_to_one
+  - upstream: <downstream-only:raw_data>
+    downstream: raw_data
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:timestamp>
+    downstream: timestamp
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.TimestampProcessor
@@ -631,6 +807,14 @@ symbols:
   - upstream: ResetAll
     downstream: reset_all
     relation: one_to_one
+  - upstream: <downstream-only:DEFAULT_TICK_PERIOD>
+    downstream: DEFAULT_TICK_PERIOD
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.TimestampResult
