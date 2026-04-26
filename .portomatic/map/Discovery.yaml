@@ -1,650 +1,439 @@
-schema_version: 2
+schema_version: 1
 shard: Discovery
 upstream_root: src/Daqifi.Core/Device/Discovery
 downstream_root: daqifi
 last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
 files:
-  - upstream: src/Daqifi.Core/Device/Discovery/DeviceDiscoveredEventArgs.cs
-    downstream: daqifi/device_finders.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Discovery/DeviceInfo.cs
-    downstream: daqifi/device_finders.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Discovery/HidDeviceFinder.cs
-    downstream: daqifi/device_finders.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Discovery/IDeviceFinder.cs
-    downstream: daqifi/discovery.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
-    downstream: daqifi/_internal/comm.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Discovery/SerialDeviceFinder.cs
-    downstream: daqifi/device_finders.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Discovery/WiFiDeviceFinder.cs
-    downstream: daqifi/device_finders.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Discovery/DeviceDiscoveredEventArgs.cs
+  downstream: daqifi/device_finders.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Discovery/DeviceInfo.cs
+  downstream: daqifi/device_finders.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Discovery/HidDeviceFinder.cs
+  downstream: daqifi/device_finders.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Discovery/IDeviceFinder.cs
+  downstream: daqifi/discovery.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
+  downstream: daqifi/_internal/comm.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Discovery/SerialDeviceFinder.cs
+  downstream: daqifi/device_finders.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Discovery/WiFiDeviceFinder.cs
+  downstream: daqifi/device_finders.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
 symbols:
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.Discovery.DeviceDiscoveredEventArgs
-      file: src/Daqifi.Core/Device/Discovery/DeviceDiscoveredEventArgs.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.device_finders.DeviceDiscoveredEventArgs
-      file: daqifi/device_finders.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: DeviceInfo
-        upstream_kind: property
-        downstream: device_info
-        downstream_kind: field
-        relation: ported
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.Discovery.DeviceInfo
-      file: src/Daqifi.Core/Device/Discovery/DeviceInfo.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.device_finders.DeviceInfo
-      file: daqifi/device_finders.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: Name
-        upstream_kind: property
-        downstream: name
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: SerialNumber
-        upstream_kind: property
-        downstream: serial_number
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: FirmwareVersion
-        upstream_kind: property
-        downstream: firmware_version
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: IPAddress
-        upstream_kind: property
-        downstream: ip_address
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: MacAddress
-        upstream_kind: property
-        downstream: mac_address
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: Port
-        upstream_kind: property
-        downstream: port
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: LocalInterfaceAddress
-        upstream_kind: property
-        downstream: local_interface_address
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: Type
-        upstream_kind: property
-        downstream: type
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: IsPowerOn
-        upstream_kind: property
-        downstream: is_power_on
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: ConnectionType
-        upstream_kind: property
-        downstream: connection_type
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: PortName
-        upstream_kind: property
-        downstream: port_name
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: DevicePath
-        upstream_kind: property
-        downstream: device_path
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: ToString
-        upstream_kind: method
-        downstream: to_string
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: device_type
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.Discovery.HidDeviceFinder
-      file: src/Daqifi.Core/Device/Discovery/HidDeviceFinder.cs
-    downstream:
-      kind: class
-      qualified: daqifi.device_finders.HidDeviceFinder
-      file: daqifi/device_finders.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: VendorIdFilter
-        upstream_kind: property
-        downstream: vendor_id_filter
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: ProductIdFilter
-        upstream_kind: property
-        downstream: product_id_filter
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DeviceDiscovered
-        upstream_kind: event
-        downstream: device_discovered
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DiscoveryCompleted
-        upstream_kind: event
-        downstream: discovery_completed
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DiscoverAsync
-        upstream_kind: method
-        downstream: discover
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Dispose
-        upstream_kind: method
-        downstream: dispose
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: DEFAULT_PRODUCT_ID
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: DEFAULT_VENDOR_ID
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: __init__
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: add_device_discovered
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: add_discovery_completed
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: close
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: remove_device_discovered
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: remove_discovery_completed
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: interface
-      qualified: Daqifi.Core.Device.Discovery.IDeviceFinder
-      file: src/Daqifi.Core/Device/Discovery/IDeviceFinder.cs
-    downstream:
-      kind: class
-      qualified: daqifi.discovery.DeviceFinder
-      file: daqifi/discovery.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: DeviceDiscovered
-        upstream_kind: event
-        downstream: device_discovered
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DiscoveryCompleted
-        upstream_kind: event
-        downstream: discovery_completed
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DiscoverAsync
-        upstream_kind: method
-        downstream: discover
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: discover_first
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: get_serial_ports
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: interface
-      qualified: Daqifi.Core.Device.Discovery.IDeviceInfo
-      file: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.device_finders.DeviceInfo
-      file: daqifi/device_finders.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: Name
-        upstream_kind: property
-        downstream: name
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: SerialNumber
-        upstream_kind: property
-        downstream: serial_number
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: FirmwareVersion
-        upstream_kind: property
-        downstream: firmware_version
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: IPAddress
-        upstream_kind: property
-        downstream: ip_address
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: MacAddress
-        upstream_kind: property
-        downstream: mac_address
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: Port
-        upstream_kind: property
-        downstream: port
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: LocalInterfaceAddress
-        upstream_kind: property
-        downstream: local_interface_address
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: Type
-        upstream_kind: property
-        downstream: type
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: IsPowerOn
-        upstream_kind: property
-        downstream: is_power_on
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: ConnectionType
-        upstream_kind: property
-        downstream: connection_type
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: PortName
-        upstream_kind: property
-        downstream: port_name
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: DevicePath
-        upstream_kind: property
-        downstream: device_path
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: device_type
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: enum
-      qualified: Daqifi.Core.Device.Discovery.DeviceType
-      file: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
-    downstream:
-      kind: enum
-      qualified: daqifi._internal.comm.DeviceType
-      file: daqifi/_internal/comm.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: Unknown
-        upstream_kind: value
-        downstream: UNKNOWN
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: Nyquist1
-        upstream_kind: value
-        downstream: NYQUIST_1
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: NYQUIST_2
-        downstream_kind: value
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: NYQUIST_3
-        downstream_kind: value
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: enum
-      qualified: Daqifi.Core.Device.Discovery.ConnectionType
-      file: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
-    downstream:
-      kind: enum
-      qualified: daqifi._internal.comm.ConnectionType
-      file: daqifi/_internal/comm.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: Unknown
-        upstream_kind: value
-        downstream: UNKNOWN
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: WiFi
-        upstream_kind: value
-        downstream: WIFI
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: Serial
-        upstream_kind: value
-        downstream: SERIAL
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: HID
-        downstream_kind: value
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.Discovery.SerialDeviceFinder
-      file: src/Daqifi.Core/Device/Discovery/SerialDeviceFinder.cs
-    downstream:
-      kind: class
-      qualified: daqifi.device_finders.SerialDeviceFinder
-      file: daqifi/device_finders.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: DeviceDiscovered
-        upstream_kind: event
-        downstream: device_discovered
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DiscoveryCompleted
-        upstream_kind: event
-        downstream: discovery_completed
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DiscoverAsync
-        upstream_kind: method
-        downstream: discover
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Dispose
-        upstream_kind: method
-        downstream: dispose
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: __init__
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: add_device_discovered
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: add_discovery_completed
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: close
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: remove_device_discovered
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: remove_discovery_completed
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.Discovery.WiFiDeviceFinder
-      file: src/Daqifi.Core/Device/Discovery/WiFiDeviceFinder.cs
-    downstream:
-      kind: class
-      qualified: daqifi.device_finders.WiFiDeviceFinder
-      file: daqifi/device_finders.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: BroadcastEndpoint
-        upstream_kind: property
-        downstream: broadcast_endpoint
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: LocalAddress
-        upstream_kind: property
-        downstream: local_address
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: SubnetMask
-        upstream_kind: property
-        downstream: subnet_mask
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DeviceDiscovered
-        upstream_kind: event
-        downstream: device_discovered
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DiscoveryCompleted
-        upstream_kind: event
-        downstream: discovery_completed
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DiscoverAsync
-        upstream_kind: method
-        downstream: discover
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Dispose
-        upstream_kind: method
-        downstream: dispose
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: DAQIFI_FINDER_QUERY
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: NATIVE_FINDER_QUERY
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: __init__
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: add_device_discovered
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: add_discovery_completed
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: close
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: remove_device_discovered
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: remove_discovery_completed
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Discovery.DeviceDiscoveredEventArgs
+    file: src/Daqifi.Core/Device/Discovery/DeviceDiscoveredEventArgs.cs
+  downstream:
+    kind: class
+    qualified: daqifi.device_finders.DeviceDiscoveredEventArgs
+    file: daqifi/device_finders.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: DeviceInfo
+    downstream: device_info
+    relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Discovery.DeviceInfo
+    file: src/Daqifi.Core/Device/Discovery/DeviceInfo.cs
+  downstream:
+    kind: class
+    qualified: daqifi.device_finders.DeviceInfo
+    file: daqifi/device_finders.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: Name
+    downstream: name
+    relation: one_to_one
+  - upstream: SerialNumber
+    downstream: serial_number
+    relation: one_to_one
+  - upstream: FirmwareVersion
+    downstream: firmware_version
+    relation: one_to_one
+  - upstream: IPAddress
+    downstream: ip_address
+    relation: one_to_one
+  - upstream: MacAddress
+    downstream: mac_address
+    relation: one_to_one
+  - upstream: Port
+    downstream: port
+    relation: one_to_one
+  - upstream: LocalInterfaceAddress
+    downstream: local_interface_address
+    relation: not_yet_ported
+  - upstream: Type
+    downstream: type
+    relation: not_yet_ported
+  - upstream: IsPowerOn
+    downstream: is_power_on
+    relation: one_to_one
+  - upstream: ConnectionType
+    downstream: connection_type
+    relation: one_to_one
+  - upstream: PortName
+    downstream: port_name
+    relation: one_to_one
+  - upstream: DevicePath
+    downstream: device_path
+    relation: one_to_one
+  - upstream: ToString
+    downstream: to_string
+    relation: not_yet_ported
+  - upstream: <downstream-only:device_type>
+    downstream: device_type
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Discovery.HidDeviceFinder
+    file: src/Daqifi.Core/Device/Discovery/HidDeviceFinder.cs
+  downstream:
+    kind: class
+    qualified: daqifi.device_finders.HidDeviceFinder
+    file: daqifi/device_finders.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: VendorIdFilter
+    downstream: vendor_id_filter
+    relation: not_yet_ported
+  - upstream: ProductIdFilter
+    downstream: product_id_filter
+    relation: not_yet_ported
+  - upstream: DeviceDiscovered
+    downstream: device_discovered
+    relation: not_yet_ported
+  - upstream: DiscoveryCompleted
+    downstream: discovery_completed
+    relation: not_yet_ported
+  - upstream: DiscoverAsync
+    downstream: discover
+    relation: one_to_one
+  - upstream: Dispose
+    downstream: dispose
+    relation: not_yet_ported
+  - upstream: <downstream-only:DEFAULT_PRODUCT_ID>
+    downstream: DEFAULT_PRODUCT_ID
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:DEFAULT_VENDOR_ID>
+    downstream: DEFAULT_VENDOR_ID
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_device_discovered>
+    downstream: add_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_discovery_completed>
+    downstream: add_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_device_discovered>
+    downstream: remove_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_discovery_completed>
+    downstream: remove_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Device.Discovery.IDeviceFinder
+    file: src/Daqifi.Core/Device/Discovery/IDeviceFinder.cs
+  downstream:
+    kind: class
+    qualified: daqifi.discovery.DeviceFinder
+    file: daqifi/discovery.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: DeviceDiscovered
+    downstream: device_discovered
+    relation: not_yet_ported
+  - upstream: DiscoveryCompleted
+    downstream: discovery_completed
+    relation: not_yet_ported
+  - upstream: DiscoverAsync
+    downstream: discover
+    relation: one_to_one
+  - upstream: <downstream-only:discover_first>
+    downstream: discover_first
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:get_serial_ports>
+    downstream: get_serial_ports
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Device.Discovery.IDeviceInfo
+    file: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
+  downstream:
+    kind: class
+    qualified: daqifi.device_finders.DeviceInfo
+    file: daqifi/device_finders.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: Name
+    downstream: name
+    relation: one_to_one
+  - upstream: SerialNumber
+    downstream: serial_number
+    relation: one_to_one
+  - upstream: FirmwareVersion
+    downstream: firmware_version
+    relation: one_to_one
+  - upstream: IPAddress
+    downstream: ip_address
+    relation: one_to_one
+  - upstream: MacAddress
+    downstream: mac_address
+    relation: one_to_one
+  - upstream: Port
+    downstream: port
+    relation: one_to_one
+  - upstream: LocalInterfaceAddress
+    downstream: local_interface_address
+    relation: not_yet_ported
+  - upstream: Type
+    downstream: type
+    relation: not_yet_ported
+  - upstream: IsPowerOn
+    downstream: is_power_on
+    relation: one_to_one
+  - upstream: ConnectionType
+    downstream: connection_type
+    relation: one_to_one
+  - upstream: PortName
+    downstream: port_name
+    relation: one_to_one
+  - upstream: DevicePath
+    downstream: device_path
+    relation: one_to_one
+  - upstream: <downstream-only:device_type>
+    downstream: device_type
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: enum
+    qualified: Daqifi.Core.Device.Discovery.DeviceType
+    file: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
+  downstream:
+    kind: enum
+    qualified: daqifi._internal.comm.DeviceType
+    file: daqifi/_internal/comm.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: Unknown
+    downstream: UNKNOWN
+    relation: one_to_one
+  - upstream: Nyquist1
+    downstream: NYQUIST_1
+    relation: one_to_one
+  - upstream: <downstream-only:NYQUIST_2>
+    downstream: NYQUIST_2
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:NYQUIST_3>
+    downstream: NYQUIST_3
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: enum
+    qualified: Daqifi.Core.Device.Discovery.ConnectionType
+    file: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
+  downstream:
+    kind: enum
+    qualified: daqifi._internal.comm.ConnectionType
+    file: daqifi/_internal/comm.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: Unknown
+    downstream: UNKNOWN
+    relation: one_to_one
+  - upstream: WiFi
+    downstream: WIFI
+    relation: one_to_one
+  - upstream: Serial
+    downstream: SERIAL
+    relation: one_to_one
+  - upstream: <downstream-only:HID>
+    downstream: HID
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Discovery.SerialDeviceFinder
+    file: src/Daqifi.Core/Device/Discovery/SerialDeviceFinder.cs
+  downstream:
+    kind: class
+    qualified: daqifi.device_finders.SerialDeviceFinder
+    file: daqifi/device_finders.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: DeviceDiscovered
+    downstream: device_discovered
+    relation: not_yet_ported
+  - upstream: DiscoveryCompleted
+    downstream: discovery_completed
+    relation: not_yet_ported
+  - upstream: DiscoverAsync
+    downstream: discover
+    relation: one_to_one
+  - upstream: Dispose
+    downstream: dispose
+    relation: not_yet_ported
+  - upstream: <downstream-only:add_device_discovered>
+    downstream: add_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_discovery_completed>
+    downstream: add_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_device_discovered>
+    downstream: remove_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_discovery_completed>
+    downstream: remove_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Discovery.WiFiDeviceFinder
+    file: src/Daqifi.Core/Device/Discovery/WiFiDeviceFinder.cs
+  downstream:
+    kind: class
+    qualified: daqifi.device_finders.WiFiDeviceFinder
+    file: daqifi/device_finders.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: BroadcastEndpoint
+    downstream: broadcast_endpoint
+    relation: not_yet_ported
+  - upstream: LocalAddress
+    downstream: local_address
+    relation: not_yet_ported
+  - upstream: SubnetMask
+    downstream: subnet_mask
+    relation: not_yet_ported
+  - upstream: DeviceDiscovered
+    downstream: device_discovered
+    relation: not_yet_ported
+  - upstream: DiscoveryCompleted
+    downstream: discovery_completed
+    relation: not_yet_ported
+  - upstream: DiscoverAsync
+    downstream: discover
+    relation: one_to_one
+  - upstream: Dispose
+    downstream: dispose
+    relation: not_yet_ported
+  - upstream: <downstream-only:DAQIFI_FINDER_QUERY>
+    downstream: DAQIFI_FINDER_QUERY
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:NATIVE_FINDER_QUERY>
+    downstream: NATIVE_FINDER_QUERY
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_device_discovered>
+    downstream: add_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:add_discovery_completed>
+    downstream: add_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:close>
+    downstream: close
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_device_discovered>
+    downstream: remove_device_discovered
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_discovery_completed>
+    downstream: remove_discovery_completed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:44:22.467247+00:00"
+updated_at: '2026-04-26T08:44:22.467247+00:00'

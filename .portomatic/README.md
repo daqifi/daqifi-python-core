@@ -12,7 +12,7 @@ ongoing port from `daqifi-core` (C#, upstream) to this repo
 ├── project.yaml           ← top-level port config (schema, tickets, conventions)
 ├── sync_state.yaml        ← last-applied upstream SHA + per-shard sync state
 ├── plans/                 ← per-feature port plan files (kind: apply | check | port)
-├── map/                   ← method-level shard maps (THIS IS THE SOURCE OF TRUTH)
+├── map/                   ← method-level shard maps (THE SOURCE OF TRUTH)
 │   ├── Channel.yaml
 │   ├── Communication.yaml
 │   ├── Communication.Consumers.yaml
@@ -37,107 +37,128 @@ source of truth for "is this port complete." Plans are derived
 artifacts that should converge on zero outstanding gaps as the port
 catches up to upstream.
 
-### 1. Regenerate the shard maps after an upstream sync
+All commands use the **portomatic CLI** (`pip install -e
+/path/to/portomatic`). The previous in-repo pilot scripts
+(`scripts/portomatic_generate_map.py`, `scripts/portomatic_audit.py`)
+were retired in 2026-04 once `portomatic map suggest` and
+`portomatic map audit` shipped upstream — see [`docs/cli-reference.md`](https://github.com/cptkoolbeenz/portomatic/blob/main/docs/cli-reference.md)
+for the full command tree.
+
+### 1. Refresh map shards after upstream sync
 
 ```bash
-python scripts/portomatic_generate_map.py --all
+# One shard at a time (interactive; review proposed pairings)
+portomatic adapter extract --lang csharp \
+  --path ../daqifi-core/src/Daqifi.Core/Network \
+  --root ../daqifi-core --out /tmp/up.network.json
+
+portomatic adapter extract --lang python \
+  --path daqifi --root . --out /tmp/dn.python.json
+
+portomatic map suggest \
+  --shard Network \
+  --upstream-root src/Daqifi.Core/Network \
+  --downstream-root daqifi \
+  --upstream-ir /tmp/up.network.json \
+  --downstream-ir /tmp/dn.python.json \
+  --apply
 ```
 
-Walks both the upstream C# tree and this repo's `daqifi/` package,
-populating method-level `members:` rows for every public class. Manual
-edits to `notes:` / `rationale:` / `divergences:` / `backlog:` /
-`hal_pairs:` are preserved across regeneration — only the
-auto-discoverable structure (file paths, symbol names, method
-presence) is overwritten.
-
-To regenerate one shard:
-
-```bash
-python scripts/portomatic_generate_map.py --shard Network
-```
+`map suggest` is idempotent — re-running on an unchanged codebase
+produces no diff. Manual `notes` / `rationale` / `divergent` decisions
+are preserved across regenerations.
 
 ### 2. Audit for drift before merging or releasing
 
 ```bash
-python scripts/portomatic_audit.py
+# Refresh downstream IR
+portomatic adapter extract --lang python --path daqifi --root . \
+  --out /tmp/daqifi.ir.json
+
+# Audit (human text)
+portomatic map audit --downstream-ir /tmp/daqifi.ir.json --downstream .
+
+# Strict mode for CI (exits 1 if any drift)
+portomatic map audit --downstream-ir /tmp/daqifi.ir.json --strict
+
+# JSON for tooling
+portomatic map audit --downstream-ir /tmp/daqifi.ir.json --json
+
+# Filter to specific drift categories
+portomatic map audit --downstream-ir /tmp/daqifi.ir.json \
+  --category protocol-no-impl
 ```
 
-Cross-references the maps against the codebase and reports drift in
-five categories:
+The audit reports drift in five categories:
 
-| Category | Meaning | Action |
-|---|---|---|
-| `protocol-no-impl` | Protocol declared, no concrete class implements all required methods with non-stub bodies | Implement the Protocol on a concrete class, or mark divergent |
-| `method-missing` | Map says `relation: ported` but the downstream method doesn't exist | Either add the method or update the map (likely a rename) |
-| `method-undocumented` | Public method exists in code, no map row | Add the row to the shard map |
-| `symbol-undocumented` | Public class exists, no map entry | Map it (or move under `_internal/` if it's not part of the public surface) |
-| `stale-divergent` | `relation: divergent` without rationale | Re-evaluate; either remove the divergence or refresh the rationale |
-
-Filter by category:
-
-```bash
-python scripts/portomatic_audit.py --category protocol-no-impl
-```
-
-Strict mode for CI gates (exits 1 if any drift):
-
-```bash
-python scripts/portomatic_audit.py --strict
-```
-
-JSON output for tooling:
-
-```bash
-python scripts/portomatic_audit.py --json
-```
+| Category | Meaning |
+|---|---|
+| `protocol-no-impl` | Protocol declared, no concrete class implements all required methods |
+| `method-missing` | Map says `one_to_one` but the downstream method doesn't exist |
+| `method-undocumented` | Public method/property in the IR not on any map row |
+| `symbol-undocumented` | Public class in the IR with no map entry |
+| `stale-divergent` | `relation: divergent` without `rationale` |
 
 ### 3. Use the audit as the "port complete" gate
 
-The `port complete` check is no longer "all plan files are marked
-done" — it's "the audit returns zero `protocol-no-impl` and zero
-`method-missing` rows." Run the audit before declaring the port
-complete; treat any output as a TODO list.
+The "port complete" check is no longer "all plan files marked done"
+— it's `portomatic map audit --strict` returning exit 0. Run before
+declaring the port complete; treat any drift as a TODO list.
 
-`symbol-undocumented` and `method-undocumented` are softer signals
-— they may indicate that the map needs to be updated to reflect a
-deliberate Python-only addition. Operator decides whether to map or
-ignore.
+## Schema vocabulary
 
-## Bootstrapping a new shard
+The maps use the official `portomatic.map.schema.MapShard` Pydantic
+models. The relation values are:
 
-The `SHARDS` dict in `scripts/portomatic_generate_map.py` lists every
-upstream shard the generator knows about. To add a new one:
+| value | meaning |
+|---|---|
+| `one_to_one` | direct equivalent |
+| `subset` | downstream covers part of upstream |
+| `superset` | downstream covers more than upstream |
+| `flattened` | several upstream artifacts collapsed into one downstream |
+| `split` | one upstream artifact split into several downstream |
+| `divergent` | intentional behavioral or shape divergence (rationale required) |
+| `dropped` | not present downstream and won't be |
+| `not_yet_ported` | not present yet but planned |
+| `shared_library` | both sides depend on a vendored 3rd-party |
 
-1. Edit `SHARDS` in `scripts/portomatic_generate_map.py` to add
-   `"<ShardName>": "<upstream/relative/path>"`.
-2. Run `python scripts/portomatic_generate_map.py --shard <ShardName>`.
-3. Review the generated `.portomatic/map/<ShardName>.yaml` — fill in
-   `rationale:` for any rows that need explanation, and curate the
-   `divergences:` / `backlog:` lists if appropriate.
-4. Re-run `python scripts/portomatic_audit.py` to confirm the new
-   shard's coverage.
+See [`docs/correspondence-map-schema.md`](https://github.com/cptkoolbeenz/portomatic/blob/main/docs/correspondence-map-schema.md)
+in the portomatic repo for the full schema reference.
 
-## Related portomatic enhancements (tracked upstream)
+## History — the in-repo pilot
 
-The following gaps in the portomatic tool itself are tracked at
-[cptkoolbeenz/portomatic](https://github.com/cptkoolbeenz/portomatic/issues):
+Before `portomatic map suggest` and `portomatic map audit` shipped
+upstream, this repo carried two pilot scripts at
+`scripts/portomatic_generate_map.py` and
+`scripts/portomatic_audit.py`. The pilots used a local relation
+vocabulary (`ported` / `missing` / `downstream-only`) that didn't
+match the official schema, plus extra member-level fields that the
+schema's `MemberMapping` doesn't allow.
 
-- `#147` — method-level shard map generation (foundation; the
-  `scripts/portomatic_generate_map.py` script in this repo is the
-  pilot implementation)
-- `#148` — audit script (the `scripts/portomatic_audit.py` script
-  in this repo is the pilot)
-- `#149` — drift detection via `last_synced_sha`
-- `#150` — derive plans from map gaps (workflow inversion)
-- `#151` — plan-state reconciliation
-- `#152` — coverage metric overhaul (replace plans-applied % with
-  member-level coverage)
-- `#153` — meta-ticket cross-referencing the batch + recommended
-  sequencing
+In 2026-04 a one-shot migration script
+(`scripts/migrate_pilot_maps.py`, since deleted) translated the
+pilot vocabulary to the official schema. The migration:
 
-Both `scripts/portomatic_generate_map.py` and
-`scripts/portomatic_audit.py` are intentionally written as
-self-contained scripts in this repo so we can iterate locally before
-the equivalent functionality lands in the portomatic tool itself.
-Once the upstream tickets ship, these scripts will be replaced by
-`portomatic map generate` and `portomatic audit` invocations.
+* `ported` → `one_to_one`
+* `missing` → `not_yet_ported`
+* `downstream-only` → `divergent` (with auto-rationale "Downstream-only
+  addition; no upstream counterpart"); member rows with no upstream
+  counterpart were dropped (audit re-derives them as
+  `method-undocumented` from the IR)
+* `dataclass` / `protocol` / `record` symbol kinds → `class` /
+  `interface` / `class`
+* Member-level `upstream_kind` / `downstream_kind` / `rationale`
+  fields stripped (no curated content was lost — verified at
+  migration time)
+* `schema_version: 2` → `schema_version: 1`
+
+All 12 shards now validate against the official schema. The pilot
+scripts have been deleted; `portomatic map suggest` and
+`portomatic map audit` are the canonical replacements.
+
+The lesson — parallel reimplementations of features that already
+exist in portomatic are wasted effort and drift over time. Before
+writing a new helper script in this repo, run `portomatic --help`
+and check
+[`docs/cli-reference.md`](https://github.com/cptkoolbeenz/portomatic/blob/main/docs/cli-reference.md)
+in the portomatic repo first.

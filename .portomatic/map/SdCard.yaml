@@ -1,621 +1,476 @@
-schema_version: 2
+schema_version: 1
 shard: SdCard
 upstream_root: src/Daqifi.Core/Device/SdCard
 downstream_root: daqifi
 last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
 files:
-  - upstream: src/Daqifi.Core/Device/SdCard/ISdCardOperations.cs
-    downstream: daqifi/sdcard.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardCsvFileParser.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardDeviceConfiguration.cs
-    downstream: daqifi/sdcard.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardDownloadResult.cs
-    downstream: daqifi/sdcard.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileInfo.cs
-    downstream: daqifi/sdcard.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileListParser.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileParser.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileParserFactory.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileReceiver.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardLogEntry.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardLogFormat.cs
-    downstream: daqifi/enums.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardLogSession.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardParseOptions.cs
-    downstream: daqifi/sdcard.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardParseProgress.cs
-    downstream: daqifi/sdcard.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/SdCard/SdCardTransferProgress.cs
-    downstream: daqifi/sdcard.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/ISdCardOperations.cs
+  downstream: daqifi/sdcard.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardCsvFileParser.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardDeviceConfiguration.cs
+  downstream: daqifi/sdcard.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardDownloadResult.cs
+  downstream: daqifi/sdcard.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardFileInfo.cs
+  downstream: daqifi/sdcard.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardFileListParser.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardFileParser.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardFileParserFactory.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardFileReceiver.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardLogEntry.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardLogFormat.cs
+  downstream: daqifi/enums.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardLogSession.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardParseOptions.cs
+  downstream: daqifi/sdcard.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardParseProgress.cs
+  downstream: daqifi/sdcard.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardTransferProgress.cs
+  downstream: daqifi/sdcard.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
 symbols:
-  - upstream:
-      kind: interface
-      qualified: Daqifi.Core.Device.SdCard.ISdCardOperations
-      file: src/Daqifi.Core/Device/SdCard/ISdCardOperations.cs
-    downstream:
-      kind: protocol
-      qualified: daqifi.sdcard.SdCardOperations
-      file: daqifi/sdcard.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: IsLoggingToSdCard
-        upstream_kind: property
-        downstream: is_logging_to_sd_card
-        downstream_kind: property
-        relation: ported
-        rationale: null
-      - upstream: SdCardFiles
-        upstream_kind: property
-        downstream: sd_card_files
-        downstream_kind: property
-        relation: ported
-        rationale: null
-      - upstream: GetSdCardFilesAsync
-        upstream_kind: method
-        downstream: get_sd_card_files
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: StartSdCardLoggingAsync
-        upstream_kind: method
-        downstream: start_sd_card_logging
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: StopSdCardLoggingAsync
-        upstream_kind: method
-        downstream: stop_sd_card_logging
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: DeleteSdCardFileAsync
-        upstream_kind: method
-        downstream: delete_sd_card_file
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: FormatSdCardAsync
-        upstream_kind: method
-        downstream: format_sd_card
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: DownloadSdCardFileAsync
-        upstream_kind: method
-        downstream: download_sd_card_file
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: download_sd_card_file_to_temp
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.SdCard.SdCardCsvFileParser
-      file: src/Daqifi.Core/Device/SdCard/SdCardCsvFileParser.cs
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Device.SdCard.ISdCardOperations
+    file: src/Daqifi.Core/Device/SdCard/ISdCardOperations.cs
+  downstream:
+    kind: interface
+    qualified: daqifi.sdcard.SdCardOperations
+    file: daqifi/sdcard.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: IsLoggingToSdCard
+    downstream: is_logging_to_sd_card
+    relation: one_to_one
+  - upstream: SdCardFiles
+    downstream: sd_card_files
+    relation: one_to_one
+  - upstream: GetSdCardFilesAsync
+    downstream: get_sd_card_files
+    relation: one_to_one
+  - upstream: StartSdCardLoggingAsync
+    downstream: start_sd_card_logging
+    relation: one_to_one
+  - upstream: StopSdCardLoggingAsync
+    downstream: stop_sd_card_logging
+    relation: one_to_one
+  - upstream: DeleteSdCardFileAsync
+    downstream: delete_sd_card_file
+    relation: one_to_one
+  - upstream: FormatSdCardAsync
+    downstream: format_sd_card
+    relation: one_to_one
+  - upstream: DownloadSdCardFileAsync
+    downstream: download_sd_card_file
+    relation: one_to_one
+  - upstream: <downstream-only:download_sd_card_file_to_temp>
+    downstream: download_sd_card_file_to_temp
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardCsvFileParser
+    file: src/Daqifi.Core/Device/SdCard/SdCardCsvFileParser.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: ParseAsync
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: ParseAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: ParseFileAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-  - upstream:
-      kind: record
-      qualified: Daqifi.Core.Device.SdCard.SdCardDeviceConfiguration
-      file: src/Daqifi.Core/Device/SdCard/SdCardDeviceConfiguration.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.sdcard.SdCardDeviceConfiguration
-      file: daqifi/sdcard.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: FromDevice
-        upstream_kind: method
-        downstream: from_device
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: analog_port_count
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: calibration_values
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: device_part_number
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: device_serial_number
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: digital_port_count
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: firmware_revision
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: internal_scale_m
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: port_range
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: resolution
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: timestamp_frequency
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: record
-      qualified: Daqifi.Core.Device.SdCard.SdCardDownloadResult
-      file: src/Daqifi.Core/Device/SdCard/SdCardDownloadResult.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.sdcard.SdCardDownloadResult
-      file: daqifi/sdcard.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: null
-        upstream_kind: null
-        downstream: duration
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: file_name
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: file_path
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: file_size
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.SdCard.SdCardFileInfo
-      file: src/Daqifi.Core/Device/SdCard/SdCardFileInfo.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.sdcard.SdCardFileInfo
-      file: daqifi/sdcard.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: FileName
-        upstream_kind: property
-        downstream: file_name
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: CreatedDate
-        upstream_kind: property
-        downstream: created_date
-        downstream_kind: field
-        relation: ported
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.SdCard.SdCardFileListParser
-      file: src/Daqifi.Core/Device/SdCard/SdCardFileListParser.cs
+    relation: not_yet_ported
+  - upstream: ParseFileAsync
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: ParseFileList
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.SdCard.SdCardFileParser
-      file: src/Daqifi.Core/Device/SdCard/SdCardFileParser.cs
+    relation: not_yet_ported
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardDeviceConfiguration
+    file: src/Daqifi.Core/Device/SdCard/SdCardDeviceConfiguration.cs
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardDeviceConfiguration
+    file: daqifi/sdcard.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: FromDevice
+    downstream: from_device
+    relation: not_yet_ported
+  - upstream: <downstream-only:analog_port_count>
+    downstream: analog_port_count
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:calibration_values>
+    downstream: calibration_values
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:device_part_number>
+    downstream: device_part_number
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:device_serial_number>
+    downstream: device_serial_number
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:digital_port_count>
+    downstream: digital_port_count
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:firmware_revision>
+    downstream: firmware_revision
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:internal_scale_m>
+    downstream: internal_scale_m
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:port_range>
+    downstream: port_range
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:resolution>
+    downstream: resolution
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:timestamp_frequency>
+    downstream: timestamp_frequency
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardDownloadResult
+    file: src/Daqifi.Core/Device/SdCard/SdCardDownloadResult.cs
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardDownloadResult
+    file: daqifi/sdcard.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: <downstream-only:duration>
+    downstream: duration
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:file_name>
+    downstream: file_name
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:file_path>
+    downstream: file_path
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:file_size>
+    downstream: file_size
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardFileInfo
+    file: src/Daqifi.Core/Device/SdCard/SdCardFileInfo.cs
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardFileInfo
+    file: daqifi/sdcard.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: FileName
+    downstream: file_name
+    relation: one_to_one
+  - upstream: CreatedDate
+    downstream: created_date
+    relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardFileListParser
+    file: src/Daqifi.Core/Device/SdCard/SdCardFileListParser.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: ParseFileList
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: ParseAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: ParseFileAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.SdCard.SdCardFileParserFactory
-      file: src/Daqifi.Core/Device/SdCard/SdCardFileParserFactory.cs
+    relation: not_yet_ported
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardFileParser
+    file: src/Daqifi.Core/Device/SdCard/SdCardFileParser.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: ParseAsync
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: ParseFileAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: ParseAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: ParseWithFormatAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DetectFormat
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.SdCard.SdCardFileReceiver
-      file: src/Daqifi.Core/Device/SdCard/SdCardFileReceiver.cs
+    relation: not_yet_ported
+  - upstream: ParseFileAsync
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: ReceiveAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.SdCard.SdCardJsonFileParser
-      file: src/Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs
+    relation: not_yet_ported
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardFileParserFactory
+    file: src/Daqifi.Core/Device/SdCard/SdCardFileParserFactory.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: ParseFileAsync
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: ParseAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: ParseFileAsync
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-  - upstream:
-      kind: record
-      qualified: Daqifi.Core.Device.SdCard.SdCardLogEntry
-      file: src/Daqifi.Core/Device/SdCard/SdCardLogEntry.cs
+    relation: not_yet_ported
+  - upstream: ParseAsync
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members: []
-  - upstream:
-      kind: enum
-      qualified: Daqifi.Core.Device.SdCard.SdCardLogFormat
-      file: src/Daqifi.Core/Device/SdCard/SdCardLogFormat.cs
-    downstream:
-      kind: enum
-      qualified: daqifi.enums.SdCardLogFormat
-      file: daqifi/enums.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: Protobuf
-        upstream_kind: value
-        downstream: PROTOBUF
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: Json
-        upstream_kind: value
-        downstream: JSON
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: Csv
-        upstream_kind: value
-        downstream: CSV
-        downstream_kind: value
-        relation: ported
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.SdCard.SdCardLogSession
-      file: src/Daqifi.Core/Device/SdCard/SdCardLogSession.cs
+    relation: not_yet_ported
+  - upstream: ParseWithFormatAsync
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: FileName
-        upstream_kind: property
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: FileCreatedDate
-        upstream_kind: property
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DeviceConfig
-        upstream_kind: property
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: Samples
-        upstream_kind: property
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.SdCard.SdCardParseOptions
-      file: src/Daqifi.Core/Device/SdCard/SdCardParseOptions.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.sdcard.SdCardParseOptions
-      file: daqifi/sdcard.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: SessionStartTime
-        upstream_kind: property
-        downstream: session_start_time
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: BufferSize
-        upstream_kind: property
-        downstream: buffer_size
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: Progress
-        upstream_kind: property
-        downstream: progress
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: FallbackTimestampFrequency
-        upstream_kind: property
-        downstream: fallback_timestamp_frequency
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: ConfigurationOverride
-        upstream_kind: property
-        downstream: configuration_override
-        downstream_kind: field
-        relation: ported
-        rationale: null
-  - upstream:
-      kind: record
-      qualified: Daqifi.Core.Device.SdCard.SdCardParseProgress
-      file: src/Daqifi.Core/Device/SdCard/SdCardParseProgress.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.sdcard.SdCardParseProgress
-      file: daqifi/sdcard.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: null
-        upstream_kind: null
-        downstream: bytes_read
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: messages_read
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: total_bytes
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: record
-      qualified: Daqifi.Core.Device.SdCard.SdCardTransferProgress
-      file: src/Daqifi.Core/Device/SdCard/SdCardTransferProgress.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.sdcard.SdCardTransferProgress
-      file: daqifi/sdcard.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: null
-        upstream_kind: null
-        downstream: bytes_received
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: file_name
-        downstream_kind: field
-        relation: downstream-only
-        rationale: null
+    relation: not_yet_ported
+  - upstream: DetectFormat
+    downstream: null
+    relation: not_yet_ported
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardFileReceiver
+    file: src/Daqifi.Core/Device/SdCard/SdCardFileReceiver.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: ReceiveAsync
+    downstream: null
+    relation: not_yet_ported
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardJsonFileParser
+    file: src/Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: ParseAsync
+    downstream: null
+    relation: not_yet_ported
+  - upstream: ParseFileAsync
+    downstream: null
+    relation: not_yet_ported
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardLogEntry
+    file: src/Daqifi.Core/Device/SdCard/SdCardLogEntry.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members: []
+- upstream:
+    kind: enum
+    qualified: Daqifi.Core.Device.SdCard.SdCardLogFormat
+    file: src/Daqifi.Core/Device/SdCard/SdCardLogFormat.cs
+  downstream:
+    kind: enum
+    qualified: daqifi.enums.SdCardLogFormat
+    file: daqifi/enums.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: Protobuf
+    downstream: PROTOBUF
+    relation: one_to_one
+  - upstream: Json
+    downstream: JSON
+    relation: one_to_one
+  - upstream: Csv
+    downstream: CSV
+    relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardLogSession
+    file: src/Daqifi.Core/Device/SdCard/SdCardLogSession.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: FileName
+    downstream: null
+    relation: not_yet_ported
+  - upstream: FileCreatedDate
+    downstream: null
+    relation: not_yet_ported
+  - upstream: DeviceConfig
+    downstream: null
+    relation: not_yet_ported
+  - upstream: Samples
+    downstream: null
+    relation: not_yet_ported
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardParseOptions
+    file: src/Daqifi.Core/Device/SdCard/SdCardParseOptions.cs
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardParseOptions
+    file: daqifi/sdcard.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: SessionStartTime
+    downstream: session_start_time
+    relation: one_to_one
+  - upstream: BufferSize
+    downstream: buffer_size
+    relation: one_to_one
+  - upstream: Progress
+    downstream: progress
+    relation: one_to_one
+  - upstream: FallbackTimestampFrequency
+    downstream: fallback_timestamp_frequency
+    relation: one_to_one
+  - upstream: ConfigurationOverride
+    downstream: configuration_override
+    relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardParseProgress
+    file: src/Daqifi.Core/Device/SdCard/SdCardParseProgress.cs
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardParseProgress
+    file: daqifi/sdcard.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: <downstream-only:bytes_read>
+    downstream: bytes_read
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:messages_read>
+    downstream: messages_read
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:total_bytes>
+    downstream: total_bytes
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardTransferProgress
+    file: src/Daqifi.Core/Device/SdCard/SdCardTransferProgress.cs
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardTransferProgress
+    file: daqifi/sdcard.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: <downstream-only:bytes_received>
+    downstream: bytes_received
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:file_name>
+    downstream: file_name
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:44:22.580172+00:00"
+updated_at: '2026-04-26T08:44:22.580172+00:00'
