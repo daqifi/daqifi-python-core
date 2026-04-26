@@ -9,12 +9,10 @@ The 0xFFFF (all 16 ADCs) case is the slice's headline focus. A
 diagnostic run via ``scripts/hw_streaming_validation.py`` against COM7
 fw 3.4.6b1 saw ~16 % of length-prefix-passed payloads fail to decode as
 :class:`DaqifiOutMessage` at this bitmask, an order of magnitude worse
-than the single-channel case. The two tests here measure that rate
-through the production parser path so a regression or a fix is visible
-in the suite — the all-16 test asserts a 5 % decode-failure floor (high
-enough to tolerate the observed 16 % so the suite stays green, low
-enough that a future parser fix that drops the rate to 0 will surface
-as a tighter bound waiting to be lowered).
+than the single-channel case. The all-16 test asserts a 5 % decode-
+failure **ceiling** computed over protobuf-framed payloads only — low
+enough that the historical ~16 % rate fails loudly, high enough to
+tolerate ~1 % CDC scheduling jitter without flaking.
 
 Sample-rate cap: ``scpi_commands.start_streaming`` enforces 1-1000 Hz
 (per PR #17 pass 6 #5). This slice stays at 1 kHz for that reason; the
@@ -79,27 +77,49 @@ def _popcount(n: int) -> int:
 
 
 class _MultiChannelHarness:
-    """Drives the production parser stack at the byte level so the
-    decode rate is observable.
+    """Drives the production framing path at the byte level so the
+    decode-failure rate is observable.
 
-    The protobuf factory returns the raw payload bytes rather than
-    :class:`DaqifiOutMessage`, so every successful length-prefix slice
-    fires the handler. The handler then attempts the protobuf decode
-    inside a guard, which lets the test distinguish three populations:
+    Uses production framing (:class:`CompositeMessageParser` and
+    :class:`ProtobufMessageParser`) but a raw-bytes ``protobuf_factory``
+    that never raises, so every length-prefix-passed payload reaches
+    the handler — the handler then attempts the
+    :meth:`DaqifiOutMessage.FromString` decode under its own guard.
+    That deviation from the production stack is deliberate: the
+    production factory raises on bad payloads, which triggers
+    :class:`ProtobufMessageParser`'s 1-byte resync path and hides the
+    failure from the consumer. Counting failures requires letting
+    them through. The trade-off is that this harness measures the
+    *content-decode* rate, not the *post-resync framing* rate the
+    production stack would expose.
 
-    * ``parsed_frames``       — payloads the parser handed up
-    * ``decoded_messages``    — payloads that decoded as a DaqifiOutMessage
-    * ``decode_errors``       — payloads that did NOT decode
+    :class:`CompositeMessageParser` can route a chunk through either
+    its protobuf parser (payload type ``bytes`` / ``bytearray``) or
+    its text parser (payload type ``str`` — SCPI replies, banner
+    text, the ``DAQIFI>`` prompt). The handler counts the two
+    populations separately:
 
-    For successfully-decoded frames the handler also tallies
+    * ``protobuf_frames``     — payloads emitted by the protobuf parser
+    * ``decoded_messages``    — protobuf payloads that decoded cleanly
+    * ``decode_errors``       — protobuf payloads that did NOT decode
+    * ``text_messages``       — payloads emitted by the text parser
+
+    ``decode_errors / protobuf_frames`` is the metric the all-16 test
+    asserts on. Text leakage (``text_messages > 0``) would skew the
+    metric if folded in, so the test should also assert it stays at
+    zero — the ``clean_device`` fixture and the ``_stream_for`` init
+    sequence force a steady-state where only protobuf frames flow.
+
+    For successfully-decoded protobuf frames the handler also tallies
     ``len(out.analog_in_data)`` so the popcount invariant can be
     asserted without conflating it with the decode-failure population.
     """
 
     def __init__(self, serial_obj) -> None:
-        self.parsed_frames = 0
+        self.protobuf_frames = 0
         self.decoded_messages = 0
         self.decode_errors = 0
+        self.text_messages = 0
         self.analog_sample_counts: List[int] = []
 
         # Raw-bytes factory: lets bad payloads through to the handler
@@ -115,12 +135,19 @@ class _MultiChannelHarness:
         self.consumer.add_message_received(self._on_message)
 
     def _on_message(self, args) -> None:
-        self.parsed_frames += 1
         msg = getattr(args, "message", None)
         payload = getattr(msg, "data", None) if msg is not None else None
-        if not isinstance(payload, (bytes, bytearray)):
-            self.decode_errors += 1
+        if isinstance(payload, str):
+            # Routed through LineBasedMessageParser — SCPI text leaked
+            # into the stream window. Counted separately so it can't
+            # skew the protobuf-decode metric.
+            self.text_messages += 1
             return
+        if not isinstance(payload, (bytes, bytearray)):
+            # Defensive: an unexpected payload type isn't a protobuf
+            # frame either, so don't fold it into the decode metric.
+            return
+        self.protobuf_frames += 1
         try:
             out = DaqifiOutMessage.FromString(bytes(payload))
         except Exception:
@@ -220,7 +247,20 @@ def test_per_frame_analog_sample_count_matches_popcount(
 
     assert harness.decoded_messages > 0, (
         f"no decoded streaming frames at bitmask=0x{bitmask:04x} "
-        f"(parsed={harness.parsed_frames}, decode_errors={harness.decode_errors})"
+        f"(protobuf_frames={harness.protobuf_frames}, "
+        f"decode_errors={harness.decode_errors}, "
+        f"text_messages={harness.text_messages})"
+    )
+
+    # No SCPI text should be flowing during a stream when the
+    # ``clean_device`` fixture + ``_stream_for`` init have done their
+    # job (echo off, protobuf format set). If text leaks in, the
+    # decode-rate metric in the all-16 test would silently shift; gate
+    # against it here too.
+    assert harness.text_messages == 0, (
+        f"unexpected text messages on the stream "
+        f"({harness.text_messages}) — echo or stream-format may not "
+        f"have been applied"
     )
 
     # Every successfully-decoded frame carries popcount(bitmask) analog
@@ -276,13 +316,22 @@ def test_all_sixteen_channels_decode_rate_under_5_pct(
     )
     firmware_stats_diff.close()
 
-    assert harness.parsed_frames > 0, "no payloads reached the handler"
+    # Text leakage would skew ``decode_failure_pct`` if folded into the
+    # denominator; this ensures the metric below is over protobuf
+    # payloads only.
+    assert harness.text_messages == 0, (
+        f"unexpected text messages on the stream "
+        f"({harness.text_messages}) — would skew the decode metric"
+    )
+    assert harness.protobuf_frames > 0, (
+        "no protobuf frames reached the handler"
+    )
     decode_failure_pct = (
-        100.0 * harness.decode_errors / harness.parsed_frames
+        100.0 * harness.decode_errors / harness.protobuf_frames
     )
     assert decode_failure_pct < 5.0, (
         f"multi-channel decode-failure rate {decode_failure_pct:.1f}% "
-        f"({harness.decode_errors}/{harness.parsed_frames}) — at or above "
+        f"({harness.decode_errors}/{harness.protobuf_frames}) — at or above "
         f"the historical diagnostic level. The parser may be misframing "
         f"larger protobuf payloads; see follow-up issue."
     )
