@@ -32,7 +32,7 @@ symbols:
         rationale: null
       - upstream: WiFi
         upstream_kind: value
-        downstream: WI_FI
+        downstream: WIFI
         downstream_kind: null
         relation: missing
         rationale: null
@@ -95,4 +95,4 @@ backlog:
     discovered_at_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
     priority: med
 hal_pairs: []
-updated_at: "2026-04-26T08:17:56.666636+00:00"
+updated_at: "2026-04-26T08:23:52.236702+00:00"

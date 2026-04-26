@@ -389,7 +389,35 @@ def cs_to_py_type_name(cs_name: str) -> str:
     return cs_name
 
 
-_PASCAL_TO_SNAKE_RE = re.compile(r"(?<!^)(?=[A-Z])")
+# PascalCase → snake_case conversion. Two-pass regex approach handles
+# both the lower-then-upper boundary (``HasFoo`` → ``has_foo``) and the
+# acronym-then-word boundary (``IPAddress`` → ``ip_address``,
+# ``HasWiFi`` → ``has_wi_fi``... wait — ``WiFi`` is a special case).
+#
+# The standard two-pass handles ``IPAddress`` correctly:
+#   Pass 1: I[P]Address → IP_Address (acronym-then-Word boundary)
+#   Pass 2: IP_Address → IP_Address (no lower-then-upper, so unchanged)
+#   Lower:  ip_address ✓
+#
+# But ``HasWiFi`` is ambiguous:
+#   Pass 1 catches W[i]Fi → no-op (already lowercase after W)
+#                  Wi[F]i → Wi_Fi (Wi-then-Fi acronym boundary doesn't
+#                                  match because F isn't followed by
+#                                  another lowercase)
+#   Pass 2 catches Has[W] → Has_Wi (lower-then-upper)
+#                  Wi[F]i → Wi_Fi (lower-then-upper)
+#   Result: Has_Wi_Fi → has_wi_fi ✗
+#
+# The user-facing identifier is ``WiFi`` which Python convention
+# treats as an acronym (``wifi`` / ``WIFI``), not as two words.
+# Pre-collapse the few known acronyms in the daqifi vocabulary as a
+# special case before the generic conversion. Add new entries here
+# whenever the audit surfaces a new member-name mismatch.
+_PASCAL_ACRONYM_FIXUPS = (
+    ("WiFi", "Wifi"),  # WiFi → wifi after lowercasing
+)
+_PASCAL_TO_SNAKE_PASS1_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_PASCAL_TO_SNAKE_PASS2_RE = re.compile(r"([a-z0-9])([A-Z])")
 
 
 def cs_to_py_member_name(cs_name: str, *, enum_value: bool = False) -> str:
@@ -398,13 +426,25 @@ def cs_to_py_member_name(cs_name: str, *, enum_value: bool = False) -> str:
     * ``UpdateNetworkConfigurationAsync`` → ``update_network_configuration``
       (snake_case + strip ``Async`` suffix)
     * ``Mode`` → ``mode``
-    * Enum values use UPPER_SNAKE: ``ExistingNetwork`` → ``EXISTING_NETWORK``
+    * ``IPAddress`` → ``ip_address`` (acronym-then-word handled
+      correctly via two-pass regex)
+    * ``HasWiFi`` → ``has_wifi`` (WiFi is treated as an acronym
+      via _PASCAL_ACRONYM_FIXUPS)
+    * Enum values use UPPER_SNAKE: ``ExistingNetwork`` →
+      ``EXISTING_NETWORK``, ``WiFi`` → ``WIFI``
     """
     name = cs_name
     if name.endswith("Async"):
         name = name[: -len("Async")]
-    snake = _PASCAL_TO_SNAKE_RE.sub("_", name)
-    return snake.upper() if enum_value else snake.lower()
+    for src, dst in _PASCAL_ACRONYM_FIXUPS:
+        name = name.replace(src, dst)
+    # Pass 1: insert underscore between an acronym and a following Word
+    # (e.g. IPAddress → IP_Address).
+    name = _PASCAL_TO_SNAKE_PASS1_RE.sub(r"\1_\2", name)
+    # Pass 2: insert underscore between a lowercase/digit and an
+    # uppercase (e.g. HasFoo → Has_Foo).
+    name = _PASCAL_TO_SNAKE_PASS2_RE.sub(r"\1_\2", name)
+    return name.upper() if enum_value else name.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -498,74 +538,150 @@ def write_yaml(path: Path, obj: dict) -> None:
 
 
 def read_existing_map(path: Path) -> dict:
-    """Best-effort load of an existing map. Returns {} if absent or
-    unparseable. Uses a minimal YAML reader to avoid the PyYAML dep —
-    we only need the top-level key/value structure to preserve manual
-    rationale/notes/divergences/backlog/hal_pairs blocks across
-    regeneration. Anything we can't parse is dropped to "unknown" and
-    the operator can re-paste from git history if needed."""
+    """Best-effort load of an existing map. Returns {} if absent.
+
+    Uses PyYAML if installed (preferred — handles every YAML feature).
+    Falls back to a block-style mini-parser tuned to the format this
+    generator emits (handles nested dicts + lists of dicts, which is
+    enough to round-trip every map field including ``members:``).
+
+    Earlier versions of this fallback only parsed top-level scalars,
+    which silently destroyed manual member-level edits when PyYAML
+    was missing — Qodo PR #36 pass 5 #1 made the fallback
+    feature-complete."""
     if not path.is_file():
         return {}
-    # Optional dep: try yaml if available.
     try:
         import yaml  # type: ignore[import-untyped]
 
         return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except ImportError:
         pass
-    # Fallback: extract preserved sections via crude line scan.
-    return _read_yaml_minimal(path)
+    return _parse_simple_yaml(path.read_text(encoding="utf-8"))
 
 
-def _read_yaml_minimal(path: Path) -> dict:
-    """Minimal reader: pulls top-level scalar keys + preserves the
-    raw text of nested sections we want to round-trip
-    (divergences, backlog, hal_pairs, notes, rationale).
+def _parse_simple_yaml(text: str) -> dict:
+    """Minimal block-style YAML reader. Handles:
 
-    NOT a real YAML parser — best-effort fallback only. Coerces
-    scalars to Python types (None/bool/int/float/str) so the
-    downstream merge logic, which checks ``if ex.get(key) is not
-    None``, works correctly when this fallback path is taken."""
-    def _coerce_scalar(value: str):
-        if value == "" or value == "null" or value == "~":
-            return None
-        if value == "[]":
-            return []
-        if value == "{}":
-            return {}
-        if value == "true":
-            return True
-        if value == "false":
-            return False
-        if (value.startswith('"') and value.endswith('"')) or (
-            value.startswith("'") and value.endswith("'")
-        ):
-            s = value[1:-1]
-            # Reverse the escaping that _yaml_escape applied so the
-            # round-trip stays clean.
-            return (
-                s.replace("\\n", "\n")
-                .replace("\\r", "\r")
-                .replace("\\t", "\t")
-                .replace('\\"', '"')
-                .replace("\\\\", "\\")
-            )
-        try:
-            if "." in value:
-                return float(value)
-            return int(value)
-        except ValueError:
-            return value
+    * top-level scalars: ``key: value``
+    * top-level lists of dicts: ``key:`` then ``  - subkey: ...``
+    * nested dicts: ``  key:`` then ``    subkey: ...``
 
-    out: dict = {}
-    text = path.read_text(encoding="utf-8")
-    for line in text.splitlines():
-        if line and not line.startswith(" ") and ":" in line:
-            k, _, v = line.partition(":")
-            v = v.strip()
-            if v and not v.endswith(":"):
-                out[k.strip()] = _coerce_scalar(v)
-    return out
+    NOT a real YAML parser — multi-line strings, anchors, flow style,
+    etc. unsupported. Adequate for our generator's own output. Falls
+    back to PyYAML if available (handled by ``read_existing_map``)."""
+    lines = text.splitlines()
+    root, _ = _parse_block(lines, 0, indent=0)
+    return root  # type: ignore[return-value]
+
+
+def _parse_block(lines: List[str], i: int, indent: int):
+    """Recursive-descent parser for our block-style YAML.
+
+    Returns ``(parsed_value, next_line_index)``. The parsed value is
+    a dict for normal blocks or a list when the block consists
+    entirely of ``- ...`` items at the requested indent.
+    """
+    out_dict: dict = {}
+    out_list: list = []
+    is_list = False
+    while i < len(lines):
+        raw = lines[i]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        cur_indent = len(raw) - len(raw.lstrip(" "))
+        if cur_indent < indent:
+            break
+        if cur_indent > indent:
+            i += 1
+            continue
+        if stripped.startswith("- "):
+            is_list = True
+            after_dash = stripped[2:].strip()
+            if after_dash and ":" in after_dash and not after_dash.endswith(":"):
+                # Inline first key: ``- key: value``
+                key, value = _split_kv(after_dash)
+                item: dict = {key: _coerce_scalar(value)}
+                i += 1
+                sibling_indent = indent + 2
+                while i < len(lines):
+                    sub_raw = lines[i]
+                    sub_stripped = sub_raw.strip()
+                    if not sub_stripped or sub_stripped.startswith("#"):
+                        i += 1
+                        continue
+                    sub_indent = len(sub_raw) - len(sub_raw.lstrip(" "))
+                    if sub_indent < sibling_indent or sub_stripped.startswith("- "):
+                        break
+                    if ":" in sub_stripped:
+                        k, v = _split_kv(sub_stripped)
+                        if not v:
+                            child, i = _parse_block(lines, i + 1, sibling_indent + 2)
+                            item[k] = child
+                        else:
+                            item[k] = _coerce_scalar(v)
+                            i += 1
+                    else:
+                        i += 1
+                out_list.append(item)
+            else:
+                if after_dash and ":" not in after_dash:
+                    out_list.append(_coerce_scalar(after_dash))
+                    i += 1
+                else:
+                    child, i = _parse_block(lines, i + 1, indent + 2)
+                    out_list.append(child)
+        else:
+            if ":" not in stripped:
+                i += 1
+                continue
+            key, value = _split_kv(stripped)
+            if value:
+                out_dict[key] = _coerce_scalar(value)
+                i += 1
+            else:
+                child, i = _parse_block(lines, i + 1, indent + 2)
+                out_dict[key] = child
+    return (out_list if is_list and not out_dict else out_dict), i
+
+
+def _split_kv(line: str) -> Tuple[str, str]:
+    k, _, v = line.partition(":")
+    return k.strip(), v.strip()
+
+
+def _coerce_scalar(value: str):
+    if value == "" or value == "null" or value == "~":
+        return None
+    if value == "[]":
+        return []
+    if value == "{}":
+        return {}
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        s = value[1:-1]
+        # Reverse the escaping that _yaml_escape applied so the
+        # round-trip stays clean.
+        return (
+            s.replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
+            .replace('\\"', '"')
+            .replace("\\\\", "\\")
+        )
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
 
 
 # ---------------------------------------------------------------------------

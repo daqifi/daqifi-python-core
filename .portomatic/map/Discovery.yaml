@@ -99,9 +99,9 @@ symbols:
         rationale: null
       - upstream: IPAddress
         upstream_kind: property
-        downstream: i_p_address
-        downstream_kind: null
-        relation: missing
+        downstream: ip_address
+        downstream_kind: property
+        relation: ported
         rationale: null
       - upstream: MacAddress
         upstream_kind: property
@@ -160,12 +160,6 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: device_type
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: ip_address
         downstream_kind: method
         relation: downstream-only
         rationale: null
@@ -342,9 +336,9 @@ symbols:
         rationale: null
       - upstream: IPAddress
         upstream_kind: property
-        downstream: i_p_address
-        downstream_kind: null
-        relation: missing
+        downstream: ip_address
+        downstream_kind: property
+        relation: ported
         rationale: null
       - upstream: MacAddress
         upstream_kind: property
@@ -397,12 +391,6 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: device_type
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: ip_address
         downstream_kind: method
         relation: downstream-only
         rationale: null
@@ -470,9 +458,9 @@ symbols:
         rationale: null
       - upstream: WiFi
         upstream_kind: value
-        downstream: WI_FI
-        downstream_kind: null
-        relation: missing
+        downstream: WIFI
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Serial
         upstream_kind: value
@@ -483,12 +471,6 @@ symbols:
       - upstream: null
         upstream_kind: null
         downstream: HID
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: WIFI
         downstream_kind: method
         relation: downstream-only
         rationale: null
@@ -671,4 +653,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:17:56.934654+00:00"
+updated_at: "2026-04-26T08:23:52.498506+00:00"

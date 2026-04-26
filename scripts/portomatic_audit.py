@@ -180,7 +180,18 @@ def _coerce(value: str):
     if (value.startswith('"') and value.endswith('"')) or (
         value.startswith("'") and value.endswith("'")
     ):
-        return value[1:-1]
+        s = value[1:-1]
+        # Reverse the escaping that the generator's _yaml_escape
+        # applied so the round-trip stays clean. Mirrors the
+        # equivalent logic in scripts/portomatic_generate_map.py
+        # (Qodo PR #36 pass 5 #2 — keep these in sync).
+        return (
+            s.replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
+            .replace('\\"', '"')
+            .replace("\\\\", "\\")
+        )
     try:
         if "." in value:
             return float(value)
