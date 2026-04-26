@@ -15,14 +15,24 @@ Includes the small value classes the parser surface needs:
 - `SdCardParseOptions.progress` is typed `Optional[Callable[...]]`
   rather than the C# `IProgress<T>` interface. Python idiom is a
   callable; introducing a `Protocol` would be ceremony with no win.
+- ``SdCardOperations`` Protocol methods are **synchronous** rather
+  than ``async`` like the C# ``Task``-returning interface. The Python
+  port is sync end-to-end (project convention shared with
+  ``NetworkConfigurable`` etc.); concrete implementations on
+  ``DaqifiStreamingDevice`` block until the device responds. Wrap
+  in a thread / ``asyncio.to_thread`` if you need non-blocking
+  semantics.
 """
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import (
     Any,
     Callable,
+    Iterable,
     List,
     Optional,
     Protocol,
@@ -42,7 +52,75 @@ __all__ = [
     "SdCardTransferProgress",
     "SdCardDownloadResult",
     "SdCardOperations",
+    "parse_sd_card_file_list",
+    "END_OF_FILE_MARKER",
 ]
+
+
+# ASCII marker the firmware appends after all SD-card file bytes have
+# been streamed. Mirrors the C# ``SdCardFileReceiver.EndOfFileMarker``
+# constant — kept module-level so test harnesses + receiver code share
+# the same bytes.
+END_OF_FILE_MARKER: bytes = b"__END_OF_FILE__"
+
+
+_LOG_FILENAME_RE = re.compile(r"^log_(\d{8}_\d{6})", re.IGNORECASE)
+_DAQIFI_DIR_PREFIX = "daqifi/"
+
+
+def _try_parse_log_filename_date(file_name: str) -> Optional[datetime]:
+    """Pull the timestamp out of ``log_YYYYMMDD_HHMMSS.<ext>`` names.
+
+    Returns ``None`` for anything else. Mirrors the C#
+    ``SdCardFileListParser.TryParseDateFromLogFileName`` helper.
+    """
+    stem, _ = os.path.splitext(file_name)
+    match = _LOG_FILENAME_RE.match(stem)
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+
+
+def parse_sd_card_file_list(lines: Iterable[str]) -> List["SdCardFileInfo"]:
+    """Parse text lines from the device's SD-card LIST? response.
+
+    Ports ``Daqifi.Core/Device/SdCard/SdCardFileListParser.cs``. Skips
+    blank lines, SCPI error responses, and entries containing control
+    characters. Strips a leading ``"Daqifi/"`` directory prefix and any
+    trailing size column when present.
+    """
+    out: List[SdCardFileInfo] = []
+    for raw in lines:
+        if raw is None:
+            continue
+        line = raw.strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if upper.startswith("**ERROR") or upper.startswith("ERROR"):
+            continue
+        # Some firmwares append "<path> <size>" — keep the first whitespace token.
+        token_end = -1
+        for sep in (" ", "\t"):
+            idx = line.find(sep)
+            if idx > 0 and (token_end < 0 or idx < token_end):
+                token_end = idx
+        if token_end > 0:
+            line = line[:token_end]
+        if line.lower().startswith(_DAQIFI_DIR_PREFIX):
+            line = line[len(_DAQIFI_DIR_PREFIX):]
+        file_name = os.path.basename(line.replace("\\", "/"))
+        if not file_name.strip():
+            continue
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in file_name):
+            continue
+        out.append(
+            SdCardFileInfo(file_name, _try_parse_log_filename_date(file_name))
+        )
+    return out
 
 
 @dataclass(frozen=True)
@@ -168,7 +246,7 @@ class SdCardOperations(Protocol):
     ``Daqifi.Core/Device/SdCard/ISdCardOperations.cs`` (the ``I``
     prefix is dropped to match the rest of this codebase's protocols).
 
-    Async methods mirror the C# ``Task`` / ``Task<T>`` returns. The
+    All methods are **synchronous** — see module docstring. The
     download convenience overload from C# (no destination stream) is
     surfaced as :meth:`download_sd_card_file_to_temp` so the two
     overloads have distinct names — Python doesn't dispatch on
@@ -189,7 +267,7 @@ class SdCardOperations(Protocol):
         """
         ...
 
-    async def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
+    def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
         """Fetch and return the current list of files on the SD card.
 
         Raises:
@@ -197,7 +275,7 @@ class SdCardOperations(Protocol):
         """
         ...
 
-    async def start_sd_card_logging(
+    def start_sd_card_logging(
         self,
         file_name: Optional[str] = None,
         channel_mask: Optional[str] = None,
@@ -221,7 +299,7 @@ class SdCardOperations(Protocol):
         """
         ...
 
-    async def stop_sd_card_logging(self) -> None:
+    def stop_sd_card_logging(self) -> None:
         """Stop the active SD card logging session.
 
         Raises:
@@ -229,7 +307,7 @@ class SdCardOperations(Protocol):
         """
         ...
 
-    async def delete_sd_card_file(self, file_name: str) -> None:
+    def delete_sd_card_file(self, file_name: str) -> None:
         """Delete ``file_name`` from the SD card.
 
         Raises:
@@ -240,7 +318,7 @@ class SdCardOperations(Protocol):
         """
         ...
 
-    async def format_sd_card(self) -> None:
+    def format_sd_card(self) -> None:
         """Erase the entire SD card.
 
         Raises:
@@ -249,7 +327,7 @@ class SdCardOperations(Protocol):
         """
         ...
 
-    async def download_sd_card_file(
+    def download_sd_card_file(
         self,
         file_name: str,
         destination_stream: Any,
@@ -270,7 +348,7 @@ class SdCardOperations(Protocol):
         """
         ...
 
-    async def download_sd_card_file_to_temp(
+    def download_sd_card_file_to_temp(
         self,
         file_name: str,
         progress: Optional[Callable[[SdCardTransferProgress], None]] = None,

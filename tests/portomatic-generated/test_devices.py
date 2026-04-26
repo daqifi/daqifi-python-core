@@ -284,7 +284,10 @@ class TestDaqifiStreamingDevice:
         assert sd.streaming_frequency == 100
         assert not sd.is_streaming
         assert not sd.is_logging_to_sd_card
-        assert sd.sd_card_files == []
+        # `sd_card_files` returns a tuple to match the SdCardOperations
+        # Protocol's `Sequence[SdCardFileInfo]` immutability contract.
+        assert sd.sd_card_files == ()
+        assert list(sd.sd_card_files) == []
         assert not sd.is_usb_connection  # transport=None
 
     def test_streaming_frequency_setter_validates(self):

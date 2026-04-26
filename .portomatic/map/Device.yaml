@@ -340,22 +340,39 @@ symbols:
     relation: one_to_one
   - upstream: GetSdCardFilesAsync
     downstream: get_sd_card_files
-    relation: not_yet_ported
+    relation: divergent
+    notes: 'Async (Task<IReadOnlyList<SdCardFileInfo>>) in C#; sync in
+      Python per project convention. Behavior matches: pause consumer, prepare
+      SD interface, send LIST?, parse response, restore LAN.'
   - upstream: StartSdCardLoggingAsync
     downstream: start_sd_card_logging
-    relation: not_yet_ported
+    relation: divergent
+    notes: Async in C#; sync in Python per project convention.
   - upstream: StopSdCardLoggingAsync
     downstream: stop_sd_card_logging
-    relation: not_yet_ported
+    relation: divergent
+    notes: Async in C#; sync in Python per project convention.
   - upstream: DeleteSdCardFileAsync
     downstream: delete_sd_card_file
-    relation: not_yet_ported
+    relation: divergent
+    notes: Async in C#; sync in Python per project convention.
   - upstream: FormatSdCardAsync
     downstream: format_sd_card
     relation: one_to_one
   - upstream: DownloadSdCardFileAsync
     downstream: download_sd_card_file
-    relation: not_yet_ported
+    relation: divergent
+    notes: 'Async in C#; sync in Python per project convention. Implements the
+      raw-capture pattern (pauses protobuf consumer, reads serial bytes until
+      __END_OF_FILE__) without C# ExecuteRawCaptureAsync helper since the Python
+      consumer exposes start/stop_safely.'
+  - upstream: DownloadSdCardFileAsync
+    downstream: download_sd_card_file_to_temp
+    relation: divergent
+    notes: 'C# overload resolution distinguishes the two DownloadSdCardFileAsync
+      variants by parameter list (with/without destination stream). Python doesn''t
+      dispatch on parameter types, so the no-destination overload is renamed to
+      download_sd_card_file_to_temp.'
   - upstream: <downstream-only:apply_network_configuration>
     downstream: apply_network_configuration
     relation: divergent
