@@ -11,18 +11,18 @@ Design choices:
   about (class/interface/struct/record/enum + their public methods +
   public properties). When the regex misses an exotic construct, the
   generator emits a TODO comment in the map so the operator notices.
-* Python parsing uses the stdlib ``ast`` module — accurate, fast,
+* Python parsing uses the stdlib ``ast`` module -- accurate, fast,
   no external deps.
 * Maps are MERGED with existing on-disk contents. Manual fields
   (rationale, notes, accepted divergences, hal_pairs, backlog) are
   preserved across regeneration. Auto-discovered rows that get
   removed upstream are kept in a ``deprecated:`` block for one cycle
   so an operator can review before deleting.
-* Default name-mapping heuristic: C# ``CamelCase`` → Python
-  ``snake_case``; C# ``IFoo`` interface → Python ``Foo`` Protocol;
-  C# ``Foo<T>`` generic → Python ``Foo`` (generics collapse).
+* Default name-mapping heuristic: C# ``CamelCase`` -> Python
+  ``snake_case``; C# ``IFoo`` interface -> Python ``Foo`` Protocol;
+  C# ``Foo<T>`` generic -> Python ``Foo`` (generics collapse).
 * When a downstream symbol can't be resolved by name, the generator
-  marks the row ``relation: missing`` rather than guessing — operator
+  marks the row ``relation: missing`` rather than guessing -- operator
   decides whether to map manually or leave as a real gap.
 
 Usage::
@@ -59,7 +59,7 @@ UPSTREAM_ROOT = (
 
 # Shard layout. Each entry maps a shard name to the upstream subdirectory
 # under daqifi-core/src/Daqifi.Core/. The downstream side is the whole
-# daqifi/ Python package — the generator finds matches by name.
+# daqifi/ Python package -- the generator finds matches by name.
 #
 # The upstream tree is not strictly two-level; some "shards" are
 # subdirectories of Device/. We list each meaningful one separately so
@@ -162,7 +162,7 @@ def parse_cs_file(path: Path) -> List[CsSymbol]:
     Approach: strip noise, find the namespace, then scan for type
     declarations. For each declaration, slice the body (matched
     braces) and scan it for members. Doesn't try to handle nested
-    types — none in the daqifi-core surface.
+    types -- none in the daqifi-core surface.
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
     src = _strip_cs_noise(raw)
@@ -212,9 +212,9 @@ def _extract_cs_members(body: str, type_name: str, kind: str) -> List[CsMember]:
     """Extract methods / properties / events / enum values from a type body.
 
     Picks the right regex set based on the enclosing kind:
-      * ``interface`` — members have no access modifier (implicitly public)
-      * ``enum`` — values are bare identifiers separated by commas
-      * everything else — members must be ``public``
+      * ``interface`` -- members have no access modifier (implicitly public)
+      * ``enum`` -- values are bare identifiers separated by commas
+      * everything else -- members must be ``public``
 
     Constructor detection: a public X(...) where X matches the type
     name. Tagged as kind="ctor".
@@ -358,7 +358,7 @@ def _collect_public_methods(
     node: ast.ClassDef, *, is_enum: bool
 ) -> Dict[str, str]:
     """Collect every public method, property, dataclass field, and enum
-    value on a Python class — the surface a C# member could map to —
+    value on a Python class -- the surface a C# member could map to --
     keyed by name with kind tags so downstream rows get the right
     ``downstream_kind`` (was hardcoded to ``method``).
 
@@ -401,30 +401,30 @@ def _collect_public_methods(
 
 
 def cs_to_py_type_name(cs_name: str) -> str:
-    """C# ``IFoo`` interface → Python ``Foo`` Protocol; otherwise leave as-is."""
+    """C# ``IFoo`` interface -> Python ``Foo`` Protocol; otherwise leave as-is."""
     if cs_name.startswith("I") and len(cs_name) > 1 and cs_name[1].isupper():
         return cs_name[1:]
     return cs_name
 
 
-# PascalCase → snake_case conversion. Two-pass regex approach handles
-# both the lower-then-upper boundary (``HasFoo`` → ``has_foo``) and the
-# acronym-then-word boundary (``IPAddress`` → ``ip_address``,
-# ``HasWiFi`` → ``has_wi_fi``... wait — ``WiFi`` is a special case).
+# PascalCase -> snake_case conversion. Two-pass regex approach handles
+# both the lower-then-upper boundary (``HasFoo`` -> ``has_foo``) and the
+# acronym-then-word boundary (``IPAddress`` -> ``ip_address``,
+# ``HasWiFi`` -> ``has_wi_fi``... wait -- ``WiFi`` is a special case).
 #
 # The standard two-pass handles ``IPAddress`` correctly:
-#   Pass 1: I[P]Address → IP_Address (acronym-then-Word boundary)
-#   Pass 2: IP_Address → IP_Address (no lower-then-upper, so unchanged)
-#   Lower:  ip_address ✓
+#   Pass 1: I[P]Address -> IP_Address (acronym-then-Word boundary)
+#   Pass 2: IP_Address -> IP_Address (no lower-then-upper, so unchanged)
+#   Lower:  ip_address OK
 #
 # But ``HasWiFi`` is ambiguous:
-#   Pass 1 catches W[i]Fi → no-op (already lowercase after W)
-#                  Wi[F]i → Wi_Fi (Wi-then-Fi acronym boundary doesn't
+#   Pass 1 catches W[i]Fi -> no-op (already lowercase after W)
+#                  Wi[F]i -> Wi_Fi (Wi-then-Fi acronym boundary doesn't
 #                                  match because F isn't followed by
 #                                  another lowercase)
-#   Pass 2 catches Has[W] → Has_Wi (lower-then-upper)
-#                  Wi[F]i → Wi_Fi (lower-then-upper)
-#   Result: Has_Wi_Fi → has_wi_fi ✗
+#   Pass 2 catches Has[W] -> Has_Wi (lower-then-upper)
+#                  Wi[F]i -> Wi_Fi (lower-then-upper)
+#   Result: Has_Wi_Fi -> has_wi_fi FAIL
 #
 # The user-facing identifier is ``WiFi`` which Python convention
 # treats as an acronym (``wifi`` / ``WIFI``), not as two words.
@@ -432,13 +432,13 @@ def cs_to_py_type_name(cs_name: str) -> str:
 # special case before the generic conversion. Add new entries here
 # whenever the audit surfaces a new member-name mismatch.
 _PASCAL_ACRONYM_FIXUPS = (
-    ("WiFi", "Wifi"),  # WiFi → wifi after lowercasing
+    ("WiFi", "Wifi"),  # WiFi -> wifi after lowercasing
 )
 _PASCAL_TO_SNAKE_PASS1_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _PASCAL_TO_SNAKE_PASS2_RE = re.compile(r"([a-z0-9])([A-Z])")
 # Letter-then-digit boundary: daqifi's enum convention puts an
 # underscore between a word and a trailing version digit, e.g. C#
-# ``Nyquist1`` → Python ``NYQUIST_1``. Run as a separate pass after
+# ``Nyquist1`` -> Python ``NYQUIST_1``. Run as a separate pass after
 # the case-based passes so we don't double-insert in already-snake
 # strings.
 _PASCAL_TO_SNAKE_DIGIT_RE = re.compile(r"([A-Za-z])(\d)")
@@ -447,15 +447,15 @@ _PASCAL_TO_SNAKE_DIGIT_RE = re.compile(r"([A-Za-z])(\d)")
 def cs_to_py_member_name(cs_name: str, *, enum_value: bool = False) -> str:
     """Map a C# member name to Python convention.
 
-    * ``UpdateNetworkConfigurationAsync`` → ``update_network_configuration``
+    * ``UpdateNetworkConfigurationAsync`` -> ``update_network_configuration``
       (snake_case + strip ``Async`` suffix)
-    * ``Mode`` → ``mode``
-    * ``IPAddress`` → ``ip_address`` (acronym-then-word handled
+    * ``Mode`` -> ``mode``
+    * ``IPAddress`` -> ``ip_address`` (acronym-then-word handled
       correctly via two-pass regex)
-    * ``HasWiFi`` → ``has_wifi`` (WiFi is treated as an acronym
+    * ``HasWiFi`` -> ``has_wifi`` (WiFi is treated as an acronym
       via _PASCAL_ACRONYM_FIXUPS)
-    * Enum values use UPPER_SNAKE: ``ExistingNetwork`` →
-      ``EXISTING_NETWORK``, ``WiFi`` → ``WIFI``
+    * Enum values use UPPER_SNAKE: ``ExistingNetwork`` ->
+      ``EXISTING_NETWORK``, ``WiFi`` -> ``WIFI``
     """
     name = cs_name
     if name.endswith("Async"):
@@ -463,19 +463,19 @@ def cs_to_py_member_name(cs_name: str, *, enum_value: bool = False) -> str:
     for src, dst in _PASCAL_ACRONYM_FIXUPS:
         name = name.replace(src, dst)
     # Pass 1: insert underscore between an acronym and a following Word
-    # (e.g. IPAddress → IP_Address).
+    # (e.g. IPAddress -> IP_Address).
     name = _PASCAL_TO_SNAKE_PASS1_RE.sub(r"\1_\2", name)
     # Pass 2: insert underscore between a lowercase/digit and an
-    # uppercase (e.g. HasFoo → Has_Foo).
+    # uppercase (e.g. HasFoo -> Has_Foo).
     name = _PASCAL_TO_SNAKE_PASS2_RE.sub(r"\1_\2", name)
     # Pass 3: insert underscore between a letter and a digit
-    # (e.g. Nyquist1 → Nyquist_1).
+    # (e.g. Nyquist1 -> Nyquist_1).
     name = _PASCAL_TO_SNAKE_DIGIT_RE.sub(r"\1_\2", name)
     return name.upper() if enum_value else name.lower()
 
 
 # ---------------------------------------------------------------------------
-# Map I/O — minimal hand-rolled YAML writer (avoids a PyYAML dep)
+# Map I/O -- minimal hand-rolled YAML writer (avoids a PyYAML dep)
 # ---------------------------------------------------------------------------
 
 
@@ -485,7 +485,7 @@ def _yaml_escape(value: str) -> str:
     chars). Otherwise emit bare for readability.
 
     Control-character handling matters because the minimal YAML
-    reader in this script + ``portomatic_audit.py`` is line-based —
+    reader in this script + ``portomatic_audit.py`` is line-based --
     a literal newline in a value would split it across two YAML
     "rows" and corrupt the parse on the next regen-then-load cycle.
     """
@@ -567,14 +567,14 @@ def write_yaml(path: Path, obj: dict) -> None:
 def read_existing_map(path: Path) -> dict:
     """Best-effort load of an existing map. Returns {} if absent.
 
-    Uses PyYAML if installed (preferred — handles every YAML feature).
+    Uses PyYAML if installed (preferred -- handles every YAML feature).
     Falls back to a block-style mini-parser tuned to the format this
     generator emits (handles nested dicts + lists of dicts, which is
     enough to round-trip every map field including ``members:``).
 
     Earlier versions of this fallback only parsed top-level scalars,
     which silently destroyed manual member-level edits when PyYAML
-    was missing — Qodo PR #36 pass 5 #1 made the fallback
+    was missing -- Qodo PR #36 pass 5 #1 made the fallback
     feature-complete."""
     if not path.is_file():
         return {}
@@ -594,7 +594,7 @@ def _parse_simple_yaml(text: str) -> dict:
     * top-level lists of dicts: ``key:`` then ``  - subkey: ...``
     * nested dicts: ``  key:`` then ``    subkey: ...``
 
-    NOT a real YAML parser — multi-line strings, anchors, flow style,
+    NOT a real YAML parser -- multi-line strings, anchors, flow style,
     etc. unsupported. Adequate for our generator's own output. Falls
     back to PyYAML if available (handled by ``read_existing_map``)."""
     lines = text.splitlines()
@@ -734,7 +734,7 @@ def generate_map(shard: str, py_index: Dict[str, PySymbol]) -> dict:
     if not upstream_dir.is_dir():
         raise FileNotFoundError(f"upstream shard not found: {upstream_dir}")
 
-    # Walk *.cs in the shard directory (NOT recursive — children belong
+    # Walk *.cs in the shard directory (NOT recursive -- children belong
     # to their own shard maps).
     cs_files = sorted(upstream_dir.glob("*.cs"))
 
@@ -759,7 +759,7 @@ def generate_map(shard: str, py_index: Dict[str, PySymbol]) -> dict:
         # one of this C# file's symbols maps to. Pick the majority
         # winner so a file with one stray name match doesn't override
         # the dominant target. Leave null if there's a tie (caller
-        # would get an arbitrary pick from sorting otherwise) — that
+        # would get an arbitrary pick from sorting otherwise) -- that
         # signal of "ambiguous mapping" is more useful than a wrong
         # auto-pick.
         ds_files: List[str] = []
@@ -817,7 +817,7 @@ def _other_cs_symbol_maps_here(
     cs_sym: CsSymbol, py_name: str, all_cs_symbols_in_shard: List[CsSymbol]
 ) -> bool:
     """True if some OTHER C# symbol in this shard auto-maps to the
-    same Python class — typical case is the C# I-prefixed interface
+    same Python class -- typical case is the C# I-prefixed interface
     + the concrete class both name-mapping to a single Python Protocol.
 
     The Python port collapses C# interface + concrete-class pairs
@@ -889,7 +889,7 @@ def symbol_row(
                     "downstream": "__init__",
                     "downstream_kind": "method",
                     "relation": "divergent",
-                    "rationale": "Python constructors are __init__ — name divergence is conventional.",
+                    "rationale": "Python constructors are __init__ -- name divergence is conventional.",
                 }
             )
             continue
@@ -911,7 +911,7 @@ def symbol_row(
                     "upstream_kind": m.kind,
                     "downstream": py_member,
                     # Prefer the actual Python member kind over the
-                    # C# kind — they usually agree, but a C# property
+                    # C# kind -- they usually agree, but a C# property
                     # might map to a Python method (no @property
                     # decorator) and vice versa. The Python parser is
                     # the authoritative source for what's actually
@@ -934,7 +934,7 @@ def symbol_row(
                     "rationale": None,
                 }
             )
-    # Python-only members on this class — flag as undocumented for the
+    # Python-only members on this class -- flag as undocumented for the
     # auditor to triage. Look up the actual member kind on the Python
     # side so an enum value doesn't get tagged ``method`` (Qodo PR #36
     # pass 8 #3+#4).
@@ -986,7 +986,7 @@ def merge_into_existing(generated: dict, existing: dict) -> dict:
     last_synced_sha) before letting the auto-generated fields win on
     everything else.
 
-    For ``divergences`` / ``backlog`` / ``hal_pairs`` — keep the
+    For ``divergences`` / ``backlog`` / ``hal_pairs`` -- keep the
     existing list verbatim; never auto-populate these from the
     generator."""
     if not existing:
@@ -1003,7 +1003,7 @@ def merge_into_existing(generated: dict, existing: dict) -> dict:
                     f[key] = ex[key]
             # Preserve a manual relation override (e.g. "divergent" with rationale).
             # When relation is divergent/dropped, ALSO preserve the
-            # original downstream pointer — operator may have set it
+            # original downstream pointer -- operator may have set it
             # to null deliberately ("no Python equivalent"), and
             # auto-discovered name matches shouldn't override that.
             if ex.get("relation") in ("divergent", "dropped") and ex.get("rationale"):
@@ -1033,7 +1033,7 @@ def merge_into_existing(generated: dict, existing: dict) -> dict:
                     s["downstream"] = ex["downstream"]
             # Member-level preservation. Manual ``rationale`` / ``notes``
             # / ``relation`` overrides on individual members must
-            # survive regeneration — without this, the operator's
+            # survive regeneration -- without this, the operator's
             # decision that a particular method is divergent (with
             # documented reason) gets clobbered the next time the
             # generator runs and finds the C# upstream method exists.

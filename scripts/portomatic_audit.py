@@ -3,25 +3,25 @@ codebase + report drift in five categories.
 
 Categories:
 
-1. **protocol-no-impl** — a Python ``Protocol`` class is mapped, all
+1. **protocol-no-impl** -- a Python ``Protocol`` class is mapped, all
    its members are marked ``relation: ported``, but no concrete class
    in the package implements the full method set with non-stub bodies.
    This catches the ``NetworkConfigurable`` / ``SdCardOperations``
    gap pattern.
 
-2. **method-missing** — map says ``relation: ported`` for a method
+2. **method-missing** -- map says ``relation: ported`` for a method
    but the downstream class doesn't have it (rename happened, method
    deleted, etc.).
 
-3. **method-undocumented** — downstream class has a public method /
+3. **method-undocumented** -- downstream class has a public method /
    property that doesn't appear on any map row. Either the map is
    stale or the method was added without updating the map.
 
-4. **symbol-undocumented** — a downstream class exists with no row on
+4. **symbol-undocumented** -- a downstream class exists with no row on
    any map. Either the class is orphaned (port artifact, dead code)
    or the map needs to be expanded.
 
-5. **stale-divergent** — map says ``relation: divergent`` with a
+5. **stale-divergent** -- map says ``relation: divergent`` with a
    rationale, but the downstream code now matches the upstream
    signature. The rationale may be obsolete; operator should re-read
    it and either remove the divergence or refresh the rationale.
@@ -34,9 +34,9 @@ Usage::
     python scripts/portomatic_audit.py --strict   # exit 1 if any drift
 
 Exit codes:
-    0 — clean (or non-strict mode with drift reported)
-    1 — strict mode + drift detected
-    2 — bad arguments / map files unreadable
+    0 -- clean (or non-strict mode with drift reported)
+    1 -- strict mode + drift detected
+    2 -- bad arguments / map files unreadable
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ PYTHON_PKG_ROOT = REPO_ROOT / "daqifi"
 
 
 # ---------------------------------------------------------------------------
-# Map I/O — best-effort YAML reader (handles our generator's output)
+# Map I/O -- best-effort YAML reader (handles our generator's output)
 # ---------------------------------------------------------------------------
 
 
@@ -77,7 +77,7 @@ def _parse_simple_yaml(text: str) -> dict:
     * top-level lists of dicts: ``key:`` then ``  - subkey: ...``
     * nested dict on a key: ``  key:`` then ``    subkey: ...``
 
-    NOT a real YAML parser — multi-line strings, anchors,
+    NOT a real YAML parser -- multi-line strings, anchors,
     flow-style, etc. unsupported. Adequate for our generated
     files; falls back to PyYAML if available."""
     lines = text.splitlines()
@@ -110,7 +110,7 @@ def _parse_block(lines: List[str], i: int, indent: int):
             continue
         if stripped.startswith("- "):
             is_list = True
-            # Parse this list item — could be a scalar or a dict.
+            # Parse this list item -- could be a scalar or a dict.
             after_dash = stripped[2:].strip()
             if after_dash and ":" in after_dash and not after_dash.endswith(":"):
                 # Inline first key: "- key: value"
@@ -184,7 +184,7 @@ def _coerce(value: str):
         # Reverse the escaping that the generator's _yaml_escape
         # applied so the round-trip stays clean. Mirrors the
         # equivalent logic in scripts/portomatic_generate_map.py
-        # (Qodo PR #36 pass 5 #2 — keep these in sync).
+        # (Qodo PR #36 pass 5 #2 -- keep these in sync).
         return (
             s.replace("\\n", "\n")
             .replace("\\r", "\r")
@@ -201,7 +201,7 @@ def _coerce(value: str):
 
 
 # ---------------------------------------------------------------------------
-# Python codebase walker — surface every public class + method body shape
+# Python codebase walker -- surface every public class + method body shape
 # ---------------------------------------------------------------------------
 
 
@@ -399,11 +399,11 @@ def find_concrete_impls_for_protocol(
     if not required:
         return []
 
-    # Build a simple-name → [classes] index so we can resolve base
+    # Build a simple-name -> [classes] index so we can resolve base
     # classes when walking the inheritance chain. Imperfect (name
     # collisions across modules go undisambiguated), but accurate
     # enough to dramatically reduce false-negative protocol-no-impl
-    # reports — without it we'd flag concrete classes that satisfy
+    # reports -- without it we'd flag concrete classes that satisfy
     # the contract via inherited methods rather than direct impls.
     by_name: Dict[str, List[PyClass]] = defaultdict(list)
     for c in all_classes:
@@ -463,7 +463,7 @@ def audit_shard_map(
                         "shard": shard_name,
                         "category": "stale-divergent",
                         "symbol": upstream_q,
-                        "detail": "marked divergent without a rationale — operator should add one or remove the divergence",
+                        "detail": "marked divergent without a rationale -- operator should add one or remove the divergence",
                     }
                 )
             continue
@@ -489,7 +489,7 @@ def audit_shard_map(
         if ds_class and ds_class.kind == "protocol":
             impls = find_concrete_impls_for_protocol(ds_class, all_classes)
             if not impls:
-                # Count only `ported` contract members — that's what
+                # Count only `ported` contract members -- that's what
                 # a concrete impl actually has to satisfy. Including
                 # `downstream-only` rows in the count would inflate
                 # the diagnostic (those are Python-side additions
@@ -508,7 +508,7 @@ def audit_shard_map(
                         "shard": shard_name,
                         "category": "protocol-no-impl",
                         "symbol": ds_class.qualified,
-                        "detail": f"Protocol declared with {method_count} method/property contract — no concrete class implements all of them",
+                        "detail": f"Protocol declared with {method_count} method/property contract -- no concrete class implements all of them",
                     }
                 )
 
@@ -543,7 +543,7 @@ def audit_undocumented(
     Walks every Python class in the package; if its qualified name
     doesn't appear as a downstream pointer in ANY map, flag it as
     symbol-undocumented. For mapped classes, check each public member
-    against the map's members[] list — flag method-undocumented for
+    against the map's members[] list -- flag method-undocumented for
     any public method/property not represented.
     """
     # Build set of mapped downstream classes + their mapped members.
@@ -562,7 +562,7 @@ def audit_undocumented(
                 # Only count `ported` and `downstream-only` rows as
                 # "documented." A `missing` row may carry a guessed
                 # downstream name, but the operator hasn't confirmed
-                # it — counting that name as documented would mask
+                # it -- counting that name as documented would mask
                 # genuinely undocumented Python methods that share
                 # the guessed name.
                 if m.get("relation") not in ("ported", "downstream-only"):
@@ -665,7 +665,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps({"drift": drift, "total": len(drift)}, indent=2))
     else:
         if not drift:
-            print("Audit clean — no drift detected.")
+            print("Audit clean -- no drift detected.")
         else:
             by_cat: Dict[str, List[dict]] = defaultdict(list)
             for d in drift:

@@ -341,6 +341,48 @@ This Python API mirrors the C# daqifi-core library:
 | `AnalogInputChannel` | `AnalogInputChannel` |
 | `DigitalIOChannel` | `DigitalIOChannel` |
 
+The C#-to-Python port itself is tracked under `.portomatic/` — see
+**[Port maintenance](#port-maintenance-portomatic)** below for the tooling
+that catalogs every C# symbol's Python counterpart and audits the port for
+drift.
+
+## Port maintenance (portomatic)
+
+The port from `daqifi-core` (C#) to this repo is catalogued at the
+**method level** in `.portomatic/map/<Shard>.yaml` and enforced with
+two scripts:
+
+```bash
+# Walk the upstream + downstream and refresh every shard map.
+# Idempotent — preserves manual notes / rationale / divergence
+# decisions across regenerations.
+python scripts/portomatic_generate_map.py --all
+
+# Cross-reference maps against the codebase. Reports drift in five
+# categories (protocol-no-impl, method-missing, method-undocumented,
+# symbol-undocumented, stale-divergent).
+python scripts/portomatic_audit.py
+
+# Strict mode for CI gates — exits 1 if any drift is reported.
+python scripts/portomatic_audit.py --strict
+
+# JSON output for tooling integration.
+python scripts/portomatic_audit.py --json
+```
+
+See **[`.portomatic/README.md`](./.portomatic/README.md)** for the
+full workflow including the categorical drift table, how to add a
+new shard, and when each script runs (post-upstream-sync vs.
+pre-merge gate).
+
+The portomatic tool itself lives at
+[cptkoolbeenz/portomatic](https://github.com/cptkoolbeenz/portomatic);
+these in-repo scripts are the pilot implementation that will fold
+into the upstream tool (tracked at
+[`portomatic#147`](https://github.com/cptkoolbeenz/portomatic/issues/147),
+[`#148`](https://github.com/cptkoolbeenz/portomatic/issues/148),
+[`#149-152`](https://github.com/cptkoolbeenz/portomatic/issues/149)).
+
 ## Known Issues
 
 ### Firmware Bug: Streaming Without Enabled Channels
