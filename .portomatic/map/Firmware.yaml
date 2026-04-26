@@ -1,0 +1,1323 @@
+schema_version: 2
+shard: Firmware
+upstream_root: src/Daqifi.Core/Firmware
+downstream_root: daqifi
+last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+files:
+  - upstream: src/Daqifi.Core/Firmware/Crc16.cs
+    downstream: daqifi/firmware/crc16.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/ExternalProcessRequest.cs
+    downstream: daqifi/firmware/external_process.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/ExternalProcessResult.cs
+    downstream: daqifi/firmware/external_process.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/FirmwareReleaseInfo.cs
+    downstream: daqifi/firmware/release_info.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateCheckResult.cs
+    downstream: daqifi/firmware/download_service.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateException.cs
+    downstream: daqifi/firmware/update_events.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateProgress.cs
+    downstream: daqifi/firmware/update_events.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateService.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateServiceOptions.cs
+    downstream: daqifi/firmware/update_options.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateState.cs
+    downstream: daqifi/enums.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateStateChangedEventArgs.cs
+    downstream: daqifi/firmware/update_events.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/FirmwareVersion.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/GitHubFirmwareDownloadService.cs
+    downstream: daqifi/firmware/github_download_service.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/HexFileRecord.cs
+    downstream: daqifi/firmware/intel_hex.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/IBootloaderProtocol.cs
+    downstream: daqifi/firmware/bootloader.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/IExternalProcessRunner.cs
+    downstream: daqifi/firmware/external_process.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/IFirmwareDownloadService.cs
+    downstream: daqifi/firmware/download_service.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/IFirmwareUpdateService.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/ILanChipInfoProvider.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/IntelHexParser.cs
+    downstream: daqifi/firmware/intel_hex.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/LanChipInfo.cs
+    downstream: daqifi/firmware/lan_chip_info.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/LanChipInfoParser.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/Pic32BootloaderMessageConsumer.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/Pic32BootloaderMessageProducer.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/Pic32BootloaderProtocol.cs
+    downstream: daqifi/firmware/bootloader.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Firmware/ProcessExternalProcessRunner.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+symbols:
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.Crc16
+      file: src/Daqifi.Core/Firmware/Crc16.cs
+    downstream:
+      kind: class
+      qualified: daqifi.firmware.crc16.Crc16
+      file: daqifi/firmware/crc16.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Crc
+        upstream_kind: property
+        downstream: crc
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: high
+        downstream_kind: property
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: low
+        downstream_kind: property
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.ExternalProcessRequest
+      file: src/Daqifi.Core/Firmware/ExternalProcessRequest.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.firmware.external_process.ExternalProcessRequest
+      file: daqifi/firmware/external_process.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: FileName
+        upstream_kind: property
+        downstream: file_name
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: Arguments
+        upstream_kind: property
+        downstream: arguments
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: WorkingDirectory
+        upstream_kind: property
+        downstream: working_directory
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: Timeout
+        upstream_kind: property
+        downstream: timeout
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: OnStandardOutputLine
+        upstream_kind: property
+        downstream: on_standard_output_line
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: OnStandardErrorLine
+        upstream_kind: property
+        downstream: on_standard_error_line
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: StandardInputResponseFactory
+        upstream_kind: property
+        downstream: standard_input_response_factory
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: timeout_seconds
+        downstream_kind: field
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.ExternalProcessResult
+      file: src/Daqifi.Core/Firmware/ExternalProcessResult.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.firmware.external_process.ExternalProcessResult
+      file: daqifi/firmware/external_process.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: ExitCode
+        upstream_kind: property
+        downstream: exit_code
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: TimedOut
+        upstream_kind: property
+        downstream: timed_out
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: Duration
+        upstream_kind: property
+        downstream: duration
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: StandardOutputLines
+        upstream_kind: property
+        downstream: standard_output_lines
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: StandardErrorLines
+        upstream_kind: property
+        downstream: standard_error_lines
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: duration_seconds
+        downstream_kind: field
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.FirmwareReleaseInfo
+      file: src/Daqifi.Core/Firmware/FirmwareReleaseInfo.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.firmware.release_info.FirmwareReleaseInfo
+      file: daqifi/firmware/release_info.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Version
+        upstream_kind: property
+        downstream: version
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: TagName
+        upstream_kind: property
+        downstream: tag_name
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: IsPreRelease
+        upstream_kind: property
+        downstream: is_pre_release
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: ReleaseNotes
+        upstream_kind: property
+        downstream: release_notes
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: DownloadUrl
+        upstream_kind: property
+        downstream: download_url
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: AssetFileName
+        upstream_kind: property
+        downstream: asset_file_name
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: AssetSize
+        upstream_kind: property
+        downstream: asset_size
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: PublishedAt
+        upstream_kind: property
+        downstream: published_at
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: ZipballUrl
+        upstream_kind: property
+        downstream: zipball_url
+        downstream_kind: field
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.FirmwareUpdateCheckResult
+      file: src/Daqifi.Core/Firmware/FirmwareUpdateCheckResult.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.firmware.download_service.FirmwareUpdateCheckResult
+      file: daqifi/firmware/download_service.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: UpdateAvailable
+        upstream_kind: property
+        downstream: update_available
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: DeviceVersion
+        upstream_kind: property
+        downstream: device_version
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: LatestRelease
+        upstream_kind: property
+        downstream: latest_release
+        downstream_kind: field
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.FirmwareUpdateException
+      file: src/Daqifi.Core/Firmware/FirmwareUpdateException.cs
+    downstream:
+      kind: class
+      qualified: daqifi.firmware.update_events.FirmwareUpdateException
+      file: daqifi/firmware/update_events.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: FailedState
+        upstream_kind: property
+        downstream: failed_state
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Operation
+        upstream_kind: property
+        downstream: operation
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: RecoveryGuidance
+        upstream_kind: property
+        downstream: recovery_guidance
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.FirmwareUpdateProgress
+      file: src/Daqifi.Core/Firmware/FirmwareUpdateProgress.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.firmware.update_events.FirmwareUpdateProgress
+      file: daqifi/firmware/update_events.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: State
+        upstream_kind: property
+        downstream: state
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: PercentComplete
+        upstream_kind: property
+        downstream: percent_complete
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: CurrentOperation
+        upstream_kind: property
+        downstream: current_operation
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: BytesWritten
+        upstream_kind: property
+        downstream: bytes_written
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: TotalBytes
+        upstream_kind: property
+        downstream: total_bytes
+        downstream_kind: field
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.FirmwareUpdateService
+      file: src/Daqifi.Core/Firmware/FirmwareUpdateService.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: FirmwareDownloadService
+        upstream_kind: property
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: CurrentState
+        upstream_kind: property
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: StateChanged
+        upstream_kind: event
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: UpdateFirmwareAsync
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: UpdateWifiModuleAsync
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Dispose
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.FirmwareUpdateServiceOptions
+      file: src/Daqifi.Core/Firmware/FirmwareUpdateServiceOptions.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.firmware.update_options.FirmwareUpdateServiceOptions
+      file: daqifi/firmware/update_options.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: BootloaderVendorId
+        upstream_kind: property
+        downstream: bootloader_vendor_id
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: BootloaderProductId
+        upstream_kind: property
+        downstream: bootloader_product_id
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: PollInterval
+        upstream_kind: property
+        downstream: poll_interval
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: PreparingDeviceTimeout
+        upstream_kind: property
+        downstream: preparing_device_timeout
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: WaitingForBootloaderTimeout
+        upstream_kind: property
+        downstream: waiting_for_bootloader_timeout
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: ConnectingTimeout
+        upstream_kind: property
+        downstream: connecting_timeout
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: ErasingFlashTimeout
+        upstream_kind: property
+        downstream: erasing_flash_timeout
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: ProgrammingTimeout
+        upstream_kind: property
+        downstream: programming_timeout
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: VerifyingTimeout
+        upstream_kind: property
+        downstream: verifying_timeout
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: JumpingToApplicationTimeout
+        upstream_kind: property
+        downstream: jumping_to_application_timeout
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: BootloaderResponseTimeout
+        upstream_kind: property
+        downstream: bootloader_response_timeout
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: PostForceBootDelay
+        upstream_kind: property
+        downstream: post_force_boot_delay
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: PostLanFirmwareModeDelay
+        upstream_kind: property
+        downstream: post_lan_firmware_mode_delay
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: PostWifiReconnectDelay
+        upstream_kind: property
+        downstream: post_wifi_reconnect_delay
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: HidConnectRetryCount
+        upstream_kind: property
+        downstream: hid_connect_retry_count
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: HidConnectRetryDelay
+        upstream_kind: property
+        downstream: hid_connect_retry_delay
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: FlashWriteRetryCount
+        upstream_kind: property
+        downstream: flash_write_retry_count
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: FlashWriteRetryDelay
+        upstream_kind: property
+        downstream: flash_write_retry_delay
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: WifiProcessTimeout
+        upstream_kind: property
+        downstream: wifi_process_timeout
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: WifiFlashToolFileName
+        upstream_kind: property
+        downstream: wifi_flash_tool_file_name
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: WifiFlashToolArgumentsTemplate
+        upstream_kind: property
+        downstream: wifi_flash_tool_arguments_template
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: WifiPortOverride
+        upstream_kind: property
+        downstream: wifi_port_override
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: GetStateTimeout
+        upstream_kind: method
+        downstream: get_state_timeout
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Validate
+        upstream_kind: method
+        downstream: validate
+        downstream_kind: method
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: enum
+      qualified: Daqifi.Core.Firmware.FirmwareUpdateState
+      file: src/Daqifi.Core/Firmware/FirmwareUpdateState.cs
+    downstream:
+      kind: enum
+      qualified: daqifi.enums.FirmwareUpdateState
+      file: daqifi/enums.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Idle
+        upstream_kind: value
+        downstream: IDLE
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: PreparingDevice
+        upstream_kind: value
+        downstream: PREPARING_DEVICE
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: WaitingForBootloader
+        upstream_kind: value
+        downstream: WAITING_FOR_BOOTLOADER
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: Connecting
+        upstream_kind: value
+        downstream: CONNECTING
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: ErasingFlash
+        upstream_kind: value
+        downstream: ERASING_FLASH
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: Programming
+        upstream_kind: value
+        downstream: PROGRAMMING
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: Verifying
+        upstream_kind: value
+        downstream: VERIFYING
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: JumpingToApp
+        upstream_kind: value
+        downstream: JUMPING_TO_APP
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: Complete
+        upstream_kind: value
+        downstream: COMPLETE
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: FAILED
+        downstream_kind: value
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.FirmwareUpdateStateChangedEventArgs
+      file: src/Daqifi.Core/Firmware/FirmwareUpdateStateChangedEventArgs.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.firmware.update_events.FirmwareUpdateStateChangedEventArgs
+      file: daqifi/firmware/update_events.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: PreviousState
+        upstream_kind: property
+        downstream: previous_state
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: CurrentState
+        upstream_kind: property
+        downstream: current_state
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: Operation
+        upstream_kind: property
+        downstream: operation
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: ChangedAtUtc
+        upstream_kind: property
+        downstream: changed_at_utc
+        downstream_kind: field
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.GitHubFirmwareDownloadService
+      file: src/Daqifi.Core/Firmware/GitHubFirmwareDownloadService.cs
+    downstream:
+      kind: class
+      qualified: daqifi.firmware.github_download_service.GitHubFirmwareDownloadService
+      file: daqifi/firmware/github_download_service.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: GetLatestReleaseAsync
+        upstream_kind: method
+        downstream: get_latest_release
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CheckForUpdateAsync
+        upstream_kind: method
+        downstream: check_for_update
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DownloadLatestFirmwareAsync
+        upstream_kind: method
+        downstream: download_latest_firmware
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DownloadFirmwareByTagAsync
+        upstream_kind: method
+        downstream: download_firmware_by_tag
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: GetLatestWifiReleaseAsync
+        upstream_kind: method
+        downstream: get_latest_wifi_release
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: InvalidateCache
+        upstream_kind: method
+        downstream: invalidate_cache
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: download_wifi_firmware
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.HexFileRecord
+      file: src/Daqifi.Core/Firmware/HexFileRecord.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.firmware.intel_hex.HexFileRecord
+      file: daqifi/firmware/intel_hex.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Address
+        upstream_kind: property
+        downstream: address
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: Data
+        upstream_kind: property
+        downstream: data
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: RecordType
+        upstream_kind: property
+        downstream: record_type
+        downstream_kind: field
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Firmware.IBootloaderProtocol
+      file: src/Daqifi.Core/Firmware/IBootloaderProtocol.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi.firmware.bootloader.BootloaderProtocol
+      file: daqifi/firmware/bootloader.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: CreateRequestVersionMessage
+        upstream_kind: method
+        downstream: create_request_version_message
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CreateEraseFlashMessage
+        upstream_kind: method
+        downstream: create_erase_flash_message
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CreateProgramFlashMessage
+        upstream_kind: method
+        downstream: create_program_flash_message
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CreateJumpToApplicationMessage
+        upstream_kind: method
+        downstream: create_jump_to_application_message
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DecodeVersionResponse
+        upstream_kind: method
+        downstream: decode_version_response
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DecodeProgramFlashResponse
+        upstream_kind: method
+        downstream: decode_program_flash_response
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DecodeEraseFlashResponse
+        upstream_kind: method
+        downstream: decode_erase_flash_response
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ParseHexFile
+        upstream_kind: method
+        downstream: parse_hex_file
+        downstream_kind: method
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Firmware.IExternalProcessRunner
+      file: src/Daqifi.Core/Firmware/IExternalProcessRunner.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi.firmware.external_process.ExternalProcessRunner
+      file: daqifi/firmware/external_process.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: RunAsync
+        upstream_kind: method
+        downstream: run
+        downstream_kind: method
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Firmware.IFirmwareDownloadService
+      file: src/Daqifi.Core/Firmware/IFirmwareDownloadService.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi.firmware.download_service.FirmwareDownloadService
+      file: daqifi/firmware/download_service.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: GetLatestReleaseAsync
+        upstream_kind: method
+        downstream: get_latest_release
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CheckForUpdateAsync
+        upstream_kind: method
+        downstream: check_for_update
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DownloadLatestFirmwareAsync
+        upstream_kind: method
+        downstream: download_latest_firmware
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DownloadFirmwareByTagAsync
+        upstream_kind: method
+        downstream: download_firmware_by_tag
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: GetLatestWifiReleaseAsync
+        upstream_kind: method
+        downstream: get_latest_wifi_release
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: InvalidateCache
+        upstream_kind: method
+        downstream: invalidate_cache
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: download_wifi_firmware
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Firmware.IFirmwareUpdateService
+      file: src/Daqifi.Core/Firmware/IFirmwareUpdateService.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: CurrentState
+        upstream_kind: property
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: StateChanged
+        upstream_kind: event
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: UpdateFirmwareAsync
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: UpdateWifiModuleAsync
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Firmware.ILanChipInfoProvider
+      file: src/Daqifi.Core/Firmware/ILanChipInfoProvider.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: GetLanChipInfoAsync
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.IntelHexParser
+      file: src/Daqifi.Core/Firmware/IntelHexParser.cs
+    downstream:
+      kind: class
+      qualified: daqifi.firmware.intel_hex.IntelHexParser
+      file: daqifi/firmware/intel_hex.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: ParseHexRecords
+        upstream_kind: method
+        downstream: parse_hex_records
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ParseRecords
+        upstream_kind: method
+        downstream: parse_records
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: DEFAULT_BEGIN_PROTECTED_ADDRESS
+        downstream_kind: field
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: DEFAULT_END_PROTECTED_ADDRESS
+        downstream_kind: field
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: record
+      qualified: Daqifi.Core.Firmware.LanChipInfo
+      file: src/Daqifi.Core/Firmware/LanChipInfo.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.firmware.lan_chip_info.LanChipInfo
+      file: daqifi/firmware/lan_chip_info.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: ChipId
+        upstream_kind: property
+        downstream: chip_id
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: FwVersion
+        upstream_kind: property
+        downstream: fw_version
+        downstream_kind: field
+        relation: ported
+        rationale: null
+      - upstream: BuildDate
+        upstream_kind: property
+        downstream: build_date
+        downstream_kind: field
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.LanChipInfoParser
+      file: src/Daqifi.Core/Firmware/LanChipInfoParser.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: TryParse
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: TryParseLines
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.Pic32BootloaderMessageConsumer
+      file: src/Daqifi.Core/Firmware/Pic32BootloaderMessageConsumer.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: DecodeVersionResponse
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: DecodeProgramFlashResponse
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: DecodeEraseFlashResponse
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.Pic32BootloaderMessageProducer
+      file: src/Daqifi.Core/Firmware/Pic32BootloaderMessageProducer.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: CreateRequestVersionMessage
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: CreateEraseFlashMessage
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: CreateProgramFlashMessage
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: CreateJumpToApplicationMessage
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.Pic32BootloaderProtocol
+      file: src/Daqifi.Core/Firmware/Pic32BootloaderProtocol.cs
+    downstream:
+      kind: class
+      qualified: daqifi.firmware.bootloader.Pic32BootloaderProtocol
+      file: daqifi/firmware/bootloader.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: CreateRequestVersionMessage
+        upstream_kind: method
+        downstream: create_request_version_message
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CreateEraseFlashMessage
+        upstream_kind: method
+        downstream: create_erase_flash_message
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CreateProgramFlashMessage
+        upstream_kind: method
+        downstream: create_program_flash_message
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CreateJumpToApplicationMessage
+        upstream_kind: method
+        downstream: create_jump_to_application_message
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DecodeVersionResponse
+        upstream_kind: method
+        downstream: decode_version_response
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DecodeProgramFlashResponse
+        upstream_kind: method
+        downstream: decode_program_flash_response
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DecodeEraseFlashResponse
+        upstream_kind: method
+        downstream: decode_erase_flash_response
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ParseHexFile
+        upstream_kind: method
+        downstream: parse_hex_file
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Firmware.ProcessExternalProcessRunner
+      file: src/Daqifi.Core/Firmware/ProcessExternalProcessRunner.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: RunAsync
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: "2026-04-26T08:44:22.634611+00:00"

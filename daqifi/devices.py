@@ -36,6 +36,8 @@ from .communication import (
     ProtobufMessageParser,
     StreamMessageConsumer,
 )
+from .enums import WifiMode, WifiSecurityType
+from .network import NetworkConfiguration
 from .protocol import ProtobufProtocolHandler
 from .transport import (
     HidLibraryTransport,
@@ -869,6 +871,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._is_logging_to_sd = False
         self._streaming_frequency = 100
         self._sd_card_files: List[str] = []
+        # Tracks the most recently APPLIED network configuration so
+        # ``network_configuration`` reads the live state without
+        # round-tripping the device. Updated at the end of
+        # ``update_network_configuration``. Defaults to the upstream
+        # parameterless-constructor shape.
+        self._network_configuration = NetworkConfiguration()
 
     # ---- streaming API (IStreamingDevice) ---------------------------------
 
@@ -938,7 +946,154 @@ class DaqifiStreamingDevice(DaqifiDevice):
     def format_sd_card(self) -> None:
         self.send(scpi_commands.format_sd_card())
 
-    # ---- Network facade (INetworkConfigurable) ----------------------------
+    # ---- Network facade (NetworkConfigurable Protocol impl) ---------------
+
+    @property
+    def network_configuration(self) -> NetworkConfiguration:
+        """Most recently applied network configuration **as tracked by
+        this Python object**.
+
+        This is a process-local snapshot, not a live query of the
+        device. It's updated at the end of every successful
+        :meth:`update_network_configuration` call, mirroring the C#
+        ``DaqifiStreamingDevice._networkConfiguration`` field which
+        is similarly process-local.
+
+        ``DaqifiStreamingDevice`` cannot currently surface text-shaped
+        SCPI query replies (the streaming-device's protobuf consumer
+        eats them — see daqifi-python-core#16), so we cannot
+        round-trip ``SYST:COMM:LAN:SSID? / NETTYPE? / SECURITY?`` to
+        rebuild the configuration from the live device state. Once
+        #16 is resolved, this property should be reworked to query
+        and reconcile.
+
+        Caveats — the snapshot can drift from the device's actual
+        config if:
+
+        * The device is reconfigured out-of-band (another process,
+          firmware reset, factory reset).
+        * The Python object is freshly constructed against an already-
+          provisioned device — the snapshot defaults to the upstream
+          parameterless-constructor shape rather than the device's
+          stored config.
+
+        Returns a defensive copy so callers can mutate without
+        affecting the live snapshot.
+        """
+        return self._network_configuration.clone()
+
+    def update_network_configuration(
+        self, configuration: NetworkConfiguration
+    ) -> None:
+        """Apply ``configuration`` to the device end-to-end.
+
+        Mirrors the canonical C# ``UpdateNetworkConfigurationAsync``
+        sequence (``Daqifi.Core/Device/DaqifiStreamingDevice.cs``):
+
+        1. Stop streaming if active (avoids racing the WiFi module restart)
+        2. Set WiFi mode (SCPI ``...:NETType``)
+        3. Set SSID
+        4. Set security type + password (security FIRST so the
+           password write has a security context)
+        5. Apply (firmware schedules the WiFi module restart)
+        6. Wait ``_WIFI_MODULE_RESTART_DELAY_S`` for the module to come back
+        7. ``prepare_lan_interface`` — DisableStorageSd + EnableNetworkLan.
+           SD card and LAN module SHARE THE SPI BUS on Nyquist hardware;
+           this hands the bus to LAN so the WiFi chip can scan + associate.
+           Without this step, the WiFi module reports ``Disconnected``
+           with ``SignalStrength=0`` even when the config is correct
+           (verified on COM7 fw 3.4.6b1, 2026-04-26).
+        8. Save (persist across reboots)
+        9. Update the locally-tracked ``_network_configuration`` snapshot.
+
+        Raises:
+            TypeError: if ``configuration`` is None.
+            ValueError: if ``configuration.mode`` or
+                ``configuration.security_type`` is unsupported.
+            RuntimeError: if the device is not connected.
+        """
+        if configuration is None:
+            raise TypeError("configuration must not be None.")
+        if not self.is_connected:
+            raise RuntimeError("Device is not connected.")
+        if not configuration.ssid:
+            raise ValueError("WiFi SSID must be a non-empty string.")
+        if (
+            configuration.security_type == WifiSecurityType.WPA_PSK_PHRASE
+            and not configuration.password
+        ):
+            raise ValueError("WPA security requires a non-empty password.")
+
+        if self._is_streaming:
+            self.stop_streaming()
+
+        if configuration.mode == WifiMode.EXISTING_NETWORK:
+            self.send(scpi_commands.set_network_wifi_mode_existing())
+        elif configuration.mode == WifiMode.SELF_HOSTED:
+            self.send(scpi_commands.set_network_wifi_mode_self_hosted())
+        else:
+            raise ValueError(f"Unsupported WiFi mode: {configuration.mode!r}")
+
+        self.send(scpi_commands.set_network_wifi_ssid(configuration.ssid))
+
+        if configuration.security_type == WifiSecurityType.NONE:
+            self.send(scpi_commands.set_network_wifi_security_open())
+        elif configuration.security_type == WifiSecurityType.WPA_PSK_PHRASE:
+            self.send(scpi_commands.set_network_wifi_security_wpa())
+            self.send(
+                scpi_commands.set_network_wifi_password(configuration.password)
+            )
+        else:
+            raise ValueError(
+                f"Unsupported WiFi security type: {configuration.security_type!r}"
+            )
+
+        self.send(scpi_commands.apply_network_lan())
+        time.sleep(self._WIFI_MODULE_RESTART_DELAY_S)
+
+        self.prepare_lan_interface()
+
+        self.send(scpi_commands.save_network_lan())
+
+        self._network_configuration = configuration.clone()
+
+    def prepare_lan_interface(self) -> None:
+        """Hand the shared SPI bus to the LAN module.
+
+        SD card and LAN share the same SPI bus on Nyquist hardware
+        and can't both drive it simultaneously. Call this before any
+        network operation that requires the WiFi module to be active
+        (scan, associate, transmit). ``update_network_configuration``
+        calls it automatically after ``APPLY``.
+
+        Side effect — the SD card SCPI module is disabled, which also
+        stops any active SD logging on the device. We update
+        ``_is_logging_to_sd`` to keep ``is_logging_to_sd_card`` in
+        sync with the firmware's actual state.
+        """
+        self.send(scpi_commands.disable_storage_sd())
+        self.send(scpi_commands.enable_network_lan())
+        self._is_logging_to_sd = False
+
+    def prepare_sd_interface(self) -> None:
+        """Hand the shared SPI bus to the SD card.
+
+        Inverse of :meth:`prepare_lan_interface`. Call before any SD
+        card operation. Note: while the SD card has the bus, WiFi will
+        report ``Disconnected`` until ``prepare_lan_interface`` is
+        called again.
+
+        Side effect — re-enables the SD card SCPI module. This does
+        NOT automatically resume an SD logging session; callers must
+        explicitly call :meth:`enable_sd_card_logging` to begin
+        logging again. The ``_is_logging_to_sd`` flag is updated on
+        that call, not here, since enabling the SD interface alone
+        doesn't restart logging on the firmware side.
+        """
+        self.send(scpi_commands.disable_network_lan())
+        self.send(scpi_commands.enable_storage_sd())
+
+    # ---- Lower-level WiFi setters (escape hatch for fine-grained control) -
 
     def set_wifi_ssid(self, ssid: str) -> None:
         self.send(scpi_commands.set_network_wifi_ssid(ssid))
@@ -953,7 +1108,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.set_network_wifi_mode_existing())
 
     def apply_network_configuration(self) -> None:
-        """Apply pending LAN config; firmware then restarts the WiFi module."""
+        """Apply pending LAN config; firmware then restarts the WiFi module.
+
+        Lower-level than :meth:`update_network_configuration` — does not
+        send the SET commands or call :meth:`prepare_lan_interface`.
+        Use :meth:`update_network_configuration` for the full canonical
+        sequence."""
         self.send(scpi_commands.apply_network_lan())
         time.sleep(self._WIFI_MODULE_RESTART_DELAY_S)
 
