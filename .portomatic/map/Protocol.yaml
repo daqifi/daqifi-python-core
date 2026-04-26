@@ -1,0 +1,137 @@
+schema_version: 2
+shard: Protocol
+upstream_root: src/Daqifi.Core/Device/Protocol
+downstream_root: daqifi
+last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+files:
+  - upstream: src/Daqifi.Core/Device/Protocol/IProtocolHandler.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/Protocol/ProtobufMessageType.cs
+    downstream: daqifi/enums.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/Protocol/ProtobufProtocolHandler.cs
+    downstream: daqifi/protocol.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+symbols:
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Device.Protocol.IProtocolHandler
+      file: src/Daqifi.Core/Device/Protocol/IProtocolHandler.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: CanHandle
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: HandleAsync
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: enum
+      qualified: Daqifi.Core.Device.Protocol.ProtobufMessageType
+      file: src/Daqifi.Core/Device/Protocol/ProtobufMessageType.cs
+    downstream:
+      kind: enum
+      qualified: daqifi.enums.ProtobufMessageType
+      file: daqifi/enums.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Unknown
+        upstream_kind: value
+        downstream: UNKNOWN
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: Status
+        upstream_kind: value
+        downstream: STATUS
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: Stream
+        upstream_kind: value
+        downstream: STREAM
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: SdCard
+        upstream_kind: value
+        downstream: SD_CARD
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: ERROR
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.Protocol.ProtobufProtocolHandler
+      file: src/Daqifi.Core/Device/Protocol/ProtobufProtocolHandler.cs
+    downstream:
+      kind: class
+      qualified: daqifi.protocol.ProtobufProtocolHandler
+      file: daqifi/protocol.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: CanHandle
+        upstream_kind: method
+        downstream: can_handle
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: HandleAsync
+        upstream_kind: method
+        downstream: handle
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DetectMessageType
+        upstream_kind: method
+        downstream: detect_message_type
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: handle_async
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: "2026-04-26T07:26:46.363212+00:00"

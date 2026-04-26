@@ -1,0 +1,245 @@
+schema_version: 2
+shard: Communication.Producers
+upstream_root: src/Daqifi.Core/Communication/Producers
+downstream_root: daqifi
+last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+files:
+  - upstream: src/Daqifi.Core/Communication/Producers/IMessageProducer.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Producers/MessageProducer.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+symbols:
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Communication.Producers.IMessageProducer
+      file: src/Daqifi.Core/Communication/Producers/IMessageProducer.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.MessageProducer
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: QueuedMessageCount
+        upstream_kind: property
+        downstream: queued_message_count
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: IsRunning
+        upstream_kind: property
+        downstream: is_running
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Start
+        upstream_kind: method
+        downstream: start
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Stop
+        upstream_kind: method
+        downstream: stop
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: StopSafely
+        upstream_kind: method
+        downstream: stop_safely
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Send
+        upstream_kind: method
+        downstream: send
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Producers.MessageProducer
+      file: src/Daqifi.Core/Communication/Producers/MessageProducer.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.MessageProducer
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Start
+        upstream_kind: method
+        downstream: start
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Stop
+        upstream_kind: method
+        downstream: stop
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: StopSafely
+        upstream_kind: method
+        downstream: stop_safely
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Send
+        upstream_kind: method
+        downstream: send
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Dispose
+        upstream_kind: method
+        downstream: dispose
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: is_running
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: queued_message_count
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Producers.ScpiMessageProducer
+      file: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: GetSdFile
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: SetSdLoggingFileName
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: DeleteSdFile
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: SetSdMaxFileSize
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: RunSdBenchmark
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: SetStreamInterface
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: StartStreaming
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: EnableAdcChannels
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: SetDioPortDirection
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: SetDioPortState
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: EnableDioPorts
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: DisableDioPorts
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: SetNetworkWifiSsid
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: SetNetworkWifiPassword
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: SetUsbTransparencyMode
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: "2026-04-26T07:26:46.112722+00:00"

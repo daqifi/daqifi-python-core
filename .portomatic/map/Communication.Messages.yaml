@@ -1,0 +1,173 @@
+schema_version: 2
+shard: Communication.Messages
+upstream_root: src/Daqifi.Core/Communication/Messages
+downstream_root: daqifi
+last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+files:
+  - upstream: src/Daqifi.Core/Communication/Messages/DaqifiOutMessage.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Messages/GenericInboundMessage.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Messages/IInboundMessage.cs
+    downstream: daqifi/communication.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Messages/IOutboundMessage.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Messages/ProtobufMessage.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Messages/ScpiMessage.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Messages/TestMessage.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+symbols:
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Messages.GenericInboundMessage
+      file: src/Daqifi.Core/Communication/Messages/GenericInboundMessage.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.GenericInboundMessage
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Data
+        upstream_kind: property
+        downstream: data
+        downstream_kind: property
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Communication.Messages.IInboundMessage
+      file: src/Daqifi.Core/Communication/Messages/IInboundMessage.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.communication.InboundMessage
+      file: daqifi/communication.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Data
+        upstream_kind: property
+        downstream: data
+        downstream_kind: property
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Communication.Messages.IOutboundMessage
+      file: src/Daqifi.Core/Communication/Messages/IOutboundMessage.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.OutboundMessage
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Data
+        upstream_kind: property
+        downstream: data
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: GetBytes
+        upstream_kind: method
+        downstream: get_bytes
+        downstream_kind: method
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Messages.ProtobufMessage
+      file: src/Daqifi.Core/Communication/Messages/ProtobufMessage.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Data
+        upstream_kind: property
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Messages.ScpiMessage
+      file: src/Daqifi.Core/Communication/Messages/ScpiMessage.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.ScpiMessage
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Data
+        upstream_kind: property
+        downstream: data
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: GetBytes
+        upstream_kind: method
+        downstream: get_bytes
+        downstream_kind: method
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Messages.TextMessage
+      file: src/Daqifi.Core/Communication/Messages/TestMessage.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Data
+        upstream_kind: property
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: "2026-04-26T07:26:46.077305+00:00"

@@ -1,0 +1,459 @@
+schema_version: 2
+shard: Communication.Consumers
+upstream_root: src/Daqifi.Core/Communication/Consumers
+downstream_root: daqifi
+last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+files:
+  - upstream: src/Daqifi.Core/Communication/Consumers/CompositeMessageParser.cs
+    downstream: daqifi/communication.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Consumers/IMessageConsumer.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Consumers/IMessageParser.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Consumers/LineBasedMessageParser.cs
+    downstream: daqifi/communication.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Consumers/MessageConsumerErrorEventArgs.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Consumers/MessageReceivedEventArgs.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Consumers/ProtobufMessageParser.cs
+    downstream: daqifi/communication.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Consumers/StreamMessageConsumer.cs
+    downstream: daqifi/communication.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+symbols:
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Consumers.CompositeMessageParser
+      file: src/Daqifi.Core/Communication/Consumers/CompositeMessageParser.cs
+    downstream:
+      kind: class
+      qualified: daqifi.communication.CompositeMessageParser
+      file: daqifi/communication.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: ParseMessages
+        upstream_kind: method
+        downstream: parse_messages
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Consumers.ObjectInboundMessage
+      file: src/Daqifi.Core/Communication/Consumers/CompositeMessageParser.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.communication.ObjectInboundMessage
+      file: daqifi/communication.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Data
+        upstream_kind: property
+        downstream: data
+        downstream_kind: property
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Communication.Consumers.IMessageConsumer
+      file: src/Daqifi.Core/Communication/Consumers/IMessageConsumer.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.MessageConsumer
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: IsRunning
+        upstream_kind: property
+        downstream: is_running
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: QueuedMessageCount
+        upstream_kind: property
+        downstream: queued_message_count
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: MessageReceived
+        upstream_kind: event
+        downstream: message_received
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: ErrorOccurred
+        upstream_kind: event
+        downstream: error_occurred
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Start
+        upstream_kind: method
+        downstream: start
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Stop
+        upstream_kind: method
+        downstream: stop
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: StopSafely
+        upstream_kind: method
+        downstream: stop_safely
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ClearBuffer
+        upstream_kind: method
+        downstream: clear_buffer
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_error_occurred
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_message_received
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_error_occurred
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_message_received
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Communication.Consumers.IMessageParser
+      file: src/Daqifi.Core/Communication/Consumers/IMessageParser.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.MessageParser
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: ParseMessages
+        upstream_kind: method
+        downstream: parse_messages
+        downstream_kind: method
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Consumers.LineBasedMessageParser
+      file: src/Daqifi.Core/Communication/Consumers/LineBasedMessageParser.cs
+    downstream:
+      kind: class
+      qualified: daqifi.communication.LineBasedMessageParser
+      file: daqifi/communication.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: ParseMessages
+        upstream_kind: method
+        downstream: parse_messages
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Consumers.TextInboundMessage
+      file: src/Daqifi.Core/Communication/Consumers/LineBasedMessageParser.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.TextInboundMessage
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Data
+        upstream_kind: property
+        downstream: data
+        downstream_kind: property
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Consumers.MessageConsumerErrorEventArgs
+      file: src/Daqifi.Core/Communication/Consumers/MessageConsumerErrorEventArgs.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.MessageConsumerErrorEventArgs
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Error
+        upstream_kind: property
+        downstream: error
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: RawData
+        upstream_kind: property
+        downstream: raw_data
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Timestamp
+        upstream_kind: property
+        downstream: timestamp
+        downstream_kind: property
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Consumers.MessageReceivedEventArgs
+      file: src/Daqifi.Core/Communication/Consumers/MessageReceivedEventArgs.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.MessageReceivedEventArgs
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Message
+        upstream_kind: property
+        downstream: message
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: RawData
+        upstream_kind: property
+        downstream: raw_data
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Timestamp
+        upstream_kind: property
+        downstream: timestamp
+        downstream_kind: property
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Consumers.ProtobufMessageParser
+      file: src/Daqifi.Core/Communication/Consumers/ProtobufMessageParser.cs
+    downstream:
+      kind: class
+      qualified: daqifi.communication.ProtobufMessageParser
+      file: daqifi/communication.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: ParseMessages
+        upstream_kind: method
+        downstream: parse_messages
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Consumers.StreamMessageConsumer
+      file: src/Daqifi.Core/Communication/Consumers/StreamMessageConsumer.cs
+    downstream:
+      kind: class
+      qualified: daqifi.communication.StreamMessageConsumer
+      file: daqifi/communication.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: IsWifiDevice
+        upstream_kind: property
+        downstream: is_wifi_device
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: MessageReceived
+        upstream_kind: event
+        downstream: message_received
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: ErrorOccurred
+        upstream_kind: event
+        downstream: error_occurred
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Start
+        upstream_kind: method
+        downstream: start
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Stop
+        upstream_kind: method
+        downstream: stop
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: StopSafely
+        upstream_kind: method
+        downstream: stop_safely
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ClearBuffer
+        upstream_kind: method
+        downstream: clear_buffer
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Dispose
+        upstream_kind: method
+        downstream: dispose
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: DEFAULT_BUFFER_SIZE
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_error_occurred
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_message_received
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: is_running
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: queued_message_count
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_error_occurred
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_message_received
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: "2026-04-26T07:26:46.029684+00:00"

@@ -1,0 +1,1334 @@
+schema_version: 2
+shard: Device
+upstream_root: src/Daqifi.Core/Device
+downstream_root: daqifi
+last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+files:
+  - upstream: src/Daqifi.Core/Device/ChannelsPopulatedEventArgs.cs
+    downstream: daqifi/channels.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/ConnectionStatus.cs
+    downstream: daqifi/_internal/scpi.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DaqifiDevice.cs
+    downstream: daqifi/devices.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DaqifiDeviceFactory.cs
+    downstream: daqifi/devices.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DaqifiStreamingDevice.cs
+    downstream: daqifi/devices.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DeviceCapabilities.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DeviceConnectionOptions.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DeviceMetadata.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DeviceState.cs
+    downstream: daqifi/_internal/scpi.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DeviceStatusEventArgs.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DeviceType.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/DeviceTypeDetector.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/IDevice.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/IStreamingDevice.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/ITimestampProcessor.cs
+    downstream: daqifi/timestamp.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/MessageReceivedEventArgs.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/TimestampProcessor.cs
+    downstream: daqifi/timestamp.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Device/TimestampResult.cs
+    downstream: daqifi/timestamp.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+symbols:
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.ChannelsPopulatedEventArgs
+      file: src/Daqifi.Core/Device/ChannelsPopulatedEventArgs.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.channels.ChannelsPopulatedEventArgs
+      file: daqifi/channels.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Channels
+        upstream_kind: property
+        downstream: channels
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: AnalogChannelCount
+        upstream_kind: property
+        downstream: analog_channel_count
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: DigitalChannelCount
+        upstream_kind: property
+        downstream: digital_channel_count
+        downstream_kind: property
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: enum
+      qualified: Daqifi.Core.Device.ConnectionStatus
+      file: src/Daqifi.Core/Device/ConnectionStatus.cs
+    downstream:
+      kind: enum
+      qualified: daqifi._internal.scpi.ConnectionStatus
+      file: daqifi/_internal/scpi.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Disconnected
+        upstream_kind: value
+        downstream: DISCONNECTED
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Connecting
+        upstream_kind: value
+        downstream: CONNECTING
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Connected
+        upstream_kind: value
+        downstream: CONNECTED
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Lost
+        upstream_kind: value
+        downstream: LOST
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Retrying
+        upstream_kind: value
+        downstream: RETRYING
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Connected
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Connecting
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Disconnected
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Failed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Lost
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Retrying
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.DaqifiDevice
+      file: src/Daqifi.Core/Device/DaqifiDevice.cs
+    downstream:
+      kind: class
+      qualified: daqifi.devices.DaqifiDevice
+      file: daqifi/devices.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Name
+        upstream_kind: property
+        downstream: name
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: IpAddress
+        upstream_kind: property
+        downstream: ip_address
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Metadata
+        upstream_kind: property
+        downstream: metadata
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: TimestampFrequency
+        upstream_kind: property
+        downstream: timestamp_frequency
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: State
+        upstream_kind: property
+        downstream: state
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Status
+        upstream_kind: property
+        downstream: status
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: StatusChanged
+        upstream_kind: event
+        downstream: status_changed
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: MessageReceived
+        upstream_kind: event
+        downstream: message_received
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: ChannelsPopulated
+        upstream_kind: event
+        downstream: channels_populated
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Connect
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Disconnect
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Dispose
+        upstream_kind: method
+        downstream: dispose
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: InitializeAsync
+        upstream_kind: method
+        downstream: initialize
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: PopulateChannelsFromStatus
+        upstream_kind: method
+        downstream: populate_channels_from_status
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_channels_populated
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_message_received
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: channels
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: is_connected
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_channels_populated
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_message_received
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: send
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: transport
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.DaqifiDeviceFactory
+      file: src/Daqifi.Core/Device/DaqifiDeviceFactory.cs
+    downstream:
+      kind: class
+      qualified: daqifi.devices.DaqifiDeviceFactory
+      file: daqifi/devices.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: ConnectTcpAsync
+        upstream_kind: method
+        downstream: connect_tcp
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ConnectTcp
+        upstream_kind: method
+        downstream: connect_tcp
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ConnectSerialAsync
+        upstream_kind: method
+        downstream: connect_serial
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ConnectSerial
+        upstream_kind: method
+        downstream: connect_serial
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ConnectFromDeviceInfoAsync
+        upstream_kind: method
+        downstream: connect_from_device_info
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: ConnectFromDeviceInfo
+        upstream_kind: method
+        downstream: connect_from_device_info
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.DaqifiStreamingDevice
+      file: src/Daqifi.Core/Device/DaqifiStreamingDevice.cs
+    downstream:
+      kind: class
+      qualified: daqifi.devices.DaqifiStreamingDevice
+      file: daqifi/devices.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: IsStreaming
+        upstream_kind: property
+        downstream: is_streaming
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: StreamingFrequency
+        upstream_kind: property
+        downstream: streaming_frequency
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: InitializeAsync
+        upstream_kind: method
+        downstream: initialize
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: StartStreaming
+        upstream_kind: method
+        downstream: start_streaming
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: StopStreaming
+        upstream_kind: method
+        downstream: stop_streaming
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: UpdateNetworkConfigurationAsync
+        upstream_kind: method
+        downstream: update_network_configuration
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: PrepareSdInterface
+        upstream_kind: method
+        downstream: prepare_sd_interface
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: PrepareLanInterface
+        upstream_kind: method
+        downstream: prepare_lan_interface
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: GetSdCardFilesAsync
+        upstream_kind: method
+        downstream: get_sd_card_files
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: StartSdCardLoggingAsync
+        upstream_kind: method
+        downstream: start_sd_card_logging
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: StopSdCardLoggingAsync
+        upstream_kind: method
+        downstream: stop_sd_card_logging
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: DeleteSdCardFileAsync
+        upstream_kind: method
+        downstream: delete_sd_card_file
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: FormatSdCardAsync
+        upstream_kind: method
+        downstream: format_sd_card
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DownloadSdCardFileAsync
+        upstream_kind: method
+        downstream: download_sd_card_file
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: apply_network_configuration
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: delete_sd_file
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: disable_sd_card_logging
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: enable_sd_card_logging
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: is_logging_to_sd_card
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: is_usb_connection
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: request_lan_chip_info
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: request_sd_card_file_list
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: save_network_configuration
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: sd_card_files
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: set_sd_logging_file_name
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: set_wifi_mode_existing
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: set_wifi_mode_self_hosted
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: set_wifi_password
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: set_wifi_ssid
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.DeviceCapabilities
+      file: src/Daqifi.Core/Device/DeviceCapabilities.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.DeviceCapabilities
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: SupportsStreaming
+        upstream_kind: property
+        downstream: supports_streaming
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: HasSdCard
+        upstream_kind: property
+        downstream: has_sd_card
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: HasWiFi
+        upstream_kind: property
+        downstream: has_wi_fi
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: HasUsb
+        upstream_kind: property
+        downstream: has_usb
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: AnalogInputChannels
+        upstream_kind: property
+        downstream: analog_input_channels
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: AnalogOutputChannels
+        upstream_kind: property
+        downstream: analog_output_channels
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: DigitalChannels
+        upstream_kind: property
+        downstream: digital_channels
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: MaxSamplingRate
+        upstream_kind: property
+        downstream: max_sampling_rate
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: FromDeviceType
+        upstream_kind: method
+        downstream: from_device_type
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: has_wifi
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.DeviceConnectionOptions
+      file: src/Daqifi.Core/Device/DeviceConnectionOptions.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.DeviceConnectionOptions
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: DeviceName
+        upstream_kind: property
+        downstream: device_name
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ConnectionRetry
+        upstream_kind: property
+        downstream: connection_retry
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: InitializeDevice
+        upstream_kind: property
+        downstream: initialize_device
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: default
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: fast
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: resilient
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.DeviceMetadata
+      file: src/Daqifi.Core/Device/DeviceMetadata.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.DeviceMetadata
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: PartNumber
+        upstream_kind: property
+        downstream: part_number
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: SerialNumber
+        upstream_kind: property
+        downstream: serial_number
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: FirmwareVersion
+        upstream_kind: property
+        downstream: firmware_version
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: HardwareRevision
+        upstream_kind: property
+        downstream: hardware_revision
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: DeviceType
+        upstream_kind: property
+        downstream: device_type
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Capabilities
+        upstream_kind: property
+        downstream: capabilities
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: IpAddress
+        upstream_kind: property
+        downstream: ip_address
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: MacAddress
+        upstream_kind: property
+        downstream: mac_address
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Ssid
+        upstream_kind: property
+        downstream: ssid
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: HostName
+        upstream_kind: property
+        downstream: host_name
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: DevicePort
+        upstream_kind: property
+        downstream: device_port
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: WifiSecurityMode
+        upstream_kind: property
+        downstream: wifi_security_mode
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: WifiInfrastructureMode
+        upstream_kind: property
+        downstream: wifi_infrastructure_mode
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: UpdateFromProtobuf
+        upstream_kind: method
+        downstream: update_from_protobuf
+        downstream_kind: method
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: enum
+      qualified: Daqifi.Core.Device.DeviceState
+      file: src/Daqifi.Core/Device/DeviceState.cs
+    downstream:
+      kind: enum
+      qualified: daqifi._internal.scpi.DeviceState
+      file: daqifi/_internal/scpi.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Disconnected
+        upstream_kind: value
+        downstream: DISCONNECTED
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Connecting
+        upstream_kind: value
+        downstream: CONNECTING
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Connected
+        upstream_kind: value
+        downstream: CONNECTED
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Initializing
+        upstream_kind: value
+        downstream: INITIALIZING
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Ready
+        upstream_kind: value
+        downstream: READY
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Streaming
+        upstream_kind: value
+        downstream: STREAMING
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Connected
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Connecting
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Disconnected
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Error
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Initializing
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Ready
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: Streaming
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.DeviceStatusEventArgs
+      file: src/Daqifi.Core/Device/DeviceStatusEventArgs.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.DeviceStatusEventArgs
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Status
+        upstream_kind: property
+        downstream: status
+        downstream_kind: property
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: enum
+      qualified: Daqifi.Core.Device.DeviceType
+      file: src/Daqifi.Core/Device/DeviceType.cs
+    downstream:
+      kind: enum
+      qualified: daqifi._internal.comm.DeviceType
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Unknown
+        upstream_kind: value
+        downstream: UNKNOWN
+        downstream_kind: value
+        relation: ported
+        rationale: null
+      - upstream: Nyquist1
+        upstream_kind: value
+        downstream: NYQUIST1
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Nyquist2
+        upstream_kind: value
+        downstream: NYQUIST2
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: NYQUIST_1
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: NYQUIST_2
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: NYQUIST_3
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.DeviceTypeDetector
+      file: src/Daqifi.Core/Device/DeviceTypeDetector.cs
+    downstream: null
+    relation: missing
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: DetectFromPartNumber
+        upstream_kind: method
+        downstream: null
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Device.IDevice
+      file: src/Daqifi.Core/Device/IDevice.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.Device
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Name
+        upstream_kind: property
+        downstream: name
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: IpAddress
+        upstream_kind: property
+        downstream: ip_address
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: IsConnected
+        upstream_kind: property
+        downstream: is_connected
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Status
+        upstream_kind: property
+        downstream: status
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: StatusChanged
+        upstream_kind: event
+        downstream: status_changed
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: MessageReceived
+        upstream_kind: event
+        downstream: message_received
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Connect
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Disconnect
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_message_received
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_message_received
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: send
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Device.IStreamingDevice
+      file: src/Daqifi.Core/Device/IStreamingDevice.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.StreamingDevice
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: StreamingFrequency
+        upstream_kind: property
+        downstream: streaming_frequency
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: IsStreaming
+        upstream_kind: property
+        downstream: is_streaming
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: StartStreaming
+        upstream_kind: method
+        downstream: start_streaming
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: StopStreaming
+        upstream_kind: method
+        downstream: stop_streaming
+        downstream_kind: method
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Device.ITimestampProcessor
+      file: src/Daqifi.Core/Device/ITimestampProcessor.cs
+    downstream:
+      kind: class
+      qualified: daqifi.timestamp.TimestampProcessor
+      file: daqifi/timestamp.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: TickPeriod
+        upstream_kind: property
+        downstream: tick_period
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ProcessTimestamp
+        upstream_kind: method
+        downstream: process_timestamp
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Reset
+        upstream_kind: method
+        downstream: reset
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ResetAll
+        upstream_kind: method
+        downstream: reset_all
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: DEFAULT_TICK_PERIOD
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.MessageReceivedEventArgs
+      file: src/Daqifi.Core/Device/MessageReceivedEventArgs.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.MessageReceivedEventArgs
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Message
+        upstream_kind: property
+        downstream: message
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: raw_data
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: timestamp
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.TimestampProcessor
+      file: src/Daqifi.Core/Device/TimestampProcessor.cs
+    downstream:
+      kind: class
+      qualified: daqifi.timestamp.TimestampProcessor
+      file: daqifi/timestamp.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: TickPeriod
+        upstream_kind: property
+        downstream: tick_period
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ProcessTimestamp
+        upstream_kind: method
+        downstream: process_timestamp
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Reset
+        upstream_kind: method
+        downstream: reset
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ResetAll
+        upstream_kind: method
+        downstream: reset_all
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: DEFAULT_TICK_PERIOD
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Device.TimestampResult
+      file: src/Daqifi.Core/Device/TimestampResult.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi.timestamp.TimestampResult
+      file: daqifi/timestamp.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Timestamp
+        upstream_kind: property
+        downstream: timestamp
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: WasRollover
+        upstream_kind: property
+        downstream: was_rollover
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ClockCyclesBetweenMessages
+        upstream_kind: property
+        downstream: clock_cycles_between_messages
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: SecondsBetweenMessages
+        upstream_kind: property
+        downstream: seconds_between_messages
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: IsFirstMessage
+        upstream_kind: property
+        downstream: is_first_message
+        downstream_kind: property
+        relation: ported
+        rationale: null
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: "2026-04-26T07:26:46.222000+00:00"

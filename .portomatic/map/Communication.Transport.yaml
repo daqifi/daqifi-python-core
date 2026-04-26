@@ -1,0 +1,995 @@
+schema_version: 2
+shard: Communication.Transport
+upstream_root: src/Daqifi.Core/Communication/Transport
+downstream_root: daqifi
+last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+files:
+  - upstream: src/Daqifi.Core/Communication/Transport/ConnectionRetryOptions.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/HidDeviceInfo.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/HidLibraryDeviceEnumerator.cs
+    downstream: daqifi/_internal/hid_enumerator.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/HidLibraryPlatform.cs
+    downstream: null
+    relation: missing
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/HidLibraryTransport.cs
+    downstream: daqifi/transport.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/IHidDeviceEnumerator.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/IHidTransport.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/IStreamTransport.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/IUdpTransport.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/SerialStreamTransport.cs
+    downstream: daqifi/transport.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/TcpStreamTransport.cs
+    downstream: daqifi/transport.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/TransportStatusEventArgs.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+  - upstream: src/Daqifi.Core/Communication/Transport/UdpTransport.cs
+    downstream: daqifi/_internal/comm.py
+    relation: ported
+    notes: null
+    rationale: null
+    last_synced_sha: null
+symbols:
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Transport.ConnectionRetryOptions
+      file: src/Daqifi.Core/Communication/Transport/ConnectionRetryOptions.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.ConnectionRetryOptions
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: MaxAttempts
+        upstream_kind: property
+        downstream: max_attempts
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: InitialDelay
+        upstream_kind: property
+        downstream: initial_delay
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: MaxDelay
+        upstream_kind: property
+        downstream: max_delay
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: BackoffMultiplier
+        upstream_kind: property
+        downstream: backoff_multiplier
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ConnectionTimeout
+        upstream_kind: property
+        downstream: connection_timeout
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Enabled
+        upstream_kind: property
+        downstream: enabled
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: CalculateDelay
+        upstream_kind: method
+        downstream: calculate_delay
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: fast
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: no_retry
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: resilient
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Transport.HidDeviceInfo
+      file: src/Daqifi.Core/Communication/Transport/HidDeviceInfo.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.HidDeviceInfo
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: VendorId
+        upstream_kind: property
+        downstream: vendor_id
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ProductId
+        upstream_kind: property
+        downstream: product_id
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: DevicePath
+        upstream_kind: property
+        downstream: device_path
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: SerialNumber
+        upstream_kind: property
+        downstream: serial_number
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ProductName
+        upstream_kind: property
+        downstream: product_name
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ToString
+        upstream_kind: method
+        downstream: to_string
+        downstream_kind: null
+        relation: missing
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Transport.HidLibraryDeviceEnumerator
+      file: src/Daqifi.Core/Communication/Transport/HidLibraryDeviceEnumerator.cs
+    downstream:
+      kind: class
+      qualified: daqifi._internal.hid_enumerator.HidLibraryDeviceEnumerator
+      file: daqifi/_internal/hid_enumerator.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: EnumerateAsync
+        upstream_kind: method
+        downstream: enumerate
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Transport.HidLibraryTransport
+      file: src/Daqifi.Core/Communication/Transport/HidLibraryTransport.cs
+    downstream:
+      kind: class
+      qualified: daqifi.transport.HidLibraryTransport
+      file: daqifi/transport.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: VendorId
+        upstream_kind: property
+        downstream: vendor_id
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ProductId
+        upstream_kind: property
+        downstream: product_id
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: SerialNumber
+        upstream_kind: property
+        downstream: serial_number
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: DevicePath
+        upstream_kind: property
+        downstream: device_path
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ReadTimeout
+        upstream_kind: property
+        downstream: read_timeout
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: WriteTimeout
+        upstream_kind: property
+        downstream: write_timeout
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ConnectAsync
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Connect
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: WriteAsync
+        upstream_kind: method
+        downstream: write
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Write
+        upstream_kind: method
+        downstream: write
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ReadAsync
+        upstream_kind: method
+        downstream: read
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Read
+        upstream_kind: method
+        downstream: read
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DisconnectAsync
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Disconnect
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Dispose
+        upstream_kind: method
+        downstream: dispose
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: is_connected
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Communication.Transport.IHidDeviceEnumerator
+      file: src/Daqifi.Core/Communication/Transport/IHidDeviceEnumerator.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.HidDeviceEnumerator
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: EnumerateAsync
+        upstream_kind: method
+        downstream: enumerate
+        downstream_kind: method
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Communication.Transport.IHidTransport
+      file: src/Daqifi.Core/Communication/Transport/IHidTransport.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.HidTransport
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: IsConnected
+        upstream_kind: property
+        downstream: is_connected
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: VendorId
+        upstream_kind: property
+        downstream: vendor_id
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ProductId
+        upstream_kind: property
+        downstream: product_id
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: SerialNumber
+        upstream_kind: property
+        downstream: serial_number
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: DevicePath
+        upstream_kind: property
+        downstream: device_path
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ReadTimeout
+        upstream_kind: property
+        downstream: read_timeout
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: WriteTimeout
+        upstream_kind: property
+        downstream: write_timeout
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ConnectAsync
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Connect
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: WriteAsync
+        upstream_kind: method
+        downstream: write
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Write
+        upstream_kind: method
+        downstream: write
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: ReadAsync
+        upstream_kind: method
+        downstream: read
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Read
+        upstream_kind: method
+        downstream: read
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DisconnectAsync
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Disconnect
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Communication.Transport.IStreamTransport
+      file: src/Daqifi.Core/Communication/Transport/IStreamTransport.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.StreamTransport
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Stream
+        upstream_kind: property
+        downstream: stream
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: IsConnected
+        upstream_kind: property
+        downstream: is_connected
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ConnectionInfo
+        upstream_kind: property
+        downstream: connection_info
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: StatusChanged
+        upstream_kind: event
+        downstream: status_changed
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: ConnectAsync
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DisconnectAsync
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Connect
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Disconnect
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: interface
+      qualified: Daqifi.Core.Communication.Transport.IUdpTransport
+      file: src/Daqifi.Core/Communication/Transport/IUdpTransport.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.UdpTransport
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: IsOpen
+        upstream_kind: property
+        downstream: is_open
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ConnectionInfo
+        upstream_kind: property
+        downstream: connection_info
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: StatusChanged
+        upstream_kind: event
+        downstream: status_changed
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: OpenAsync
+        upstream_kind: method
+        downstream: open
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CloseAsync
+        upstream_kind: method
+        downstream: close
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: SendBroadcastAsync
+        upstream_kind: method
+        downstream: send_broadcast
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: SendUnicastAsync
+        upstream_kind: method
+        downstream: send_unicast
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Open
+        upstream_kind: method
+        downstream: open
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Close
+        upstream_kind: method
+        downstream: close
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: receive
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: send_broadcast_to
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Transport.SerialStreamTransport
+      file: src/Daqifi.Core/Communication/Transport/SerialStreamTransport.cs
+    downstream:
+      kind: class
+      qualified: daqifi.transport.SerialStreamTransport
+      file: daqifi/transport.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Stream
+        upstream_kind: property
+        downstream: stream
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ConnectionInfo
+        upstream_kind: property
+        downstream: connection_info
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: StatusChanged
+        upstream_kind: event
+        downstream: status_changed
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: ConnectAsync
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DisconnectAsync
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Connect
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Disconnect
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: GetAvailablePortNames
+        upstream_kind: method
+        downstream: get_available_port_names
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Dispose
+        upstream_kind: method
+        downstream: dispose
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: DEFAULT_OS_RX_BUFFER_BYTES
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: DEFAULT_OS_TX_BUFFER_BYTES
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: is_connected
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Transport.TcpStreamTransport
+      file: src/Daqifi.Core/Communication/Transport/TcpStreamTransport.cs
+    downstream:
+      kind: class
+      qualified: daqifi.transport.TcpStreamTransport
+      file: daqifi/transport.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: Hostname
+        upstream_kind: property
+        downstream: hostname
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: Stream
+        upstream_kind: property
+        downstream: stream
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ConnectionInfo
+        upstream_kind: property
+        downstream: connection_info
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: StatusChanged
+        upstream_kind: event
+        downstream: status_changed
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: ConnectAsync
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: DisconnectAsync
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Connect
+        upstream_kind: method
+        downstream: connect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Disconnect
+        upstream_kind: method
+        downstream: disconnect
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Dispose
+        upstream_kind: method
+        downstream: dispose
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: __init__
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: close
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: is_connected
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Transport.TransportStatusEventArgs
+      file: src/Daqifi.Core/Communication/Transport/TransportStatusEventArgs.cs
+    downstream:
+      kind: dataclass
+      qualified: daqifi._internal.comm.TransportStatusEventArgs
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: IsConnected
+        upstream_kind: property
+        downstream: is_connected
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: ConnectionInfo
+        upstream_kind: property
+        downstream: connection_info
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: Error
+        upstream_kind: property
+        downstream: error
+        downstream_kind: property
+        relation: ported
+        rationale: null
+  - upstream:
+      kind: class
+      qualified: Daqifi.Core.Communication.Transport.UdpTransport
+      file: src/Daqifi.Core/Communication/Transport/UdpTransport.cs
+    downstream:
+      kind: protocol
+      qualified: daqifi._internal.comm.UdpTransport
+      file: daqifi/_internal/comm.py
+    relation: ported
+    last_synced_sha: null
+    notes: null
+    rationale: null
+    members:
+      - upstream: LocalPort
+        upstream_kind: property
+        downstream: local_port
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: ConnectionInfo
+        upstream_kind: property
+        downstream: connection_info
+        downstream_kind: property
+        relation: ported
+        rationale: null
+      - upstream: StatusChanged
+        upstream_kind: event
+        downstream: status_changed
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: OpenAsync
+        upstream_kind: method
+        downstream: open
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: CloseAsync
+        upstream_kind: method
+        downstream: close
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: SendBroadcastAsync
+        upstream_kind: method
+        downstream: send_broadcast
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: SendUnicastAsync
+        upstream_kind: method
+        downstream: send_unicast
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Open
+        upstream_kind: method
+        downstream: open
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Close
+        upstream_kind: method
+        downstream: close
+        downstream_kind: method
+        relation: ported
+        rationale: null
+      - upstream: Dispose
+        upstream_kind: method
+        downstream: dispose
+        downstream_kind: null
+        relation: missing
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: add_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: is_open
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: receive
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: remove_status_changed
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+      - upstream: null
+        upstream_kind: null
+        downstream: send_broadcast_to
+        downstream_kind: method
+        relation: downstream-only
+        rationale: null
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: "2026-04-26T07:26:46.155264+00:00"
