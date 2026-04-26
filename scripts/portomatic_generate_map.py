@@ -719,6 +719,38 @@ def merge_into_existing(generated: dict, existing: dict) -> dict:
                     s[key] = ex[key]
             if ex.get("relation") in ("divergent", "dropped") and ex.get("rationale"):
                 s["relation"] = ex["relation"]
+            # Member-level preservation. Manual ``rationale`` / ``notes``
+            # / ``relation`` overrides on individual members must
+            # survive regeneration — without this, the operator's
+            # decision that a particular method is divergent (with
+            # documented reason) gets clobbered the next time the
+            # generator runs and finds the C# upstream method exists.
+            ex_members = ex.get("members") or []
+            if isinstance(ex_members, list) and isinstance(s.get("members"), list):
+                # Key by (upstream_name, upstream_kind) so renames in
+                # Python-land don't accidentally erase the manual
+                # rationale tied to a still-present C# member.
+                ex_member_by_key = {
+                    (m.get("upstream"), m.get("upstream_kind")): m
+                    for m in ex_members
+                    if isinstance(m, dict)
+                }
+                for m in s["members"]:
+                    if not isinstance(m, dict):
+                        continue
+                    exm = ex_member_by_key.get(
+                        (m.get("upstream"), m.get("upstream_kind"))
+                    )
+                    if not exm:
+                        continue
+                    for key in ("notes", "rationale"):
+                        if exm.get(key) is not None:
+                            m[key] = exm[key]
+                    if (
+                        exm.get("relation") in ("divergent", "dropped")
+                        and exm.get("rationale")
+                    ):
+                        m["relation"] = exm["relation"]
     # Verbatim preserve curated lists.
     for key in ("divergences", "backlog", "hal_pairs"):
         if isinstance(existing.get(key), list) and existing[key]:

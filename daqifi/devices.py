@@ -1016,6 +1016,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
             raise TypeError("configuration must not be None.")
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
+        if not configuration.ssid:
+            raise ValueError("WiFi SSID must be a non-empty string.")
+        if (
+            configuration.security_type == WifiSecurityType.WPA_PSK_PHRASE
+            and not configuration.password
+        ):
+            raise ValueError("WPA security requires a non-empty password.")
 
         if self._is_streaming:
             self.stop_streaming()
