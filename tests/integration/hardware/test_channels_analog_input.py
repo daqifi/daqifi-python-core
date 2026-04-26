@@ -110,18 +110,44 @@ def _read_firmware_bitmask(dev: NyquistDevice) -> int:
     return scpi.parse_int(response)
 
 
+def _await_firmware_bitmask(
+    dev: NyquistDevice,
+    expected: int,
+    *,
+    timeout: float = 1.0,
+    poll_interval: float = 0.02,
+) -> None:
+    """Poll until the firmware bitmask matches ``expected`` or
+    ``timeout`` elapses. Replaces fixed-sleep settles so a slow
+    firmware commit (USB CDC scheduling jitter, paging on the
+    Windows VM, etc.) doesn't false-fail the next read — and so a
+    real settle bug surfaces with a diagnostic instead of as a
+    race-condition flake later."""
+    start = time.monotonic()
+    while True:
+        actual = _read_firmware_bitmask(dev)
+        if actual == expected:
+            return
+        if (time.monotonic() - start) >= timeout:
+            raise AssertionError(
+                f"firmware bitmask did not settle to 0x{expected:X} "
+                f"within {timeout:g}s; last read was 0x{actual:X}"
+            )
+        time.sleep(poll_interval)
+
+
 def _write_firmware_bitmask(dev: NyquistDevice, value: int) -> None:
     """Set the ADC channel-enable bitmask via the proven raw-SCPI
     path. Used for setting up GET-test preconditions independently
     of the production per-channel setter (which is broken — see
     module docstring). Uses the SCPI constant so a rename of the
     underlying command surface stays in lockstep with production
-    code."""
+    code. Blocks until the firmware confirms the new bitmask via
+    ``ENABle:VOLTage:DC?``."""
     dev._comm.send_command(
         f"{scpi.AnalogInput.ENABLE_ALL_SET} {value}", delay=0.2
     )
-    # Brief settle so the next read sees the new value.
-    time.sleep(0.05)
+    _await_firmware_bitmask(dev, value)
 
 
 @pytest.fixture
