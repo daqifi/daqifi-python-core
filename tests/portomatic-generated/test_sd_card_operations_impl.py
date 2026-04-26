@@ -551,6 +551,28 @@ class TestDownloadSdCardFile:
         finally:
             sd.disconnect()
 
+    def test_binary_payload_containing_daqifi_prompt_bytes_not_corrupted(self) -> None:
+        # Binary payloads can incidentally contain the ASCII bytes that
+        # spell ``DAQIFI>``. The prompt-strip must only fire at the head
+        # of the response, never search the body (Qodo PR #41 pass 3 #3).
+        evil_payload = (
+            b"\x00\x01\x02DAQIFI> middle\x03\x04"
+            + b"more body bytes "
+            + b"DAQIFI>"
+            + b"\x05\x06\x07"
+        )
+        framed = b"DAQIFI> " + evil_payload + END_OF_FILE_MARKER
+        sd = _make_device_with_serial_facade(
+            response_map={b"SD:GET": framed}
+        )
+        dest = BytesIO()
+        try:
+            result = sd.download_sd_card_file("log_evil.bin", dest)
+        finally:
+            sd.disconnect()
+        assert dest.getvalue() == evil_payload
+        assert result.file_size == len(evil_payload)
+
     def test_eof_marker_split_across_chunks(self) -> None:
         payload = b"abcdefghij"
         # Concatenate head + tail; cap reads to 8 bytes so the receiver

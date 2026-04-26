@@ -1180,8 +1180,19 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.stop_streaming())
         self._is_streaming = False
 
-        self.prepare_sd_interface()
-        self.send(scpi_commands.format_sd_card())
+        try:
+            self.prepare_sd_interface()
+            self.send(scpi_commands.format_sd_card())
+        finally:
+            # Restore LAN — same finally pattern as get/delete/download.
+            # The format command continues asynchronously on the device,
+            # but we don't need to hold the SPI bus for it (firmware
+            # finishes the erase whether or not LAN is back on).
+            if self.is_connected:
+                try:
+                    self.prepare_lan_interface()
+                except Exception:
+                    pass
 
     def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
         """Fetch + return the SD-card file listing (and refresh the cache)."""
@@ -1388,7 +1399,16 @@ class DaqifiStreamingDevice(DaqifiDevice):
         if consumer is not None and was_running:
             stopped = consumer.stop_safely()
             if stopped is False:
-                consumer.stop()
+                # `stop_safely` returns False when called from inside
+                # the consumer thread itself (it can't `.join()` on
+                # itself). Calling `.stop()` here would also try to
+                # join and deadlock. Refuse instead — raw-capture
+                # SD-card ops can't run from a consumer callback.
+                raise RuntimeError(
+                    "Cannot perform raw-capture SD-card operations "
+                    "from inside the protobuf consumer thread or its "
+                    "message-received callbacks."
+                )
             try:
                 consumer.clear_buffer()
             except Exception:
@@ -1450,12 +1470,20 @@ class DaqifiStreamingDevice(DaqifiDevice):
         trailing = bytearray()
 
         def _strip_echo_prefix(buf: bytearray) -> bytes:
-            """Drop the first echoed-command + ``DAQIFI>`` prompt."""
+            """Drop a leading ``DAQIFI>`` prompt (head of buffer only).
+
+            Anchored to the start so a prompt-shaped sequence inside the
+            file payload (binary downloads can hit those bytes by chance)
+            doesn't get mistakenly stripped — ``buf.find()`` would have
+            corrupted the file in that case.
+            """
+            b = bytes(buf)
+            # Firmware sometimes precedes the prompt with CR/LF.
+            b = b.lstrip(b"\r\n")
             for prompt in (b"DAQIFI> ", b"DAQIFI>"):
-                idx = buf.find(prompt)
-                if idx >= 0:
-                    return bytes(buf[idx + len(prompt):])
-            return bytes(buf)
+                if b.startswith(prompt):
+                    return b[len(prompt):]
+            return b
 
         while True:
             now = time.monotonic()
