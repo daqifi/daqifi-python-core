@@ -50,6 +50,7 @@ hardware:
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Iterator
 
@@ -60,6 +61,14 @@ from daqifi.channels import AnalogInputChannel
 from daqifi.device import NyquistDevice
 from daqifi.discovery import BoardVariant, DeviceInfo
 from daqifi.exceptions import FeatureNotSupportedError
+
+
+# Strict ``SYST:ERR?`` no-error matcher. ``"No error" in err`` is too
+# loose — leftover bytes in the read window can include strings like
+# ``"No error in stream"`` (matches but isn't the canonical reply).
+# Mirrors the bytes-side regex in ``tests/integration/conftest.py``,
+# adapted for the str-shaped response that ``send_query`` returns.
+_SCPI_NO_ERROR_STR_RE = re.compile(r'\b0\s*,\s*"?No error"?')
 
 
 # ---- Local fixture ---------------------------------------------------------
@@ -76,14 +85,13 @@ def _wake_and_drain(dev: NyquistDevice) -> None:
     accepted — wake from Standby and drain any stale SCPI errors.
 
     Mirrors the wake/init sequence that ``clean_device`` does for
-    streaming tests, just routed through ``NyquistDevice``'s own
-    ``SerialInterface`` (the higher-level facade doesn't expose a
-    ``power_up`` until B9, so we drive it via the raw send path)."""
-    dev._comm.send_command("SYSTem:POWer:STATe 1", delay=0.5)
+    streaming tests, routed through the public ``NyquistDevice``
+    surface."""
+    dev.power_up()
     # Bounded clear (capped at 10 by the SerialInterface impl — that's
     # plenty for our setup since we haven't issued any error-producing
     # commands yet).
-    dev._comm.clear_errors()
+    dev.clear_errors()
 
 
 def _read_firmware_bitmask(dev: NyquistDevice) -> int:
@@ -91,7 +99,13 @@ def _read_firmware_bitmask(dev: NyquistDevice) -> int:
     reports it. This is the load-bearing assertion target — it's what
     the streaming engine uses to decide which channels to sample, so
     if a per-channel write doesn't show up here, streaming will be
-    wrong even if the per-channel getter looks right."""
+    wrong even if the per-channel getter looks right.
+
+    No public API surfaces the bulk ``ENABle:VOLTage:DC?`` query
+    (the per-channel ``enabled`` getter only reads one bit at a
+    time), so we use the underlying ``SerialInterface`` directly via
+    the SCPI constant — this stays in sync with the production code
+    if the constant is ever renamed."""
     response = dev._comm.send_query(scpi.AnalogInput.ENABLE_ALL_QUERY)
     return scpi.parse_int(response)
 
@@ -100,8 +114,12 @@ def _write_firmware_bitmask(dev: NyquistDevice, value: int) -> None:
     """Set the ADC channel-enable bitmask via the proven raw-SCPI
     path. Used for setting up GET-test preconditions independently
     of the production per-channel setter (which is broken — see
-    module docstring)."""
-    dev._comm.send_command(f"ENAble:VOLTage:DC {value}", delay=0.2)
+    module docstring). Uses the SCPI constant so a rename of the
+    underlying command surface stays in lockstep with production
+    code."""
+    dev._comm.send_command(
+        f"{scpi.AnalogInput.ENABLE_ALL_SET} {value}", delay=0.2
+    )
     # Brief settle so the next read sees the new value.
     time.sleep(0.05)
 
@@ -130,7 +148,9 @@ def nyquist_device(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
         # because the per-channel setter is broken (see module
         # docstring).
         try:
-            dev._comm.send_command("ENAble:VOLTage:DC 0", delay=0.2)
+            dev._comm.send_command(
+                f"{scpi.AnalogInput.ENABLE_ALL_SET} 0", delay=0.2
+            )
         except Exception:
             pass
         try:
@@ -269,7 +289,7 @@ def test_disable_all_after_bitmask_write_reflects_in_getter(
         "the SYST:ERR? round-trip. Production-code fix is out of "
         "scope for this tests-only PR."
     ),
-    strict=False,
+    strict=True,
 )
 def test_per_channel_enabled_setter_reflects_in_firmware_bitmask(
     nyquist_device: NyquistDevice,
@@ -291,7 +311,7 @@ def test_per_channel_enabled_setter_reflects_in_firmware_bitmask(
 
 @pytest.mark.xfail(
     reason="depends on the broken per-channel enabled setter (see above)",
-    strict=False,
+    strict=True,
 )
 def test_enable_all_sets_full_bitmask(nyquist_device: NyquistDevice) -> None:
     """``enable_all()`` SHOULD flip every per-channel bit on. Currently
@@ -306,7 +326,7 @@ def test_enable_all_sets_full_bitmask(nyquist_device: NyquistDevice) -> None:
 
 @pytest.mark.xfail(
     reason="depends on the broken per-channel enabled setter (see above)",
-    strict=False,
+    strict=True,
 )
 def test_disable_all_clears_bitmask(nyquist_device: NyquistDevice) -> None:
     """``disable_all()`` SHOULD drive the firmware bitmask to 0.
@@ -350,10 +370,14 @@ def test_range_setter_raises_on_nq1(
     with pytest.raises(FeatureNotSupportedError):
         nyquist_device.analog_inputs[0].range = "10V"
     # No SCPI command was sent → no firmware error generated.
-    err = nyquist_device._comm.send_query(scpi.System.ERR)
-    assert "No error" in err, (
-        f"expected clean error queue after rejected range setter, "
-        f"got {err!r}"
+    # Strict structured match against the canonical reply shape
+    # ``0,"No error"`` so a stray ``"No error in stream"`` substring
+    # in the read window can't false-positive (matches the bytes-side
+    # regex pattern in tests/integration/conftest.py).
+    err = nyquist_device.get_last_error()
+    assert _SCPI_NO_ERROR_STR_RE.search(err), (
+        f"expected canonical 0,\"No error\" reply after rejected "
+        f"range setter, got {err!r}"
     )
 
 
@@ -417,7 +441,7 @@ def test_configure_channels_raises_on_nq1_due_to_range_setter(
         "enabled setter (see module docstring); range write succeeds "
         "but the enabled write silently fails and the bitmask stays 0."
     ),
-    strict=False,
+    strict=True,
 )
 def test_configure_channels_enables_listed_channels_on_nq3(
     nyquist_device: NyquistDevice,
