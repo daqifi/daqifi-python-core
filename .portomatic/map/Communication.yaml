@@ -26,43 +26,25 @@ symbols:
     members:
       - upstream: Usb
         upstream_kind: value
-        downstream: USB
-        downstream_kind: null
-        relation: missing
+        downstream: Usb
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: WiFi
         upstream_kind: value
-        downstream: WIFI
-        downstream_kind: null
-        relation: missing
+        downstream: WiFi
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: SdCard
         upstream_kind: value
-        downstream: SD_CARD
-        downstream_kind: null
-        relation: missing
+        downstream: SdCard
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: All
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: SdCard
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Usb
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: WiFi
         downstream_kind: method
         relation: downstream-only
         rationale: null
@@ -95,4 +77,4 @@ backlog:
     discovered_at_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
     priority: med
 hal_pairs: []
-updated_at: "2026-04-26T08:23:52.236702+00:00"
+updated_at: "2026-04-26T08:33:20.769871+00:00"

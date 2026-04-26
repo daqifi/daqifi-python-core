@@ -195,27 +195,15 @@ symbols:
     members:
       - upstream: Input
         upstream_kind: value
-        downstream: INPUT
-        downstream_kind: null
-        relation: missing
+        downstream: Input
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Output
         upstream_kind: value
-        downstream: OUTPUT
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Input
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
         downstream: Output
-        downstream_kind: method
-        relation: downstream-only
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: null
         upstream_kind: null
@@ -238,19 +226,13 @@ symbols:
     members:
       - upstream: Digital
         upstream_kind: value
-        downstream: DIGITAL
-        downstream_kind: null
-        relation: missing
+        downstream: Digital
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: Analog
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Digital
         downstream_kind: method
         relation: downstream-only
         rationale: null
@@ -616,4 +598,4 @@ backlog:
     discovered_at_sha: HEAD
     priority: low
 hal_pairs: []
-updated_at: "2026-04-26T08:23:52.181036+00:00"
+updated_at: "2026-04-26T08:33:20.715543+00:00"

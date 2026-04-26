@@ -159,67 +159,37 @@ symbols:
     members:
       - upstream: Disconnected
         upstream_kind: value
-        downstream: DISCONNECTED
-        downstream_kind: null
-        relation: missing
+        downstream: Disconnected
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Connecting
         upstream_kind: value
-        downstream: CONNECTING
-        downstream_kind: null
-        relation: missing
+        downstream: Connecting
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Connected
         upstream_kind: value
-        downstream: CONNECTED
-        downstream_kind: null
-        relation: missing
+        downstream: Connected
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Lost
         upstream_kind: value
-        downstream: LOST
-        downstream_kind: null
-        relation: missing
+        downstream: Lost
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Retrying
         upstream_kind: value
-        downstream: RETRYING
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Connected
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Connecting
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Disconnected
-        downstream_kind: method
-        relation: downstream-only
+        downstream: Retrying
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: Failed
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Lost
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Retrying
         downstream_kind: method
         relation: downstream-only
         rationale: null
@@ -868,79 +838,43 @@ symbols:
     members:
       - upstream: Disconnected
         upstream_kind: value
-        downstream: DISCONNECTED
-        downstream_kind: null
-        relation: missing
+        downstream: Disconnected
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Connecting
         upstream_kind: value
-        downstream: CONNECTING
-        downstream_kind: null
-        relation: missing
+        downstream: Connecting
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Connected
         upstream_kind: value
-        downstream: CONNECTED
-        downstream_kind: null
-        relation: missing
+        downstream: Connected
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Initializing
         upstream_kind: value
-        downstream: INITIALIZING
-        downstream_kind: null
-        relation: missing
+        downstream: Initializing
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Ready
         upstream_kind: value
-        downstream: READY
-        downstream_kind: null
-        relation: missing
+        downstream: Ready
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Streaming
         upstream_kind: value
-        downstream: STREAMING
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Connected
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Connecting
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Disconnected
-        downstream_kind: method
-        relation: downstream-only
+        downstream: Streaming
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: null
         upstream_kind: null
         downstream: Error
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Initializing
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Ready
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: Streaming
         downstream_kind: method
         relation: downstream-only
         rationale: null
@@ -984,27 +918,15 @@ symbols:
         rationale: null
       - upstream: Nyquist1
         upstream_kind: value
-        downstream: NYQUIST1
-        downstream_kind: null
-        relation: missing
+        downstream: NYQUIST_1
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: Nyquist2
         upstream_kind: value
-        downstream: NYQUIST2
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: NYQUIST_1
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
         downstream: NYQUIST_2
-        downstream_kind: method
-        relation: downstream-only
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: null
         upstream_kind: null
@@ -1331,4 +1253,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:23:52.430545+00:00"
+updated_at: "2026-04-26T08:33:20.967889+00:00"

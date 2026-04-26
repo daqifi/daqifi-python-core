@@ -415,15 +415,9 @@ symbols:
         rationale: null
       - upstream: Nyquist1
         upstream_kind: value
-        downstream: NYQUIST1
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: null
-        upstream_kind: null
         downstream: NYQUIST_1
-        downstream_kind: method
-        relation: downstream-only
+        downstream_kind: value
+        relation: ported
         rationale: null
       - upstream: null
         upstream_kind: null
@@ -653,4 +647,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:23:52.498506+00:00"
+updated_at: "2026-04-26T08:33:21.035423+00:00"

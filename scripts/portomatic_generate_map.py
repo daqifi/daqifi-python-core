@@ -418,6 +418,12 @@ _PASCAL_ACRONYM_FIXUPS = (
 )
 _PASCAL_TO_SNAKE_PASS1_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _PASCAL_TO_SNAKE_PASS2_RE = re.compile(r"([a-z0-9])([A-Z])")
+# Letter-then-digit boundary: daqifi's enum convention puts an
+# underscore between a word and a trailing version digit, e.g. C#
+# ``Nyquist1`` → Python ``NYQUIST_1``. Run as a separate pass after
+# the case-based passes so we don't double-insert in already-snake
+# strings.
+_PASCAL_TO_SNAKE_DIGIT_RE = re.compile(r"([A-Za-z])(\d)")
 
 
 def cs_to_py_member_name(cs_name: str, *, enum_value: bool = False) -> str:
@@ -444,6 +450,9 @@ def cs_to_py_member_name(cs_name: str, *, enum_value: bool = False) -> str:
     # Pass 2: insert underscore between a lowercase/digit and an
     # uppercase (e.g. HasFoo → Has_Foo).
     name = _PASCAL_TO_SNAKE_PASS2_RE.sub(r"\1_\2", name)
+    # Pass 3: insert underscore between a letter and a digit
+    # (e.g. Nyquist1 → Nyquist_1).
+    name = _PASCAL_TO_SNAKE_DIGIT_RE.sub(r"\1_\2", name)
     return name.upper() if enum_value else name.lower()
 
 
@@ -844,7 +853,16 @@ def symbol_row(
                 }
             )
             continue
-        py_member = cs_to_py_member_name(m.name, enum_value=(m.kind == "value"))
+        # Enum-value matching: daqifi mixes conventions across enums
+        # (ConnectionStatus uses PascalCase like ``Disconnected``, but
+        # DeviceType uses UPPER_SNAKE like ``NYQUIST_1``). Prefer a
+        # direct C#-name match against the Python class members
+        # before falling back to the convention conversion, so we
+        # auto-link in either style.
+        if m.kind == "value" and py and m.name in py_methods:
+            py_member = m.name
+        else:
+            py_member = cs_to_py_member_name(m.name, enum_value=(m.kind == "value"))
         if py and py_member in py_methods:
             seen_py.add(py_member)
             members.append(
