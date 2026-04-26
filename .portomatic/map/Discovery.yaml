@@ -63,7 +63,7 @@ symbols:
       - upstream: DeviceInfo
         upstream_kind: property
         downstream: device_info
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -82,37 +82,37 @@ symbols:
       - upstream: Name
         upstream_kind: property
         downstream: name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: SerialNumber
         upstream_kind: property
         downstream: serial_number
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: FirmwareVersion
         upstream_kind: property
         downstream: firmware_version
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: IPAddress
         upstream_kind: property
         downstream: ip_address
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: MacAddress
         upstream_kind: property
         downstream: mac_address
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Port
         upstream_kind: property
         downstream: port
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: LocalInterfaceAddress
@@ -130,25 +130,25 @@ symbols:
       - upstream: IsPowerOn
         upstream_kind: property
         downstream: is_power_on
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ConnectionType
         upstream_kind: property
         downstream: connection_type
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PortName
         upstream_kind: property
         downstream: port_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: DevicePath
         upstream_kind: property
         downstream: device_path
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ToString
@@ -319,37 +319,37 @@ symbols:
       - upstream: Name
         upstream_kind: property
         downstream: name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: SerialNumber
         upstream_kind: property
         downstream: serial_number
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: FirmwareVersion
         upstream_kind: property
         downstream: firmware_version
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: IPAddress
         upstream_kind: property
         downstream: ip_address
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: MacAddress
         upstream_kind: property
         downstream: mac_address
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Port
         upstream_kind: property
         downstream: port
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: LocalInterfaceAddress
@@ -367,25 +367,25 @@ symbols:
       - upstream: IsPowerOn
         upstream_kind: property
         downstream: is_power_on
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ConnectionType
         upstream_kind: property
         downstream: connection_type
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PortName
         upstream_kind: property
         downstream: port_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: DevicePath
         upstream_kind: property
         downstream: device_path
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: null
@@ -647,4 +647,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:39:13.757045+00:00"
+updated_at: "2026-04-26T08:44:22.467247+00:00"

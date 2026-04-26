@@ -23,8 +23,8 @@ files:
     rationale: null
     last_synced_sha: null
   - upstream: src/Daqifi.Core/Communication/Consumers/LineBasedMessageParser.cs
-    downstream: null
-    relation: missing
+    downstream: daqifi/_internal/comm.py
+    relation: ported
     notes: null
     rationale: null
     last_synced_sha: null
@@ -94,7 +94,7 @@ symbols:
       - upstream: Data
         upstream_kind: property
         downstream: data
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -248,7 +248,7 @@ symbols:
       - upstream: Data
         upstream_kind: property
         downstream: data
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -267,19 +267,19 @@ symbols:
       - upstream: Error
         upstream_kind: property
         downstream: error
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: RawData
         upstream_kind: property
         downstream: raw_data
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Timestamp
         upstream_kind: property
         downstream: timestamp
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -298,19 +298,19 @@ symbols:
       - upstream: Message
         upstream_kind: property
         downstream: message
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: RawData
         upstream_kind: property
         downstream: raw_data
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Timestamp
         upstream_kind: property
         downstream: timestamp
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -456,4 +456,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:39:13.525963+00:00"
+updated_at: "2026-04-26T08:44:22.233195+00:00"

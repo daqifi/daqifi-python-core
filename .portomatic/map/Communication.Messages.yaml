@@ -63,7 +63,7 @@ symbols:
       - upstream: Data
         upstream_kind: property
         downstream: data
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -82,7 +82,7 @@ symbols:
       - upstream: Data
         upstream_kind: property
         downstream: data
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -101,7 +101,7 @@ symbols:
       - upstream: Data
         upstream_kind: property
         downstream: data
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: GetBytes
@@ -142,7 +142,7 @@ symbols:
       - upstream: Data
         upstream_kind: property
         downstream: data
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: GetBytes
@@ -170,4 +170,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:39:13.566474+00:00"
+updated_at: "2026-04-26T08:44:22.273699+00:00"

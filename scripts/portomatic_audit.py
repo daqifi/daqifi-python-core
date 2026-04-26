@@ -557,10 +557,19 @@ def audit_undocumented(
             if not qualified:
                 continue
             for m in sym.get("members") or []:
-                if isinstance(m, dict):
-                    name = m.get("downstream")
-                    if name:
-                        mapped_class_to_members[qualified].add(name)
+                if not isinstance(m, dict):
+                    continue
+                # Only count `ported` and `downstream-only` rows as
+                # "documented." A `missing` row may carry a guessed
+                # downstream name, but the operator hasn't confirmed
+                # it — counting that name as documented would mask
+                # genuinely undocumented Python methods that share
+                # the guessed name.
+                if m.get("relation") not in ("ported", "downstream-only"):
+                    continue
+                name = m.get("downstream")
+                if name:
+                    mapped_class_to_members[qualified].add(name)
 
     drift: List[dict] = []
     for cls in py_classes.values():

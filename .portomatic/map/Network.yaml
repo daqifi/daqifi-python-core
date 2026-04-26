@@ -134,25 +134,25 @@ symbols:
       - upstream: Mode
         upstream_kind: property
         downstream: mode
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: SecurityType
         upstream_kind: property
         downstream: security_type
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Ssid
         upstream_kind: property
         downstream: ssid
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Password
         upstream_kind: property
         downstream: password
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Clone
@@ -214,4 +214,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:39:13.800852+00:00"
+updated_at: "2026-04-26T08:44:22.510657+00:00"

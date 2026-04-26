@@ -87,19 +87,19 @@ symbols:
       - upstream: Name
         upstream_kind: property
         downstream: name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: IsEnabled
         upstream_kind: property
         downstream: is_enabled
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Direction
         upstream_kind: property
         downstream: direction
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ActiveSample
@@ -123,31 +123,31 @@ symbols:
       - upstream: Resolution
         upstream_kind: property
         downstream: resolution
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: CalibrationM
         upstream_kind: property
         downstream: calibration_m
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: CalibrationB
         upstream_kind: property
         downstream: calibration_b
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: InternalScaleM
         upstream_kind: property
         downstream: internal_scale_m
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PortRange
         upstream_kind: property
         downstream: port_range
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: SampleReceived
@@ -252,13 +252,13 @@ symbols:
       - upstream: Timestamp
         upstream_kind: property
         downstream: timestamp
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Value
         upstream_kind: property
         downstream: value
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ToString
@@ -289,19 +289,19 @@ symbols:
       - upstream: Name
         upstream_kind: property
         downstream: name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: IsEnabled
         upstream_kind: property
         downstream: is_enabled
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Direction
         upstream_kind: property
         downstream: direction
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ActiveSample
@@ -374,31 +374,31 @@ symbols:
       - upstream: Resolution
         upstream_kind: property
         downstream: resolution
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: CalibrationM
         upstream_kind: property
         downstream: calibration_m
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: CalibrationB
         upstream_kind: property
         downstream: calibration_b
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: InternalScaleM
         upstream_kind: property
         downstream: internal_scale_m
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PortRange
         upstream_kind: property
         downstream: port_range
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: GetScaledValue
@@ -505,13 +505,13 @@ symbols:
       - upstream: Timestamp
         upstream_kind: property
         downstream: timestamp
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Value
         upstream_kind: property
         downstream: value
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -579,7 +579,7 @@ symbols:
       - upstream: Sample
         upstream_kind: property
         downstream: sample
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
 divergences:
@@ -598,4 +598,4 @@ backlog:
     discovered_at_sha: HEAD
     priority: low
 hal_pairs: []
-updated_at: "2026-04-26T08:39:13.441454+00:00"
+updated_at: "2026-04-26T08:44:22.147192+00:00"

@@ -214,19 +214,19 @@ symbols:
       - upstream: FileName
         upstream_kind: property
         downstream: file_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Arguments
         upstream_kind: property
         downstream: arguments
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: WorkingDirectory
         upstream_kind: property
         downstream: working_directory
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Timeout
@@ -238,19 +238,19 @@ symbols:
       - upstream: OnStandardOutputLine
         upstream_kind: property
         downstream: on_standard_output_line
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: OnStandardErrorLine
         upstream_kind: property
         downstream: on_standard_error_line
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: StandardInputResponseFactory
         upstream_kind: property
         downstream: standard_input_response_factory
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: null
@@ -275,13 +275,13 @@ symbols:
       - upstream: ExitCode
         upstream_kind: property
         downstream: exit_code
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: TimedOut
         upstream_kind: property
         downstream: timed_out
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Duration
@@ -293,13 +293,13 @@ symbols:
       - upstream: StandardOutputLines
         upstream_kind: property
         downstream: standard_output_lines
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: StandardErrorLines
         upstream_kind: property
         downstream: standard_error_lines
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: null
@@ -324,55 +324,55 @@ symbols:
       - upstream: Version
         upstream_kind: property
         downstream: version
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: TagName
         upstream_kind: property
         downstream: tag_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: IsPreRelease
         upstream_kind: property
         downstream: is_pre_release
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ReleaseNotes
         upstream_kind: property
         downstream: release_notes
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: DownloadUrl
         upstream_kind: property
         downstream: download_url
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: AssetFileName
         upstream_kind: property
         downstream: asset_file_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: AssetSize
         upstream_kind: property
         downstream: asset_size
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PublishedAt
         upstream_kind: property
         downstream: published_at
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ZipballUrl
         upstream_kind: property
         downstream: zipball_url
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -391,19 +391,19 @@ symbols:
       - upstream: UpdateAvailable
         upstream_kind: property
         downstream: update_available
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: DeviceVersion
         upstream_kind: property
         downstream: device_version
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: LatestRelease
         upstream_kind: property
         downstream: latest_release
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -459,31 +459,31 @@ symbols:
       - upstream: State
         upstream_kind: property
         downstream: state
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PercentComplete
         upstream_kind: property
         downstream: percent_complete
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: CurrentOperation
         upstream_kind: property
         downstream: current_operation
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: BytesWritten
         upstream_kind: property
         downstream: bytes_written
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: TotalBytes
         upstream_kind: property
         downstream: total_bytes
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -548,133 +548,133 @@ symbols:
       - upstream: BootloaderVendorId
         upstream_kind: property
         downstream: bootloader_vendor_id
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: BootloaderProductId
         upstream_kind: property
         downstream: bootloader_product_id
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PollInterval
         upstream_kind: property
         downstream: poll_interval
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PreparingDeviceTimeout
         upstream_kind: property
         downstream: preparing_device_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: WaitingForBootloaderTimeout
         upstream_kind: property
         downstream: waiting_for_bootloader_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ConnectingTimeout
         upstream_kind: property
         downstream: connecting_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ErasingFlashTimeout
         upstream_kind: property
         downstream: erasing_flash_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ProgrammingTimeout
         upstream_kind: property
         downstream: programming_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: VerifyingTimeout
         upstream_kind: property
         downstream: verifying_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: JumpingToApplicationTimeout
         upstream_kind: property
         downstream: jumping_to_application_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: BootloaderResponseTimeout
         upstream_kind: property
         downstream: bootloader_response_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PostForceBootDelay
         upstream_kind: property
         downstream: post_force_boot_delay
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PostLanFirmwareModeDelay
         upstream_kind: property
         downstream: post_lan_firmware_mode_delay
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: PostWifiReconnectDelay
         upstream_kind: property
         downstream: post_wifi_reconnect_delay
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: HidConnectRetryCount
         upstream_kind: property
         downstream: hid_connect_retry_count
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: HidConnectRetryDelay
         upstream_kind: property
         downstream: hid_connect_retry_delay
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: FlashWriteRetryCount
         upstream_kind: property
         downstream: flash_write_retry_count
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: FlashWriteRetryDelay
         upstream_kind: property
         downstream: flash_write_retry_delay
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: WifiProcessTimeout
         upstream_kind: property
         downstream: wifi_process_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: WifiFlashToolFileName
         upstream_kind: property
         downstream: wifi_flash_tool_file_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: WifiFlashToolArgumentsTemplate
         upstream_kind: property
         downstream: wifi_flash_tool_arguments_template
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: WifiPortOverride
         upstream_kind: property
         downstream: wifi_port_override
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: GetStateTimeout
@@ -778,25 +778,25 @@ symbols:
       - upstream: PreviousState
         upstream_kind: property
         downstream: previous_state
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: CurrentState
         upstream_kind: property
         downstream: current_state
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Operation
         upstream_kind: property
         downstream: operation
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ChangedAtUtc
         upstream_kind: property
         downstream: changed_at_utc
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -876,19 +876,19 @@ symbols:
       - upstream: Address
         upstream_kind: property
         downstream: address
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Data
         upstream_kind: property
         downstream: data
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: RecordType
         upstream_kind: property
         downstream: record_type
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -1135,19 +1135,19 @@ symbols:
       - upstream: ChipId
         upstream_kind: property
         downstream: chip_id
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: FwVersion
         upstream_kind: property
         downstream: fw_version
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: BuildDate
         upstream_kind: property
         downstream: build_date
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -1320,4 +1320,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:39:13.927590+00:00"
+updated_at: "2026-04-26T08:44:22.634611+00:00"

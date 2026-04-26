@@ -99,37 +99,37 @@ symbols:
       - upstream: MaxAttempts
         upstream_kind: property
         downstream: max_attempts
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: InitialDelay
         upstream_kind: property
         downstream: initial_delay
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: MaxDelay
         upstream_kind: property
         downstream: max_delay
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: BackoffMultiplier
         upstream_kind: property
         downstream: backoff_multiplier
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ConnectionTimeout
         upstream_kind: property
         downstream: connection_timeout
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Enabled
         upstream_kind: property
         downstream: enabled
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: CalculateDelay
@@ -172,31 +172,31 @@ symbols:
       - upstream: VendorId
         upstream_kind: property
         downstream: vendor_id
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ProductId
         upstream_kind: property
         downstream: product_id
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: DevicePath
         upstream_kind: property
         downstream: device_path
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: SerialNumber
         upstream_kind: property
         downstream: serial_number
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ProductName
         upstream_kind: property
         downstream: product_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ToString
@@ -270,13 +270,13 @@ symbols:
       - upstream: ReadTimeout
         upstream_kind: property
         downstream: read_timeout
-        downstream_kind: property
+        downstream_kind: method
         relation: ported
         rationale: null
       - upstream: WriteTimeout
         upstream_kind: property
         downstream: write_timeout
-        downstream_kind: property
+        downstream_kind: method
         relation: ported
         rationale: null
       - upstream: ConnectAsync
@@ -416,13 +416,13 @@ symbols:
       - upstream: ReadTimeout
         upstream_kind: property
         downstream: read_timeout
-        downstream_kind: property
+        downstream_kind: method
         relation: ported
         rationale: null
       - upstream: WriteTimeout
         upstream_kind: property
         downstream: write_timeout
-        downstream_kind: property
+        downstream_kind: method
         relation: ported
         rationale: null
       - upstream: ConnectAsync
@@ -871,19 +871,19 @@ symbols:
       - upstream: IsConnected
         upstream_kind: property
         downstream: is_connected
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ConnectionInfo
         upstream_kind: property
         downstream: connection_info
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Error
         upstream_kind: property
         downstream: error
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -899,4 +899,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:39:13.631477+00:00"
+updated_at: "2026-04-26T08:44:22.339206+00:00"

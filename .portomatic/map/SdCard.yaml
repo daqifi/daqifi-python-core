@@ -322,13 +322,13 @@ symbols:
       - upstream: FileName
         upstream_kind: property
         downstream: file_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: CreatedDate
         upstream_kind: property
         downstream: created_date
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -532,31 +532,31 @@ symbols:
       - upstream: SessionStartTime
         upstream_kind: property
         downstream: session_start_time
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: BufferSize
         upstream_kind: property
         downstream: buffer_size
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Progress
         upstream_kind: property
         downstream: progress
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: FallbackTimestampFrequency
         upstream_kind: property
         downstream: fallback_timestamp_frequency
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ConfigurationOverride
         upstream_kind: property
         downstream: configuration_override
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -618,4 +618,4 @@ symbols:
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:39:13.871577+00:00"
+updated_at: "2026-04-26T08:44:22.580172+00:00"

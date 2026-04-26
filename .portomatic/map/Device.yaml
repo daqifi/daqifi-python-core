@@ -129,19 +129,19 @@ symbols:
       - upstream: Channels
         upstream_kind: property
         downstream: channels
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: AnalogChannelCount
         upstream_kind: property
         downstream: analog_channel_count
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: DigitalChannelCount
         upstream_kind: property
         downstream: digital_channel_count
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -433,7 +433,7 @@ symbols:
       - upstream: StreamingFrequency
         upstream_kind: property
         downstream: streaming_frequency
-        downstream_kind: property
+        downstream_kind: method
         relation: ported
         rationale: null
       - upstream: InitializeAsync
@@ -626,49 +626,49 @@ symbols:
       - upstream: SupportsStreaming
         upstream_kind: property
         downstream: supports_streaming
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: HasSdCard
         upstream_kind: property
         downstream: has_sd_card
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: HasWiFi
         upstream_kind: property
         downstream: has_wifi
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: HasUsb
         upstream_kind: property
         downstream: has_usb
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: AnalogInputChannels
         upstream_kind: property
         downstream: analog_input_channels
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: AnalogOutputChannels
         upstream_kind: property
         downstream: analog_output_channels
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: DigitalChannels
         upstream_kind: property
         downstream: digital_channels
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: MaxSamplingRate
         upstream_kind: property
         downstream: max_sampling_rate
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: FromDeviceType
@@ -693,19 +693,19 @@ symbols:
       - upstream: DeviceName
         upstream_kind: property
         downstream: device_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ConnectionRetry
         upstream_kind: property
         downstream: connection_retry
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: InitializeDevice
         upstream_kind: property
         downstream: initialize_device
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: null
@@ -742,79 +742,79 @@ symbols:
       - upstream: PartNumber
         upstream_kind: property
         downstream: part_number
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: SerialNumber
         upstream_kind: property
         downstream: serial_number
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: FirmwareVersion
         upstream_kind: property
         downstream: firmware_version
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: HardwareRevision
         upstream_kind: property
         downstream: hardware_revision
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: DeviceType
         upstream_kind: property
         downstream: device_type
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Capabilities
         upstream_kind: property
         downstream: capabilities
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: IpAddress
         upstream_kind: property
         downstream: ip_address
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: MacAddress
         upstream_kind: property
         downstream: mac_address
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: Ssid
         upstream_kind: property
         downstream: ssid
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: HostName
         upstream_kind: property
         downstream: host_name
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: DevicePort
         upstream_kind: property
         downstream: device_port
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: WifiSecurityMode
         upstream_kind: property
         downstream: wifi_security_mode
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: WifiInfrastructureMode
         upstream_kind: property
         downstream: wifi_infrastructure_mode
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: UpdateFromProtobuf
@@ -894,7 +894,7 @@ symbols:
       - upstream: Status
         upstream_kind: property
         downstream: status
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
   - upstream:
@@ -1057,7 +1057,7 @@ symbols:
       - upstream: StreamingFrequency
         upstream_kind: property
         downstream: streaming_frequency
-        downstream_kind: property
+        downstream_kind: method
         relation: ported
         rationale: null
       - upstream: IsStreaming
@@ -1143,7 +1143,7 @@ symbols:
       - upstream: Message
         upstream_kind: property
         downstream: message
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: null
@@ -1223,34 +1223,34 @@ symbols:
       - upstream: Timestamp
         upstream_kind: property
         downstream: timestamp
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: WasRollover
         upstream_kind: property
         downstream: was_rollover
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: ClockCyclesBetweenMessages
         upstream_kind: property
         downstream: clock_cycles_between_messages
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: SecondsBetweenMessages
         upstream_kind: property
         downstream: seconds_between_messages
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
       - upstream: IsFirstMessage
         upstream_kind: property
         downstream: is_first_message
-        downstream_kind: property
+        downstream_kind: field
         relation: ported
         rationale: null
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:39:13.692533+00:00"
+updated_at: "2026-04-26T08:44:22.401206+00:00"

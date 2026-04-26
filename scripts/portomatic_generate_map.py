@@ -773,10 +773,14 @@ def generate_map(shard: str, py_index: Dict[str, PySymbol]) -> dict:
             counts: Dict[str, int] = _defaultdict(int)
             for f in ds_files:
                 counts[f] += 1
+            # Pick the unique majority winner; on a tie (e.g. a C#
+            # file with two classes that landed in two different
+            # Python files), pick the alphabetically-first one as a
+            # hint and let the symbols: section disambiguate per
+            # symbol. Leaving null + relation:missing here would
+            # contradict the symbols: rows that ARE ported.
             best_file, best_n = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
-            # Only commit when there's a clear winner.
-            if list(counts.values()).count(best_n) == 1:
-                ds_file = best_file
+            ds_file = best_file
         files.append(
             {
                 "upstream": cs_sym_file_rel(cs_path),
@@ -906,7 +910,15 @@ def symbol_row(
                     "upstream": m.name,
                     "upstream_kind": m.kind,
                     "downstream": py_member,
-                    "downstream_kind": "method" if m.kind == "method" else m.kind,
+                    # Prefer the actual Python member kind over the
+                    # C# kind — they usually agree, but a C# property
+                    # might map to a Python method (no @property
+                    # decorator) and vice versa. The Python parser is
+                    # the authoritative source for what's actually
+                    # there.
+                    "downstream_kind": py_member_kind.get(
+                        py_member, ("method" if m.kind == "method" else m.kind)
+                    ),
                     "relation": "ported",
                     "rationale": None,
                 }
@@ -1051,6 +1063,12 @@ def merge_into_existing(generated: dict, existing: dict) -> dict:
                         and exm.get("rationale")
                     ):
                         m["relation"] = exm["relation"]
+                        # Mirror the file/symbol level: when an
+                        # operator marked a member divergent/dropped,
+                        # also preserve their downstream pointer (often
+                        # null for "no Python equivalent").
+                        if "downstream" in exm:
+                            m["downstream"] = exm["downstream"]
     # Verbatim preserve curated lists.
     for key in ("divergences", "backlog", "hal_pairs"):
         if isinstance(existing.get(key), list) and existing[key]:
