@@ -31,10 +31,16 @@ symbols:
     kind: interface
     qualified: daqifi._internal.comm.MessageProducer
     file: daqifi/_internal/comm.py
-  relation: one_to_one
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: C# IMessageProducer<T> is an async send queue (background thread + queued
+    OutboundMessage<T> sends to the device). The Python port declares the Protocol
+    shape at daqifi._internal.comm.MessageProducer but ships no concrete async implementation
+    today — the synchronous SerialInterface in the same module fills the sending role
+    for now. The async producer is aspirational; once a thread-safe queued sender
+    lands, it will be the concrete impl and this row should flip back to one_to_one.
+    Until then the Protocol is intentionally a contract-only declaration.
   members:
   - upstream: QueuedMessageCount
     downstream: queued_message_count
