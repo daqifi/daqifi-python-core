@@ -186,7 +186,7 @@ public API forces a test or a documented skip).
 | **B2** | `devices.py` (DaqifiDevice, Factory) | 8 |
 | **B3** | `device_finders.py`, `discovery.py` | 6 |
 | **B4** | `communication.py`, `streaming.py` (StreamManager) | 11 |
-| **B5** | multi-channel decode (parser) | bug-fix focus |
+| **B5** | multi-channel decode (parser) — popcount invariant + decode-rate guard | 1 (typed factory) |
 | **B6** | streaming lifecycle | 4 |
 | **B7** | `channels.py` (AI) | 6 |
 | **B8** | `channels.py` (DIO) | 4 |
@@ -262,4 +262,4 @@ out the remaining members the shorthand glossed over (added pass
 
 ---
 
-_Last updated: B4 — single-channel streaming + StreamMessageConsumer (skips StreamManager facade and clear_buffer; deferred to B6)._
+_Last updated: B5 — multi-channel streaming popcount invariant + parser decode-failure rate guard (no new public symbols; reinforces B4's StreamMessageConsumer / CompositeMessageParser coverage on the multi-channel path)._
