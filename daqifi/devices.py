@@ -908,6 +908,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
     _SD_DOWNLOAD_BUFFER_BYTES = 16 * 1024
     # Idle wait between empty serial reads while accumulating raw bytes.
     _SD_DOWNLOAD_POLL_INTERVAL_S = 0.01
+    # Hard cap for the raw-text capture path (LIST? / DELete responses).
+    # A normal SD-card listing on a Nyquist is well under 8 KiB; 512 KiB
+    # leaves plenty of slack while bounding memory if a noisy stream
+    # never falls quiet.
+    _SD_TEXT_CAPTURE_MAX_BYTES = 512 * 1024
 
     def __init__(
         self,
@@ -1360,6 +1365,16 @@ class DaqifiStreamingDevice(DaqifiDevice):
             buf = bytearray()
             deadline = time.monotonic() + response_timeout_s
             while time.monotonic() < deadline:
+                # Defensive bound: if a noisy stream keeps trickling
+                # data forever, the idle-deadline reset would never
+                # fire. Cap the buffer so the capture aborts cleanly
+                # instead of growing without limit.
+                if len(buf) >= self._SD_TEXT_CAPTURE_MAX_BYTES:
+                    raise TimeoutError(
+                        f"SD-card text response exceeded "
+                        f"{self._SD_TEXT_CAPTURE_MAX_BYTES} bytes; "
+                        f"aborting capture (likely a stuck stream)."
+                    )
                 in_waiting = getattr(raw_stream, "in_waiting", 0) or 0
                 if in_waiting:
                     chunk = raw_stream.read(in_waiting)
