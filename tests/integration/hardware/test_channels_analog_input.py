@@ -122,16 +122,34 @@ def _await_firmware_bitmask(
     firmware commit (USB CDC scheduling jitter, paging on the
     Windows VM, etc.) doesn't false-fail the next read — and so a
     real settle bug surfaces with a diagnostic instead of as a
-    race-condition flake later."""
+    race-condition flake later.
+
+    Transient read/parse errors during the poll window are
+    swallowed and retried — only the final exception (or the last
+    seen bitmask value) is reported in the timeout diagnostic. This
+    matters because the SerialInterface read path occasionally
+    returns malformed bytes (echo collisions, prompt fragments)
+    that ``parse_int`` rejects; one such hiccup mid-poll shouldn't
+    fail the whole test if a subsequent retry succeeds."""
     start = time.monotonic()
+    last_actual: int | None = None
+    last_exc: Exception | None = None
     while True:
-        actual = _read_firmware_bitmask(dev)
-        if actual == expected:
-            return
+        try:
+            last_actual = _read_firmware_bitmask(dev)
+            last_exc = None
+            if last_actual == expected:
+                return
+        except Exception as e:
+            last_exc = e
         if (time.monotonic() - start) >= timeout:
+            if last_exc is not None:
+                tail = f"; last exception was {last_exc!r}"
+            else:
+                tail = f"; last read was 0x{last_actual:X}"
             raise AssertionError(
                 f"firmware bitmask did not settle to 0x{expected:X} "
-                f"within {timeout:g}s; last read was 0x{actual:X}"
+                f"within {timeout:g}s{tail}"
             )
         time.sleep(poll_interval)
 
@@ -172,11 +190,14 @@ def nyquist_device(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
         # next test (or a streaming test that runs later in the same
         # session) doesn't inherit a stale bitmask. Uses raw SCPI
         # because the per-channel setter is broken (see module
-        # docstring).
+        # docstring). Confirms the clear actually landed on the
+        # firmware side via _await_firmware_bitmask so the next
+        # test starts from a verified-clean baseline.
         try:
             dev._comm.send_command(
                 f"{scpi.AnalogInput.ENABLE_ALL_SET} 0", delay=0.2
             )
+            _await_firmware_bitmask(dev, 0, timeout=1.0)
         except Exception:
             pass
         try:
