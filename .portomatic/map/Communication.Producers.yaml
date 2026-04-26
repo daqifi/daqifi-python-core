@@ -1,194 +1,127 @@
-schema_version: 2
+schema_version: 1
 shard: Communication.Producers
 upstream_root: src/Daqifi.Core/Communication/Producers
 downstream_root: daqifi
 last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
 files:
-  - upstream: src/Daqifi.Core/Communication/Producers/IMessageProducer.cs
-    downstream: daqifi/_internal/comm.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Communication/Producers/MessageProducer.cs
-    downstream: daqifi/_internal/comm.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
+- upstream: src/Daqifi.Core/Communication/Producers/IMessageProducer.cs
+  downstream: daqifi/_internal/comm.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Communication/Producers/MessageProducer.cs
+  downstream: daqifi/_internal/comm.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
 symbols:
-  - upstream:
-      kind: interface
-      qualified: Daqifi.Core.Communication.Producers.IMessageProducer
-      file: src/Daqifi.Core/Communication/Producers/IMessageProducer.cs
-    downstream:
-      kind: protocol
-      qualified: daqifi._internal.comm.MessageProducer
-      file: daqifi/_internal/comm.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: QueuedMessageCount
-        upstream_kind: property
-        downstream: queued_message_count
-        downstream_kind: property
-        relation: ported
-        rationale: null
-      - upstream: IsRunning
-        upstream_kind: property
-        downstream: is_running
-        downstream_kind: property
-        relation: ported
-        rationale: null
-      - upstream: Start
-        upstream_kind: method
-        downstream: start
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Stop
-        upstream_kind: method
-        downstream: stop
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: StopSafely
-        upstream_kind: method
-        downstream: stop_safely
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: Send
-        upstream_kind: method
-        downstream: send
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: close
-        downstream_kind: method
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Communication.Producers.MessageProducer
-      file: src/Daqifi.Core/Communication/Producers/MessageProducer.cs
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Communication.Producers.IMessageProducer
+    file: src/Daqifi.Core/Communication/Producers/IMessageProducer.cs
+  downstream:
+    kind: interface
+    qualified: daqifi._internal.comm.MessageProducer
+    file: daqifi/_internal/comm.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: QueuedMessageCount
+    downstream: queued_message_count
+    relation: one_to_one
+  - upstream: IsRunning
+    downstream: is_running
+    relation: one_to_one
+  - upstream: Start
+    downstream: start
+    relation: one_to_one
+  - upstream: Stop
+    downstream: stop
+    relation: one_to_one
+  - upstream: StopSafely
+    downstream: stop_safely
+    relation: one_to_one
+  - upstream: Send
+    downstream: send
+    relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Communication.Producers.MessageProducer
+    file: src/Daqifi.Core/Communication/Producers/MessageProducer.cs
+  downstream: null
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python collapses the C# class MessageProducer + its sibling IMessageProducer
+    interface into a single daqifi._internal.comm.MessageProducer Protocol. No concrete
+    Python class is maintained for the class side.
+  members: []
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Communication.Producers.ScpiMessageProducer
+    file: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: GetSdFile
     downstream: null
-    relation: divergent
-    last_synced_sha: null
-    notes: null
-    rationale: "Python collapses the C# class MessageProducer + its sibling IMessageProducer interface into a single daqifi._internal.comm.MessageProducer Protocol. No concrete Python class is maintained for the class side."
-    members: []
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Communication.Producers.ScpiMessageProducer
-      file: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+    relation: not_yet_ported
+  - upstream: SetSdLoggingFileName
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: GetSdFile
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: SetSdLoggingFileName
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DeleteSdFile
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: SetSdMaxFileSize
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: RunSdBenchmark
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: SetStreamInterface
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: StartStreaming
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: EnableAdcChannels
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: SetDioPortDirection
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: SetDioPortState
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: EnableDioPorts
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: DisableDioPorts
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: SetNetworkWifiSsid
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: SetNetworkWifiPassword
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: SetUsbTransparencyMode
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
+    relation: not_yet_ported
+  - upstream: DeleteSdFile
+    downstream: null
+    relation: not_yet_ported
+  - upstream: SetSdMaxFileSize
+    downstream: null
+    relation: not_yet_ported
+  - upstream: RunSdBenchmark
+    downstream: null
+    relation: not_yet_ported
+  - upstream: SetStreamInterface
+    downstream: null
+    relation: not_yet_ported
+  - upstream: StartStreaming
+    downstream: null
+    relation: not_yet_ported
+  - upstream: EnableAdcChannels
+    downstream: null
+    relation: not_yet_ported
+  - upstream: SetDioPortDirection
+    downstream: null
+    relation: not_yet_ported
+  - upstream: SetDioPortState
+    downstream: null
+    relation: not_yet_ported
+  - upstream: EnableDioPorts
+    downstream: null
+    relation: not_yet_ported
+  - upstream: DisableDioPorts
+    downstream: null
+    relation: not_yet_ported
+  - upstream: SetNetworkWifiSsid
+    downstream: null
+    relation: not_yet_ported
+  - upstream: SetNetworkWifiPassword
+    downstream: null
+    relation: not_yet_ported
+  - upstream: SetUsbTransparencyMode
+    downstream: null
+    relation: not_yet_ported
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:44:22.304697+00:00"
+updated_at: '2026-04-26T08:44:22.304697+00:00'

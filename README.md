@@ -349,39 +349,36 @@ drift.
 ## Port maintenance (portomatic)
 
 The port from `daqifi-core` (C#) to this repo is catalogued at the
-**method level** in `.portomatic/map/<Shard>.yaml` and enforced with
-two scripts:
+**method level** in `.portomatic/map/<Shard>.yaml` and maintained
+via the [portomatic](https://github.com/cptkoolbeenz/portomatic)
+CLI:
 
 ```bash
-# Walk the upstream + downstream and refresh every shard map.
-# Idempotent — preserves manual notes / rationale / divergence
-# decisions across regenerations.
-python scripts/portomatic_generate_map.py --all
+# Refresh proposed pairings for one shard (interactive review).
+portomatic map suggest --shard Network \
+  --upstream-ir /tmp/up.ir.json --downstream-ir /tmp/dn.ir.json --apply
 
-# Cross-reference maps against the codebase. Reports drift in five
-# categories (protocol-no-impl, method-missing, method-undocumented,
-# symbol-undocumented, stale-divergent).
-python scripts/portomatic_audit.py
+# Audit every shard for drift across 5 categories.
+portomatic map audit --downstream-ir /tmp/daqifi.ir.json --downstream .
 
 # Strict mode for CI gates — exits 1 if any drift is reported.
-python scripts/portomatic_audit.py --strict
-
-# JSON output for tooling integration.
-python scripts/portomatic_audit.py --json
+portomatic map audit --downstream-ir /tmp/daqifi.ir.json --strict
 ```
 
 See **[`.portomatic/README.md`](./.portomatic/README.md)** for the
-full workflow including the categorical drift table, how to add a
-new shard, and when each script runs (post-upstream-sync vs.
-pre-merge gate).
+full workflow with extract commands + the categorical drift table.
 
-The portomatic tool itself lives at
-[cptkoolbeenz/portomatic](https://github.com/cptkoolbeenz/portomatic);
-these in-repo scripts are the pilot implementation that will fold
-into the upstream tool (tracked at
-[`portomatic#147`](https://github.com/cptkoolbeenz/portomatic/issues/147),
-[`#148`](https://github.com/cptkoolbeenz/portomatic/issues/148),
-[`#149-152`](https://github.com/cptkoolbeenz/portomatic/issues/149)).
+**Historical note** — earlier in the port, this repo carried two
+pilot scripts (`scripts/portomatic_generate_map.py` /
+`portomatic_audit.py`) that reimplemented the equivalent features.
+Once `portomatic map suggest` and `portomatic map audit` shipped
+upstream (see
+[`portomatic#155`](https://github.com/cptkoolbeenz/portomatic/pull/155)),
+the pilots were retired and the maps were migrated to the official
+schema vocabulary. **Don't write new helper scripts** without first
+checking
+[`portomatic/docs/cli-reference.md`](https://github.com/cptkoolbeenz/portomatic/blob/main/docs/cli-reference.md)
+to confirm the feature isn't already there.
 
 ## Known Issues
 

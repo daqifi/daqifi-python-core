@@ -1,217 +1,148 @@
-schema_version: 2
+schema_version: 1
 shard: Network
 upstream_root: src/Daqifi.Core/Device/Network
 downstream_root: daqifi
 last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
 files:
-  - upstream: src/Daqifi.Core/Device/Network/INetworkConfigurable.cs
-    downstream: daqifi/network.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Network/NetworkAddressHelper.cs
-    downstream: null
-    relation: missing
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Network/NetworkConfiguration.cs
-    downstream: daqifi/network.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Network/WifiMode.cs
-    downstream: daqifi/enums.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
-  - upstream: src/Daqifi.Core/Device/Network/WifiSecurityType.cs
-    downstream: daqifi/enums.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Network/INetworkConfigurable.cs
+  downstream: daqifi/network.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Network/NetworkAddressHelper.cs
+  downstream: null
+  relation: not_yet_ported
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Network/NetworkConfiguration.cs
+  downstream: daqifi/network.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Network/WifiMode.cs
+  downstream: daqifi/enums.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/Network/WifiSecurityType.cs
+  downstream: daqifi/enums.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
 symbols:
-  - upstream:
-      kind: interface
-      qualified: Daqifi.Core.Device.Network.INetworkConfigurable
-      file: src/Daqifi.Core/Device/Network/INetworkConfigurable.cs
-    downstream:
-      kind: protocol
-      qualified: daqifi.network.NetworkConfigurable
-      file: daqifi/network.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: NetworkConfiguration
-        upstream_kind: property
-        downstream: network_configuration
-        downstream_kind: property
-        relation: ported
-        rationale: null
-      - upstream: UpdateNetworkConfigurationAsync
-        upstream_kind: method
-        downstream: update_network_configuration
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: PrepareSdInterface
-        upstream_kind: method
-        downstream: prepare_sd_interface
-        downstream_kind: method
-        relation: ported
-        rationale: null
-      - upstream: PrepareLanInterface
-        upstream_kind: method
-        downstream: prepare_lan_interface
-        downstream_kind: method
-        relation: ported
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.Network.NetworkAddressHelper
-      file: src/Daqifi.Core/Device/Network/NetworkAddressHelper.cs
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Device.Network.INetworkConfigurable
+    file: src/Daqifi.Core/Device/Network/INetworkConfigurable.cs
+  downstream:
+    kind: interface
+    qualified: daqifi.network.NetworkConfigurable
+    file: daqifi/network.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: NetworkConfiguration
+    downstream: network_configuration
+    relation: one_to_one
+  - upstream: UpdateNetworkConfigurationAsync
+    downstream: update_network_configuration
+    relation: one_to_one
+  - upstream: PrepareSdInterface
+    downstream: prepare_sd_interface
+    relation: one_to_one
+  - upstream: PrepareLanInterface
+    downstream: prepare_lan_interface
+    relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Network.NetworkAddressHelper
+    file: src/Daqifi.Core/Device/Network/NetworkAddressHelper.cs
+  downstream: null
+  relation: not_yet_ported
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: GetIpAddressString
     downstream: null
-    relation: missing
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: GetIpAddressString
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: GetMacAddressString
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: GetSubnetMaskString
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: GetGatewayString
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: GetPrimaryDnsString
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-      - upstream: GetSecondaryDnsString
-        upstream_kind: method
-        downstream: null
-        downstream_kind: null
-        relation: missing
-        rationale: null
-  - upstream:
-      kind: class
-      qualified: Daqifi.Core.Device.Network.NetworkConfiguration
-      file: src/Daqifi.Core/Device/Network/NetworkConfiguration.cs
-    downstream:
-      kind: dataclass
-      qualified: daqifi.network.NetworkConfiguration
-      file: daqifi/network.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: Mode
-        upstream_kind: property
-        downstream: mode
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: SecurityType
-        upstream_kind: property
-        downstream: security_type
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: Ssid
-        upstream_kind: property
-        downstream: ssid
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: Password
-        upstream_kind: property
-        downstream: password
-        downstream_kind: field
-        relation: ported
-        rationale: null
-      - upstream: Clone
-        upstream_kind: method
-        downstream: clone
-        downstream_kind: method
-        relation: ported
-        rationale: null
-  - upstream:
-      kind: enum
-      qualified: Daqifi.Core.Device.Network.WifiMode
-      file: src/Daqifi.Core/Device/Network/WifiMode.cs
-    downstream:
-      kind: enum
-      qualified: daqifi.enums.WifiMode
-      file: daqifi/enums.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: null
-        upstream_kind: null
-        downstream: EXISTING_NETWORK
-        downstream_kind: value
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: SELF_HOSTED
-        downstream_kind: value
-        relation: downstream-only
-        rationale: null
-  - upstream:
-      kind: enum
-      qualified: Daqifi.Core.Device.Network.WifiSecurityType
-      file: src/Daqifi.Core/Device/Network/WifiSecurityType.cs
-    downstream:
-      kind: enum
-      qualified: daqifi.enums.WifiSecurityType
-      file: daqifi/enums.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: null
-        upstream_kind: null
-        downstream: NONE
-        downstream_kind: value
-        relation: downstream-only
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: WPA_PSK_PHRASE
-        downstream_kind: value
-        relation: downstream-only
-        rationale: null
+    relation: not_yet_ported
+  - upstream: GetMacAddressString
+    downstream: null
+    relation: not_yet_ported
+  - upstream: GetSubnetMaskString
+    downstream: null
+    relation: not_yet_ported
+  - upstream: GetGatewayString
+    downstream: null
+    relation: not_yet_ported
+  - upstream: GetPrimaryDnsString
+    downstream: null
+    relation: not_yet_ported
+  - upstream: GetSecondaryDnsString
+    downstream: null
+    relation: not_yet_ported
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Network.NetworkConfiguration
+    file: src/Daqifi.Core/Device/Network/NetworkConfiguration.cs
+  downstream:
+    kind: class
+    qualified: daqifi.network.NetworkConfiguration
+    file: daqifi/network.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: Mode
+    downstream: mode
+    relation: one_to_one
+  - upstream: SecurityType
+    downstream: security_type
+    relation: one_to_one
+  - upstream: Ssid
+    downstream: ssid
+    relation: one_to_one
+  - upstream: Password
+    downstream: password
+    relation: one_to_one
+  - upstream: Clone
+    downstream: clone
+    relation: one_to_one
+- upstream:
+    kind: enum
+    qualified: Daqifi.Core.Device.Network.WifiMode
+    file: src/Daqifi.Core/Device/Network/WifiMode.cs
+  downstream:
+    kind: enum
+    qualified: daqifi.enums.WifiMode
+    file: daqifi/enums.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members: []
+- upstream:
+    kind: enum
+    qualified: Daqifi.Core.Device.Network.WifiSecurityType
+    file: src/Daqifi.Core/Device/Network/WifiSecurityType.cs
+  downstream:
+    kind: enum
+    qualified: daqifi.enums.WifiSecurityType
+    file: daqifi/enums.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members: []
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: "2026-04-26T08:44:22.510657+00:00"
+updated_at: '2026-04-26T08:44:22.510657+00:00'

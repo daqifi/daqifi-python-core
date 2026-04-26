@@ -1,80 +1,70 @@
-schema_version: 2
+schema_version: 1
 shard: Communication
 upstream_root: src/Daqifi.Core/Communication
 downstream_root: daqifi
 last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
 files:
-  - upstream: src/Daqifi.Core/Communication/StreamInterface.cs
-    downstream: daqifi/_internal/scpi.py
-    relation: ported
-    notes: null
-    rationale: null
-    last_synced_sha: null
+- upstream: src/Daqifi.Core/Communication/StreamInterface.cs
+  downstream: daqifi/_internal/scpi.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: null
 symbols:
-  - upstream:
-      kind: enum
-      qualified: Daqifi.Core.Communication.StreamInterface
-      file: src/Daqifi.Core/Communication/StreamInterface.cs
-    downstream:
-      kind: enum
-      qualified: daqifi._internal.scpi.StreamInterface
-      file: daqifi/_internal/scpi.py
-    relation: ported
-    last_synced_sha: null
-    notes: null
-    rationale: null
-    members:
-      - upstream: Usb
-        upstream_kind: value
-        downstream: Usb
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: WiFi
-        upstream_kind: value
-        downstream: WiFi
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: SdCard
-        upstream_kind: value
-        downstream: SdCard
-        downstream_kind: value
-        relation: ported
-        rationale: null
-      - upstream: null
-        upstream_kind: null
-        downstream: All
-        downstream_kind: value
-        relation: downstream-only
-        rationale: null
+- upstream:
+    kind: enum
+    qualified: Daqifi.Core.Communication.StreamInterface
+    file: src/Daqifi.Core/Communication/StreamInterface.cs
+  downstream:
+    kind: enum
+    qualified: daqifi._internal.scpi.StreamInterface
+    file: daqifi/_internal/scpi.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: Usb
+    downstream: Usb
+    relation: one_to_one
+  - upstream: WiFi
+    downstream: WiFi
+    relation: one_to_one
+  - upstream: SdCard
+    downstream: SdCard
+    relation: one_to_one
 divergences:
-  - id: DIV-002
-    upstream_path: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
-    downstream_path: daqifi/_internal/scpi.py
-    upstream_symbol: null
-    downstream_symbol: null
-    kind: api_shape
-    rationale: "C# represents commands as Producer/Message objects (with Data + Format fields). Python represents them as bare strings on grouped helper classes. /portomatic-check should NOT propose adding ProducerMessage to Python — this is intentional Pythonic flattening. "
-    accepted_at: 2026-04-18
-  - id: DIV-003
-    upstream_path: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
-    downstream_path: daqifi/_internal/scpi.py
-    upstream_symbol: null
-    downstream_symbol: null
-    kind: behavioral
-    rationale: "C# uses SCPI long form (\"SYSTem:STORage:...\"); Python uses short form (\"SYST:STOR:...\"). Both compliant; do not normalize either way. "
-    accepted_at: 2026-04-18
+- id: DIV-002
+  upstream_path: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  downstream_path: daqifi/_internal/scpi.py
+  upstream_symbol: null
+  downstream_symbol: null
+  kind: api_shape
+  rationale: 'C# represents commands as Producer/Message objects (with Data + Format
+    fields). Python represents them as bare strings on grouped helper classes. /portomatic-check
+    should NOT propose adding ProducerMessage to Python — this is intentional Pythonic
+    flattening. '
+  accepted_at: 2026-04-18
+- id: DIV-003
+  upstream_path: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  downstream_path: daqifi/_internal/scpi.py
+  upstream_symbol: null
+  downstream_symbol: null
+  kind: behavioral
+  rationale: 'C# uses SCPI long form ("SYSTem:STORage:..."); Python uses short form
+    ("SYST:STOR:..."). Both compliant; do not normalize either way. '
+  accepted_at: 2026-04-18
 backlog:
-  - id: PORT-002
-    upstream_symbol: Daqifi.Core.Communication.Producers.ScpiMessageProducer.RebootDevice
-    blocker: Python device.py never exposed reboot.
-    discovered_at_sha: HEAD
-    priority: med
-  - id: PORT-003
-    upstream_symbol: Daqifi.Core.Communication.Consumers.StreamMessageConsumer
-    blocker: "Python streaming layer doesn't yet decode protobuf stream messages; coupled to PORT-001."
-    discovered_at_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
-    priority: med
+- id: PORT-002
+  upstream_symbol: Daqifi.Core.Communication.Producers.ScpiMessageProducer.RebootDevice
+  blocker: Python device.py never exposed reboot.
+  discovered_at_sha: HEAD
+  priority: med
+- id: PORT-003
+  upstream_symbol: Daqifi.Core.Communication.Consumers.StreamMessageConsumer
+  blocker: Python streaming layer doesn't yet decode protobuf stream messages; coupled
+    to PORT-001.
+  discovered_at_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  priority: med
 hal_pairs: []
-updated_at: "2026-04-26T08:44:22.203189+00:00"
+updated_at: '2026-04-26T08:44:22.203189+00:00'
