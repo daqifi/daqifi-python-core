@@ -41,7 +41,7 @@ public API forces a test or a documented skip).
 - [x] `StreamMessageConsumer.stop_safely` — bounded-timeout stop (B4)
 - [x] `StreamMessageConsumer.add_message_received` — events fire per-frame (B4)
 - [x] `StreamMessageConsumer.queued_message_count` — accurate during/after stream (B4)
-- [ ] `StreamMessageConsumer.clear_buffer` — drops in-flight bytes (B4 — deferred to B6 streaming-lifecycle slice)
+- [x] `StreamMessageConsumer.clear_buffer` — drops in-flight bytes (B6)
 - [~] `LineBasedMessageParser.parse_messages` — pure parser; unit tests
 - [~] `ProtobufMessageParser.parse_messages` — pure parser; unit tests
 - [~] `CompositeMessageParser.parse_messages` — pure parser; unit tests
@@ -74,9 +74,9 @@ public API forces a test or a documented skip).
 - [x] `DaqifiDevice.channels` populated via `populate_channels_from_status` (B2)
 - [x] `DaqifiDevice.timestamp_frequency` (B2)
 - [x] `DaqifiDevice.add_channels_populated` event fires once on init (B2)
-- [ ] `DaqifiStreamingDevice.start_streaming` / `stop_streaming` (B6)
-- [ ] `DaqifiStreamingDevice.is_streaming` / `streaming_frequency` (B6)
-- [ ] `DaqifiStreamingDevice.is_usb_connection` (B6)
+- [x] `DaqifiStreamingDevice.start_streaming` / `stop_streaming` (B6)
+- [x] `DaqifiStreamingDevice.is_streaming` / `streaming_frequency` (B6)
+- [x] `DaqifiStreamingDevice.is_usb_connection` (B6)
 - [ ] `DaqifiStreamingDevice.enable_sd_card_logging` / `disable_sd_card_logging` / `set_sd_logging_file_name` / `request_sd_card_file_list` (B10)
 - [d] `DaqifiStreamingDevice.delete_sd_file` / `format_sd_card` (B11)
 - [ ] `DaqifiStreamingDevice.set_wifi_ssid` / `set_wifi_password` / `set_wifi_mode_self_hosted` / `set_wifi_mode_existing` (B12)
@@ -236,12 +236,12 @@ out the remaining members the shorthand glossed over (added pass
 ### B4 — streaming (round out)
 
 - [ ] `StreamManager.buffer` — exposed property; covered alongside the StreamManager block
-- [ ] `StreamMessageConsumer.is_running` / `StreamMessageConsumer.add_error_occurred` / `StreamMessageConsumer.remove_error_occurred` (B4 — deferred; not exercised by current B4 tests, planned for B6)
+- [x] `StreamMessageConsumer.is_running` / `StreamMessageConsumer.add_error_occurred` / `StreamMessageConsumer.remove_error_occurred` (B6)
 - [x] `StreamMessageConsumer.close` / `StreamMessageConsumer.remove_message_received` (B4)
 
 ### B6 — streaming lifecycle (round out)
 
-- [ ] `DaqifiStreamingDevice.is_logging_to_sd_card` / `DaqifiStreamingDevice.sd_card_files` — properties readable via the streaming-device facade
+- [x] `DaqifiStreamingDevice.is_logging_to_sd_card` / `DaqifiStreamingDevice.sd_card_files` — properties readable via the streaming-device facade (B6)
 
 ### B10 — SD card (round out)
 
@@ -262,4 +262,10 @@ out the remaining members the shorthand glossed over (added pass
 
 ---
 
-_Last updated: B5 — multi-channel streaming popcount invariant + parser decode-failure rate guard (no new public symbols; reinforces B4's StreamMessageConsumer / CompositeMessageParser coverage on the multi-channel path)._
+_Last updated: B6 — streaming-lifecycle slice. Checked off
+`DaqifiStreamingDevice.start_streaming` / `stop_streaming` /
+`is_streaming` / `streaming_frequency` / `is_usb_connection` /
+`is_logging_to_sd_card` / `sd_card_files`, plus the deferred
+`StreamMessageConsumer.is_running` / `clear_buffer` /
+`add_error_occurred` / `remove_error_occurred` symbols. Adds the
+N-restart firmware-drop-counter regression guard._
