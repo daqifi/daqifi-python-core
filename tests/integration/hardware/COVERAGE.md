@@ -57,10 +57,10 @@ public API forces a test or a documented skip).
 - [x] `NyquistDevice.clear_errors` (B9 — currently capped at 10; see python-core#22)
 - [x] `NyquistDevice.is_connected` (B9)
 - [x] `NyquistDevice.variant` / `manufacturer` / `model` / `serial_number` / `firmware_version` (B9)
-- [ ] `NyquistDevice.create_stream` (B14 async)
+- [x] `NyquistDevice.create_stream` (B14 async — both branches)
 - [ ] `NyquistDevice.sd_enable` / `sd_list_files` / `sd_get_file` / `sd_get_file_binary` / `sd_set_logging` / `sd_benchmark` (B10)
 - [d] `NyquistDevice.sd_format` / `sd_delete_file` (B11)
-- [ ] `NyquistDevice.analog_outputs` / `analog_inputs` / `digital_io` (B7, B8)
+- [x] `NyquistDevice.analog_outputs` / `analog_inputs` / `digital_io` (B7, B8 — accessors covered in test_device_collections.py)
 - [x] `NyquistDevice.power_state` (B9)
 - [x] `NyquistDevice.__enter__` / `__exit__` — context manager (B9)
 
@@ -121,10 +121,10 @@ public API forces a test or a documented skip).
 - [x] `StreamManager.read_all` — collects to SampleBuffer (B4)
 - [x] `StreamManager.state` / `channels` / `sample_rate` properties (B4)
 - [x] `StreamManager.__enter__` / `__exit__` context manager (B4)
-- [ ] `AsyncStreamManager.start` / `stop` / `read` / async-iter (B14)
-- [ ] `SampleBuffer.add_sample` / `clear` (B15)
-- [ ] `SampleBuffer.get_channel_data` / `get_timestamps` (B15)
-- [ ] `SampleBuffer.to_csv` / `to_json` / `to_dataframe` (B15)
+- [x] `AsyncStreamManager.start` / `stop` / `read` / async-iter (B14)
+- [~] `SampleBuffer.add_sample` / `clear` (B15 — pure data, unit-tested in `tests/integration/test_sample_buffer.py`)
+- [~] `SampleBuffer.get_channel_data` / `get_timestamps` (B15 — same)
+- [~] `SampleBuffer.to_csv` / `to_json` / `to_dataframe` (B15 — same)
 
 ## daqifi.sdcard
 
@@ -235,7 +235,7 @@ out the remaining members the shorthand glossed over (added pass
 
 ### B4 — streaming (round out)
 
-- [ ] `StreamManager.buffer` — exposed property; covered alongside the StreamManager block
+- [x] `StreamManager.buffer` — exposed property; covered in test_device_collections.py
 - [x] `StreamMessageConsumer.is_running` / `StreamMessageConsumer.add_error_occurred` / `StreamMessageConsumer.remove_error_occurred` (B6)
 - [x] `StreamMessageConsumer.close` / `StreamMessageConsumer.remove_message_received` (B4)
 
