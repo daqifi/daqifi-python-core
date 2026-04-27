@@ -275,18 +275,22 @@ def test_update_network_configuration_round_trip(
     # --- STAGE 1: apply a transient config (different from saved) ---
     # `update_network_configuration` ALWAYS does APPLY+SAVE under
     # the hood, so this is a persistent flash write. The try/finally
-    # below guarantees restore runs even if any assertion in stage 1
-    # fails — without it, a stage-1 assertion failure would leave
-    # the rig saved with the transient SSID/password indefinitely.
+    # below guarantees restore runs even if the transient apply
+    # itself partially fails (mid-sequence — some SET commands done,
+    # SAVE not yet) OR any assertion in stage 1 fails. Without the
+    # try wrapping the apply call, a partial mid-sequence failure
+    # would leave the rig with arbitrary intermediate state and no
+    # restore.
     transient = NetworkConfiguration(
         mode=WifiMode.EXISTING_NETWORK,
         security_type=WifiSecurityType.WPA_PSK_PHRASE,
         ssid="b12-transient-do-not-associate",
         password="b12-transient-password-x",
     )
-    dev.update_network_configuration(transient)
 
     try:
+        dev.update_network_configuration(transient)
+
         # Snapshot should now reflect the transient config.
         snap = dev.network_configuration
         assert snap.ssid == transient.ssid
