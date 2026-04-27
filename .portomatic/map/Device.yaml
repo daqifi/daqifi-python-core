@@ -341,9 +341,9 @@ symbols:
   - upstream: GetSdCardFilesAsync
     downstream: get_sd_card_files
     relation: divergent
-    notes: 'Async (Task<IReadOnlyList<SdCardFileInfo>>) in C#; sync in
-      Python per project convention. Behavior matches: pause consumer, prepare
-      SD interface, send LIST?, parse response, restore LAN.'
+    notes: 'Async (Task<IReadOnlyList<SdCardFileInfo>>) in C#; sync in Python per
+      project convention. Behavior matches: pause consumer, prepare SD interface,
+      send LIST?, parse response, restore LAN.'
   - upstream: StartSdCardLoggingAsync
     downstream: start_sd_card_logging
     relation: divergent
@@ -362,17 +362,15 @@ symbols:
   - upstream: DownloadSdCardFileAsync
     downstream: download_sd_card_file
     relation: divergent
-    notes: 'Async in C#; sync in Python per project convention. Implements the
-      raw-capture pattern (pauses protobuf consumer, reads serial bytes until
-      __END_OF_FILE__) without C# ExecuteRawCaptureAsync helper since the Python
-      consumer exposes start/stop_safely.'
+    notes: Async in C#; sync in Python per project convention. Implements the raw-capture
+      pattern (pauses protobuf consumer, reads serial bytes until __END_OF_FILE__)
+      without C# ExecuteRawCaptureAsync helper since the Python consumer exposes start/stop_safely.
   - upstream: DownloadSdCardFileAsync
     downstream: download_sd_card_file_to_temp
     relation: divergent
-    notes: 'C# overload resolution distinguishes the two DownloadSdCardFileAsync
-      variants by parameter list (with/without destination stream). Python doesn''t
-      dispatch on parameter types, so the no-destination overload is renamed to
-      download_sd_card_file_to_temp.'
+    notes: C# overload resolution distinguishes the two DownloadSdCardFileAsync variants
+      by parameter list (with/without destination stream). Python doesn't dispatch
+      on parameter types, so the no-destination overload is renamed to download_sd_card_file_to_temp.
   - upstream: <downstream-only:apply_network_configuration>
     downstream: apply_network_configuration
     relation: divergent
@@ -860,6 +858,210 @@ symbols:
   - upstream: IsFirstMessage
     downstream: is_first_message
     relation: one_to_one
+- upstream:
+    kind: class
+    qualified: <downstream-only:NyquistDevice>
+  downstream:
+    kind: class
+    qualified: daqifi.device.NyquistDevice
+    file: daqifi/device.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only user-facing facade over DaqifiStreamingDevice. Wraps connect/initialize/teardown\
+    \ and exposes ergonomic SCPI shortcuts. No direct C# counterpart \u2014 C# users\
+    \ compose DaqifiStreamingDevice directly."
+  members:
+  - upstream: <downstream-only:connect>
+    downstream: connect
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:disconnect>
+    downstream: disconnect
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_connected>
+    downstream: is_connected
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:variant>
+    downstream: variant
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:manufacturer>
+    downstream: manufacturer
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:model>
+    downstream: model
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:serial_number>
+    downstream: serial_number
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:firmware_version>
+    downstream: firmware_version
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:analog_outputs>
+    downstream: analog_outputs
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:analog_inputs>
+    downstream: analog_inputs
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:digital_io>
+    downstream: digital_io
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:power_state>
+    downstream: power_state
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:power_up>
+    downstream: power_up
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:power_down>
+    downstream: power_down
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:reset>
+    downstream: reset
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:get_system_info>
+    downstream: get_system_info
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:get_last_error>
+    downstream: get_last_error
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:clear_errors>
+    downstream: clear_errors
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_enable>
+    downstream: sd_enable
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_list_files>
+    downstream: sd_list_files
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_get_file_size>
+    downstream: sd_get_file_size
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_get_file>
+    downstream: sd_get_file
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_get_file_binary>
+    downstream: sd_get_file_binary
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_delete_file>
+    downstream: sd_delete_file
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_format>
+    downstream: sd_format
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_set_logging>
+    downstream: sd_set_logging
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:sd_benchmark>
+    downstream: sd_benchmark
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:create_stream>
+    downstream: create_stream
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: <downstream-only:DAQiFiError>
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.DAQiFiError
+    file: daqifi/exceptions.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only base exception. C# uses InvalidOperationException / ArgumentException
+    directly.
+- upstream:
+    kind: class
+    qualified: <downstream-only:ConnectionError>
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.ConnectionError
+    file: daqifi/exceptions.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only \u2014 see DAQiFiError rationale."
+- upstream:
+    kind: class
+    qualified: <downstream-only:DeviceNotFoundError>
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.DeviceNotFoundError
+    file: daqifi/exceptions.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only \u2014 see DAQiFiError rationale."
+- upstream:
+    kind: class
+    qualified: <downstream-only:CommandError>
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.CommandError
+    file: daqifi/exceptions.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only \u2014 see DAQiFiError rationale."
+- upstream:
+    kind: class
+    qualified: <downstream-only:ConfigurationError>
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.ConfigurationError
+    file: daqifi/exceptions.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only \u2014 see DAQiFiError rationale."
+- upstream:
+    kind: class
+    qualified: <downstream-only:FeatureNotSupportedError>
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.FeatureNotSupportedError
+    file: daqifi/exceptions.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only \u2014 see DAQiFiError rationale."
+- upstream:
+    kind: class
+    qualified: <downstream-only:PowerStateError>
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.PowerStateError
+    file: daqifi/exceptions.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only \u2014 see DAQiFiError rationale."
 divergences: []
 backlog: []
 hal_pairs: []

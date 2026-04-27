@@ -433,6 +433,131 @@ symbols:
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: enum
+    qualified: Daqifi.Core.Device.Discovery.ConnectionType
+    file: src/Daqifi.Core/Device/Discovery/ConnectionType.cs
+  downstream:
+    kind: enum
+    qualified: daqifi.device_finders.ConnectionType
+    file: daqifi/device_finders.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: <downstream-only:SERIAL>
+    downstream: SERIAL
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:WIFI>
+    downstream: WIFI
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:HID>
+    downstream: HID
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: enum
+    qualified: Daqifi.Core.Device.Discovery.DeviceType
+    file: src/Daqifi.Core/Device/Discovery/DeviceType.cs
+  downstream:
+    kind: enum
+    qualified: daqifi.device_finders.DeviceType
+    file: daqifi/device_finders.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: <downstream-only:UNKNOWN>
+    downstream: UNKNOWN
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:NYQUIST>
+    downstream: NYQUIST
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: enum
+    qualified: <downstream-only:BoardVariant>
+  downstream:
+    kind: enum
+    qualified: daqifi.discovery.BoardVariant
+    file: daqifi/discovery.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only enum naming the supported Nyquist hardware variants (NQ1/NQ2/NQ3).
+    C# port doesn't currently surface variants as an enum.
+  members:
+  - upstream: <downstream-only:UNKNOWN>
+    downstream: UNKNOWN
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:NQ1>
+    downstream: NQ1
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:NQ2>
+    downstream: NQ2
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:NQ3>
+    downstream: NQ3
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Discovery.DeviceInfo
+    file: src/Daqifi.Core/Device/Discovery/DeviceInfo.cs
+  downstream:
+    kind: class
+    qualified: daqifi.discovery.DeviceInfo
+    file: daqifi/discovery.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: Port
+    downstream: port
+    relation: one_to_one
+  - upstream: <downstream-only:variant>
+    downstream: variant
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:manufacturer>
+    downstream: manufacturer
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:model>
+    downstream: model
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: SerialNumber
+    downstream: serial_number
+    relation: one_to_one
+  - upstream: FirmwareVersion
+    downstream: firmware_version
+    relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Discovery.DeviceDiscoveredEventArgs
+    file: src/Daqifi.Core/Device/Discovery/DeviceDiscoveredEventArgs.cs
+  downstream:
+    kind: class
+    qualified: daqifi.discovery.DeviceDiscoveredEventArgs
+    file: daqifi/discovery.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: DeviceInfo
+    downstream: device_info
+    relation: one_to_one
 divergences: []
 backlog: []
 hal_pairs: []

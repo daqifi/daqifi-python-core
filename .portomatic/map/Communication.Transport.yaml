@@ -595,6 +595,57 @@ symbols:
     interface into a single daqifi._internal.comm.UdpTransport Protocol. No concrete
     Python class is maintained for the class side.
   members: []
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Communication.Transport.IUdpTransport
+    file: src/Daqifi.Core/Communication/Transport/IUdpTransport.cs
+  downstream:
+    kind: interface
+    qualified: daqifi.transport.UdpTransport
+    file: daqifi/transport.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: Python class implements the upstream IUdpTransport interface contract.
+  members:
+  - upstream: IsOpen
+    downstream: is_open
+    relation: one_to_one
+  - upstream: <downstream-only:local_port>
+    downstream: local_port
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: ConnectionInfo
+    downstream: connection_info
+    relation: one_to_one
+  - upstream: <downstream-only:add_status_changed>
+    downstream: add_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:remove_status_changed>
+    downstream: remove_status_changed
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: OpenAsync
+    downstream: open
+    relation: one_to_one
+  - upstream: CloseAsync
+    downstream: close
+    relation: one_to_one
+  - upstream: SendBroadcastAsync
+    downstream: send_broadcast
+    relation: one_to_one
+  - upstream: <downstream-only:send_broadcast_to>
+    downstream: send_broadcast_to
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: SendUnicastAsync
+    downstream: send_unicast
+    relation: one_to_one
+  - upstream: <downstream-only:receive>
+    downstream: receive
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []

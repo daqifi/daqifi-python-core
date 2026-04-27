@@ -8,13 +8,13 @@ files:
   downstream: daqifi/devices.py
   relation: divergent
   notes: null
-  rationale: 'C# AnalogChannel is a self-contained data model with local scaling/calibration
-    math (GetScaledValue computes (raw / resolution * port_range * cal_m + cal_b)
-    * internal_scale_m client-side). Python AnalogInputChannel is a thin SCPI wrapper
-    with no scaling math — the device computes scaled values and the Python class
-    delegates everything via send_query/send_set. There is no Python class with field-level
-    parity to C# AnalogChannel and no plan to add one (the Python port is intentionally
-    device-delegated). '
+  rationale: "C# AnalogChannel is a self-contained data model with local scaling/calibration\
+    \ math (GetScaledValue computes (raw / resolution * port_range * cal_m + cal_b)\
+    \ * internal_scale_m client-side). Python AnalogInputChannel is a thin SCPI wrapper\
+    \ with no scaling math \u2014 the device computes scaled values and the Python\
+    \ class delegates everything via send_query/send_set. There is no Python class\
+    \ with field-level parity to C# AnalogChannel and no plan to add one (the Python\
+    \ port is intentionally device-delegated). "
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Channel/ChannelDirection.cs
   downstream: daqifi/_internal/scpi.py
@@ -38,7 +38,7 @@ files:
   downstream: daqifi/devices.py
   relation: divergent
   notes: null
-  rationale: Same as AnalogChannel — Python DigitalIOChannel is SCPI-delegated.
+  rationale: "Same as AnalogChannel \u2014 Python DigitalIOChannel is SCPI-delegated."
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Channel/IAnalogChannel.cs
   downstream: daqifi/devices.py
@@ -213,7 +213,7 @@ symbols:
   relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: Same as AnalogChannel — Python DigitalIOChannel is SCPI-delegated.
+  rationale: "Same as AnalogChannel \u2014 Python DigitalIOChannel is SCPI-delegated."
   members:
   - upstream: ChannelNumber
     downstream: channel_number
@@ -406,6 +406,179 @@ symbols:
   - upstream: Sample
     downstream: sample
     relation: one_to_one
+- upstream:
+    kind: class
+    qualified: <downstream-only:AnalogInputChannel>
+  downstream:
+    kind: class
+    qualified: daqifi.channels.AnalogInputChannel
+    file: daqifi/channels.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only SCPI-wrapper for a single analog input. C# AnalogChannel
+    is a data-only record; Python adds an IO-aware wrapper around SerialInterface
+    for ergonomic per-channel reads.
+  members:
+  - upstream: <downstream-only:index>
+    downstream: index
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:range>
+    downstream: range
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:enabled>
+    downstream: enabled
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: <downstream-only:AnalogOutputChannel>
+  downstream:
+    kind: class
+    qualified: daqifi.channels.AnalogOutputChannel
+    file: daqifi/channels.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only SCPI-wrapper for a single analog output. C# DAC support not
+    yet ported as a class; Python ships an IO-aware wrapper today.
+  members:
+  - upstream: <downstream-only:index>
+    downstream: index
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:voltage>
+    downstream: voltage
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:enabled>
+    downstream: enabled
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: <downstream-only:DigitalIOChannel>
+  downstream:
+    kind: class
+    qualified: daqifi.channels.DigitalIOChannel
+    file: daqifi/channels.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only SCPI-wrapper for a single digital IO line. C# DigitalChannel
+    is data-only; Python adds an IO-aware wrapper.
+  members:
+  - upstream: <downstream-only:index>
+    downstream: index
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:direction>
+    downstream: direction
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:state>
+    downstream: state
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: <downstream-only:ChannelCollection>
+  downstream:
+    kind: class
+    qualified: daqifi.channels.ChannelCollection
+    file: daqifi/channels.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only collection facade exposing AnalogInputs/AnalogOutputs/DigitalIO
+    bank attributes on a single `device.channels` accessor. C# uses separate properties
+    on the device.
+  members:
+  - upstream: <downstream-only:channels>
+    downstream: channels
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: <downstream-only:AnalogInputs>
+  downstream:
+    kind: class
+    qualified: daqifi.channels.AnalogInputs
+    file: daqifi/channels.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only port-bank wrapper grouping AnalogInputChannel instances.
+    No C# counterpart (C# exposes channels directly on the device).
+  members:
+  - upstream: <downstream-only:configure_channels>
+    downstream: configure_channels
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:enable_all>
+    downstream: enable_all
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:disable_all>
+    downstream: disable_all
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: <downstream-only:AnalogOutputs>
+  downstream:
+    kind: class
+    qualified: daqifi.channels.AnalogOutputs
+    file: daqifi/channels.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only port-bank wrapper grouping AnalogOutputChannel instances.
+    No C# counterpart.
+  members:
+  - upstream: <downstream-only:set_voltages>
+    downstream: set_voltages
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:enable_all>
+    downstream: enable_all
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:disable_all>
+    downstream: disable_all
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: <downstream-only:DigitalIO>
+  downstream:
+    kind: class
+    qualified: daqifi.channels.DigitalIO
+    file: daqifi/channels.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only port-bank wrapper grouping DigitalIOChannel instances. No
+    C# counterpart.
+  members:
+  - upstream: <downstream-only:configure_outputs>
+    downstream: configure_outputs
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:configure_inputs>
+    downstream: configure_inputs
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:set_states>
+    downstream: set_states
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:read_all>
+    downstream: read_all
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences:
 - id: DIV-001
   upstream_path: src/Daqifi.Core/Channel/
