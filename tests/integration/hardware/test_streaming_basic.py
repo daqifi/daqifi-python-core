@@ -210,20 +210,26 @@ def test_single_channel_streaming_supported_rates(
         f"distinct counts seen: {sorted(set(harness.analog_sample_counts))}"
     )
 
-    # Timestamp monotonicity. The wrap period for ``uint32`` is
-    # ~49.7 days at a 1 kHz tick freq, so wrap can't happen here. We
-    # don't assert strict increase because COM7 fw 3.4.6b1 reports a
-    # constant boot-tick value across all frames (timestamp_freq=0 =>
-    # per-frame counter disabled). Non-decreasing is the portable
-    # check that holds across both that mode and a future firmware
-    # that does increment per trigger.
+    # Timestamp monotonicity, modular over uint32. The earlier comment
+    # claimed wrap couldn't happen at 1 kHz but the firmware actually
+    # ticks at the MCU core-timer rate (observed ~24.5 kHz on fw
+    # 3.4.6b1), so a long-uptime device that's only been running a few
+    # tens of minutes will straddle the wrap point inside this 2-second
+    # window. Treat any forward step <2^31 as monotonic (interpret
+    # `(curr - prev) mod 2^32` as the forward delta — same trick a
+    # uint32 ring counter uses).
     assert len(harness.timestamps) == harness.parsed_frames, (
         "harness should record one timestamp per parsed frame"
     )
+    _UINT32_WRAP = 1 << 32
+    _MAX_FORWARD_DELTA = 1 << 31  # half the ring; anything ≥ this is "backwards"
     for i in range(1, len(harness.timestamps)):
-        assert harness.timestamps[i] >= harness.timestamps[i - 1], (
+        prev = harness.timestamps[i - 1]
+        curr = harness.timestamps[i]
+        forward_delta = (curr - prev) % _UINT32_WRAP
+        assert forward_delta < _MAX_FORWARD_DELTA, (
             f"timestamp went backwards at index {i}: "
-            f"{harness.timestamps[i - 1]} -> {harness.timestamps[i]}"
+            f"{prev} -> {curr} (forward delta mod 2^32 = {forward_delta})"
         )
 
 

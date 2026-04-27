@@ -129,17 +129,16 @@ def test_is_usb_connection_true_for_serial_factory(
 
 def test_initial_sd_state_is_idle(device_info: DeviceInfo) -> None:
     """Without an explicit SD enable, ``is_logging_to_sd_card`` reads
-    False and ``sd_card_files`` is an empty list. ``sd_card_files``
-    returns a *snapshot* (mutating it must not poison the device)."""
+    False and ``sd_card_files`` is an empty snapshot. The property
+    returns ``tuple(...)`` so callers literally can't mutate the
+    internal cache — strongest possible defensive-copy semantics."""
     dev = _open_factory_device(device_info.port)
     try:
         assert dev.is_logging_to_sd_card is False
 
         files = dev.sd_card_files
-        assert files == []
-        files.append("not-a-real-file.bin")
-        # The internal list must be untouched by the caller's mutation.
-        assert dev.sd_card_files == []
+        assert files == ()
+        assert isinstance(files, tuple)
     finally:
         dev.close()
 
