@@ -77,7 +77,7 @@ public API forces a test or a documented skip).
 - [x] `DaqifiStreamingDevice.start_streaming` / `stop_streaming` (B6)
 - [x] `DaqifiStreamingDevice.is_streaming` / `streaming_frequency` (B6)
 - [x] `DaqifiStreamingDevice.is_usb_connection` (B6)
-- [ ] `DaqifiStreamingDevice.enable_sd_card_logging` / `disable_sd_card_logging` / `set_sd_logging_file_name` / `request_sd_card_file_list` (B10)
+- [x] `DaqifiStreamingDevice.enable_sd_card_logging` / `disable_sd_card_logging` / `set_sd_logging_file_name` / `request_sd_card_file_list` (B10 — flag round-trip + SCPI fire smoke; no card needed)
 - [d] `DaqifiStreamingDevice.delete_sd_file` / `format_sd_card` (B11)
 - [x] `DaqifiStreamingDevice.set_wifi_ssid` / `set_wifi_password` / `set_wifi_mode_self_hosted` / `set_wifi_mode_existing` (B12 — smoke; SCPI error-queue check blocked on python-core#16)
 - [x] `DaqifiStreamingDevice.apply_network_configuration` / `save_network_configuration` (B12 — exercised via `update_network_configuration` round-trip, gated on `DAQIFI_DESTRUCTIVE_OK=1`)
@@ -129,7 +129,7 @@ public API forces a test or a documented skip).
 ## daqifi.sdcard
 
 - [~] All dataclasses (`SdCardFileInfo`, `SdCardParseProgress`, `SdCardDeviceConfiguration`, `SdCardParseOptions`, `SdCardTransferProgress`, `SdCardDownloadResult`) — pure data
-- [ ] `SdCardOperations` impl on `DaqifiStreamingDevice` (B10)
+- [x] `SdCardOperations` impl on `DaqifiStreamingDevice` (B10 — runtime_checkable Protocol satisfaction)
 - [ ] `SdCardOperations.download_sd_card_file` / `download_sd_card_file_to_temp` (B10)
 
 ## daqifi.network
@@ -138,7 +138,7 @@ public API forces a test or a documented skip).
 - [~] `get_ip_address_string` / `get_mac_address_string` / `get_subnet_mask_string` / `get_gateway_string` / `get_primary_dns_string` / `get_secondary_dns_string` — pure; unit-tested
 - [x] `NetworkConfiguration.clone` (B12)
 - [x] `NetworkConfigurable.update_network_configuration` (B12 — full apply+save round-trip; gated on `DAQIFI_DESTRUCTIVE_OK=1`)
-- [ ] `NetworkConfigurable.prepare_sd_interface` / `prepare_lan_interface` (B10)
+- [x] `NetworkConfigurable.prepare_sd_interface` / `prepare_lan_interface` (B10 — SPI bus mux; no card needed)
 
 ## daqifi.protocol
 
