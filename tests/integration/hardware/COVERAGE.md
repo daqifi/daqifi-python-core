@@ -116,11 +116,11 @@ public API forces a test or a documented skip).
 
 ## daqifi.streaming
 
-- [ ] `StreamManager.start` / `stop` (B4)
-- [ ] `StreamManager.read` (blocking) (B4)
-- [ ] `StreamManager.read_all` — collects to SampleBuffer (B4)
-- [ ] `StreamManager.state` / `channels` / `sample_rate` properties (B4)
-- [ ] `StreamManager.__enter__` / `__exit__` context manager (B4)
+- [x] `StreamManager.start` / `stop` (B4)
+- [x] `StreamManager.read` (blocking) (B4)
+- [x] `StreamManager.read_all` — collects to SampleBuffer (B4)
+- [x] `StreamManager.state` / `channels` / `sample_rate` properties (B4)
+- [x] `StreamManager.__enter__` / `__exit__` context manager (B4)
 - [ ] `AsyncStreamManager.start` / `stop` / `read` / async-iter (B14)
 - [ ] `SampleBuffer.add_sample` / `clear` (B15)
 - [ ] `SampleBuffer.get_channel_data` / `get_timestamps` (B15)
