@@ -167,36 +167,53 @@ def _write_state_mask(dev: NyquistDevice, value: int) -> None:
 @pytest.fixture
 def nyquist_device(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
     """Open a NyquistDevice on the discovered port. Yields a connected
-    device with errors drained and the DIO port reset to all-inputs +
-    all-low so each test starts from a known-clean baseline. Teardown
+    device with errors drained and the DIO port reset to all-inputs
+    so each test starts from a known-clean baseline. Teardown
     restores the same all-inputs baseline so a later session doesn't
-    inherit driven outputs."""
+    inherit driven outputs.
+
+    Setup baseline asserts on success — if we can't reliably reset
+    the direction mask, the module's safety guarantee (no driven
+    outputs survive teardown) is unverifiable and tests must not run.
+    Teardown re-raises any reset failure AFTER disconnect so the
+    operator sees the safety-reset failure even when a test passed."""
     port = device_info.port
     if not port:
         pytest.skip(f"device_info has no serial port: {device_info!r}")
     dev = NyquistDevice.connect(port.strip())
+    setup_failed = False
     try:
         _wake_and_drain(dev)
-        # Setup baseline: all inputs (high-Z, harmless) + all low.
-        # State mask is meaningless for inputs but normalizes both
-        # masks for predictable per-test starting state.
-        try:
-            _write_direction_mask(dev, 0)
-            _write_state_mask(dev, 0)
-        except Exception:
-            pass
+        # Setup baseline: all inputs (high-Z, harmless). State mask
+        # is meaningless for inputs (their state read reflects live
+        # pin values, not the output register) so we don't normalize
+        # it — leaving direction=0 alone is enough to make every pin
+        # safe.
+        _write_direction_mask(dev, 0)
         yield dev
+    except Exception:
+        setup_failed = True
+        raise
     finally:
-        # Restore safe baseline regardless of test outcome.
-        try:
-            _write_direction_mask(dev, 0)
-            _write_state_mask(dev, 0)
-        except Exception:
-            pass
+        teardown_exc: Exception | None = None
+        # Restore safe baseline. We surface the failure rather than
+        # swallow it — driven outputs on a "clean" device are a
+        # safety hazard, not a flake.
+        if not setup_failed:
+            try:
+                _write_direction_mask(dev, 0)
+            except Exception as e:
+                teardown_exc = e
         try:
             dev.disconnect()
         except Exception:
             pass
+        if teardown_exc is not None:
+            pytest.fail(
+                f"DIO safety-reset FAILED in teardown: {teardown_exc!r}. "
+                f"Device may have driven outputs — physically unplug "
+                f"before re-running."
+            )
 
 
 # ---- Collection ops --------------------------------------------------------
@@ -298,7 +315,11 @@ def test_direction_setter_rejects_invalid_value(
     _write_direction_mask(dev, 0)
     ch = dev.digital_io[0]
 
-    with pytest.raises(Exception):
+    # Tight exception type — the production setter promises
+    # ConfigurationError specifically. A broader Exception would
+    # silently accept a future regression that swaps it for, say,
+    # CommandError.
+    with pytest.raises(ConfigurationError):
         ch.direction = "bidirectional"
 
     # Mask should still be 0 — invalid value rejected before write.
@@ -393,22 +414,39 @@ def test_per_channel_state_setter_on_input_raises_configuration_error(
 ) -> None:
     """Trying to set state on a channel that's configured as input
     raises ``ConfigurationError`` BEFORE any state-write SCPI hits
-    the wire — verified by reading the state mask before/after and
-    confirming it's unchanged."""
+    the wire.
+
+    Setup: every channel as OUTPUT (deterministic state register),
+    target channel switched to INPUT just before the attempted
+    write. We compare the state mask masking out the target bit so
+    the floating input pin's live reading doesn't poison the
+    deterministic comparison (input bits in ``DIO:PORt:STATe?``
+    reflect the live pin, not the output register, so direct
+    equality on a port-wide mask while any bit is an input is
+    inherently flaky)."""
     dev = nyquist_device
-    _write_direction_mask(dev, 0)  # all inputs
-    _write_state_mask(dev, 0)
+    # All outputs with a known non-trivial state pattern, so the bits
+    # we DON'T touch stay deterministic across the read window.
+    _write_direction_mask(dev, 0xFFFF)
+    _write_state_mask(dev, 0xA5A5)
 
-    ch = dev.digital_io[2]
-    assert ch.direction == "input"
+    target_idx = 2
+    target_bit = 1 << target_idx
+    other_bits_mask = 0xFFFF & ~target_bit
 
-    before = _read_state_mask(dev)
+    # Switch only the target channel to input; the rest stay outputs
+    # so their state-register bits remain deterministic.
+    dev.digital_io[target_idx].direction = "input"
+    assert dev.digital_io[target_idx].direction == "input"
+
+    before_other = _read_state_mask(dev) & other_bits_mask
     with pytest.raises(ConfigurationError):
-        ch.state = True
-    after = _read_state_mask(dev)
-    assert after == before, (
-        f"state mask changed despite ConfigurationError: "
-        f"before=0x{before:X} after=0x{after:X}"
+        dev.digital_io[target_idx].state = True
+    after_other = _read_state_mask(dev) & other_bits_mask
+    assert after_other == before_other, (
+        "state mask changed on the non-target output channels despite "
+        f"ConfigurationError: before=0x{before_other:X} "
+        f"after=0x{after_other:X}"
     )
 
 
