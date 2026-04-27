@@ -38,21 +38,35 @@ configured.
 from __future__ import annotations
 
 import os
+import time
 from typing import Iterator
 
 import pytest
 
+from daqifi._internal import scpi_commands
 from daqifi.devices import DaqifiDeviceFactory, DaqifiStreamingDevice
 from daqifi.discovery import DeviceInfo
 from daqifi.enums import WifiMode, WifiSecurityType
 from daqifi.network import NetworkConfiguration
 
 
+# USB CDC convention used by the rest of the hardware suite. Baud
+# is technically meaningless on USB CDC (it's a serial-protocol
+# parameter the host driver ignores) but explicit consistency keeps
+# us aligned with the other test modules and future-proofs against
+# a real serial transport ever appearing.
+_USB_CDC_BAUD = 115200
+
+
 def _open_factory_device(port: str) -> DaqifiStreamingDevice:
     """Same factory shape the other B-slice tests use — opens a
     DaqifiStreamingDevice via the canonical factory + initialize
-    sequence."""
-    return DaqifiDeviceFactory.connect_serial(port.strip())
+    sequence. Pinned to 115200 baud for consistency with the rest
+    of the hardware suite."""
+    return DaqifiDeviceFactory.connect_serial(
+        port_name=port.strip(),
+        baud_rate=_USB_CDC_BAUD,
+    )
 
 
 @pytest.fixture
@@ -251,7 +265,19 @@ def test_update_network_configuration_round_trip(
             "round-trip would leave the device mis-configured"
         )
 
+    restore = NetworkConfiguration(
+        mode=WifiMode.EXISTING_NETWORK,
+        security_type=WifiSecurityType.WPA_PSK_PHRASE,
+        ssid=saved_ssid,
+        password=saved_password,
+    )
+
     # --- STAGE 1: apply a transient config (different from saved) ---
+    # `update_network_configuration` ALWAYS does APPLY+SAVE under
+    # the hood, so this is a persistent flash write. The try/finally
+    # below guarantees restore runs even if any assertion in stage 1
+    # fails — without it, a stage-1 assertion failure would leave
+    # the rig saved with the transient SSID/password indefinitely.
     transient = NetworkConfiguration(
         mode=WifiMode.EXISTING_NETWORK,
         security_type=WifiSecurityType.WPA_PSK_PHRASE,
@@ -260,36 +286,61 @@ def test_update_network_configuration_round_trip(
     )
     dev.update_network_configuration(transient)
 
-    # Snapshot should now reflect the transient config.
-    snap = dev.network_configuration
-    assert snap.ssid == transient.ssid
-    assert snap.mode == transient.mode
-    assert snap.security_type == transient.security_type
-    # Password cloned through; clear-text in the snapshot is fine
-    # because it's process-local (not on the wire).
-    assert snap.password == transient.password
+    try:
+        # Snapshot should now reflect the transient config.
+        snap = dev.network_configuration
+        assert snap.ssid == transient.ssid
+        assert snap.mode == transient.mode
+        assert snap.security_type == transient.security_type
+        # Password cloned through; clear-text in the snapshot is fine
+        # because it's process-local (not on the wire).
+        assert snap.password == transient.password
 
-    # --- STAGE 2: restore to the rig's known-good Tesla credentials ---
-    restore = NetworkConfiguration(
-        mode=WifiMode.EXISTING_NETWORK,
-        security_type=WifiSecurityType.WPA_PSK_PHRASE,
-        ssid=saved_ssid,
-        password=saved_password,
-    )
-    dev.update_network_configuration(restore)
+    finally:
+        # --- STAGE 2 (always-runs): restore Tesla credentials ---
+        restore_failed: Exception | None = None
+        try:
+            dev.update_network_configuration(restore)
+        except Exception as e:
+            restore_failed = e
+        else:
+            snap = dev.network_configuration
+            # Snapshot assertions go inside else (only if restore
+            # itself didn't blow up). Wrap to capture so we can
+            # report whichever failure mode actually occurred.
+            try:
+                assert snap.ssid == saved_ssid
+                assert snap.mode == WifiMode.EXISTING_NETWORK
+                assert snap.security_type == WifiSecurityType.WPA_PSK_PHRASE
+            except AssertionError as e:
+                restore_failed = e
 
-    snap = dev.network_configuration
-    assert snap.ssid == saved_ssid
-    assert snap.mode == WifiMode.EXISTING_NETWORK
-    assert snap.security_type == WifiSecurityType.WPA_PSK_PHRASE
+        # --- STAGE 3 (always-runs): reboot for clean re-association ---
+        # Empirically: rapid back-to-back apply+save+apply+save (the
+        # transient → restore thrash above) leaves the WINC in a state
+        # where the Tesla credentials are saved to flash but the radio
+        # never re-joins the AP — the unit sits at the self-hosted-
+        # default ip=192.168.1.1 indefinitely. A SYSTem:REboot forces
+        # a clean power-up sequence; the saved Tesla config then
+        # drives a normal association on next boot.
+        try:
+            dev.send(scpi_commands.reboot_device())
+        except Exception:
+            # Reboot wire-write may fail if the device already
+            # disconnected — non-fatal here, the restore is what
+            # actually matters.
+            pass
 
-    # --- STAGE 3: clean reboot so WINC reliably re-associates ---
-    # Empirically: rapid back-to-back apply+save+apply+save (the
-    # transient → restore thrash above) leaves the WINC in a state
-    # where the Tesla credentials are saved to flash but the radio
-    # never re-joins the AP — the unit sits at the self-hosted-default
-    # ip=192.168.1.1 indefinitely. A SYSTem:REboot forces a clean
-    # power-up sequence; the saved Tesla config then drives a normal
-    # association on next boot.
-    from daqifi._internal import scpi_commands
-    dev.send(scpi_commands.reboot_device())
+        # Hold for ~6s so the device finishes USB re-enumeration
+        # before any subsequent test in the same pytest session
+        # tries to open the port. Without this guard the next
+        # test's fixture would race the re-enumeration window
+        # and intermittently fail to connect.
+        time.sleep(6)
+
+        if restore_failed is not None:
+            pytest.fail(
+                "FAILED to restore Tesla credentials after stage 1. "
+                "Device may be persistently misconfigured — manual "
+                f"restoration required. Underlying: {restore_failed!r}"
+            )
