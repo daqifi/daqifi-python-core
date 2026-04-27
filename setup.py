@@ -57,6 +57,11 @@ setup(
         "dev": [
             "pytest>=7.0",
             "pytest-cov>=3.0",
+            # Required for the async hardware tests in
+            # tests/integration/hardware/test_async_stream_manager.py.
+            # Without it, modules using `pytest.mark.asyncio` and
+            # `async def` test functions error at collection time.
+            "pytest-asyncio>=0.21",
             "black>=22.0",
             "mypy>=0.950",
             "flake8>=4.0",
