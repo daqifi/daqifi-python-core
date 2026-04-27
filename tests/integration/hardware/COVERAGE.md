@@ -48,21 +48,21 @@ public API forces a test or a documented skip).
 
 ## daqifi.device (NyquistDevice — high-level facade)
 
-- [ ] `NyquistDevice.connect` (B9)
-- [ ] `NyquistDevice.disconnect` (B9)
-- [ ] `NyquistDevice.power_up` / `power_down` (B9)
-- [ ] `NyquistDevice.reset` (B9)
-- [ ] `NyquistDevice.get_system_info` (B9)
-- [ ] `NyquistDevice.get_last_error` (B9)
-- [ ] `NyquistDevice.clear_errors` (B9 — currently capped at 10; see python-core#22)
-- [ ] `NyquistDevice.is_connected` (B9)
-- [ ] `NyquistDevice.variant` / `manufacturer` / `model` / `serial_number` / `firmware_version` (B9)
+- [x] `NyquistDevice.connect` (B9)
+- [x] `NyquistDevice.disconnect` (B9)
+- [x] `NyquistDevice.power_up` / `power_down` (B9)
+- [x] `NyquistDevice.reset` (B9)
+- [x] `NyquistDevice.get_system_info` (B9)
+- [x] `NyquistDevice.get_last_error` (B9)
+- [x] `NyquistDevice.clear_errors` (B9 — currently capped at 10; see python-core#22)
+- [x] `NyquistDevice.is_connected` (B9)
+- [x] `NyquistDevice.variant` / `manufacturer` / `model` / `serial_number` / `firmware_version` (B9)
 - [ ] `NyquistDevice.create_stream` (B14 async)
 - [ ] `NyquistDevice.sd_enable` / `sd_list_files` / `sd_get_file` / `sd_get_file_binary` / `sd_set_logging` / `sd_benchmark` (B10)
 - [d] `NyquistDevice.sd_format` / `sd_delete_file` (B11)
 - [ ] `NyquistDevice.analog_outputs` / `analog_inputs` / `digital_io` (B7, B8)
-- [ ] `NyquistDevice.power_state` (B9)
-- [ ] `NyquistDevice.__enter__` / `__exit__` — context manager (B9)
+- [x] `NyquistDevice.power_state` (B9)
+- [x] `NyquistDevice.__enter__` / `__exit__` — context manager (B9)
 
 ## daqifi.devices
 
