@@ -70,6 +70,17 @@ def device_facade(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
 # ---- connect — both signatures ---------------------------------------------
 
 
+def _safe_disconnect(dev: NyquistDevice) -> None:
+    """Best-effort disconnect for tests that manage their own
+    NyquistDevice (i.e. don't go through the `device_facade`
+    fixture). A teardown-time disconnect failure shouldn't cascade
+    into the pytest output and bury the actual test outcome."""
+    try:
+        dev.disconnect()
+    except Exception:
+        pass
+
+
 def test_connect_accepts_string_port(device_info: DeviceInfo) -> None:
     """``NyquistDevice.connect("/dev/ttyACMx")`` opens, identifies,
     and populates the variant from the IDN reply."""
@@ -87,7 +98,7 @@ def test_connect_accepts_string_port(device_info: DeviceInfo) -> None:
             BoardVariant.NQ3,
         )
     finally:
-        dev.disconnect()
+        _safe_disconnect(dev)
 
 
 def test_connect_accepts_device_info(device_info: DeviceInfo) -> None:
@@ -111,7 +122,7 @@ def test_connect_accepts_device_info(device_info: DeviceInfo) -> None:
     try:
         assert dev.is_connected is True
     finally:
-        dev.disconnect()
+        _safe_disconnect(dev)
 
 
 # ---- disconnect / is_connected --------------------------------------------
@@ -125,12 +136,15 @@ def test_is_connected_tracks_disconnect(device_info: DeviceInfo) -> None:
     if not port:
         pytest.skip(f"device_info has no serial port: {device_info!r}")
     dev = NyquistDevice.connect(port.strip())
-    assert dev.is_connected is True
-    dev.disconnect()
-    assert dev.is_connected is False
-    # Second disconnect: no raise.
-    dev.disconnect()
-    assert dev.is_connected is False
+    try:
+        assert dev.is_connected is True
+        dev.disconnect()
+        assert dev.is_connected is False
+        # Second disconnect: no raise.
+        dev.disconnect()
+        assert dev.is_connected is False
+    finally:
+        _safe_disconnect(dev)
 
 
 # ---- IDN-derived metadata --------------------------------------------------
@@ -244,12 +258,16 @@ def test_context_manager_disconnects_on_normal_exit(
     device_info: DeviceInfo,
 ) -> None:
     """``with NyquistDevice.connect(...) as dev:`` disconnects on
-    block exit — ``is_connected`` is False after the block."""
+    block exit — ``is_connected`` is False after the block.
+
+    Uses the canonical inline pattern (`with NyquistDevice.connect(...)
+    as dev:`) so the test exercises the same shape users would
+    actually write."""
     port = device_info.port
     if not port:
         pytest.skip(f"device_info has no serial port: {device_info!r}")
-    dev = NyquistDevice.connect(port.strip())
-    with dev:
+    dev: NyquistDevice
+    with NyquistDevice.connect(port.strip()) as dev:
         assert dev.is_connected is True
     assert dev.is_connected is False
 
@@ -263,10 +281,13 @@ def test_context_manager_disconnects_on_exception(
     port = device_info.port
     if not port:
         pytest.skip(f"device_info has no serial port: {device_info!r}")
-    dev = NyquistDevice.connect(port.strip())
     sentinel_message = "deliberate-test-exception-b9-context-manager"
+    captured: dict[str, NyquistDevice] = {}
     with pytest.raises(RuntimeError, match=sentinel_message):
-        with dev:
+        with NyquistDevice.connect(port.strip()) as dev:
+            captured["dev"] = dev
             assert dev.is_connected is True
             raise RuntimeError(sentinel_message)
-    assert dev.is_connected is False
+    # The with-block exited via exception; verify __exit__ still
+    # disconnected the device the user got from `as dev`.
+    assert captured["dev"].is_connected is False
