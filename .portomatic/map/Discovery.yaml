@@ -433,6 +433,25 @@ symbols:
   - upstream: DeviceInfo
     downstream: device_info
     relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Discovery.DeviceDiscoveredEventArgs
+    file: src/Daqifi.Core/Device/Discovery/DeviceDiscoveredEventArgs.cs
+  downstream:
+    kind: class
+    qualified: daqifi.device_finders.DeviceDiscoveredEventArgs
+    file: daqifi/device_finders.py
+  relation: split
+  last_synced_sha: null
+  notes: null
+  rationale: "Python defines DeviceDiscoveredEventArgs in two modules \u2014 discovery.py\
+    \ (canonical, cataloged separately) and device_finders.py (legacy alias used by\
+    \ the IFinder Protocol implementations). Both refer to the same C# class; the\
+    \ device_finders.py copy may be consolidated when the discovery API is unified."
+  members:
+  - upstream: DeviceInfo
+    downstream: device_info
+    relation: one_to_one
 divergences: []
 backlog: []
 hal_pairs: []
