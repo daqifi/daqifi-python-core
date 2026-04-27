@@ -31,6 +31,7 @@ import pytest
 
 from daqifi.device import NyquistDevice
 from daqifi.discovery import DeviceInfo
+from daqifi.exceptions import CommandError
 from daqifi.streaming import Sample, SampleBuffer, StreamManager, StreamState
 
 
@@ -42,7 +43,9 @@ from daqifi.streaming import Sample, SampleBuffer, StreamManager, StreamState
 def streaming_nyquist(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
     """Open NyquistDevice, yield it ready to construct streams from
     (powered-up, errors drained, all channels disabled). Teardown
-    disables every analog channel and disconnects."""
+    issues a best-effort StopStreamData (in case a test left the
+    firmware streaming), disables every analog channel, and
+    disconnects."""
     port = device_info.port
     if not port:
         pytest.skip(f"device_info has no serial port: {device_info!r}")
@@ -56,6 +59,14 @@ def streaming_nyquist(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
         _disable_all_adc(dev)
         yield dev
     finally:
+        # Best-effort StopStreamData first — if a test exited with
+        # the firmware still streaming (e.g. its own stream.stop()
+        # raised), un-stuck the device-side state machine before
+        # the next test or session inherits it.
+        try:
+            dev._comm.send_command("SYSTem:StopStreamData")
+        except Exception:
+            pass
         try:
             _disable_all_adc(dev)
         except Exception:
@@ -135,23 +146,23 @@ def test_start_without_enabled_channels_raises(
     streaming_nyquist: NyquistDevice,
 ) -> None:
     """``start()`` requires at least one ADC channel enabled (firmware
-    crashes with TLB exception otherwise — production guard wraps the
-    underlying ConfigurationError in a CommandError). State transitions
-    to ERROR and stays there until reset."""
+    crashes with TLB exception otherwise). Production guard wraps
+    the underlying ConfigurationError in a `CommandError` whose
+    message includes "No ADC channels enabled". State transitions
+    to ERROR and stays there until the next successful start.
+
+    Tight exception type + message-substring match — a future
+    regression that swaps the exception class or removes the
+    diagnostic string fails the test instead of passing silently."""
     dev = streaming_nyquist
     _disable_all_adc(dev)  # ensure clean slate
 
     stream = dev.create_stream(channels=[0], sample_rate=100)
 
-    # The actual exception class is wrapped — production code wraps
-    # ConfigurationError in CommandError. Match on either by accepting
-    # the broader Exception, but assert the message includes the
-    # diagnostic substring so we know the right path fired.
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(CommandError, match="No ADC channels enabled"):
         stream.start()
-    assert "channel" in str(excinfo.value).lower(), (
-        f"expected 'channel' in error message; got {excinfo.value!r}"
-    )
+    # Per the docstring, the failed start transitions to ERROR.
+    assert stream.state == StreamState.ERROR
 
 
 def test_start_then_stop_round_trips_state(
@@ -163,6 +174,7 @@ def test_start_then_stop_round_trips_state(
     _enable_adc_channel(dev, 0)
 
     stream = dev.create_stream(channels=[0], sample_rate=100)
+    stop_exc: Exception | None = None
     try:
         stream.start()
         assert stream.state == StreamState.RUNNING
@@ -177,8 +189,11 @@ def test_start_then_stop_round_trips_state(
         if stream.state == StreamState.RUNNING:
             try:
                 stream.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                stop_exc = e
+
+    if stop_exc is not None:
+        pytest.fail(f"stream.stop() failed in cleanup: {stop_exc!r}")
 
 
 def test_stop_without_start_is_noop(
@@ -206,6 +221,7 @@ def test_read_returns_requested_sample_count(
     _enable_adc_channel(dev, 0)
 
     stream = dev.create_stream(channels=[0], sample_rate=200)
+    stop_exc: Exception | None = None
     try:
         stream.start()
         samples = stream.read(num_samples=5, timeout=2.0)
@@ -214,8 +230,11 @@ def test_read_returns_requested_sample_count(
     finally:
         try:
             stream.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            stop_exc = e
+
+    if stop_exc is not None:
+        pytest.fail(f"stream.stop() failed in cleanup: {stop_exc!r}")
 
 
 def test_read_before_start_raises_runtime_error(
@@ -234,29 +253,36 @@ def test_read_all_returns_populated_buffer(
     streaming_nyquist: NyquistDevice,
 ) -> None:
     """``read_all(duration=T)`` returns a SampleBuffer that holds
-    samples collected over T seconds at the configured rate."""
+    samples collected over T seconds at the configured rate.
+
+    Tiny window (0.05s @ 100 Hz → 5 expected samples) keeps the
+    worst-case blocking under ~5s — `read_all` calls `read()`
+    with the default per-sample timeout (1.0s × N expected
+    samples), so even with a flaky firmware we won't hang the
+    suite for 50+s here. The deeper "we get the EXPECTED count"
+    check lives in test_streaming_basic.py with its long-window
+    no-drop guards."""
     dev = streaming_nyquist
     _enable_adc_channel(dev, 0)
 
     stream = dev.create_stream(channels=[0], sample_rate=100)
+    stop_exc: Exception | None = None
     try:
         stream.start()
-        # Ask for a short window so the test stays under 5s total.
-        # We don't strictly verify the count — firmware drop tolerance
-        # makes exact counts brittle (the long-window no-drop guard
-        # lives in test_streaming_basic.py). What we DO verify is
-        # the return shape is a SampleBuffer with at least one sample.
-        buf = stream.read_all(duration=0.5)
+        buf = stream.read_all(duration=0.05)
         assert isinstance(buf, SampleBuffer)
-        # If we got nothing back, the streaming pipeline is broken
-        # at a level deeper than this slice can cover; defer to the
-        # B5/B6 tests to diagnose.
         assert len(buf) > 0, "read_all returned an empty SampleBuffer"
     finally:
         try:
             stream.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            stop_exc = e
+
+    # Surface stop-failures AFTER the body assertions resolve so
+    # we don't shadow a body failure, but they still get reported
+    # — silently swallowing them masks real device issues.
+    if stop_exc is not None:
+        pytest.fail(f"stream.stop() failed in cleanup: {stop_exc!r}")
 
 
 # ---- Context manager ------------------------------------------------------
