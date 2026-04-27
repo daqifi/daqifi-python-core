@@ -56,30 +56,49 @@ _USB_CDC_BAUD = 115200
 @pytest.fixture(scope="module")
 def sd_card_present(device_info: DeviceInfo) -> bool:
     """Probe whether an SD card is in the slot (one-time, module-
-    scoped). Connects via the high-level NyquistDevice surface
-    (which exposes the simpler ``sd_list_files`` helper) and
-    looks for the firmware's "No SD Card Detected" sentinel.
+    scoped). Goes through the documented SPI-mux dance — disable
+    LAN → settle → enable SD storage → settle — before issuing
+    SD:LIST?. Without that prep the SD module shares SPI with the
+    WiFi chip and reads can return garbage or hit firmware error
+    -200 even when a card IS in the slot.
 
-    Returns True when a card IS present; False when the slot is
-    empty. Card-needing tests skip on False.
+    Returns True when the firmware's response is anything OTHER
+    than the "No SD Card Detected" sentinel; False ONLY when that
+    sentinel is observed. Probe-infrastructure errors (port
+    missing, connect failure, SCPI write failure) propagate as
+    test ERRORs rather than masquerading as silent skips — silent
+    skips would hide real probe regressions and let the operator
+    believe SD coverage was running when it wasn't.
     """
     from daqifi.device import NyquistDevice
 
     port = device_info.port
     if not port:
-        return False
+        pytest.fail(f"device_info has no serial port: {device_info!r}")
     dev = NyquistDevice.connect(port.strip())
     try:
-        dev.sd_enable(True)
+        # Documented SPI-mux dance: LAN off → settle → SD on → settle.
+        # The settle delays match `DaqifiStreamingDevice
+        # ._SD_INTERFACE_SETTLE_DELAY_S` (0.5s on this firmware) —
+        # without them the firmware's SPI arbiter races and the
+        # next SD command can hit error -200.
+        dev._comm.send_command("SYSTem:COMMunicate:LAN:ENAbled 0", delay=0.5)
+        dev._comm.send_command("SYSTem:STORage:SD:ENAble 1", delay=0.5)
         files = dev.sd_list_files()
         # Firmware sentinel for empty slot: returns a single
         # "Error !! No SD Card Detected" pseudo-file plus the
         # standard "**ERROR: -200" error-queue marker.
         joined = " ".join(files).lower()
         return "no sd card" not in joined
-    except Exception:
-        return False
     finally:
+        # Hand the SPI bus back to LAN so subsequent fixtures don't
+        # inherit SD-on / LAN-off. Best-effort — disconnect is what
+        # actually matters for test isolation.
+        try:
+            dev._comm.send_command("SYSTem:STORage:SD:ENAble 0", delay=0.5)
+            dev._comm.send_command("SYSTem:COMMunicate:LAN:ENAbled 1", delay=0.5)
+        except Exception:
+            pass
         try:
             dev.disconnect()
         except Exception:
