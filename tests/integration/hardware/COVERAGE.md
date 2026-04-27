@@ -109,10 +109,10 @@ public API forces a test or a documented skip).
 - [ ] `AnalogOutputs.set_voltages` (s — Nq3 only)
 - [ ] `AnalogOutputs.enable_all` / `disable_all` (s — Nq3 only)
 - [ ] `AnalogOutputChannel.voltage` / `enabled` (s — Nq3 only)
-- [ ] `DigitalIO.__getitem__` / `__len__` / `__iter__` (B8)
-- [ ] `DigitalIO.configure_outputs` / `configure_inputs` (B8)
-- [ ] `DigitalIO.set_states` / `read_all` (B8)
-- [ ] `DigitalIOChannel.direction` / `state` (B8)
+- [x] `DigitalIO.__getitem__` / `__len__` / `__iter__` (B8)
+- [x] `DigitalIO.configure_outputs` / `configure_inputs` (B8)
+- [x] `DigitalIO.set_states` / `read_all` (B8)
+- [x] `DigitalIOChannel.direction` / `state` (B8)
 
 ## daqifi.streaming
 
