@@ -905,6 +905,64 @@ symbols:
   - upstream: RunAsync
     downstream: null
     relation: not_yet_ported
+- upstream:
+    kind: class
+    qualified: <downstream-only:SubprocessRunner>
+  downstream:
+    kind: class
+    qualified: daqifi.firmware.external_process.SubprocessRunner
+    file: daqifi/firmware/external_process.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: Python-only helper wrapping subprocess.run for the firmware-update CLI
+    shell-out path. C# uses System.Diagnostics.Process inline.
+  members:
+  - upstream: <downstream-only:run>
+    downstream: run
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Firmware.FirmwareVersion
+    file: src/Daqifi.Core/Firmware/FirmwareVersion.cs
+  downstream:
+    kind: class
+    qualified: daqifi.firmware.version.FirmwareVersion
+    file: daqifi/firmware/version.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: <downstream-only:major>
+    downstream: major
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:minor>
+    downstream: minor
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:patch>
+    downstream: patch
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:pre_label>
+    downstream: pre_label
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:pre_number>
+    downstream: pre_number
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:is_pre_release>
+    downstream: is_pre_release
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:parse>
+    downstream: parse
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []

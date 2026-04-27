@@ -24,22 +24,6 @@ files:
   last_synced_sha: null
 symbols:
 - upstream:
-    kind: interface
-    qualified: Daqifi.Core.Device.Protocol.IProtocolHandler
-    file: src/Daqifi.Core/Device/Protocol/IProtocolHandler.cs
-  downstream: null
-  relation: not_yet_ported
-  last_synced_sha: null
-  notes: null
-  rationale: null
-  members:
-  - upstream: CanHandle
-    downstream: null
-    relation: not_yet_ported
-  - upstream: HandleAsync
-    downstream: null
-    relation: not_yet_ported
-- upstream:
     kind: enum
     qualified: Daqifi.Core.Device.Protocol.ProtobufMessageType
     file: src/Daqifi.Core/Device/Protocol/ProtobufMessageType.cs
@@ -98,6 +82,25 @@ symbols:
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Device.Protocol.IProtocolHandler
+    file: src/Daqifi.Core/Device/Protocol/IProtocolHandler.cs
+  downstream:
+    kind: interface
+    qualified: daqifi.protocol.IProtocolHandler
+    file: daqifi/protocol.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: null
+  rationale: null
+  members:
+  - upstream: CanHandle
+    downstream: can_handle
+    relation: one_to_one
+  - upstream: HandleAsync
+    downstream: handle_async
+    relation: one_to_one
 divergences: []
 backlog: []
 hal_pairs: []
