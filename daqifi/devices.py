@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -588,13 +589,18 @@ class DaqifiDevice:
                 pass
 
         captured: List[str] = []
+        line_queue: "queue.Queue[str]" = queue.Queue()
 
         try:
             text_parser = LineBasedMessageParser(line_ending="\r\n")
             text_consumer = StreamMessageConsumer[str](stream, text_parser)
 
             def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
-                captured.append(args.message.data)
+                # Background-thread callback. Only push to the queue;
+                # the captured list is built on the main thread from
+                # the queue gets so late arrivals can't slip in past
+                # the inactivity timeout.
+                line_queue.put(args.message.data)
 
             text_consumer.add_message_received(_on_text_line)
             text_consumer.start()
@@ -602,21 +608,30 @@ class DaqifiDevice:
             try:
                 setup_action()
 
-                # Phase 1: wait up to response_timeout_ms for first byte.
-                phase1_deadline = time.monotonic() + (response_timeout_ms / 1000.0)
-                while time.monotonic() < phase1_deadline and not captured:
-                    time.sleep(0.01)
+                # Phase 1: block up to response_timeout_ms for the first
+                # line. Returns immediately as soon as a line arrives,
+                # so we don't waste cycles polling.
+                try:
+                    captured.append(
+                        line_queue.get(timeout=response_timeout_ms / 1000.0)
+                    )
+                except queue.Empty:
+                    # No data within phase-1 budget — skip phase-2
+                    # entirely (nothing to wait inactivity ON).
+                    return []
 
-                # Phase 2: inactivity timeout. Reset the inactivity clock
-                # whenever a new line arrives.
+                # Phase 2: drain remaining lines until inactivity
+                # exceeds the completion threshold. Each get blocks
+                # until the next line OR the timeout — when get raises
+                # queue.Empty, we've hit the inactivity gap.
                 inactivity_threshold = completion_timeout_ms / 1000.0
-                last_count = len(captured)
-                last_change = time.monotonic()
-                while time.monotonic() - last_change < inactivity_threshold:
-                    if len(captured) != last_count:
-                        last_count = len(captured)
-                        last_change = time.monotonic()
-                    time.sleep(0.01)
+                while True:
+                    try:
+                        captured.append(
+                            line_queue.get(timeout=inactivity_threshold)
+                        )
+                    except queue.Empty:
+                        break
             finally:
                 # Always tear down the text consumer.
                 try:
