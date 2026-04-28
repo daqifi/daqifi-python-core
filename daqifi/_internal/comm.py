@@ -1288,9 +1288,12 @@ class SerialInterface:
         # firmware is still flushing the echo from the disable command
         # itself. Stable-empty for 2 consecutive polls (or 500 ms total)
         # before stopping.
-        deadline = time.time() + 0.5
+        # Monotonic clock for the deadline so a system clock adjustment
+        # doesn't make the loop run forever or terminate immediately
+        # (Qodo PR #55 /improve pass 5 importance 6).
+        deadline = time.monotonic() + 0.5
         empty_polls = 0
-        while time.time() < deadline and empty_polls < 2:
+        while time.monotonic() < deadline and empty_polls < 2:
             try:
                 pending = self._serial.in_waiting
             except (serial.SerialException, OSError):
