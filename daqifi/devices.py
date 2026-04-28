@@ -596,7 +596,10 @@ class DaqifiDevice:
             text_consumer = StreamMessageConsumer[str](stream, text_parser)
 
             def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
-                captured.append(args.message.data)
+                # Background-thread callback. Only push to the queue;
+                # the captured list is built on the main thread from
+                # the queue gets so late arrivals can't slip in past
+                # the inactivity timeout.
                 line_queue.put(args.message.data)
 
             text_consumer.add_message_received(_on_text_line)
@@ -609,7 +612,9 @@ class DaqifiDevice:
                 # line. Returns immediately as soon as a line arrives,
                 # so we don't waste cycles polling.
                 try:
-                    line_queue.get(timeout=response_timeout_ms / 1000.0)
+                    captured.append(
+                        line_queue.get(timeout=response_timeout_ms / 1000.0)
+                    )
                 except queue.Empty:
                     # No data within phase-1 budget — skip phase-2
                     # entirely (nothing to wait inactivity ON).
@@ -622,7 +627,9 @@ class DaqifiDevice:
                 inactivity_threshold = completion_timeout_ms / 1000.0
                 while True:
                     try:
-                        line_queue.get(timeout=inactivity_threshold)
+                        captured.append(
+                            line_queue.get(timeout=inactivity_threshold)
+                        )
                     except queue.Empty:
                         break
             finally:
