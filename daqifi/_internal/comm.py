@@ -1225,6 +1225,12 @@ class SerialInterface:
                 port=self.port,
                 baudrate=self.baudrate,
                 timeout=self.timeout,
+                # write_timeout matches read timeout so the open-time
+                # echo-disable write can't block forever on a flaky USB
+                # CDC enumeration. Consistent with the serial probing
+                # in device_finders.py which sets write_timeout before
+                # init writes (Qodo PR #55 review #2).
+                write_timeout=self.timeout,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE
@@ -1253,18 +1259,46 @@ class SerialInterface:
 
         Kept private + bare-bones because at open() time the device
         may still be in the slow USB-CDC settling window where
-        send_command's read-loop would burn the full timeout. We just
-        write + flush, give the device 100 ms to apply, and drain.
+        send_command's read-loop would burn the full timeout.
+
+        Drain strategy (Qodo PR #55 review #1): after the initial 100ms
+        settle, poll in_waiting in a short loop and read whatever's
+        there until the buffer stays empty for two consecutive polls
+        OR a 500ms deadline elapses. Then call reset_input_buffer()
+        as belt-and-suspenders so a discovery flow's *IDN? right
+        after open() can't pick up stale echo bytes.
         """
         if self._serial is None or not self._serial.is_open:
             return
         self._serial.write(b"SYSTem:ECHO -1\r")
         self._serial.flush()
         time.sleep(0.1)
-        # Drain whatever the device echoed back before suppression took effect.
+        # Drain loop — bytes can arrive after the initial settle if the
+        # firmware is still flushing the echo from the disable command
+        # itself. Stable-empty for 2 consecutive polls (or 500 ms total)
+        # before stopping.
+        deadline = time.time() + 0.5
+        empty_polls = 0
+        while time.time() < deadline and empty_polls < 2:
+            try:
+                pending = self._serial.in_waiting
+            except (serial.SerialException, OSError):
+                break
+            if pending:
+                try:
+                    self._serial.read(pending)
+                except (serial.SerialException, OSError):
+                    break
+                empty_polls = 0
+            else:
+                empty_polls += 1
+            time.sleep(0.02)
+        # Belt-and-suspenders: explicit input-buffer reset so any
+        # bytes still in flight when we stopped polling don't bleed
+        # into the next caller's read (e.g. discovery's *IDN?).
         try:
-            if self._serial.in_waiting:
-                self._serial.read(self._serial.in_waiting)
+            if hasattr(self._serial, "reset_input_buffer"):
+                self._serial.reset_input_buffer()
         except (serial.SerialException, OSError):
             pass
 

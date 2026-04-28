@@ -93,6 +93,40 @@ def test_open_succeeds_even_if_echo_disable_raises():
         assert si.open() is True
 
 
+def test_open_drains_input_buffer_after_disable_echo():
+    """Qodo PR #55 review #1: the drain loop must call reset_input_buffer
+    after the polling drain so a discovery flow's *IDN? right after
+    open() can't pick up stale echo bytes the polling missed."""
+    from daqifi._internal.comm import SerialInterface
+
+    fake = _make_fake_serial()
+    with patch("daqifi._internal.comm.serial.Serial", return_value=fake):
+        si = SerialInterface(port="/dev/null")
+        si.open()
+    # reset_input_buffer is called twice: once in the original open
+    # path (line 1224) and once at the end of _send_disable_echo.
+    assert fake.reset_input_buffer.call_count >= 2
+
+
+def test_open_sets_write_timeout():
+    """Qodo PR #55 review #2: serial.Serial must be constructed with a
+    write_timeout so the open-time echo-disable write can't block
+    indefinitely on a flaky USB CDC enumeration."""
+    from daqifi._internal.comm import SerialInterface
+
+    captured = {}
+
+    def capture_serial(**kwargs):
+        captured.update(kwargs)
+        return _make_fake_serial()
+
+    with patch("daqifi._internal.comm.serial.Serial", side_effect=capture_serial):
+        si = SerialInterface(port="/dev/null", timeout=2.5)
+        si.open()
+    assert "write_timeout" in captured
+    assert captured["write_timeout"] == 2.5
+
+
 def test_close_tolerates_serial_exception_on_restore():
     """close() must not raise when the restore-echo write fails — the
     underlying port may already be gone."""
