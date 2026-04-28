@@ -10,20 +10,26 @@ from daqifi.channels import AnalogInputChannel, AnalogInputs
 from daqifi.exceptions import FeatureNotSupportedError
 
 
-def _make_channel(variant: str | None) -> AnalogInputChannel:
+def _make_channel(channel_id: int, variant: str | None) -> AnalogInputChannel:
     """Build an AnalogInputChannel wired to a MagicMock comm so we can
-    introspect the .enabled writes."""
+    introspect the .enabled writes. ``channel_id`` is the per-channel
+    index that gets baked into the SCPI command — keep it explicit so
+    multi-channel tests can verify each channel addresses itself."""
     comm = MagicMock()
     # send_set_with_error returns (success, error_response). The
     # default success path is True, error_response='0,"No error"'.
     comm.send_set_with_error = MagicMock(return_value=(True, '0,"No error"'))
-    return AnalogInputChannel(channel_id=0, comm=comm, variant=variant)
+    return AnalogInputChannel(channel_id=channel_id, comm=comm, variant=variant)
 
 
 def test_configure_channels_writes_enabled_when_range_not_supported():
     """Reproducer from #32: on NQ1, range raises FeatureNotSupportedError.
     Before the fix, that aborted the loop before enabled was written."""
-    channels = [_make_channel("NQ1"), _make_channel("NQ1"), _make_channel("NQ1")]
+    channels = [
+        _make_channel(0, "NQ1"),
+        _make_channel(1, "NQ1"),
+        _make_channel(2, "NQ1"),
+    ]
     inputs = AnalogInputs(channels)
 
     inputs.configure_channels([0, 1, 2], range="10V", enabled=True)
@@ -46,7 +52,7 @@ def test_configure_channels_writes_enabled_when_range_not_supported():
 
 def test_configure_channels_writes_range_on_nq3():
     """On NQ3 (configurable range), range write should still happen."""
-    channels = [_make_channel("NQ3")]
+    channels = [_make_channel(0, "NQ3")]
     inputs = AnalogInputs(channels)
 
     inputs.configure_channels([0], range="10V", enabled=True)
@@ -65,7 +71,7 @@ def test_configure_channels_writes_range_on_nq3():
 def test_configure_channels_skips_out_of_range_indices():
     """Defensive: indices outside the channel collection are silently
     skipped (existing behavior, regression-protected)."""
-    channels = [_make_channel("NQ1")]  # only 1 channel
+    channels = [_make_channel(0, "NQ1")]  # only 1 channel
     inputs = AnalogInputs(channels)
 
     # No raise — just skip the out-of-range index 99
@@ -80,8 +86,11 @@ def test_enable_setter_uses_comma_separator():
     firmware syntax for per-channel enable is
     ``CONFigure:ADC:CHANnel <ch>,<state>`` — comma-separated. The
     previous space form produced ``-101,"Invalid character"`` on real
-    NQ1 firmware 3.4.6b1."""
-    ch = _make_channel("NQ1")
+    NQ1 firmware 3.4.6b1.
+
+    Use a non-zero channel id so the test would catch a regression
+    where the channel index gets dropped or hardcoded to 0."""
+    ch = _make_channel(2, "NQ1")
     ch.enabled = True
 
     # Find the call that invoked send_set_with_error for ENABLE_CHANNEL_SET.
@@ -94,15 +103,15 @@ def test_enable_setter_uses_comma_separator():
     assert matching, f"no ENABLE_CHANNEL_SET write — calls: {calls!r}"
     # The pre-formatted value contains comma between channel + state.
     sent_value = matching[0].args[1]
-    assert sent_value == "0,1", (
-        f"expected '0,1' (comma-separated channel+state), got: {sent_value!r}"
+    assert sent_value == "2,1", (
+        f"expected '2,1' (comma-separated channel+state), got: {sent_value!r}"
     )
 
 
 def test_configure_channels_propagates_non_range_errors():
     """If the enabled setter itself fails, that error must propagate
     (the FeatureNotSupportedError swallow is range-specific only)."""
-    channels = [_make_channel("NQ1")]
+    channels = [_make_channel(0, "NQ1")]
     inputs = AnalogInputs(channels)
     # Make the enabled setter fail with a real CommandError.
     from daqifi.exceptions import CommandError
