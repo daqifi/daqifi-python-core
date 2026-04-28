@@ -1242,29 +1242,50 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 "The SD card and WiFi/LAN share the SPI bus."
             )
 
-        was_logging_to_sd = self._is_logging_to_sd
+        # Default to local cache for the restore decision; the
+        # device's actual response (parsed below) overrides it
+        # whenever we get a definitive 0/1.
+        restore_lan = not self._is_logging_to_sd
+        parsed_state: Optional[bool] = None
+        lines: List[str] = []
 
         try:
             lines = self.execute_text_command(
                 lambda: (
                     self.prepare_sd_interface(),
+                    time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S),
                     self.send(scpi_commands.get_sd_logging_state()),
                 ),
                 response_timeout_ms=2000,
                 completion_timeout_ms=500,
             )
+
+            # SYST:STOR:SD:LOG? returns a single integer line:
+            # 1 = logging, 0 = not. Parse before deciding restore so
+            # a stale local cache can't trick us into stopping an
+            # actually-active logging session.
+            for ln in lines:
+                stripped = ln.strip()
+                if stripped in ("0", "1"):
+                    parsed_state = stripped == "1"
+                    break
+
+            if parsed_state is True:
+                # Device confirms it's logging — keep SD muxed.
+                restore_lan = False
+            elif parsed_state is False:
+                # Device confirms not logging — safe to restore.
+                restore_lan = True
+            # else: unparseable — keep restore_lan from cache (above).
         finally:
-            if self.is_connected and not was_logging_to_sd:
+            if self.is_connected and restore_lan:
                 try:
                     self.prepare_lan_interface()
                 except Exception:
                     pass
-        # SYST:STOR:SD:LOG? returns a single integer line: 1 = logging, 0 = not.
-        for ln in lines:
-            stripped = ln.strip()
-            if stripped in ("0", "1"):
-                return stripped == "1"
-        # Device gave no parseable response — fall back to local state.
+
+        if parsed_state is not None:
+            return parsed_state
         return self._is_logging_to_sd
 
     def delete_sd_file(self, file_name: str) -> None:
