@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -515,6 +516,144 @@ class DaqifiDevice:
                 "Direct message sending without a string-typed ScpiMessage is "
                 "not yet implemented."
             )
+
+    def execute_text_command(
+        self,
+        setup_action: Callable[[], None],
+        response_timeout_ms: int = 5000,
+        completion_timeout_ms: int = 1000,
+    ) -> List[str]:
+        """Run a SCPI command that expects a TEXT-mode reply, capturing
+        the lines the device returns.
+
+        After ``initialize()`` runs ``set_protobuf_stream_format()``, the
+        consumer pipeline only parses length-prefixed protobuf frames —
+        text replies (SD/network/info queries, ``**ERROR`` messages, etc.)
+        are silently dropped by the protobuf parser. This helper pauses
+        the protobuf consumer, swaps in a temporary text consumer on the
+        SAME stream, runs ``setup_action()`` (typically a single
+        :meth:`send` call), waits with a two-phase inactivity timeout,
+        then restarts the protobuf consumer.
+
+        Two-phase timeout (mirrors upstream
+        ``ExecuteTextCommandAsync``):
+
+        - Phase 1: wait up to ``response_timeout_ms`` for the FIRST text
+          line to arrive.
+        - Phase 2: once any line has arrived, wait until
+          ``completion_timeout_ms`` of inactivity (no new lines) elapses
+          before returning. This catches multi-line responses like
+          ``SD:LIST?`` without an explicit termination marker.
+
+        The protobuf consumer's restart is wrapped in ``finally`` so
+        streaming resumes even if ``setup_action()`` raises. Closes
+        Gap 1 of daqifi/daqifi-python-core#22.
+
+        Args:
+            setup_action: callable that issues the SCPI command (typically
+                ``lambda: self.send(scpi_commands.<query>())``).
+            response_timeout_ms: phase-1 budget for the first byte.
+            completion_timeout_ms: phase-2 inactivity budget after the
+                first line.
+
+        Returns:
+            List of text lines captured between ``setup_action()`` and the
+            inactivity timeout. Empty list when the device returned
+            nothing within ``response_timeout_ms``.
+        """
+        if self._consumer is None:
+            raise RuntimeError(
+                "execute_text_command requires an active consumer; "
+                "call connect() first."
+            )
+        if self._transport is None:
+            raise RuntimeError(
+                "execute_text_command requires an active transport."
+            )
+        stream = self._transport.stream
+        if stream is None:
+            raise RuntimeError(
+                "Transport reports no stream; cannot pause consumer."
+            )
+
+        was_running = self._consumer.is_running
+        if was_running:
+            try:
+                stopped = self._consumer.stop_safely()
+                if stopped is False:
+                    self._consumer.stop()
+            except Exception:
+                # Best-effort pause; if we can't stop the protobuf
+                # consumer we'll race it for stream bytes (degraded
+                # but not catastrophic).
+                pass
+
+        captured: List[str] = []
+        line_queue: "queue.Queue[str]" = queue.Queue()
+
+        try:
+            text_parser = LineBasedMessageParser(line_ending="\r\n")
+            text_consumer = StreamMessageConsumer[str](stream, text_parser)
+
+            def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
+                # Background-thread callback. Only push to the queue;
+                # the captured list is built on the main thread from
+                # the queue gets so late arrivals can't slip in past
+                # the inactivity timeout.
+                line_queue.put(args.message.data)
+
+            text_consumer.add_message_received(_on_text_line)
+            text_consumer.start()
+
+            try:
+                setup_action()
+
+                # Phase 1: block up to response_timeout_ms for the first
+                # line. Returns immediately as soon as a line arrives,
+                # so we don't waste cycles polling.
+                try:
+                    captured.append(
+                        line_queue.get(timeout=response_timeout_ms / 1000.0)
+                    )
+                except queue.Empty:
+                    # No data within phase-1 budget — skip phase-2
+                    # entirely (nothing to wait inactivity ON).
+                    return []
+
+                # Phase 2: drain remaining lines until inactivity
+                # exceeds the completion threshold. Each get blocks
+                # until the next line OR the timeout — when get raises
+                # queue.Empty, we've hit the inactivity gap.
+                inactivity_threshold = completion_timeout_ms / 1000.0
+                while True:
+                    try:
+                        captured.append(
+                            line_queue.get(timeout=inactivity_threshold)
+                        )
+                    except queue.Empty:
+                        break
+            finally:
+                # Always tear down the text consumer.
+                try:
+                    stopped = text_consumer.stop_safely()
+                    if stopped is False:
+                        text_consumer.stop()
+                except Exception:
+                    pass
+                try:
+                    text_consumer.close()
+                except Exception:
+                    pass
+        finally:
+            # Always restart the protobuf consumer so streaming
+            # resumes — even if setup_action raised.
+            if was_running:
+                try:
+                    self._consumer.start()
+                except Exception:
+                    pass
+
+        return captured
 
     def initialize(self) -> None:
         """Run the standard SCPI init sequence.

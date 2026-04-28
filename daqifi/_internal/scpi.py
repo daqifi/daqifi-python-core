@@ -254,6 +254,27 @@ def parse_float(response: str) -> float:
         raise ValueError(f"Invalid float response: {response}")
 
 
+def contains_scpi_error(lines) -> bool:
+    """Return True if any line in ``lines`` looks like a SCPI error reply.
+
+    Matches ``**ERROR`` (firmware extension prefix) and bare ``ERROR``
+    (SCPI standard). Case-insensitive; tolerates leading whitespace so
+    a line like ``"  **ERROR: -200, Execution error"`` still matches.
+
+    Ports the C# ``ContainsScpiError`` from
+    ``Daqifi.Core/Device/DaqifiStreamingDevice.cs``. Closes the part of
+    daqifi/daqifi-python-core#22 that was missing from the Python port
+    — without this helper, callers couldn't tell whether a captured
+    text response indicated success or failure.
+    """
+    for line in lines:
+        trimmed = line.lstrip()
+        upper = trimmed.upper()
+        if upper.startswith("**ERROR") or upper.startswith("ERROR"):
+            return True
+    return False
+
+
 def parse_system_error(response: str) -> tuple[int, str]:
     """Parse a ``SYST:ERR?`` response into (code, description).
 
