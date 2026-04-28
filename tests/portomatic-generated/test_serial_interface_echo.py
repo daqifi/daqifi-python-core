@@ -14,23 +14,27 @@ import pytest
 
 
 def _make_fake_serial(in_waiting_seq=None):
-    """Return a MagicMock simulating pyserial.Serial."""
-    s = MagicMock()
+    """Return a MagicMock simulating pyserial.Serial.
+
+    Uses a per-instance MagicMock subclass so that
+    ``type(s).in_waiting = PropertyMock(...)`` doesn't leak across
+    tests via the shared MagicMock class (Qodo PR #55 /improve pass 2
+    importance 8). Each test gets a fresh subclass.
+    """
+    FakeSerial = type("FakeSerial", (MagicMock,), {})
+    s = FakeSerial()
     s.is_open = True
     s.write = MagicMock(return_value=None)
     s.flush = MagicMock()
     s.reset_input_buffer = MagicMock()
     s.reset_output_buffer = MagicMock()
     s.read = MagicMock(return_value=b"")
-    # in_waiting can be a sequence of return values across calls or
-    # a single int. MagicMock treats a list as side_effect candidates.
+    s.close = MagicMock()
     if in_waiting_seq is None:
         s.in_waiting = 0
     else:
-        # Use PropertyMock for sequenced reads.
         from unittest.mock import PropertyMock
-        type(s).in_waiting = PropertyMock(side_effect=in_waiting_seq)
-    s.close = MagicMock()
+        FakeSerial.in_waiting = PropertyMock(side_effect=in_waiting_seq)
     return s
 
 
