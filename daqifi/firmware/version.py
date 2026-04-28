@@ -16,10 +16,17 @@ from functools import total_ordering
 from typing import Optional
 
 
-# Compiled once. Mirrors the C# regex semantics:
+# Compiled once. Mirrors the C# regex semantics, plus an extension for
+# dot-separated SemVer pre-releases:
 # - optional leading `v` or `V`
 # - major (required); minor + patch (optional, default 0)
-# - optional alphabetic suffix + optional digit run (e.g. "b2", "rc1", "alpha")
+# - one of TWO optional pre-release suffix shapes:
+#   * concatenated (legacy / C# parity): "b2", "rc1", "alpha"
+#   * dash + label + optional dot-number (SemVer / GitHub tags):
+#     "-beta.1", "-rc.2", "-alpha"
+# Closes daqifi/daqifi-python-core#10 — the C# regex only accepted the
+# concatenated form, but the Python ecosystem (PEP 440, semver.org,
+# GitHub release tags) overwhelmingly uses the dash-and-dot form.
 _VERSION_RE = re.compile(
     r"""
     ^\s*
@@ -27,7 +34,11 @@ _VERSION_RE = re.compile(
     (?P<maj>\d+)
     (?:\.(?P<min>\d+))?
     (?:\.(?P<pat>\d+))?
-    (?P<suffix>[A-Za-z]+\d*)?
+    (?:
+        -(?P<dash_label>[A-Za-z]+)(?:\.(?P<dash_num>\d+))?
+        |
+        (?P<suffix>[A-Za-z]+\d*)
+    )?
     \s*$
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -97,21 +108,31 @@ class FirmwareVersion:
         major = int(m.group("maj"))
         minor = int(m.group("min")) if m.group("min") else 0
         patch = int(m.group("pat")) if m.group("pat") else 0
-        suffix = m.group("suffix")
         label: Optional[str] = None
         pre_number = 0
-        if suffix:
-            # Split alphabetic prefix from trailing digits (e.g. "b2" → "b", 2).
-            i = 0
-            while i < len(suffix) and suffix[i].isalpha():
-                i += 1
-            label = suffix[:i] or None
-            num_part = suffix[i:]
-            if num_part:
-                try:
-                    pre_number = int(num_part)
-                except ValueError:
-                    pre_number = 0
+        # Dash-form SemVer pre-release ("3.0.0-beta.1") wins when present
+        # — the regex's two suffix branches are mutually exclusive, so
+        # only one of dash_label / suffix can be non-None per match.
+        dash_label = m.group("dash_label")
+        if dash_label:
+            label = dash_label
+            dash_num = m.group("dash_num")
+            if dash_num:
+                pre_number = int(dash_num)
+        else:
+            suffix = m.group("suffix")
+            if suffix:
+                # Split alphabetic prefix from trailing digits (e.g. "b2" → "b", 2).
+                i = 0
+                while i < len(suffix) and suffix[i].isalpha():
+                    i += 1
+                label = suffix[:i] or None
+                num_part = suffix[i:]
+                if num_part:
+                    try:
+                        pre_number = int(num_part)
+                    except ValueError:
+                        pre_number = 0
         return cls(
             major=major,
             minor=minor,

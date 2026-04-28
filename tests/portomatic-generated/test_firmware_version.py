@@ -162,6 +162,47 @@ def test_compare_returns_expected_sign(left, right, expected_sign):
 
 
 # ---------------------------------------------------------------------------
+# Dot-separated SemVer pre-release form (#10)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("inp,expected", [
+    # Standard SemVer / GitHub release tag form
+    ("3.0.0-beta.1",   (3, 0, 0, "beta", 1)),
+    ("v3.0.0-beta.1",  (3, 0, 0, "beta", 1)),
+    ("1.2.3-rc.5",     (1, 2, 3, "rc", 5)),
+    ("1.2.3-alpha.10", (1, 2, 3, "alpha", 10)),
+    # Dash + label without trailing number
+    ("3.0.0-beta",     (3, 0, 0, "beta", 0)),
+    ("3.0.0-rc",       (3, 0, 0, "rc", 0)),
+    ("v1.0.0-alpha",   (1, 0, 0, "alpha", 0)),
+])
+def test_parse_accepts_dot_separated_semver_pre_release(inp, expected):
+    """Closes #10: GitHub release tags + SemVer use ``3.0.0-beta.1`` shape;
+    the original C# regex only accepted ``3.0.0beta1``. Both shapes parse
+    to the same FirmwareVersion fields after this widening."""
+    v = FirmwareVersion.parse(inp)
+    assert v is not None, f"failed to parse: {inp!r}"
+    assert (v.major, v.minor, v.patch, v.pre_label, v.pre_number) == expected
+
+
+def test_dot_form_and_concat_form_compare_equal():
+    """3.0.0-beta.1 and 3.0.0beta1 are the same version — comparison
+    must agree across both shapes so callers don't get version drift
+    based on which form upstream emits."""
+    dot = FirmwareVersion.parse("3.0.0-beta.1")
+    concat = FirmwareVersion.parse("3.0.0beta1")
+    assert dot == concat
+    assert hash(dot) == hash(concat)
+
+
+def test_dot_form_pre_release_sorts_below_release():
+    rel = FirmwareVersion.parse("3.0.0")
+    pre = FirmwareVersion.parse("3.0.0-beta.1")
+    assert pre is not None and rel is not None
+    assert pre < rel
+
+
+# ---------------------------------------------------------------------------
 # Cross-type comparison protocol
 # ---------------------------------------------------------------------------
 
