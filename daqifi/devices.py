@@ -531,7 +531,20 @@ class DaqifiDevice:
         if self._is_initialized:
             return
 
+        # Snapshot prior state so a BaseException interrupt can restore
+        # it from "Initializing" — operator may want to resume after
+        # Ctrl-C without the device permanently stuck in the transient
+        # init state (Qodo PR #54 /improve pass 1 importance 6).
+        prev_state = self._state
         self._set_state(DeviceState.Initializing)
+        # init_succeeded tracks whether we made it through the full
+        # SCPI sequence. The cleanup runs in `finally` so it covers
+        # BaseException (KeyboardInterrupt / SystemExit) too, not just
+        # Exception. Without this, a Ctrl-C mid-init would leave the
+        # handler registered and a subsequent retry would double-
+        # register it. (Closes daqifi/daqifi-python-core#26 + Qodo
+        # PR #54 review #2.)
+        init_succeeded = False
         try:
             self._protocol_handler = ProtobufProtocolHandler(
                 status_message_handler=self._on_status_message_received,
@@ -570,9 +583,31 @@ class DaqifiDevice:
 
             self._is_initialized = True
             self._set_state(DeviceState.Ready)
+            init_succeeded = True
         except Exception:
+            # Mark Error state on Exception specifically — KeyboardInterrupt
+            # / SystemExit shouldn't transition to "Error" because the
+            # operator may want to resume.
             self._set_state(DeviceState.Error)
             raise
+        finally:
+            if not init_succeeded:
+                # remove_message_received is idempotent (suppresses
+                # ValueError when the handler isn't subscribed) so we
+                # can call it unconditionally without tracking a
+                # registration flag.
+                if self._consumer is not None:
+                    try:
+                        self._consumer.remove_message_received(self._on_inbound_message)
+                    except Exception:
+                        pass
+                self._protocol_handler = None
+                # If the state is still Initializing (BaseException
+                # path — Exception path already set Error), restore
+                # the prior state so an operator-driven resume isn't
+                # blocked on a permanent transient state.
+                if self._state == DeviceState.Initializing:
+                    self._set_state(prev_state)
 
     def close(self) -> None:
         if self._disposed:

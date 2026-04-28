@@ -508,3 +508,100 @@ class TestStreamInterfaceAutoPin:
             f"unknown transport should not send STReam:INTerface; "
             f"sent: {sent!r}"
         )
+
+
+# ---- initialize() failure cleanup (#26) -------------------------------------
+
+
+class TestInitializeFailureUnwindsHandlerSubscription:
+    """Closes daqifi/daqifi-python-core#26: when initialize() raises
+    mid-sequence the inbound-message handler must be unregistered so a
+    caller-driven retry doesn't double-register and deliver every
+    message twice for the rest of the session."""
+
+    @pytest.fixture
+    def dev(self):
+        """Connected device with guaranteed teardown — connect() spawns
+        a StreamMessageConsumer thread that loops on the fake stream's
+        empty read(). Without a finally-disconnect those threads leak
+        across tests (Qodo PR #54 review #1)."""
+        from daqifi.transport import SerialStreamTransport
+        t = _make_fake_transport(SerialStreamTransport)
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        try:
+            yield dev
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass
+
+    def test_send_failure_during_init_removes_handler(self, dev):
+        # Make the FOURTH `send` call (set_protobuf_stream_format) fail.
+        # The handler is registered before send #1 fires, so all paths
+        # after that need the unwind.
+        original_send = dev.send
+        call_count = [0]
+
+        def flaky_send(msg):
+            call_count[0] += 1
+            if call_count[0] == 4:
+                raise RuntimeError("simulated mid-init failure")
+            return original_send(msg)
+
+        dev.send = flaky_send  # type: ignore[method-assign]
+        handlers_before = list(dev._consumer._message_handlers) if dev._consumer else []
+        with pytest.raises(RuntimeError, match="simulated"):
+            dev.initialize()
+        handlers_after = list(dev._consumer._message_handlers) if dev._consumer else []
+        # Handler list returns to its pre-init state — no leak.
+        assert handlers_after == handlers_before
+
+    def test_retry_after_failure_does_not_double_register(self, dev):
+        """The motivating scenario: caller catches the init error,
+        retries successfully, then sends a single inbound message and
+        observes the handler firing exactly once."""
+        original_send = dev.send
+        first_attempt = [True]
+
+        def fail_first_attempt(msg):
+            text = msg.data if hasattr(msg, "data") else str(msg)
+            if first_attempt[0] and "STReam:FORmat" in text:
+                raise RuntimeError("first-attempt failure")
+            return original_send(msg)
+
+        dev.send = fail_first_attempt  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            dev.initialize()
+        # Second attempt — clear the failure trigger and re-init.
+        first_attempt[0] = False
+        dev._is_initialized = False  # allow re-init
+        dev.initialize()
+        if dev._consumer is not None:
+            # Exactly one registration of _on_inbound_message — not two.
+            handler_refs = [
+                h for h in dev._consumer._message_handlers
+                if h == dev._on_inbound_message
+            ]
+            assert len(handler_refs) == 1
+
+    def test_base_exception_during_init_still_unwinds(self, dev):
+        """Qodo PR #54 review #2: KeyboardInterrupt / SystemExit during
+        init must also trigger the cleanup. Previous except-Exception
+        version skipped these; the finally-block version handles all."""
+        original_send = dev.send
+
+        def interrupt_send(msg):
+            text = msg.data if hasattr(msg, "data") else str(msg)
+            if "STReam:FORmat" in text:
+                raise KeyboardInterrupt("simulated")
+            return original_send(msg)
+
+        dev.send = interrupt_send  # type: ignore[method-assign]
+        handlers_before = list(dev._consumer._message_handlers) if dev._consumer else []
+        with pytest.raises(KeyboardInterrupt):
+            dev.initialize()
+        handlers_after = list(dev._consumer._message_handlers) if dev._consumer else []
+        assert handlers_after == handlers_before
+        assert dev._protocol_handler is None
