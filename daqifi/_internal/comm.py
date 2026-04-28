@@ -1220,17 +1220,18 @@ class SerialInterface:
         Returns:
             True if connection successful, False otherwise.
         """
+        # Pick a finite write_timeout even when the read timeout is
+        # explicitly None (e.g. blocking-read configurations) — the
+        # open-time echo-disable write must NEVER block forever on a
+        # flaky USB CDC enumeration. (Qodo PR #55 /improve pass 1
+        # importance 7.)
+        write_timeout = self.timeout if self.timeout is not None else 1.0
         try:
             self._serial = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
                 timeout=self.timeout,
-                # write_timeout matches read timeout so the open-time
-                # echo-disable write can't block forever on a flaky USB
-                # CDC enumeration. Consistent with the serial probing
-                # in device_finders.py which sets write_timeout before
-                # init writes (Qodo PR #55 review #2).
-                write_timeout=self.timeout,
+                write_timeout=write_timeout,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE
@@ -1244,9 +1245,12 @@ class SerialInterface:
             # Failure here doesn't abort the connection — the existing
             # response-stripping fallbacks compensate; we just won't
             # get the cleaner binary stream the disable affords.
+            # Catch specific I/O exceptions (not bare Exception) so a
+            # programmer error inside _send_disable_echo isn't silently
+            # swallowed (Qodo PR #55 /improve pass 1 importance 7).
             try:
                 self._send_disable_echo()
-            except Exception:
+            except (serial.SerialException, OSError):
                 pass
             return True
         except (serial.SerialException, OSError) as e:
