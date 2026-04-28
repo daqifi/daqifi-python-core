@@ -30,7 +30,9 @@ from daqifi.firmware.version import compare
     ("3.2.0b2",     (3, 2, 0, "b", 2)),
     ("v1.0.0rc1",   (1, 0, 0, "rc", 1)),
     ("1.0.0alpha",  (1, 0, 0, "alpha", 0)),
-    ("1.0.0BETA",   (1, 0, 0, "BETA", 0)),  # case preserved on label, ordering case-insensitive
+    # Pre-release labels canonicalize to lowercase so equality / hash
+    # agree with ordering (Qodo PR #52 review #1).
+    ("1.0.0BETA",   (1, 0, 0, "beta", 0)),
     ("2.0.0pre",    (2, 0, 0, "pre", 0)),
 ])
 def test_parse_round_trips_to_expected_fields(inp, expected):
@@ -193,6 +195,20 @@ def test_dot_form_and_concat_form_compare_equal():
     concat = FirmwareVersion.parse("3.0.0beta1")
     assert dot == concat
     assert hash(dot) == hash(concat)
+
+
+def test_label_case_normalized_so_equality_agrees_with_compare():
+    """Qodo PR #52 review #1: parse() now lowercases the label so two
+    inputs that differ only in case (firmware self-report 'BETA' vs
+    GitHub release tag 'beta') are == and hash-equal. Without this,
+    compare() would return 0 (same precedence rank, same number) but
+    dataclass __eq__ would return False (different label strings)."""
+    upper = FirmwareVersion.parse("3.0.0BETA")
+    lower = FirmwareVersion.parse("3.0.0beta")
+    dash_upper = FirmwareVersion.parse("3.0.0-BETA")
+    dash_lower = FirmwareVersion.parse("3.0.0-beta")
+    assert upper == lower == dash_upper == dash_lower
+    assert hash(upper) == hash(lower) == hash(dash_upper) == hash(dash_lower)
 
 
 def test_dot_form_pre_release_sorts_below_release():

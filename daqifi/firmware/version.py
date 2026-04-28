@@ -133,6 +133,16 @@ class FirmwareVersion:
                         pre_number = int(num_part)
                     except ValueError:
                         pre_number = 0
+        # Canonicalize label to lowercase so equality / hash agree with
+        # ordering. _precedence_rank lowercases internally for sort
+        # ordering, so without canonicalization here parse("3.0.0BETA")
+        # and parse("3.0.0beta") would compare equal via compare() but
+        # NOT via dataclass equality (which sees the raw label strings)
+        # and would hash to different values. (Closes Qodo PR #52
+        # review #1.) Operators reading the label back get the
+        # canonical lowercase form.
+        if label is not None:
+            label = label.lower()
         return cls(
             major=major,
             minor=minor,
