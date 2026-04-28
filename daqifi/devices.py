@@ -607,16 +607,20 @@ class DaqifiDevice:
                 while time.monotonic() < phase1_deadline and not captured:
                     time.sleep(0.01)
 
-                # Phase 2: inactivity timeout. Reset the inactivity clock
-                # whenever a new line arrives.
-                inactivity_threshold = completion_timeout_ms / 1000.0
-                last_count = len(captured)
-                last_change = time.monotonic()
-                while time.monotonic() - last_change < inactivity_threshold:
-                    if len(captured) != last_count:
-                        last_count = len(captured)
-                        last_change = time.monotonic()
-                    time.sleep(0.01)
+                # If nothing arrived in phase 1, return empty without
+                # paying the phase-2 inactivity timeout — there's no
+                # activity to wait inactivity ON.
+                if captured:
+                    # Phase 2: inactivity timeout. Reset the inactivity
+                    # clock whenever a new line arrives.
+                    inactivity_threshold = completion_timeout_ms / 1000.0
+                    last_count = len(captured)
+                    last_change = time.monotonic()
+                    while time.monotonic() - last_change < inactivity_threshold:
+                        if len(captured) != last_count:
+                            last_count = len(captured)
+                            last_change = time.monotonic()
+                        time.sleep(0.01)
             finally:
                 # Always tear down the text consumer.
                 try:
