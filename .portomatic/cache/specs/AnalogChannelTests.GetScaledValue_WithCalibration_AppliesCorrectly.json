@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "spec_id": "AnalogChannelTests.GetScaledValue_WithCalibration_AppliesCorrectly",
+  "upstream_file": "/mnt/c/Users/User/Documents/GitHub/daqifi-core/src/Daqifi.Core.Tests/Channel/AnalogChannelTests.cs",
+  "upstream_test_name": "GetScaledValue_WithCalibration_AppliesCorrectly",
+  "subject_qualified": "AnalogChannel",
+  "decorators": [
+    "Fact"
+  ],
+  "raw_body": "{\n        // Arrange\n        var channel = new AnalogChannel(0, 65535)\n        {\n            PortRange = 1.0,\n            CalibrationM = 2.0,\n            CalibrationB = 1.0,\n            InternalScaleM = 1.0\n        };\n\n        // Act\n        var result = channel.GetScaledValue(65535); // Max value\n\n        // Assert\n        // Expected: (65535 / 65535) * 1.0 * 2.0 + 1.0 = 3.0\n        Assert.Equal(3.0, result, precision: 6);\n    }",
+  "setup": [
+    "var channel = new AnalogChannel(0, 65535)",
+    "{",
+    "PortRange = 1.0,",
+    "CalibrationM = 2.0,",
+    "CalibrationB = 1.0,",
+    "InternalScaleM = 1.0",
+    "};"
+  ],
+  "action": [
+    "var result = channel.GetScaledValue(65535); // Max value"
+  ],
+  "expected": [
+    "Assert.Equal(3.0, result, precision: 6);"
+  ],
+  "inline_data": []
+}

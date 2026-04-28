@@ -1,0 +1,34 @@
+schema_version: 1
+plan_id: 20260420T220005-port-compositeparser-v11
+slug: port-compositeparser-v11
+kind: apply
+created_at: '2026-04-20T22:00:05Z'
+upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+summary: "v0.11 test 5/5: Port CompositeMessageParser (nested types \u2014 excerpt\
+  \ extraction stress test)"
+steps:
+- id: s1
+  summary: "v0.11 test 5: Port CompositeMessageParser \u2014 nested enum + nested\
+    \ public class"
+  kind: patch
+  upstream_ref: null
+  downstream_target: daqifi/_internal/comm.py
+  assigned_to: patch-author
+  status: done
+  classification: new-feature
+  shard: Communication
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Communication/Consumers/CompositeMessageParser.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes:
+  - 'reconciled by `portomatic plan reconcile` (2026-04-27T03:22:03.750497+00:00):
+    file ''daqifi/_internal/comm.py'' exists; no target_symbol pinned, treating file
+    existence as completion'
+  divergences: []
+  started_at: null
+  finished_at: '2026-04-27T03:22:03.750497Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null

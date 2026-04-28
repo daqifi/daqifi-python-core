@@ -1,0 +1,45 @@
+schema_version: 1
+plan_id: 20260420T032343-port-sd-queries-v07-redo
+slug: port-sd-queries-v07-redo
+kind: apply
+created_at: '2026-04-20T03:23:43.950953Z'
+upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+summary: 'Re-test port #12 (sequential single-file ports) on main with #54 merged'
+steps:
+- id: s1
+  summary: Port ScpiMessageProducer.GetSdLoggingState (returns SCPI query string)
+  kind: patch
+  upstream_ref: null
+  downstream_target: daqifi/_internal/scpi.py
+  assigned_to: null
+  status: done
+  classification: api-shape
+  shard: Communication
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  notes:
+  - closed by portomatic apply close at 2026-04-20T03:24:47.200621+00:00
+  started_at: null
+  finished_at: '2026-04-20T03:24:47.203570Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: s2
+  summary: Port ScpiMessageProducer.EnableStorageSd (returns SYSTem:STORage:SD:ENAble
+    1) - exercises diff-since-last-step on s2 prompt
+  kind: patch
+  upstream_ref: null
+  downstream_target: daqifi/_internal/scpi.py
+  assigned_to: null
+  status: done
+  classification: api-shape
+  shard: Communication
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  notes:
+  - closed by portomatic apply close at 2026-04-20T03:25:56.819512+00:00
+  started_at: null
+  finished_at: '2026-04-20T03:25:56.823087Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null

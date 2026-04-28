@@ -1,0 +1,28 @@
+schema_version: 1
+plan_id: 20260419T233723-port-imessageproducer-v05
+slug: port-imessageproducer-v05
+kind: apply
+created_at: '2026-04-19T23:37:23.625247Z'
+upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+summary: Port IMessageProducer<T> (multi-method generic interface - tests interface-shape
+  mapping in Python)
+steps:
+- id: s1
+  summary: Port IMessageProducer<T> interface (4 methods + 2 properties + IDisposable)
+    to a Python Protocol or ABC
+  kind: patch
+  upstream_ref: null
+  downstream_target: daqifi/_internal/comm.py
+  assigned_to: null
+  status: done
+  classification: new-feature
+  shard: Communication
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Communication/Producers/IMessageProducer.cs
+  notes:
+  - closed by portomatic apply close at 2026-04-19T23:40:27.364925+00:00
+  started_at: null
+  finished_at: '2026-04-19T23:40:27.369824Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null

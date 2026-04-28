@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "spec_id": "ScpiMessageProducerTests.SetNetworkWifiModeExisting_ReturnsCorrectCommand",
+  "upstream_file": "/mnt/c/Users/User/Documents/GitHub/daqifi-core/src/Daqifi.Core.Tests/Communication/Producers/ScpiMessageProducerTests.cs",
+  "upstream_test_name": "SetNetworkWifiModeExisting_ReturnsCorrectCommand",
+  "subject_qualified": "ScpiMessageProducer",
+  "decorators": [
+    "Fact"
+  ],
+  "raw_body": "{\n        var message = ScpiMessageProducer.SetNetworkWifiModeExisting;\n        Assert.Equal(\"SYSTem:COMMunicate:LAN:NETType 1\", message.Data);\n        AssertMessageFormat(message);\n    }",
+  "setup": [
+    "var message = ScpiMessageProducer.SetNetworkWifiModeExisting;",
+    "AssertMessageFormat(message);"
+  ],
+  "action": [],
+  "expected": [
+    "Assert.Equal(\"SYSTem:COMMunicate:LAN:NETType 1\", message.Data);"
+  ],
+  "inline_data": []
+}

@@ -1,0 +1,36 @@
+schema_version: 1
+docs:
+- slug: ieee-488-2-scpi-command-parsing-rules
+  topic: scpi_protocol
+  title: IEEE 488.2 SCPI command parsing rules
+  uri: https://www.ivifoundation.org/docs/SCPI-99.pdf
+  kind: url
+  notes: Reference for short-vs-long form (DIV-003 rationale)
+  cached_path: scpi_protocol/ieee-488-2-scpi-command-parsing-rules.md
+  cached_bytes: 628
+  fetched_at: '2026-04-19T00:47:45.321781Z'
+  status: cached
+  registered_at: '2026-04-19T00:47:40.820633Z'
+- slug: daqifi-protobuf-message-schema-proto
+  topic: daqifi_protobuf
+  title: DAQiFi protobuf message schema (.proto)
+  uri: /mnt/c/Users/User/Documents/GitHub/daqifi-core/src/Daqifi.Core/Communication/DaqifiOutMessage.proto
+  kind: file
+  notes: Source of truth for protobuf decode (PORT-001/PORT-003 unblocker)
+  cached_path: null
+  cached_bytes: null
+  fetched_at: null
+  status: registered
+  registered_at: '2026-04-19T00:47:42.295423Z'
+- slug: pic32mz-adc-peripheral-library-reference
+  topic: pic32mz_adc
+  title: PIC32MZ ADC peripheral library reference
+  uri: https://ww1.microchip.com/downloads/aemDocuments/documents/MCU32/ProductDocuments/ReferenceManuals/PIC32MZ-Embedded-Connectivity-with-Floating-Point-Unit-Family-Reference-Manual.pdf
+  kind: url
+  notes: "For future PIC32\u2192ESP32 firmware port"
+  cached_path: null
+  cached_bytes: null
+  fetched_at: null
+  status: registered
+  registered_at: '2026-04-19T00:47:43.791179Z'
+updated_at: '2026-04-19T00:47:45.321818Z'

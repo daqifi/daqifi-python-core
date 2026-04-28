@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "spec_id": "AnalogChannelTests.Constructor_WithValidParameters_InitializesCorrectly",
+  "upstream_file": "/mnt/c/Users/User/Documents/GitHub/daqifi-core/src/Daqifi.Core.Tests/Channel/AnalogChannelTests.cs",
+  "upstream_test_name": "Constructor_WithValidParameters_InitializesCorrectly",
+  "subject_qualified": "AnalogChannel",
+  "decorators": [
+    "Fact"
+  ],
+  "raw_body": "{\n        // Arrange & Act\n        var channel = new AnalogChannel(channelNumber: 0, resolution: 65535);\n\n        // Assert\n        Assert.Equal(0, channel.ChannelNumber);\n        Assert.Equal(65535u, channel.Resolution);\n        Assert.Equal(\"Analog Channel 0\", channel.Name);\n        Assert.Equal(ChannelType.Analog, channel.Type);\n        Assert.Equal(ChannelDirection.Input, channel.Direction);\n        Assert.False(channel.IsEnabled);\n        Assert.Equal(1.0, channel.CalibrationM);\n        Assert.Equal(0.0, channel.CalibrationB);\n        Assert.Equal(1.0, channel.InternalScaleM);\n        Assert.Equal(1.0, channel.PortRange);\n    }",
+  "setup": [
+    "var channel = new AnalogChannel(channelNumber: 0, resolution: 65535);"
+  ],
+  "action": [],
+  "expected": [
+    "Assert.Equal(0, channel.ChannelNumber);",
+    "Assert.Equal(65535u, channel.Resolution);",
+    "Assert.Equal(\"Analog Channel 0\", channel.Name);",
+    "Assert.Equal(ChannelType.Analog, channel.Type);",
+    "Assert.Equal(ChannelDirection.Input, channel.Direction);",
+    "Assert.False(channel.IsEnabled);",
+    "Assert.Equal(1.0, channel.CalibrationM);",
+    "Assert.Equal(0.0, channel.CalibrationB);",
+    "Assert.Equal(1.0, channel.InternalScaleM);",
+    "Assert.Equal(1.0, channel.PortRange);"
+  ],
+  "inline_data": []
+}

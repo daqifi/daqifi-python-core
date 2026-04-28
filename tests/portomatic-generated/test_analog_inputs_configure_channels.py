@@ -2,6 +2,7 @@
 fully unusable on NQ1/NQ2 because the range setter raises
 FeatureNotSupportedError on those variants and aborted the loop before
 enabled was set."""
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,7 +11,7 @@ from daqifi.channels import AnalogInputChannel, AnalogInputs
 from daqifi.exceptions import FeatureNotSupportedError
 
 
-def _make_channel(channel_id: int, variant: str | None) -> AnalogInputChannel:
+def _make_channel(channel_id: int, variant: Optional[str]) -> AnalogInputChannel:
     """Build an AnalogInputChannel wired to a MagicMock comm so we can
     introspect the .enabled writes. ``channel_id`` is the per-channel
     index that gets baked into the SCPI command — keep it explicit so

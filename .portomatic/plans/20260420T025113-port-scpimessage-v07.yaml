@@ -1,0 +1,27 @@
+schema_version: 1
+plan_id: 20260420T025113-port-scpimessage-v07
+slug: port-scpimessage-v07
+kind: apply
+created_at: '2026-04-20T02:51:13.941493Z'
+upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+summary: 'Port ScpiMessage class (test #10: typed message wrapper with GetBytes encoding)'
+steps:
+- id: s1
+  summary: Port ScpiMessage class - constructor takes command, IOutboundMessage<string>,
+    GetBytes returns ASCII bytes with CRLF
+  kind: patch
+  upstream_ref: null
+  downstream_target: daqifi/_internal/comm.py
+  assigned_to: null
+  status: done
+  classification: new-feature
+  shard: Communication
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Communication/Messages/ScpiMessage.cs
+  notes:
+  - closed by portomatic apply close at 2026-04-20T02:53:13.652475+00:00
+  started_at: null
+  finished_at: '2026-04-20T02:53:13.655204Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null

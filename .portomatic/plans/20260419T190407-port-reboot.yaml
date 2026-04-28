@@ -1,0 +1,27 @@
+schema_version: 1
+plan_id: 20260419T190407-port-reboot
+slug: port-reboot
+kind: apply
+created_at: '2026-04-19T19:04:07.564511Z'
+upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+summary: ''
+steps:
+- id: s1
+  summary: "Port ScpiMessageProducer.RebootDevice (C# static property \u2192 Python\
+    \ SCPI command constant)"
+  kind: patch
+  upstream_ref: null
+  downstream_target: daqifi/_internal/scpi.py
+  assigned_to: null
+  status: done
+  classification: api-shape
+  shard: Communication
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  notes:
+  - closed by portomatic apply close at 2026-04-19T19:05:44.203409+00:00
+  started_at: null
+  finished_at: '2026-04-19T19:05:44.212432Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null

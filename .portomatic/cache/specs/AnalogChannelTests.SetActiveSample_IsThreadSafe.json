@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "spec_id": "AnalogChannelTests.SetActiveSample_IsThreadSafe",
+  "upstream_file": "/mnt/c/Users/User/Documents/GitHub/daqifi-core/src/Daqifi.Core.Tests/Channel/AnalogChannelTests.cs",
+  "upstream_test_name": "SetActiveSample_IsThreadSafe",
+  "subject_qualified": "AnalogChannel",
+  "decorators": [
+    "Fact"
+  ],
+  "raw_body": "{\n        // Arrange\n        var channel = new AnalogChannel(0);\n        var tasks = new List<Task>();\n\n        // Act\n        for (int i = 0; i < 100; i++)\n        {\n            var value = i;\n            tasks.Add(Task.Run(() => channel.SetActiveSample(value, DateTime.UtcNow)));\n        }\n\n        await Task.WhenAll(tasks.ToArray());\n\n        // Assert\n        Assert.NotNull(channel.ActiveSample);\n    }",
+  "setup": [
+    "var channel = new AnalogChannel(0);",
+    "var tasks = new List<Task>();"
+  ],
+  "action": [
+    "for (int i = 0; i < 100; i++)",
+    "{",
+    "var value = i;",
+    "tasks.Add(Task.Run(() => channel.SetActiveSample(value, DateTime.UtcNow)));",
+    "}",
+    "await Task.WhenAll(tasks.ToArray());"
+  ],
+  "expected": [
+    "Assert.NotNull(channel.ActiveSample);"
+  ],
+  "inline_data": []
+}

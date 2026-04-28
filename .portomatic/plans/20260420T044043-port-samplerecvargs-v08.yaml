@@ -1,0 +1,26 @@
+schema_version: 1
+plan_id: 20260420T044043-port-samplerecvargs-v08
+slug: port-samplerecvargs-v08
+kind: apply
+created_at: '2026-04-20T04:40:43.052044Z'
+upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+summary: '#19: Port SampleReceivedEventArgs (frozen EventArgs)'
+steps:
+- id: s1
+  summary: '#19: Port SampleReceivedEventArgs (frozen EventArgs)'
+  kind: patch
+  upstream_ref: null
+  downstream_target: daqifi/_internal/comm.py
+  assigned_to: null
+  status: done
+  classification: new-feature
+  shard: Channel
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Channel/SampleReceivedEventArgs.cs
+  notes:
+  - closed by portomatic apply close at 2026-04-20T04:45:19.353024+00:00
+  started_at: null
+  finished_at: '2026-04-20T04:45:19.356556Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null

@@ -1,0 +1,19 @@
+{
+  "// portomatic": "Merge into your downstream repo's .claude/settings.local.json. Tightens Bash to portomatic-related commands only.",
+  "permissions": {
+    "allow": [
+      "Bash(portomatic:*)",
+      "Bash(git -C *)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git diff:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(make -f *)",
+      "Bash(pio run:*)",
+      "Bash(pio check:*)",
+      "Bash(dotnet test:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(pytest:*)"
+    ]
+  }
+}

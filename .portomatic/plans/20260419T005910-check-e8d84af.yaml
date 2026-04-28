@@ -1,0 +1,511 @@
+schema_version: 1
+plan_id: 20260419T005910-check-e8d84af
+slug: check-e8d84af
+kind: check
+created_at: '2026-04-19T00:59:10.938804Z'
+upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+summary: check 096a4409..e8d84af on /mnt/c/Users/User/Documents/GitHub/daqifi-core
+steps:
+- id: c001
+  summary: '[test-only] src/Daqifi.Core.Tests/Device/SdCard/SdCardOperationsTests.cs
+    (b9c6589)'
+  kind: review
+  upstream_ref: b9c6589031628b6288705c01c74438eb7a260d1e:src/Daqifi.Core.Tests/Device/SdCard/SdCardOperationsTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: b9c6589031628b6288705c01c74438eb7a260d1e
+  file: src/Daqifi.Core.Tests/Device/SdCard/SdCardOperationsTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c002
+  summary: '[irrelevant] src/Daqifi.Core/Device/DaqifiStreamingDevice.cs (b9c6589)'
+  kind: review
+  upstream_ref: b9c6589031628b6288705c01c74438eb7a260d1e:src/Daqifi.Core/Device/DaqifiStreamingDevice.cs
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: b9c6589031628b6288705c01c74438eb7a260d1e
+  file: src/Daqifi.Core/Device/DaqifiStreamingDevice.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes:
+  - no shard covers this path
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c003
+  summary: '[irrelevant] README.md (3dfe93f)'
+  kind: review
+  upstream_ref: 3dfe93fa90293d9059471ec78e4a4169ef1e5015:README.md
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: 3dfe93fa90293d9059471ec78e4a4169ef1e5015
+  file: README.md
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c004
+  summary: '[irrelevant] docs/DEVICE_INTERFACES.md (3dfe93f)'
+  kind: review
+  upstream_ref: 3dfe93fa90293d9059471ec78e4a4169ef1e5015:docs/DEVICE_INTERFACES.md
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: 3dfe93fa90293d9059471ec78e4a4169ef1e5015
+  file: docs/DEVICE_INTERFACES.md
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c005
+  summary: '[irrelevant] docs/simulator/GITHUB_ISSUES.md (3dfe93f)'
+  kind: review
+  upstream_ref: 3dfe93fa90293d9059471ec78e4a4169ef1e5015:docs/simulator/GITHUB_ISSUES.md
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: 3dfe93fa90293d9059471ec78e4a4169ef1e5015
+  file: docs/simulator/GITHUB_ISSUES.md
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c006
+  summary: '[irrelevant] docs/simulator/SIMULATOR_DESIGN.md (3dfe93f)'
+  kind: review
+  upstream_ref: 3dfe93fa90293d9059471ec78e4a4169ef1e5015:docs/simulator/SIMULATOR_DESIGN.md
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: 3dfe93fa90293d9059471ec78e4a4169ef1e5015
+  file: docs/simulator/SIMULATOR_DESIGN.md
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c007
+  summary: '[irrelevant] docs/simulator/SIMULATOR_IMPLEMENTATION_PLAN.md (3dfe93f)'
+  kind: review
+  upstream_ref: 3dfe93fa90293d9059471ec78e4a4169ef1e5015:docs/simulator/SIMULATOR_IMPLEMENTATION_PLAN.md
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: 3dfe93fa90293d9059471ec78e4a4169ef1e5015
+  file: docs/simulator/SIMULATOR_IMPLEMENTATION_PLAN.md
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c008
+  summary: '[test-only] src/Daqifi.Core.Tests/Communication/Producers/ScpiMessageProducerTests.cs
+    (3dfe93f)'
+  kind: review
+  upstream_ref: 3dfe93fa90293d9059471ec78e4a4169ef1e5015:src/Daqifi.Core.Tests/Communication/Producers/ScpiMessageProducerTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: 3dfe93fa90293d9059471ec78e4a4169ef1e5015
+  file: src/Daqifi.Core.Tests/Communication/Producers/ScpiMessageProducerTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c009
+  summary: '[cosmetic] src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+    (3dfe93f)'
+  kind: patch
+  upstream_ref: 3dfe93fa90293d9059471ec78e4a4169ef1e5015:src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  downstream_target: daqifi/_internal/scpi.py
+  assigned_to: null
+  status: done
+  classification: cosmetic
+  shard: Communication
+  commit_sha: 3dfe93fa90293d9059471ec78e4a4169ef1e5015
+  file: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes:
+  - "file is marked divergent \u2014 review change in light of map rationale"
+  - diff is whitespace/comments only
+  - 'reconciled by `portomatic plan reconcile` (2026-04-27T03:22:03.478906+00:00):
+    file ''daqifi/_internal/scpi.py'' exists; no target_symbol pinned, treating file
+    existence as completion'
+  divergences: []
+  started_at: null
+  finished_at: '2026-04-27T03:22:03.478906Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c010
+  summary: '[irrelevant] src/Daqifi.Core/Device/DaqifiStreamingDevice.cs (3dfe93f)'
+  kind: review
+  upstream_ref: 3dfe93fa90293d9059471ec78e4a4169ef1e5015:src/Daqifi.Core/Device/DaqifiStreamingDevice.cs
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: 3dfe93fa90293d9059471ec78e4a4169ef1e5015
+  file: src/Daqifi.Core/Device/DaqifiStreamingDevice.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes:
+  - no shard covers this path
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c011
+  summary: '[irrelevant] src/Daqifi.Core/Device/SdCard/ISdCardOperations.cs (3dfe93f)'
+  kind: review
+  upstream_ref: 3dfe93fa90293d9059471ec78e4a4169ef1e5015:src/Daqifi.Core/Device/SdCard/ISdCardOperations.cs
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: 3dfe93fa90293d9059471ec78e4a4169ef1e5015
+  file: src/Daqifi.Core/Device/SdCard/ISdCardOperations.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes:
+  - no shard covers this path
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c012
+  summary: '[test-only] src/Daqifi.Core.Tests/Device/DaqifiDeviceWithTransportTests.cs
+    (0829573)'
+  kind: review
+  upstream_ref: 0829573fa2ac8a15b155501ef2ae7fbff1351841:src/Daqifi.Core.Tests/Device/DaqifiDeviceWithTransportTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: 0829573fa2ac8a15b155501ef2ae7fbff1351841
+  file: src/Daqifi.Core.Tests/Device/DaqifiDeviceWithTransportTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c013
+  summary: '[irrelevant] src/Daqifi.Core/Device/DaqifiDevice.cs (0829573)'
+  kind: review
+  upstream_ref: 0829573fa2ac8a15b155501ef2ae7fbff1351841:src/Daqifi.Core/Device/DaqifiDevice.cs
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: 0829573fa2ac8a15b155501ef2ae7fbff1351841
+  file: src/Daqifi.Core/Device/DaqifiDevice.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes:
+  - no shard covers this path
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c014
+  summary: '[test-only] src/Daqifi.Core.Tests/Channel/AnalogChannelTests.cs (e8d84af)'
+  kind: review
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core.Tests/Channel/AnalogChannelTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core.Tests/Channel/AnalogChannelTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c015
+  summary: '[test-only] src/Daqifi.Core.Tests/Channel/DigitalChannelTests.cs (e8d84af)'
+  kind: review
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core.Tests/Channel/DigitalChannelTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core.Tests/Channel/DigitalChannelTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c016
+  summary: '[test-only] src/Daqifi.Core.Tests/Communication/Transport/UdpTransportTests.cs
+    (e8d84af)'
+  kind: review
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core.Tests/Communication/Transport/UdpTransportTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core.Tests/Communication/Transport/UdpTransportTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c017
+  summary: '[test-only] src/Daqifi.Core.Tests/Device/DeviceTypeDetectorTests.cs (e8d84af)'
+  kind: review
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core.Tests/Device/DeviceTypeDetectorTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core.Tests/Device/DeviceTypeDetectorTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c018
+  summary: '[test-only] src/Daqifi.Core.Tests/Device/Protocol/ProtobufProtocolHandlerTests.cs
+    (e8d84af)'
+  kind: review
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core.Tests/Device/Protocol/ProtobufProtocolHandlerTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core.Tests/Device/Protocol/ProtobufProtocolHandlerTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c019
+  summary: '[test-only] src/Daqifi.Core.Tests/Device/SdCard/SdCardCsvFileParserTests.cs
+    (e8d84af)'
+  kind: review
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core.Tests/Device/SdCard/SdCardCsvFileParserTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core.Tests/Device/SdCard/SdCardCsvFileParserTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c020
+  summary: '[test-only] src/Daqifi.Core.Tests/Device/SdCard/SdCardJsonFileParserTests.cs
+    (e8d84af)'
+  kind: review
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core.Tests/Device/SdCard/SdCardJsonFileParserTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core.Tests/Device/SdCard/SdCardJsonFileParserTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c021
+  summary: '[test-only] src/Daqifi.Core.Tests/Device/TimestampProcessorTests.cs (e8d84af)'
+  kind: review
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core.Tests/Device/TimestampProcessorTests.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: test-only
+  shard: null
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core.Tests/Device/TimestampProcessorTests.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes: []
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c022
+  summary: '[new-feature] src/Daqifi.Core/Communication/Consumers/StreamMessageConsumer.cs
+    (e8d84af)'
+  kind: patch
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core/Communication/Consumers/StreamMessageConsumer.cs
+  downstream_target: null
+  assigned_to: null
+  status: pending
+  classification: new-feature
+  shard: Communication
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Communication/Consumers/StreamMessageConsumer.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes:
+  - under Communication root but not in shard.files
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
+- id: c023
+  summary: '[irrelevant] src/Daqifi.Core/Device/DeviceTypeDetector.cs (e8d84af)'
+  kind: review
+  upstream_ref: e8d84af01032ac21602d7ef51d51485ff0c043c0:src/Daqifi.Core/Device/DeviceTypeDetector.cs
+  downstream_target: null
+  assigned_to: null
+  status: skipped
+  classification: irrelevant
+  shard: null
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Device/DeviceTypeDetector.cs
+  target_symbol: null
+  parent_audit_row: null
+  expected_resolution: null
+  notes:
+  - no shard covers this path
+  divergences: []
+  started_at: null
+  finished_at: null
+  failure_class: null
+  ticket_url: null
+  ticket_number: null

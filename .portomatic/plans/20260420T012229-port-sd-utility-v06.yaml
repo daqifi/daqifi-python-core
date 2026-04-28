@@ -1,0 +1,27 @@
+schema_version: 1
+plan_id: 20260420T012229-port-sd-utility-v06
+slug: port-sd-utility-v06
+kind: apply
+created_at: '2026-04-20T01:22:29.535627Z'
+upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+summary: Port SD-card utility commands (GetSdFile, DeleteSdFile) - parameterized batch
+steps:
+- id: s1
+  summary: Port ScpiMessageProducer.GetSdFile and DeleteSdFile (both take fileName,
+    build SCPI commands)
+  kind: patch
+  upstream_ref: null
+  downstream_target: daqifi/_internal/scpi.py
+  assigned_to: null
+  status: done
+  classification: api-shape
+  shard: Communication
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
+  notes:
+  - closed by portomatic apply close at 2026-04-20T01:24:15.772078+00:00
+  started_at: null
+  finished_at: '2026-04-20T01:24:15.775098Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null

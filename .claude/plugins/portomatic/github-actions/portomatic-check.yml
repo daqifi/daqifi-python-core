@@ -1,0 +1,142 @@
+# portomatic upstream-drift watcher
+#
+# Runs `portomatic check` daily (and on demand) against the configured upstream
+# repo. Opens a GitHub issue when actionable drift (semantic | api-shape |
+# new-feature) is detected and no open issue already covers the current
+# upstream HEAD sha.
+#
+# Required repo configuration:
+#   Variables (Settings → Secrets and variables → Actions → Variables):
+#     PORTOMATIC_UPSTREAM_REPO   e.g. "DAQiFi/daqifi-core"
+#     PORTOMATIC_UPSTREAM_REF    optional, defaults to "main"
+#     PORTOMATIC_BASELINE        optional, defaults to sync_state.last_synced or HEAD~10
+#     PORTOMATIC_DOWNSTREAM_DIR  optional, defaults to "." (repo root)
+#
+# Required permissions: issues:write, contents:read.
+
+name: portomatic check
+
+on:
+  schedule:
+    - cron: "0 8 * * *"   # daily at 08:00 UTC
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: "Upstream SHA/ref to diff against (overrides PORTOMATIC_BASELINE)."
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout downstream (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: downstream
+
+      - name: Checkout upstream
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.PORTOMATIC_UPSTREAM_REPO }}
+          ref: ${{ vars.PORTOMATIC_UPSTREAM_REF || 'main' }}
+          path: upstream
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install portomatic
+        # If portomatic is published to PyPI, switch to: pip install portomatic
+        run: |
+          pip install -U pip
+          pip install "git+https://github.com/DAQiFi/portomatic@main"
+
+      - name: Resolve baseline
+        id: resolve
+        run: |
+          BASELINE="${{ inputs.baseline || vars.PORTOMATIC_BASELINE || '' }}"
+          if [ -z "$BASELINE" ]; then
+            STATE="downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}/.portomatic/sync_state.yaml"
+            if [ -f "$STATE" ]; then
+              BASELINE=$(python -c "import yaml; print(yaml.safe_load(open('$STATE')).get('last_synced_upstream_sha') or '')")
+            fi
+          fi
+          if [ -z "$BASELINE" ]; then
+            BASELINE="HEAD~10"
+          fi
+          echo "baseline=$BASELINE" >> "$GITHUB_OUTPUT"
+          echo "Using baseline: $BASELINE"
+
+      - name: Run check
+        id: check
+        working-directory: downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}
+        run: |
+          portomatic check \
+            --upstream "${{ github.workspace }}/upstream" \
+            --baseline "${{ steps.resolve.outputs.baseline }}" \
+            --json > /tmp/portomatic-summary.json
+          cat /tmp/portomatic-summary.json
+
+      - name: Parse summary
+        id: summary
+        run: |
+          ACTIONABLE=$(jq -r '.actionable' /tmp/portomatic-summary.json)
+          UPSTREAM_SHA=$(jq -r '.upstream_sha' /tmp/portomatic-summary.json)
+          REPORT=$(jq -r '.report_path' /tmp/portomatic-summary.json)
+          ACTIONABLE_COUNT=$(jq -r '.actionable_count' /tmp/portomatic-summary.json)
+          TOTAL=$(jq -r '.total' /tmp/portomatic-summary.json)
+          echo "actionable=$ACTIONABLE" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "report=downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}/$REPORT" >> "$GITHUB_OUTPUT"
+          echo "actionable_count=$ACTIONABLE_COUNT" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if no actionable drift
+        if: steps.summary.outputs.actionable != 'true'
+        run: |
+          echo "No actionable drift (semantic / api-shape / new-feature). Total file-touches: ${{ steps.summary.outputs.total }}."
+
+      - name: Check for existing issue for this upstream sha
+        if: steps.summary.outputs.actionable == 'true'
+        id: dedup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA_SHORT=$(echo "${{ steps.summary.outputs.upstream_sha }}" | cut -c1-7)
+          TITLE="portomatic: upstream drift @ $SHA_SHORT"
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "existing=$EXISTING" >> "$GITHUB_OUTPUT"
+
+      - name: Open drift issue
+        if: steps.summary.outputs.actionable == 'true' && steps.dedup.outputs.existing == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY=$(mktemp)
+          {
+            echo "**${{ steps.summary.outputs.actionable_count }}** actionable file-touch(es) of **${{ steps.summary.outputs.total }}** total."
+            echo ""
+            echo "Upstream: \`${{ vars.PORTOMATIC_UPSTREAM_REPO }}@${{ steps.summary.outputs.upstream_sha }}\`"
+            echo "Baseline: \`${{ steps.resolve.outputs.baseline }}\`"
+            echo ""
+            cat "${{ steps.summary.outputs.report }}"
+            echo ""
+            echo "---"
+            echo "_Generated by portomatic-check on \`${{ github.sha }}\`. To absorb: run \`/portomatic-plan\` then \`/portomatic-apply\` locally._"
+          } > "$BODY"
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "${{ steps.dedup.outputs.title }}" \
+            --label "portomatic,upstream-drift" \
+            --body-file "$BODY"
+
+      - name: Skip — issue already exists
+        if: steps.summary.outputs.actionable == 'true' && steps.dedup.outputs.existing != ''
+        run: echo "Issue #${{ steps.dedup.outputs.existing }} already covers upstream sha ${{ steps.summary.outputs.upstream_sha }}; not opening a duplicate."

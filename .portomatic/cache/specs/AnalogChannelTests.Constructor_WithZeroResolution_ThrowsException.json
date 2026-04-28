@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "spec_id": "AnalogChannelTests.Constructor_WithZeroResolution_ThrowsException",
+  "upstream_file": "/mnt/c/Users/User/Documents/GitHub/daqifi-core/src/Daqifi.Core.Tests/Channel/AnalogChannelTests.cs",
+  "upstream_test_name": "Constructor_WithZeroResolution_ThrowsException",
+  "subject_qualified": "AnalogChannel",
+  "decorators": [
+    "Fact"
+  ],
+  "raw_body": "{\n        // Arrange, Act & Assert\n        Assert.Throws<ArgumentOutOfRangeException>(() => new AnalogChannel(channelNumber: 0, resolution: 0));\n    }",
+  "setup": [],
+  "action": [],
+  "expected": [
+    "Assert.Throws<ArgumentOutOfRangeException>(() => new AnalogChannel(channelNumber: 0, resolution: 0));"
+  ],
+  "inline_data": []
+}

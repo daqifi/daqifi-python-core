@@ -1,0 +1,26 @@
+schema_version: 1
+plan_id: 20260420T044036-port-connstatus-v08
+slug: port-connstatus-v08
+kind: apply
+created_at: '2026-04-20T04:40:36.747198Z'
+upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+summary: '#18: Port ConnectionStatus enum (6 values)'
+steps:
+- id: s1
+  summary: '#18: Port ConnectionStatus enum (6 values)'
+  kind: patch
+  upstream_ref: null
+  downstream_target: daqifi/_internal/scpi.py
+  assigned_to: null
+  status: done
+  classification: new-feature
+  shard: Device
+  commit_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+  file: src/Daqifi.Core/Device/ConnectionStatus.cs
+  notes:
+  - closed by portomatic apply close at 2026-04-20T04:45:17.665058+00:00
+  started_at: null
+  finished_at: '2026-04-20T04:45:17.669070Z'
+  failure_class: null
+  ticket_url: null
+  ticket_number: null
