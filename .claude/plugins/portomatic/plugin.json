@@ -1,9 +1,0 @@
-{
-  "name": "portomatic",
-  "version": "0.1.0",
-  "description": "Agentic codebase porting framework: cross-language sync, cross-MCU ports, continuous upstream tracking.",
-  "homepage": "https://github.com/daqifi/portomatic",
-  "commands": "commands",
-  "agents": "agents",
-  "skills": "skills"
-}
