@@ -1190,6 +1190,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 "operations cannot be performed over a network connection."
             )
 
+        # Capture interface intent BEFORE muxing so the finally
+        # block doesn't tear down an SD-logging session by switching
+        # the SPI bus back to LAN. (prepare_lan_interface disables
+        # the SD storage module.)
+        was_logging_to_sd = self._is_logging_to_sd
+
         try:
             lines = self.execute_text_command(
                 lambda: (
@@ -1201,7 +1207,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 completion_timeout_ms=1500,
             )
         finally:
-            if self.is_connected:
+            if self.is_connected and not was_logging_to_sd:
                 try:
                     self.prepare_lan_interface()
                 except Exception:
@@ -1221,6 +1227,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
         Distinct from the local :attr:`is_logging_to_sd_card` property,
         which reflects what THIS Python session has commanded —
         ``get_sd_logging_state`` asks the DEVICE.
+
+        SD/LAN share the SPI bus on Nyquist hardware. We mux to SD
+        for the query so the firmware can serve it; if we weren't
+        already logging to SD (in which case the bus is already SD),
+        we restore LAN afterwards. Active SD-logging sessions are
+        preserved.
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
@@ -1230,13 +1242,23 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 "The SD card and WiFi/LAN share the SPI bus."
             )
 
-        from ._internal.scpi import System as _SystemScpi
+        was_logging_to_sd = self._is_logging_to_sd
 
-        lines = self.execute_text_command(
-            lambda: self.send(ScpiMessage(data=_SystemScpi.get_sd_logging_state())),
-            response_timeout_ms=2000,
-            completion_timeout_ms=500,
-        )
+        try:
+            lines = self.execute_text_command(
+                lambda: (
+                    self.prepare_sd_interface(),
+                    self.send(scpi_commands.get_sd_logging_state()),
+                ),
+                response_timeout_ms=2000,
+                completion_timeout_ms=500,
+            )
+        finally:
+            if self.is_connected and not was_logging_to_sd:
+                try:
+                    self.prepare_lan_interface()
+                except Exception:
+                    pass
         # SYST:STOR:SD:LOG? returns a single integer line: 1 = logging, 0 = not.
         for ln in lines:
             stripped = ln.strip()

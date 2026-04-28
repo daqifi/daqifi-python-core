@@ -208,3 +208,55 @@ class TestGetSdLoggingState:
             assert sd.get_sd_logging_state() is False
         finally:
             sd.disconnect()
+
+    def test_query_muxes_to_sd_interface(self) -> None:
+        # The query must switch the SPI bus to SD before sending
+        # SD:LOGging? — otherwise the firmware can't serve it.
+        sd = _make_device(response_map={b"SD:LOGging?": b"DAQIFI>\r\n0\r\n"})
+        try:
+            sd.get_sd_logging_state()
+            written = b"".join(sd._transport.stream.written)
+            # Bus muxed to SD before the query, then back to LAN after.
+            assert b"LAN:ENAbled 0" in written
+            assert b"SD:LOGging?" in written
+            assert b"LAN:ENAbled 1" in written
+        finally:
+            sd.disconnect()
+
+    def test_query_preserves_active_sd_logging_session(self) -> None:
+        # When SD logging is active, the bus is already SD-muxed.
+        # Restoring LAN in finally would tear down the logging session.
+        # Verify the LAN-restore is skipped.
+        sd = _make_device(response_map={b"SD:LOGging?": b"DAQIFI>\r\n1\r\n"})
+        try:
+            sd._is_logging_to_sd = True
+            assert sd.get_sd_logging_state() is True
+            written = b"".join(sd._transport.stream.written)
+            assert b"SD:LOGging?" in written
+            # No LAN-restore at the end — would have stopped logging.
+            assert b"LAN:ENAbled 1" not in written
+        finally:
+            sd.disconnect()
+
+
+# ---- bus-preservation across LIST? --------------------------------------
+
+
+class TestRequestSdCardFileListBusPreservation:
+    def test_preserves_active_sd_logging_session(self) -> None:
+        # request_sd_card_file_list during an SD-logging session must
+        # not call prepare_lan_interface in finally (that would stop
+        # logging by disabling the SD storage module).
+        listing = b"DAQIFI>\r\nactive_log.bin\r\n"
+        sd = _make_device(response_map={b"SD:LIST?": listing})
+        try:
+            sd._is_logging_to_sd = True
+            sd.request_sd_card_file_list()
+            written = b"".join(sd._transport.stream.written)
+            assert b"SD:LIST?" in written
+            # The "LAN:ENAbled 1" toggle must NOT be sent when logging
+            # was already active, because prepare_lan_interface stops
+            # SD logging.
+            assert b"LAN:ENAbled 1" not in written
+        finally:
+            sd.disconnect()
