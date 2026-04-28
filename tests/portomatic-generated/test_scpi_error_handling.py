@@ -1,8 +1,10 @@
 """Tests for SCPI system-error parsing + the channels.py setter helper.
 
 Closes daqifi/daqifi-python-core#14 — setters were treating SCPI code-0
-``"No error"`` as a failure indicator. After the fix, the setter helper
-parses the response and only raises when the code is non-zero.
+``"No error"`` as a failure indicator. After the fix, the helper parses
+the same SYST:ERR? response captured by ``send_set_with_error`` and
+only raises when the device reported a non-zero error code, an empty
+reply (timeout), or success=True survived no-op short-circuit.
 """
 import pytest
 
@@ -27,70 +29,84 @@ def test_parse_system_error_round_trips(response, expected):
     assert scpi.parse_system_error(response) == expected
 
 
-def test_parse_system_error_empty_response_treated_as_no_error():
-    """Empty / whitespace responses can occur when the device echoes
-    nothing back — treat as the benign no-error state rather than
-    raising spuriously."""
+def test_parse_system_error_empty_response_falls_back_to_no_error():
+    """Pure parser tolerates empty input — but the setter helper does
+    NOT trust this fallback (see test_setter_helper_raises_on_empty
+    below). Keeping the parser permissive lets non-setter callers (who
+    treat the result advisorially) avoid wrapping every call in a
+    try/except for ValueError."""
     assert scpi.parse_system_error("") == (0, "No error")
     assert scpi.parse_system_error("   ") == (0, "No error")
 
 
 def test_parse_system_error_non_numeric_code_falls_back_to_no_error():
     """Mangled responses shouldn't crash callers; fall back to the
-    benign state and let the operator see the original buffer if they
-    want to dig deeper."""
+    benign state and let the setter helper detect the empty/malformed
+    case separately (it pre-checks the raw response for empty)."""
     assert scpi.parse_system_error('garbage,"???"') == (0, "No error")
 
 
 # ---------------------------------------------------------------------------
-# _check_setter_response — the channels.py helper
+# _check_setter_response — channels.py helper (Qodo PR #53 review #1+2)
 # ---------------------------------------------------------------------------
 
 
-class _FakeComm:
-    """Records send_query calls + returns canned responses."""
-
-    def __init__(self, error_response: str = '0,"No error"'):
-        self._error_response = error_response
-        self.queries: list[str] = []
-
-    def send_query(self, cmd: str) -> str:
-        self.queries.append(cmd)
-        return self._error_response
-
-    def send_set(self, *args, **kwargs):
-        raise NotImplementedError("test should not call send_set")
-
-
 def test_setter_helper_returns_when_send_set_succeeded():
-    """When success=True the helper must short-circuit without
-    consulting the error queue (one fewer round-trip on the wire)."""
-    comm = _FakeComm()
-    _check_setter_response(comm, success=True, op_description="set X")
-    assert comm.queries == []
+    """success=True short-circuits with no inspection of error_response."""
+    _check_setter_response(success=True, error_response="garbage", op_description="set X")
 
 
-def test_setter_helper_returns_when_error_code_is_zero():
-    """The bug fix path: send_set returned False, but the device
-    reports code 0 ('No error') so the operation actually succeeded.
-    Must NOT raise."""
-    comm = _FakeComm(error_response='0,"No error"')
-    _check_setter_response(comm, success=False, op_description="set X")
-    assert comm.queries == [scpi.System.ERR]
+def test_setter_helper_returns_when_device_reports_no_error():
+    """Bug-fix path (#14): send_set returned False but the device
+    explicitly said 0,"No error" — operation actually succeeded."""
+    _check_setter_response(
+        success=False, error_response='0,"No error"', op_description="set X",
+    )
 
 
 def test_setter_helper_raises_on_real_error():
-    comm = _FakeComm(error_response='-100,"Bad command"')
     with pytest.raises(CommandError, match="-100"):
-        _check_setter_response(comm, success=False, op_description="set X")
-    assert comm.queries == [scpi.System.ERR]
+        _check_setter_response(
+            success=False,
+            error_response='-100,"Bad command"',
+            op_description="set X",
+        )
+
+
+def test_setter_helper_raises_on_empty_response():
+    """Qodo PR #53 review #2: a timeout / missing reply on the error
+    query MUST NOT be silently treated as success — the device may be
+    in an unknown state."""
+    with pytest.raises(CommandError, match="did not respond"):
+        _check_setter_response(
+            success=False, error_response="", op_description="set X",
+        )
+    with pytest.raises(CommandError, match="did not respond"):
+        _check_setter_response(
+            success=False, error_response="   ", op_description="set X",
+        )
 
 
 def test_setter_helper_includes_description_in_error():
-    comm = _FakeComm(error_response='113,"Undefined header"')
     with pytest.raises(CommandError) as exc:
-        _check_setter_response(comm, success=False, op_description="enable channel")
+        _check_setter_response(
+            success=False,
+            error_response='113,"Undefined header"',
+            op_description="enable channel",
+        )
     msg = str(exc.value)
     assert "enable channel" in msg
     assert "113" in msg
     assert "Undefined header" in msg
+
+
+def test_setter_helper_does_not_query_error_queue():
+    """Qodo PR #53 review #1: the helper must NOT call send_query on
+    the error queue — that would advance the queue past the failure
+    that produced success=False. The error response is passed in
+    pre-captured by ``send_set_with_error``."""
+    # Helper signature requires no comm object — proves it can't query.
+    import inspect
+    sig = inspect.signature(_check_setter_response)
+    assert "comm" not in sig.parameters
+    assert "error_response" in sig.parameters
