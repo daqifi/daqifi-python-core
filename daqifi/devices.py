@@ -1171,20 +1171,79 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.set_sd_logging_file_name(file_name))
 
     def request_sd_card_file_list(self) -> None:
-        """Low-level helper — emit ``SD:LIST?`` only, do nothing else.
+        """Issue ``SD:LIST?`` and populate :attr:`sd_card_files` with the
+        parsed result.
 
-        **Most callers want :meth:`get_sd_card_files`** (which wraps
-        the LIST? + parse + ``_sd_card_files`` cache update flow).
-        This method is fire-and-forget by design — it does NOT update
-        ``_sd_card_files`` because the consumer pipeline is currently
-        protobuf-only and the text reply isn't surfaced through
-        :meth:`add_message_received` callbacks
-        (daqifi-python-core#16). When that lands, this method can be
-        wired to update state too; until then, use the higher-level
-        helper.
+        Now that ``execute_text_command`` (#22) captures text replies
+        without losing them to the protobuf consumer, this method
+        actually updates the local ``_sd_card_files`` cache — closes
+        daqifi/daqifi-python-core#16. Callers can either inspect
+        ``sd_card_files`` after the call OR keep using the higher-level
+        :meth:`get_sd_card_files` (which returns the list directly).
         """
-        self.send(scpi_commands.get_sd_file_list())
-        time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+        if not self.is_connected:
+            raise RuntimeError("Device is not connected.")
+        if not self.is_usb_connection:
+            raise RuntimeError(
+                "SD card operations require a USB/serial connection. "
+                "The SD card and WiFi/LAN share the SPI bus, so SD "
+                "operations cannot be performed over a network connection."
+            )
+
+        try:
+            lines = self.execute_text_command(
+                lambda: (
+                    self.prepare_sd_interface(),
+                    time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S),
+                    self.send(scpi_commands.get_sd_file_list()),
+                ),
+                response_timeout_ms=3000,
+                completion_timeout_ms=1500,
+            )
+        finally:
+            if self.is_connected:
+                try:
+                    self.prepare_lan_interface()
+                except Exception:
+                    pass
+
+        self._sd_card_files = parse_sd_card_file_list(lines)
+
+    def get_sd_logging_state(self) -> bool:
+        """Query the device's current SD-logging state via ``SD:LOG?``.
+
+        Returns ``True`` if the device is currently logging to SD,
+        ``False`` otherwise. Uses :meth:`execute_text_command` so the
+        text reply is actually captured (was previously dropped by the
+        protobuf consumer — closes part of
+        daqifi/daqifi-python-core#16).
+
+        Distinct from the local :attr:`is_logging_to_sd_card` property,
+        which reflects what THIS Python session has commanded —
+        ``get_sd_logging_state`` asks the DEVICE.
+        """
+        if not self.is_connected:
+            raise RuntimeError("Device is not connected.")
+        if not self.is_usb_connection:
+            raise RuntimeError(
+                "SD operations require a USB/serial connection. "
+                "The SD card and WiFi/LAN share the SPI bus."
+            )
+
+        from ._internal.scpi import System as _SystemScpi
+
+        lines = self.execute_text_command(
+            lambda: self.send(ScpiMessage(data=_SystemScpi.get_sd_logging_state())),
+            response_timeout_ms=2000,
+            completion_timeout_ms=500,
+        )
+        # SYST:STOR:SD:LOG? returns a single integer line: 1 = logging, 0 = not.
+        for ln in lines:
+            stripped = ln.strip()
+            if stripped in ("0", "1"):
+                return stripped == "1"
+        # Device gave no parseable response — fall back to local state.
+        return self._is_logging_to_sd
 
     def delete_sd_file(self, file_name: str) -> None:
         """Low-level helper — emit DELete only. Prefer
