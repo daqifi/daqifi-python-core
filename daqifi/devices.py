@@ -532,6 +532,13 @@ class DaqifiDevice:
             return
 
         self._set_state(DeviceState.Initializing)
+        # Track whether we registered the inbound-message handler so we
+        # can unwind it on failure. Without unwinding, a caller that
+        # catches the error and retries initialize() would
+        # double-register the handler — every inbound message would
+        # then be delivered twice for the rest of the session.
+        # (Closes daqifi/daqifi-python-core#26.)
+        handler_registered = False
         try:
             self._protocol_handler = ProtobufProtocolHandler(
                 status_message_handler=self._on_status_message_received,
@@ -539,6 +546,7 @@ class DaqifiDevice:
             )
             if self._consumer is not None:
                 self._consumer.add_message_received(self._on_inbound_message)
+                handler_registered = True
 
             # Standard SCPI init sequence (mirrors upstream).
             self.send(scpi_commands.disable_device_echo())
@@ -571,6 +579,18 @@ class DaqifiDevice:
             self._is_initialized = True
             self._set_state(DeviceState.Ready)
         except Exception:
+            # Unwind the handler registration so a retry doesn't
+            # double-register. Suppress remove_message_received errors —
+            # the original failure is the actionable one and we don't
+            # want to mask it. The handler is also cleared from the
+            # protocol handler reference since the caller has no other
+            # way to drop it.
+            if handler_registered and self._consumer is not None:
+                try:
+                    self._consumer.remove_message_received(self._on_inbound_message)
+                except Exception:
+                    pass
+            self._protocol_handler = None
             self._set_state(DeviceState.Error)
             raise
 
