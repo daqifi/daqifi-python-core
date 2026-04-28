@@ -1205,8 +1205,20 @@ class SerialInterface:
         """
         Open serial connection.
 
+        Sends ``SYSTem:ECHO -1`` after the port stabilizes so the
+        firmware suppresses both command-echo and the ``DAQIFI>``
+        prompt for the rest of the session. This matches the .NET core
+        (``DisableDeviceEcho``) initialization pattern and eliminates
+        the heuristic prompt/echo stripping every receive method
+        otherwise has to do (closes daqifi/daqifi-python-core#2).
+
+        The existing string-replace fallbacks in ``send_command()`` /
+        ``sd_get_file*`` are intentionally retained as defense-in-depth
+        for transports where the echo-disable command itself is lost
+        (a flaky pre-stable USB CDC enumeration, for example).
+
         Returns:
-            True if connection successful, False otherwise
+            True if connection successful, False otherwise.
         """
         try:
             self._serial = serial.Serial(
@@ -1222,14 +1234,52 @@ class SerialInterface:
             # Clear any pending data
             self._serial.reset_input_buffer()
             self._serial.reset_output_buffer()
+            # Disable echo + prompt for the rest of the session.
+            # Failure here doesn't abort the connection — the existing
+            # response-stripping fallbacks compensate; we just won't
+            # get the cleaner binary stream the disable affords.
+            try:
+                self._send_disable_echo()
+            except Exception:
+                pass
             return True
         except (serial.SerialException, OSError) as e:
             # Return False instead of raising to allow discovery to continue
             return False
 
+    def _send_disable_echo(self) -> None:
+        """Send ``SYSTem:ECHO -1`` raw, bypassing send_command's
+        echo-strip path so the response (if any) is discarded.
+
+        Kept private + bare-bones because at open() time the device
+        may still be in the slow USB-CDC settling window where
+        send_command's read-loop would burn the full timeout. We just
+        write + flush, give the device 100 ms to apply, and drain.
+        """
+        if self._serial is None or not self._serial.is_open:
+            return
+        self._serial.write(b"SYSTem:ECHO -1\r")
+        self._serial.flush()
+        time.sleep(0.1)
+        # Drain whatever the device echoed back before suppression took effect.
+        try:
+            if self._serial.in_waiting:
+                self._serial.read(self._serial.in_waiting)
+        except (serial.SerialException, OSError):
+            pass
+
     def close(self):
-        """Close serial connection"""
+        """Close serial connection. Restores echo to terminal-friendly
+        defaults (SYSTem:ECHO 1) before closing so a human opening the
+        port in a serial terminal afterward sees the prompt."""
         if self._serial and self._serial.is_open:
+            try:
+                self._serial.write(b"SYSTem:ECHO 1\r")
+                self._serial.flush()
+                time.sleep(0.05)
+            except (serial.SerialException, OSError):
+                # Best-effort; the underlying port may already be gone.
+                pass
             self._serial.close()
 
     def is_open(self) -> bool:
