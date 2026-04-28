@@ -516,6 +516,130 @@ class DaqifiDevice:
                 "not yet implemented."
             )
 
+    def execute_text_command(
+        self,
+        setup_action: Callable[[], None],
+        response_timeout_ms: int = 5000,
+        completion_timeout_ms: int = 1000,
+    ) -> List[str]:
+        """Run a SCPI command that expects a TEXT-mode reply, capturing
+        the lines the device returns.
+
+        After ``initialize()`` runs ``set_protobuf_stream_format()``, the
+        consumer pipeline only parses length-prefixed protobuf frames —
+        text replies (SD/network/info queries, ``**ERROR`` messages, etc.)
+        are silently dropped by the protobuf parser. This helper pauses
+        the protobuf consumer, swaps in a temporary text consumer on the
+        SAME stream, runs ``setup_action()`` (typically a single
+        :meth:`send` call), waits with a two-phase inactivity timeout,
+        then restarts the protobuf consumer.
+
+        Two-phase timeout (mirrors upstream
+        ``ExecuteTextCommandAsync``):
+
+        - Phase 1: wait up to ``response_timeout_ms`` for the FIRST text
+          line to arrive.
+        - Phase 2: once any line has arrived, wait until
+          ``completion_timeout_ms`` of inactivity (no new lines) elapses
+          before returning. This catches multi-line responses like
+          ``SD:LIST?`` without an explicit termination marker.
+
+        The protobuf consumer's restart is wrapped in ``finally`` so
+        streaming resumes even if ``setup_action()`` raises. Closes
+        Gap 1 of daqifi/daqifi-python-core#22.
+
+        Args:
+            setup_action: callable that issues the SCPI command (typically
+                ``lambda: self.send(scpi_commands.<query>())``).
+            response_timeout_ms: phase-1 budget for the first byte.
+            completion_timeout_ms: phase-2 inactivity budget after the
+                first line.
+
+        Returns:
+            List of text lines captured between ``setup_action()`` and the
+            inactivity timeout. Empty list when the device returned
+            nothing within ``response_timeout_ms``.
+        """
+        if self._consumer is None:
+            raise RuntimeError(
+                "execute_text_command requires an active consumer; "
+                "call connect() first."
+            )
+        if self._transport is None:
+            raise RuntimeError(
+                "execute_text_command requires an active transport."
+            )
+        stream = self._transport.stream
+        if stream is None:
+            raise RuntimeError(
+                "Transport reports no stream; cannot pause consumer."
+            )
+
+        was_running = self._consumer.is_running
+        if was_running:
+            try:
+                stopped = self._consumer.stop_safely()
+                if stopped is False:
+                    self._consumer.stop()
+            except Exception:
+                # Best-effort pause; if we can't stop the protobuf
+                # consumer we'll race it for stream bytes (degraded
+                # but not catastrophic).
+                pass
+
+        captured: List[str] = []
+
+        try:
+            text_parser = LineBasedMessageParser(line_ending="\r\n")
+            text_consumer = StreamMessageConsumer[str](stream, text_parser)
+
+            def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
+                captured.append(args.message.data)
+
+            text_consumer.add_message_received(_on_text_line)
+            text_consumer.start()
+
+            try:
+                setup_action()
+
+                # Phase 1: wait up to response_timeout_ms for first byte.
+                phase1_deadline = time.monotonic() + (response_timeout_ms / 1000.0)
+                while time.monotonic() < phase1_deadline and not captured:
+                    time.sleep(0.01)
+
+                # Phase 2: inactivity timeout. Reset the inactivity clock
+                # whenever a new line arrives.
+                inactivity_threshold = completion_timeout_ms / 1000.0
+                last_count = len(captured)
+                last_change = time.monotonic()
+                while time.monotonic() - last_change < inactivity_threshold:
+                    if len(captured) != last_count:
+                        last_count = len(captured)
+                        last_change = time.monotonic()
+                    time.sleep(0.01)
+            finally:
+                # Always tear down the text consumer.
+                try:
+                    stopped = text_consumer.stop_safely()
+                    if stopped is False:
+                        text_consumer.stop()
+                except Exception:
+                    pass
+                try:
+                    text_consumer.close()
+                except Exception:
+                    pass
+        finally:
+            # Always restart the protobuf consumer so streaming
+            # resumes — even if setup_action raised.
+            if was_running:
+                try:
+                    self._consumer.start()
+                except Exception:
+                    pass
+
+        return captured
+
     def initialize(self) -> None:
         """Run the standard SCPI init sequence.
 
