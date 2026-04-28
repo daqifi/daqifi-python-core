@@ -40,8 +40,20 @@ def _check_setter_response(
         )
     code, desc = scpi.parse_system_error(error_response)
     if code == 0:
+        # parse_system_error is intentionally permissive — it falls back
+        # to (0, "No error") for unrecognized strings so non-setter
+        # callers can avoid try/except boilerplate. The setter path
+        # MUST NOT trust that fallback: a malformed response (no comma
+        # AND not a "no error" string) means the device is in an
+        # unknown state, not actually success. Closes Qodo PR #53
+        # /improve pass 2 importance 9.
+        if "," not in error_response and "no error" not in error_response.lower():
+            raise CommandError(
+                f"Failed to {op_description}: malformed error response "
+                f"{error_response!r}"
+            )
         # send_set returned False but the device explicitly reports no
-        # error — the operation actually succeeded. Bug-fix path.
+        # error — the operation actually succeeded. Bug-fix path for #14.
         return
     raise CommandError(f"Failed to {op_description}: {code},{desc!r}")
 

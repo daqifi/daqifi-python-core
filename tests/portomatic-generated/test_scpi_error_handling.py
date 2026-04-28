@@ -100,6 +100,30 @@ def test_setter_helper_includes_description_in_error():
     assert "Undefined header" in msg
 
 
+def test_setter_helper_rejects_malformed_response_even_at_code_zero():
+    """Qodo PR #53 /improve pass 2 importance 9: parse_system_error
+    falls back to (0, "No error") for garbage input so non-setter
+    callers don't need try/except. The setter helper MUST detect that
+    fallback and raise rather than treating it as silent success."""
+    with pytest.raises(CommandError, match="malformed"):
+        _check_setter_response(
+            success=False,
+            error_response="garbage with no comma at all",
+            op_description="set X",
+        )
+
+
+def test_setter_helper_accepts_no_error_without_comma():
+    """Some firmware variants might emit just 'No error' without the
+    standard '0,"..."' wrapper. Accept either the comma-canonical
+    form OR a literal 'no error' substring (case-insensitive)."""
+    _check_setter_response(
+        success=False,
+        error_response="No error",
+        op_description="set X",
+    )
+
+
 def test_setter_helper_does_not_query_error_queue():
     """Qodo PR #53 review #1: the helper must NOT call send_query on
     the error queue — that would advance the queue past the failure
