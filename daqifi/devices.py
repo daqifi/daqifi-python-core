@@ -1196,13 +1196,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
         # the SD storage module.)
         was_logging_to_sd = self._is_logging_to_sd
 
+        def _setup_list() -> None:
+            self.prepare_sd_interface()
+            time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+            self.send(scpi_commands.get_sd_file_list())
+
         try:
             lines = self.execute_text_command(
-                lambda: (
-                    self.prepare_sd_interface(),
-                    time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S),
-                    self.send(scpi_commands.get_sd_file_list()),
-                ),
+                _setup_list,
                 response_timeout_ms=3000,
                 completion_timeout_ms=1500,
             )
@@ -1211,7 +1212,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 try:
                     self.prepare_lan_interface()
                 except Exception:
-                    pass
+                    _log.exception(
+                        "Failed to restore LAN interface after SD list"
+                    )
 
         self._sd_card_files = parse_sd_card_file_list(lines)
 
@@ -1249,13 +1252,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
         parsed_state: Optional[bool] = None
         lines: List[str] = []
 
+        def _setup_log_query() -> None:
+            self.prepare_sd_interface()
+            time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+            self.send(scpi_commands.get_sd_logging_state())
+
         try:
             lines = self.execute_text_command(
-                lambda: (
-                    self.prepare_sd_interface(),
-                    time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S),
-                    self.send(scpi_commands.get_sd_logging_state()),
-                ),
+                _setup_log_query,
                 response_timeout_ms=2000,
                 completion_timeout_ms=500,
             )
@@ -1282,7 +1286,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 try:
                     self.prepare_lan_interface()
                 except Exception:
-                    pass
+                    _log.exception(
+                        "Failed to restore LAN interface after SD log query"
+                    )
 
         if parsed_state is not None:
             return parsed_state
