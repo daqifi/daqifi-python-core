@@ -38,20 +38,29 @@ def _check_setter_response(
             f"Failed to {op_description}: device did not respond to error query "
             "(possible timeout or transport disconnect)"
         )
+    # parse_system_error is intentionally permissive — it falls back to
+    # (0, "No error") for unrecognized strings so non-setter callers
+    # can avoid try/except boilerplate. The setter path MUST NOT
+    # trust that fallback. Re-validate explicitly: success requires
+    # EITHER a parsable numeric code OR a literal "no error" substring
+    # — anything else is malformed and the device is in an unknown
+    # state. (Qodo PR #53 /improve pass 3 importance 9 — stricter than
+    # the prior "no comma" heuristic which let "garbage,nope" through.)
+    raw = error_response.strip()
+    code_str, _, _ = raw.partition(",")
+    no_error_literal = "no error" in raw.lower()
+    try:
+        int(code_str.strip())
+        parsed_ok = True
+    except ValueError:
+        parsed_ok = False
+    if not no_error_literal and not parsed_ok:
+        raise CommandError(
+            f"Failed to {op_description}: malformed error response "
+            f"{error_response!r}"
+        )
     code, desc = scpi.parse_system_error(error_response)
     if code == 0:
-        # parse_system_error is intentionally permissive — it falls back
-        # to (0, "No error") for unrecognized strings so non-setter
-        # callers can avoid try/except boilerplate. The setter path
-        # MUST NOT trust that fallback: a malformed response (no comma
-        # AND not a "no error" string) means the device is in an
-        # unknown state, not actually success. Closes Qodo PR #53
-        # /improve pass 2 importance 9.
-        if "," not in error_response and "no error" not in error_response.lower():
-            raise CommandError(
-                f"Failed to {op_description}: malformed error response "
-                f"{error_response!r}"
-            )
         # send_set returned False but the device explicitly reports no
         # error — the operation actually succeeded. Bug-fix path for #14.
         return

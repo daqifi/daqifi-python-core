@@ -100,15 +100,22 @@ def test_setter_helper_includes_description_in_error():
     assert "Undefined header" in msg
 
 
-def test_setter_helper_rejects_malformed_response_even_at_code_zero():
-    """Qodo PR #53 /improve pass 2 importance 9: parse_system_error
-    falls back to (0, "No error") for garbage input so non-setter
-    callers don't need try/except. The setter helper MUST detect that
-    fallback and raise rather than treating it as silent success."""
+@pytest.mark.parametrize("malformed", [
+    "garbage with no comma at all",  # no comma + no "no error"
+    "garbage,nope",                   # comma but unparseable code
+    "abc,xyz,123",                   # multiple commas, code not int
+    "  ,",                            # comma alone
+])
+def test_setter_helper_rejects_malformed_response_even_at_code_zero(malformed):
+    """Qodo PR #53 /improve pass 3 importance 9 (tightened from
+    pass 2): parse_system_error falls back to (0, "No error") for
+    garbage input so non-setter callers don't need try/except. The
+    setter helper MUST detect ANY malformed response, including ones
+    that have a comma but no parsable numeric code."""
     with pytest.raises(CommandError, match="malformed"):
         _check_setter_response(
             success=False,
-            error_response="garbage with no comma at all",
+            error_response=malformed,
             op_description="set X",
         )
 
