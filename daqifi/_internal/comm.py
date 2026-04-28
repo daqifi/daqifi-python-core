@@ -1205,14 +1205,36 @@ class SerialInterface:
         """
         Open serial connection.
 
+        Sends ``SYSTem:ECHO -1`` after the port stabilizes so the
+        firmware suppresses both command-echo and the ``DAQIFI>``
+        prompt for the rest of the session. This matches the .NET core
+        (``DisableDeviceEcho``) initialization pattern and eliminates
+        the heuristic prompt/echo stripping every receive method
+        otherwise has to do (closes daqifi/daqifi-python-core#2).
+
+        The existing string-replace fallbacks in ``send_command()`` /
+        ``sd_get_file*`` are intentionally retained as defense-in-depth
+        for transports where the echo-disable command itself is lost
+        (a flaky pre-stable USB CDC enumeration, for example).
+
         Returns:
-            True if connection successful, False otherwise
+            True if connection successful, False otherwise.
         """
+        # Pick a finite POSITIVE write_timeout — the open-time echo-
+        # disable write must NEVER block forever on a flaky USB CDC
+        # enumeration, but timeout=0 (non-blocking write) and
+        # timeout<0 (invalid) would both break the disable path.
+        # (Qodo PR #55 /improve pass 1 importance 7 + pass 3
+        # importance 7 — clamp to positive.)
+        write_timeout = 1.0
+        if self.timeout is not None and self.timeout > 0:
+            write_timeout = self.timeout
         try:
             self._serial = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
                 timeout=self.timeout,
+                write_timeout=write_timeout,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE
@@ -1222,14 +1244,90 @@ class SerialInterface:
             # Clear any pending data
             self._serial.reset_input_buffer()
             self._serial.reset_output_buffer()
+            # Disable echo + prompt for the rest of the session.
+            # Failure here doesn't abort the connection — the existing
+            # response-stripping fallbacks compensate; we just won't
+            # get the cleaner binary stream the disable affords.
+            # Catch specific I/O exceptions (not bare Exception) so a
+            # programmer error inside _send_disable_echo isn't silently
+            # swallowed (Qodo PR #55 /improve pass 1 importance 7).
+            try:
+                self._send_disable_echo()
+            except (serial.SerialException, OSError):
+                pass
             return True
         except (serial.SerialException, OSError) as e:
             # Return False instead of raising to allow discovery to continue
             return False
 
+    def _send_disable_echo(self) -> None:
+        """Send ``SYSTem:ECHO -1`` raw, bypassing send_command's
+        echo-strip path so the response (if any) is discarded.
+
+        Kept private + bare-bones because at open() time the device
+        may still be in the slow USB-CDC settling window where
+        send_command's read-loop would burn the full timeout.
+
+        Drain strategy (Qodo PR #55 review #1): after the initial 100ms
+        settle, poll in_waiting in a short loop and read whatever's
+        there until the buffer stays empty for two consecutive polls
+        OR a 500ms deadline elapses. Then call reset_input_buffer()
+        as belt-and-suspenders so a discovery flow's *IDN? right
+        after open() can't pick up stale echo bytes.
+        """
+        if self._serial is None or not self._serial.is_open:
+            return
+        # Use \r\n to match ScpiMessage.get_bytes() — the canonical
+        # wire format. send_command() uses bare \r for legacy
+        # compatibility but new writes should use the canonical form
+        # (Qodo PR #55 /improve pass 4 importance 7).
+        self._serial.write(b"SYSTem:ECHO -1\r\n")
+        self._serial.flush()
+        time.sleep(0.1)
+        # Drain loop — bytes can arrive after the initial settle if the
+        # firmware is still flushing the echo from the disable command
+        # itself. Stable-empty for 2 consecutive polls (or 500 ms total)
+        # before stopping.
+        # Monotonic clock for the deadline so a system clock adjustment
+        # doesn't make the loop run forever or terminate immediately
+        # (Qodo PR #55 /improve pass 5 importance 6).
+        deadline = time.monotonic() + 0.5
+        empty_polls = 0
+        while time.monotonic() < deadline and empty_polls < 2:
+            try:
+                pending = self._serial.in_waiting
+            except (serial.SerialException, OSError):
+                break
+            if pending:
+                try:
+                    self._serial.read(pending)
+                except (serial.SerialException, OSError):
+                    break
+                empty_polls = 0
+            else:
+                empty_polls += 1
+            time.sleep(0.02)
+        # Belt-and-suspenders: explicit input-buffer reset so any
+        # bytes still in flight when we stopped polling don't bleed
+        # into the next caller's read (e.g. discovery's *IDN?).
+        try:
+            if hasattr(self._serial, "reset_input_buffer"):
+                self._serial.reset_input_buffer()
+        except (serial.SerialException, OSError):
+            pass
+
     def close(self):
-        """Close serial connection"""
+        """Close serial connection. Restores echo to terminal-friendly
+        defaults (SYSTem:ECHO 1) before closing so a human opening the
+        port in a serial terminal afterward sees the prompt."""
         if self._serial and self._serial.is_open:
+            try:
+                self._serial.write(b"SYSTem:ECHO 1\r\n")
+                self._serial.flush()
+                time.sleep(0.05)
+            except (serial.SerialException, OSError):
+                # Best-effort; the underlying port may already be gone.
+                pass
             self._serial.close()
 
     def is_open(self) -> bool:
