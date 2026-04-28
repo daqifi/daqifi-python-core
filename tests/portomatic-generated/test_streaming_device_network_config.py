@@ -91,6 +91,9 @@ def _make_device() -> DaqifiStreamingDevice:
     sd.connect()
     # Override the WiFi-restart sleep so tests don't pay 2s per call.
     sd._WIFI_MODULE_RESTART_DELAY_S = 0.0  # type: ignore[attr-defined]
+    # Also zero the SD settle delay — prepare_sd_interface() sleeps
+    # twice via this constant, and tests only assert command ordering.
+    sd._SD_INTERFACE_SETTLE_DELAY_S = 0.0  # type: ignore[attr-defined]
     return sd
 
 
@@ -117,7 +120,7 @@ class TestUpdateNetworkConfiguration:
             with pytest.raises(TypeError, match="must not be None"):
                 sd.update_network_configuration(None)  # type: ignore[arg-type]
         finally:
-            sd.disconnect()
+            sd.close()
 
     def test_rejects_empty_ssid(self) -> None:
         sd = _make_device()
@@ -125,7 +128,7 @@ class TestUpdateNetworkConfiguration:
             with pytest.raises(ValueError, match="SSID"):
                 sd.update_network_configuration(NetworkConfiguration(ssid=""))
         finally:
-            sd.disconnect()
+            sd.close()
 
     def test_rejects_wpa_without_password(self) -> None:
         sd = _make_device()
@@ -139,7 +142,7 @@ class TestUpdateNetworkConfiguration:
                     )
                 )
         finally:
-            sd.disconnect()
+            sd.close()
 
     def test_existing_network_emits_canonical_sequence(self) -> None:
         sd = _make_device()
@@ -176,7 +179,7 @@ class TestUpdateNetworkConfiguration:
             )
             assert save_idx > enable_lan_idx, "Save must come after prepare_lan"
         finally:
-            sd.disconnect()
+            sd.close()
 
     def test_self_hosted_uses_different_nettype(self) -> None:
         sd = _make_device()
@@ -194,7 +197,7 @@ class TestUpdateNetworkConfiguration:
             # No password command for open networks.
             assert b"LAN:PASs" not in written
         finally:
-            sd.disconnect()
+            sd.close()
 
     def test_open_security_skips_password(self) -> None:
         sd = _make_device()
@@ -209,7 +212,7 @@ class TestUpdateNetworkConfiguration:
             assert b"SECurity 0" in written
             assert b"LAN:PASs" not in written
         finally:
-            sd.disconnect()
+            sd.close()
 
     def test_updates_local_snapshot_after_success(self) -> None:
         sd = _make_device()
@@ -226,7 +229,7 @@ class TestUpdateNetworkConfiguration:
             assert snap.mode == WifiMode.EXISTING_NETWORK
             assert snap.security_type == WifiSecurityType.WPA_PSK_PHRASE
         finally:
-            sd.disconnect()
+            sd.close()
 
     def test_stops_streaming_before_apply(self) -> None:
         sd = _make_device()
@@ -246,7 +249,7 @@ class TestUpdateNetworkConfiguration:
             assert apply_idx > stop_idx
             assert sd.is_streaming is False
         finally:
-            sd.disconnect()
+            sd.close()
 
 
 # ---- prepare_lan_interface / prepare_sd_interface --------------------------
@@ -264,7 +267,7 @@ class TestPrepareLanInterface:
             assert sd_off >= 0
             assert lan_on > sd_off, "Enable LAN must come after Disable SD"
         finally:
-            sd.disconnect()
+            sd.close()
 
     def test_clears_local_logging_flag(self) -> None:
         sd = _make_device()
@@ -273,7 +276,7 @@ class TestPrepareLanInterface:
             sd.prepare_lan_interface()
             assert sd._is_logging_to_sd is False
         finally:
-            sd.disconnect()
+            sd.close()
 
 
 class TestPrepareSdInterface:
@@ -288,4 +291,4 @@ class TestPrepareSdInterface:
             assert lan_off >= 0
             assert sd_on > lan_off, "Enable SD must come after Disable LAN"
         finally:
-            sd.disconnect()
+            sd.close()
