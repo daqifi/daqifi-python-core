@@ -1277,7 +1277,11 @@ class SerialInterface:
         """
         if self._serial is None or not self._serial.is_open:
             return
-        self._serial.write(b"SYSTem:ECHO -1\r")
+        # Use \r\n to match ScpiMessage.get_bytes() — the canonical
+        # wire format. send_command() uses bare \r for legacy
+        # compatibility but new writes should use the canonical form
+        # (Qodo PR #55 /improve pass 4 importance 7).
+        self._serial.write(b"SYSTem:ECHO -1\r\n")
         self._serial.flush()
         time.sleep(0.1)
         # Drain loop — bytes can arrive after the initial settle if the
@@ -1315,7 +1319,7 @@ class SerialInterface:
         port in a serial terminal afterward sees the prompt."""
         if self._serial and self._serial.is_open:
             try:
-                self._serial.write(b"SYSTem:ECHO 1\r")
+                self._serial.write(b"SYSTem:ECHO 1\r\n")
                 self._serial.flush()
                 time.sleep(0.05)
             except (serial.SerialException, OSError):

@@ -53,7 +53,7 @@ def test_open_sends_disable_echo_command():
     written = [call.args[0] for call in fake.write.call_args_list]
     echo_writes = [b for b in written if b"ECHO -1" in b]
     assert echo_writes, f"expected SYSTem:ECHO -1 write, got: {written!r}"
-    assert echo_writes[0] == b"SYSTem:ECHO -1\r"
+    assert echo_writes[0] == b"SYSTem:ECHO -1\r\n"
 
 
 def test_close_sends_restore_echo_command():
