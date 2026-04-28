@@ -35,7 +35,12 @@ _VERSION_RE = re.compile(
     (?:\.(?P<min>\d+))?
     (?:\.(?P<pat>\d+))?
     (?:
-        -(?P<dash_label>[A-Za-z]+)(?:\.(?P<dash_num>\d+))?
+        # Dash form — separator before the number is optional so both
+        # ``3.0.0-beta.1`` (SemVer / GitHub tags) AND ``3.0.0-beta1``
+        # (some firmware self-reports) parse to the same fields. Single
+        # capture group via the ``\.?`` optional separator instead of
+        # a second capture (Qodo PR #52 /improve pass 1 importance 6).
+        -(?P<dash_label>[A-Za-z]+)(?:\.?(?P<dash_num>\d+))?
         |
         (?P<suffix>[A-Za-z]+\d*)
     )?

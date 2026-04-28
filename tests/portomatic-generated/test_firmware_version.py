@@ -177,6 +177,11 @@ def test_compare_returns_expected_sign(left, right, expected_sign):
     ("3.0.0-beta",     (3, 0, 0, "beta", 0)),
     ("3.0.0-rc",       (3, 0, 0, "rc", 0)),
     ("v1.0.0-alpha",   (1, 0, 0, "alpha", 0)),
+    # Dash form WITHOUT the dot separator before the number — some
+    # firmware self-reports use this shape (Qodo PR #52 /improve
+    # pass 1 importance 6).
+    ("3.0.0-beta1",    (3, 0, 0, "beta", 1)),
+    ("v1.2.3-rc5",     (1, 2, 3, "rc", 5)),
 ])
 def test_parse_accepts_dot_separated_semver_pre_release(inp, expected):
     """Closes #10: GitHub release tags + SemVer use ``3.0.0-beta.1`` shape;
