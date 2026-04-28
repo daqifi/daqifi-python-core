@@ -30,7 +30,9 @@ from daqifi.firmware.version import compare
     ("3.2.0b2",     (3, 2, 0, "b", 2)),
     ("v1.0.0rc1",   (1, 0, 0, "rc", 1)),
     ("1.0.0alpha",  (1, 0, 0, "alpha", 0)),
-    ("1.0.0BETA",   (1, 0, 0, "BETA", 0)),  # case preserved on label, ordering case-insensitive
+    # Pre-release labels canonicalize to lowercase so equality / hash
+    # agree with ordering (Qodo PR #52 review #1).
+    ("1.0.0BETA",   (1, 0, 0, "beta", 0)),
     ("2.0.0pre",    (2, 0, 0, "pre", 0)),
 ])
 def test_parse_round_trips_to_expected_fields(inp, expected):
@@ -159,6 +161,66 @@ def test_compare_returns_expected_sign(left, right, expected_sign):
         assert result < 0
     else:
         assert result > 0
+
+
+# ---------------------------------------------------------------------------
+# Dot-separated SemVer pre-release form (#10)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("inp,expected", [
+    # Standard SemVer / GitHub release tag form
+    ("3.0.0-beta.1",   (3, 0, 0, "beta", 1)),
+    ("v3.0.0-beta.1",  (3, 0, 0, "beta", 1)),
+    ("1.2.3-rc.5",     (1, 2, 3, "rc", 5)),
+    ("1.2.3-alpha.10", (1, 2, 3, "alpha", 10)),
+    # Dash + label without trailing number
+    ("3.0.0-beta",     (3, 0, 0, "beta", 0)),
+    ("3.0.0-rc",       (3, 0, 0, "rc", 0)),
+    ("v1.0.0-alpha",   (1, 0, 0, "alpha", 0)),
+    # Dash form WITHOUT the dot separator before the number — some
+    # firmware self-reports use this shape (Qodo PR #52 /improve
+    # pass 1 importance 6).
+    ("3.0.0-beta1",    (3, 0, 0, "beta", 1)),
+    ("v1.2.3-rc5",     (1, 2, 3, "rc", 5)),
+])
+def test_parse_accepts_dot_separated_semver_pre_release(inp, expected):
+    """Closes #10: GitHub release tags + SemVer use ``3.0.0-beta.1`` shape;
+    the original C# regex only accepted ``3.0.0beta1``. Both shapes parse
+    to the same FirmwareVersion fields after this widening."""
+    v = FirmwareVersion.parse(inp)
+    assert v is not None, f"failed to parse: {inp!r}"
+    assert (v.major, v.minor, v.patch, v.pre_label, v.pre_number) == expected
+
+
+def test_dot_form_and_concat_form_compare_equal():
+    """3.0.0-beta.1 and 3.0.0beta1 are the same version — comparison
+    must agree across both shapes so callers don't get version drift
+    based on which form upstream emits."""
+    dot = FirmwareVersion.parse("3.0.0-beta.1")
+    concat = FirmwareVersion.parse("3.0.0beta1")
+    assert dot == concat
+    assert hash(dot) == hash(concat)
+
+
+def test_label_case_normalized_so_equality_agrees_with_compare():
+    """Qodo PR #52 review #1: parse() now lowercases the label so two
+    inputs that differ only in case (firmware self-report 'BETA' vs
+    GitHub release tag 'beta') are == and hash-equal. Without this,
+    compare() would return 0 (same precedence rank, same number) but
+    dataclass __eq__ would return False (different label strings)."""
+    upper = FirmwareVersion.parse("3.0.0BETA")
+    lower = FirmwareVersion.parse("3.0.0beta")
+    dash_upper = FirmwareVersion.parse("3.0.0-BETA")
+    dash_lower = FirmwareVersion.parse("3.0.0-beta")
+    assert upper == lower == dash_upper == dash_lower
+    assert hash(upper) == hash(lower) == hash(dash_upper) == hash(dash_lower)
+
+
+def test_dot_form_pre_release_sorts_below_release():
+    rel = FirmwareVersion.parse("3.0.0")
+    pre = FirmwareVersion.parse("3.0.0-beta.1")
+    assert pre is not None and rel is not None
+    assert pre < rel
 
 
 # ---------------------------------------------------------------------------
