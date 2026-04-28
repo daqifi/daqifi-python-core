@@ -11,6 +11,30 @@ from ._internal import scpi
 from .exceptions import CommandError, ConfigurationError
 
 
+def _check_setter_response(comm: SerialInterface, success: bool, op_description: str) -> None:
+    """Resolve a setter's success boolean using the device's error queue.
+
+    Some setters return ``False`` from ``send_set`` even on a successful
+    write — typically because the firmware doesn't echo an explicit OK.
+    The authoritative signal is the device's error queue (``SYST:ERR?``):
+    code 0 means the setter actually succeeded.
+
+    Closes daqifi/daqifi-python-core#14 — every setter that called
+    ``send_set`` then raised on the boolean treated SCPI code-0 ``"No
+    error"`` as a failure indicator. Now: query the error queue, parse
+    the code, raise only when non-zero.
+    """
+    if success:
+        return
+    error = comm.send_query(scpi.System.ERR)
+    code, desc = scpi.parse_system_error(error)
+    if code == 0:
+        # send_set returned False but the device reports no error —
+        # the operation actually succeeded. This is the bug fix path.
+        return
+    raise CommandError(f"Failed to {op_description}: {code},{desc!r}")
+
+
 class AnalogOutputChannel:
     """
     Single analog output (DAC) channel.
@@ -69,9 +93,9 @@ class AnalogOutputChannel:
 
         try:
             success = self._comm.send_set(f"{scpi.AnalogOutput.VOLTAGE_SET} {self._channel}", value)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set voltage: {error}")
+            _check_setter_response(self._comm, success, "set voltage")
+        except CommandError:
+            raise
         except Exception as e:
             raise CommandError(f"Failed to set voltage on channel {self._channel}: {e}")
 
@@ -99,9 +123,9 @@ class AnalogOutputChannel:
         """
         try:
             success = self._comm.send_set(f"{scpi.AnalogOutput.ENABLE_SET} {self._channel}", value)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set enable state: {error}")
+            _check_setter_response(self._comm, success, "set enable state")
+        except CommandError:
+            raise
         except Exception as e:
             raise CommandError(f"Failed to set enable state on channel {self._channel}: {e}")
 
@@ -198,10 +222,8 @@ class AnalogInputChannel:
                 range_val = int(value)
 
             success = self._comm.send_set(scpi.AnalogInput.RANGE_SET, range_val)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set range: {error}")
-        except FeatureNotSupportedError:
+            _check_setter_response(self._comm, success, "set range")
+        except (CommandError, FeatureNotSupportedError):
             raise
         except Exception as e:
             raise CommandError(f"Failed to set range: {e}")
@@ -230,9 +252,9 @@ class AnalogInputChannel:
         """
         try:
             success = self._comm.send_set(f"{scpi.AnalogInput.ENABLE_CHANNEL_SET} {self._channel}", value)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set enable state: {error}")
+            _check_setter_response(self._comm, success, "set enable state")
+        except CommandError:
+            raise
         except Exception as e:
             raise CommandError(f"Failed to set enable state on channel {self._channel}: {e}")
 
@@ -315,9 +337,9 @@ class DigitalIOChannel:
 
             # Write back entire port direction
             success = self._comm.send_set(scpi.DigitalIO.PORT_DIRECTION_SET, port_dir)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set direction: {error}")
+            _check_setter_response(self._comm, success, "set direction")
+        except CommandError:
+            raise
         except Exception as e:
             raise CommandError(f"Failed to set direction on channel {self._channel}: {e}")
 
@@ -370,9 +392,9 @@ class DigitalIOChannel:
 
             # Write back entire port state
             success = self._comm.send_set(scpi.DigitalIO.PORT_STATE_SET, port_state)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set state: {error}")
+            _check_setter_response(self._comm, success, "set state")
+        except CommandError:
+            raise
         except Exception as e:
             raise CommandError(f"Failed to set state on channel {self._channel}: {e}")
 
