@@ -50,3 +50,8 @@ tests/integration/captures/
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent / portomatic working dirs (local cache, never commit)
+.portomatic/
+.claude/
+.codex

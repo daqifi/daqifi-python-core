@@ -296,10 +296,22 @@ class AnalogInputChannel:
 
         Args:
             value: True to enable, False to disable
+
+        Note:
+            Firmware syntax for the per-channel enable is
+            ``CONFigure:ADC:CHANnel <ch>,<state>`` — comma-separated,
+            NOT space-separated. Sending space (the previous behavior
+            from before send_set_with_error was wired in) produced
+            ``-101,"Invalid character"`` from the device. Closes the
+            hardware-side gap that made #32's logic fix non-functional
+            on real NQ1 firmware (3.4.6b1).
         """
+        # Pre-format channel + value with the comma so the inner
+        # ``send_set_with_error`` doesn't insert a space between them.
+        cmd_value = f"{self._channel},{1 if value else 0}"
         try:
             success, error_response = self._comm.send_set_with_error(
-                f"{scpi.AnalogInput.ENABLE_CHANNEL_SET} {self._channel}", value,
+                scpi.AnalogInput.ENABLE_CHANNEL_SET, cmd_value,
             )
             _check_setter_response(success, error_response, "set enable state")
         except CommandError as e:
@@ -534,15 +546,33 @@ class AnalogInputs(ChannelCollection):
 
         Args:
             channels: List of channel indices to configure
-            range: Input voltage range
+            range: Input voltage range. Silently ignored on variants
+                   with fixed-range ADCs (NQ1, NQ2 — MC12bADC).
             enabled: Enable channels after configuration
 
         Example:
             analog_inputs.configure_channels([0, 1, 2], range="5V", enabled=True)
+
+        Note:
+            Closes daqifi/daqifi-python-core#32 — on NQ1/NQ2 the range
+            setter raises ``FeatureNotSupportedError`` (the hardware has
+            a fixed input range), and the original implementation let
+            that exception abort the loop without ever setting
+            ``enabled``. ``configure_channels(..., enabled=True)`` was
+            therefore fully unusable on the only variants we currently
+            ship. Swallow the range-not-supported error so the enabled
+            write always reaches the channel; callers that want strict
+            range enforcement can call ``channel.range = ...`` directly.
         """
+        from .exceptions import FeatureNotSupportedError
+
         for channel_id in channels:
             if 0 <= channel_id < len(self._channels):
-                self._channels[channel_id].range = range
+                try:
+                    self._channels[channel_id].range = range
+                except FeatureNotSupportedError:
+                    # NQ1/NQ2 fixed-range ADC — leave range alone, still apply enabled.
+                    pass
                 self._channels[channel_id].enabled = enabled
 
     def enable_all(self):
