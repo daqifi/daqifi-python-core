@@ -532,13 +532,14 @@ class DaqifiDevice:
             return
 
         self._set_state(DeviceState.Initializing)
-        # Track whether we registered the inbound-message handler so we
-        # can unwind it on failure. Without unwinding, a caller that
-        # catches the error and retries initialize() would
-        # double-register the handler — every inbound message would
-        # then be delivered twice for the rest of the session.
-        # (Closes daqifi/daqifi-python-core#26.)
-        handler_registered = False
+        # init_succeeded tracks whether we made it through the full
+        # SCPI sequence. The cleanup runs in `finally` so it covers
+        # BaseException (KeyboardInterrupt / SystemExit) too, not just
+        # Exception. Without this, a Ctrl-C mid-init would leave the
+        # handler registered and a subsequent retry would double-
+        # register it. (Closes daqifi/daqifi-python-core#26 + Qodo
+        # PR #54 review #2.)
+        init_succeeded = False
         try:
             self._protocol_handler = ProtobufProtocolHandler(
                 status_message_handler=self._on_status_message_received,
@@ -546,7 +547,6 @@ class DaqifiDevice:
             )
             if self._consumer is not None:
                 self._consumer.add_message_received(self._on_inbound_message)
-                handler_registered = True
 
             # Standard SCPI init sequence (mirrors upstream).
             self.send(scpi_commands.disable_device_echo())
@@ -578,21 +578,25 @@ class DaqifiDevice:
 
             self._is_initialized = True
             self._set_state(DeviceState.Ready)
+            init_succeeded = True
         except Exception:
-            # Unwind the handler registration so a retry doesn't
-            # double-register. Suppress remove_message_received errors —
-            # the original failure is the actionable one and we don't
-            # want to mask it. The handler is also cleared from the
-            # protocol handler reference since the caller has no other
-            # way to drop it.
-            if handler_registered and self._consumer is not None:
-                try:
-                    self._consumer.remove_message_received(self._on_inbound_message)
-                except Exception:
-                    pass
-            self._protocol_handler = None
+            # Mark Error state on Exception specifically — KeyboardInterrupt
+            # / SystemExit shouldn't transition to "Error" because the
+            # operator may want to resume.
             self._set_state(DeviceState.Error)
             raise
+        finally:
+            if not init_succeeded:
+                # remove_message_received is idempotent (suppresses
+                # ValueError when the handler isn't subscribed) so we
+                # can call it unconditionally without tracking a
+                # registration flag.
+                if self._consumer is not None:
+                    try:
+                        self._consumer.remove_message_received(self._on_inbound_message)
+                    except Exception:
+                        pass
+                self._protocol_handler = None
 
     def close(self) -> None:
         if self._disposed:
