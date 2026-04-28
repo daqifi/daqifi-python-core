@@ -1220,12 +1220,15 @@ class SerialInterface:
         Returns:
             True if connection successful, False otherwise.
         """
-        # Pick a finite write_timeout even when the read timeout is
-        # explicitly None (e.g. blocking-read configurations) — the
-        # open-time echo-disable write must NEVER block forever on a
-        # flaky USB CDC enumeration. (Qodo PR #55 /improve pass 1
-        # importance 7.)
-        write_timeout = self.timeout if self.timeout is not None else 1.0
+        # Pick a finite POSITIVE write_timeout — the open-time echo-
+        # disable write must NEVER block forever on a flaky USB CDC
+        # enumeration, but timeout=0 (non-blocking write) and
+        # timeout<0 (invalid) would both break the disable path.
+        # (Qodo PR #55 /improve pass 1 importance 7 + pass 3
+        # importance 7 — clamp to positive.)
+        write_timeout = 1.0
+        if self.timeout is not None and self.timeout > 0:
+            write_timeout = self.timeout
         try:
             self._serial = serial.Serial(
                 port=self.port,
