@@ -531,6 +531,11 @@ class DaqifiDevice:
         if self._is_initialized:
             return
 
+        # Snapshot prior state so a BaseException interrupt can restore
+        # it from "Initializing" — operator may want to resume after
+        # Ctrl-C without the device permanently stuck in the transient
+        # init state (Qodo PR #54 /improve pass 1 importance 6).
+        prev_state = self._state
         self._set_state(DeviceState.Initializing)
         # init_succeeded tracks whether we made it through the full
         # SCPI sequence. The cleanup runs in `finally` so it covers
@@ -597,6 +602,12 @@ class DaqifiDevice:
                     except Exception:
                         pass
                 self._protocol_handler = None
+                # If the state is still Initializing (BaseException
+                # path — Exception path already set Error), restore
+                # the prior state so an operator-driven resume isn't
+                # blocked on a permanent transient state.
+                if self._state == DeviceState.Initializing:
+                    self._set_state(prev_state)
 
     def close(self) -> None:
         if self._disposed:
