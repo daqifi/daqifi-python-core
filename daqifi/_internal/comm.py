@@ -1325,6 +1325,27 @@ class SerialInterface:
         Returns:
             True if command succeeded (no error), False otherwise
         """
+        # Delegate to send_set_with_error; collapse to legacy bool return.
+        success, _err = self.send_set_with_error(command, value, delay)
+        return success
+
+    def send_set_with_error(
+        self, command: str, value, delay: float = 0.1
+    ) -> tuple[bool, str]:
+        """Send SCPI set command and return (success, raw_error_response).
+
+        Each ``SYST:ERR?`` query advances the device's error queue, so a
+        caller that needs to inspect the error after a failed set MUST
+        use the response captured here — re-querying would read the next
+        queue entry and likely see ``0,"No error"``, silently swallowing
+        the real failure (closes Qodo PR #53 review #1).
+
+        Returns:
+            ``(success, error_response)`` where ``success`` is True iff
+            the response contained ``"No error"`` (legacy semantics) and
+            ``error_response`` is the raw ``SYST:ERR?`` reply for callers
+            that want to parse code + description.
+        """
         # Format value based on type
         if isinstance(value, str):
             cmd = f"{command} {value}"
@@ -1337,9 +1358,11 @@ class SerialInterface:
 
         self.send_command(cmd, delay)
 
-        # Check for errors
+        # Read the error queue exactly once — repeated queries advance
+        # it. The raw response is returned so callers can parse it
+        # without re-reading.
         error = self.send_query("SYST:ERR?", 0.1)
-        return "No error" in error
+        return ("No error" in error, error)
 
     def clear_errors(self):
         """Clear error queue by reading all errors"""

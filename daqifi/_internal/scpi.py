@@ -254,6 +254,31 @@ def parse_float(response: str) -> float:
         raise ValueError(f"Invalid float response: {response}")
 
 
+def parse_system_error(response: str) -> tuple[int, str]:
+    """Parse a ``SYST:ERR?`` response into (code, description).
+
+    The SCPI standard format is ``<int code>,"<description>"`` — code 0
+    with description ``"No error"`` means the device's error queue is
+    empty (the previous operation succeeded). Non-zero codes describe
+    actual errors.
+
+    Returns ``(0, "No error")`` for malformed responses so callers
+    treat them as the benign no-op state rather than spuriously
+    raising. The most common malformed shape is whitespace / empty
+    when the device echoed nothing back.
+    """
+    response = response.strip()
+    if not response:
+        return 0, "No error"
+    code_str, _, desc = response.partition(",")
+    try:
+        code = int(code_str.strip())
+    except ValueError:
+        return 0, "No error"
+    desc = desc.strip().strip('"')
+    return code, desc
+
+
 def parse_string(response: str) -> str:
     """Parse SCPI string response (removes quotes)"""
     response = response.strip()
