@@ -1513,7 +1513,7 @@ class SerialInterface:
                     break
                 continue
             consecutive_empty = 0
-            popped.append(error)
+            popped.append(stripped)
         return popped
 
     def clear_errors(self) -> None:
