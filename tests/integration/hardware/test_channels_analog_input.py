@@ -320,12 +320,7 @@ def test_per_channel_enabled_setter_reflects_in_firmware_bitmask(
     assert _read_firmware_bitmask(nyquist_device) == 0
     inputs[3].enabled = True
     inputs[7].enabled = True
-    time.sleep(0.05)
-    bitmask = _read_firmware_bitmask(nyquist_device)
-    assert bitmask == (1 << 3) | (1 << 7), (
-        f"unexpected firmware bitmask after per-channel writes: "
-        f"0x{bitmask:X}"
-    )
+    _await_firmware_bitmask(nyquist_device, (1 << 3) | (1 << 7))
 
 
 def test_enable_all_sets_full_bitmask(nyquist_device: NyquistDevice) -> None:
@@ -333,9 +328,8 @@ def test_enable_all_sets_full_bitmask(nyquist_device: NyquistDevice) -> None:
     inputs = nyquist_device.analog_inputs
     _write_firmware_bitmask(nyquist_device, 0)
     inputs.enable_all()
-    time.sleep(0.1)
     expected = (1 << len(inputs)) - 1
-    assert _read_firmware_bitmask(nyquist_device) == expected
+    _await_firmware_bitmask(nyquist_device, expected)
 
 
 def test_disable_all_clears_bitmask(nyquist_device: NyquistDevice) -> None:
@@ -345,8 +339,7 @@ def test_disable_all_clears_bitmask(nyquist_device: NyquistDevice) -> None:
     _write_firmware_bitmask(nyquist_device, full)
     assert _read_firmware_bitmask(nyquist_device) == full
     inputs.disable_all()
-    time.sleep(0.1)
-    assert _read_firmware_bitmask(nyquist_device) == 0
+    _await_firmware_bitmask(nyquist_device, 0)
 
 
 # ---- Range — variant-aware -------------------------------------------------
@@ -426,12 +419,9 @@ def test_configure_channels_enables_listed_channels_on_nq1(
     inputs = nyquist_device.analog_inputs
     _write_firmware_bitmask(nyquist_device, 0)
     inputs.configure_channels([0, 1, 2], range="10V", enabled=True)
-    time.sleep(0.1)
-    bitmask = _read_firmware_bitmask(nyquist_device)
-    assert bitmask & 0x7 == 0x7, (
-        f"configure_channels did not set bits 0..2 on NQ1; "
-        f"bitmask=0x{bitmask:X}"
-    )
+    # Strict equality (not bits-0..2-set masked) — the setup wrote 0,
+    # so any extra bit set after the call is a regression.
+    _await_firmware_bitmask(nyquist_device, 0x7)
 
 
 def test_configure_channels_enables_listed_channels_on_nq3(
