@@ -23,30 +23,13 @@ Hardware source-of-truth: the firmware bitmask via the raw SCPI query
 writes — see daqifi-python-core "bitmask vs per-channel SCPI are
 equivalent" finding).
 
-PRODUCTION BUG SURFACED — per-channel SET path is broken on real
-hardware:
-
-  ``AnalogInputChannel.enabled`` setter calls
-  ``SerialInterface.send_set("CONFigure:ADC:CHANnel <ch>", value)`` →
-  the SCPI command sent on the wire is
-  ``CONFigure:ADC:CHANnel <ch> <value>`` (space-separated) but the
-  firmware expects the comma-separated form
-  ``CONFigure:ADC:CHANnel <ch>,<value>``. The malformed command is
-  silently dropped by the firmware (no error queued, bitmask
-  unchanged), but ``send_set`` ALSO returns False — independently —
-  because the follow-up ``SYST:ERR?`` round-trip races with leftover
-  bytes from the prior ``send_command`` window. So the setter raises
-  ``CommandError`` even when the queue is clean, AND the underlying
-  SCPI is malformed even when the setter doesn't raise.
-
-  This breaks ``analog_inputs[i].enabled = True`` /
-  ``enable_all()`` / ``disable_all()`` / ``configure_channels(...)``
-  end-to-end. None of those paths affect streaming today (callers
-  use the typed-bitmask factory ``enable_adc_channels`` instead),
-  so the slice's per-channel SET tests are marked ``xfail`` and
-  the bug is logged for a follow-up production-code PR (per the
-  tests-only-PR scope rule). The per-channel GET tests below
-  still validate the production GET surface end-to-end.
+FIXED in PR #56 (#32): the per-channel SET path is now correct on
+real hardware. ``AnalogInputChannel.enabled`` setter pre-formats
+the value as ``"<ch>,<state>"`` so ``send_set`` emits the
+firmware's expected ``CONFigure:ADC:CHANnel <ch>,<state>`` form;
+``configure_channels`` swallows ``FeatureNotSupportedError`` from
+the range setter on NQ1/NQ2 so ``enabled`` still gets written.
+The previously-xfailed per-channel SET tests now pass.
 """
 from __future__ import annotations
 
@@ -324,68 +307,39 @@ def test_disable_all_after_bitmask_write_reflects_in_getter(
     assert not any(inputs[i].enabled for i in range(len(inputs)))
 
 
-# ---- Per-channel SET — currently broken upstream (see module docstring) ----
+# ---- Per-channel SET — fixed by PR #56 (#32) -----------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "AnalogInputChannel.enabled setter sends malformed SCPI "
-        "(space-separated `CONFigure:ADC:CHANnel <ch> <val>` instead "
-        "of comma-separated `<ch>,<val>`); firmware silently drops "
-        "it AND SerialInterface.send_set's response check races on "
-        "the SYST:ERR? round-trip. Production-code fix is out of "
-        "scope for this tests-only PR."
-    ),
-    strict=True,
-)
 def test_per_channel_enabled_setter_reflects_in_firmware_bitmask(
     nyquist_device: NyquistDevice,
 ) -> None:
-    """Setting ``analog_inputs[i].enabled = True`` SHOULD set bit
-    ``i`` in the firmware bitmask. Currently broken — see xfail."""
+    """Setting ``analog_inputs[i].enabled = True`` sets bit ``i`` in
+    the firmware bitmask."""
     inputs = nyquist_device.analog_inputs
     _write_firmware_bitmask(nyquist_device, 0)
     assert _read_firmware_bitmask(nyquist_device) == 0
     inputs[3].enabled = True
     inputs[7].enabled = True
-    time.sleep(0.05)
-    bitmask = _read_firmware_bitmask(nyquist_device)
-    assert bitmask == (1 << 3) | (1 << 7), (
-        f"unexpected firmware bitmask after per-channel writes: "
-        f"0x{bitmask:X}"
-    )
+    _await_firmware_bitmask(nyquist_device, (1 << 3) | (1 << 7))
 
 
-@pytest.mark.xfail(
-    reason="depends on the broken per-channel enabled setter (see above)",
-    strict=True,
-)
 def test_enable_all_sets_full_bitmask(nyquist_device: NyquistDevice) -> None:
-    """``enable_all()`` SHOULD flip every per-channel bit on. Currently
-    broken — bulk wrapper iterates the broken per-channel setter."""
+    """``enable_all()`` flips every per-channel bit on."""
     inputs = nyquist_device.analog_inputs
     _write_firmware_bitmask(nyquist_device, 0)
     inputs.enable_all()
-    time.sleep(0.1)
     expected = (1 << len(inputs)) - 1
-    assert _read_firmware_bitmask(nyquist_device) == expected
+    _await_firmware_bitmask(nyquist_device, expected)
 
 
-@pytest.mark.xfail(
-    reason="depends on the broken per-channel enabled setter (see above)",
-    strict=True,
-)
 def test_disable_all_clears_bitmask(nyquist_device: NyquistDevice) -> None:
-    """``disable_all()`` SHOULD drive the firmware bitmask to 0.
-    Currently broken — bulk wrapper iterates the broken per-channel
-    setter."""
+    """``disable_all()`` drives the firmware bitmask to 0."""
     inputs = nyquist_device.analog_inputs
     full = (1 << len(inputs)) - 1
     _write_firmware_bitmask(nyquist_device, full)
     assert _read_firmware_bitmask(nyquist_device) == full
     inputs.disable_all()
-    time.sleep(0.1)
-    assert _read_firmware_bitmask(nyquist_device) == 0
+    _await_firmware_bitmask(nyquist_device, 0)
 
 
 # ---- Range — variant-aware -------------------------------------------------
@@ -451,51 +405,30 @@ def test_range_setter_round_trip_on_nq3(
 # ---- configure_channels ----------------------------------------------------
 
 
-def test_configure_channels_raises_on_nq1_due_to_range_setter(
+def test_configure_channels_enables_listed_channels_on_nq1(
     nyquist_device: NyquistDevice,
 ) -> None:
-    """``configure_channels`` writes ``range`` first — so on NQ1 it
-    propagates the same ``FeatureNotSupportedError`` the standalone
-    range setter raises, and the targeted channels stay un-enabled.
-
-    NOTE: This documents a real production limitation —
-    ``configure_channels`` is unusable on NQ1 even when the caller
-    only cares about the ``enabled`` arg. Combined with the broken
-    per-channel ``enabled`` setter (see module docstring), the bulk
-    bulk-config path is fully unusable on NQ1 today. Logged as a
-    follow-up production fix; tests-only PR scope keeps it out of
-    this slice."""
+    """On NQ1, ``configure_channels`` swallows the
+    ``FeatureNotSupportedError`` from the fixed-range ADC and still
+    writes ``enabled`` for each listed channel. Closes #32 — the
+    bulk-config path is fully usable on NQ1."""
     if nyquist_device.variant != BoardVariant.NQ1:
         pytest.skip(
             f"NQ1-only test (variant={nyquist_device.variant.value})"
         )
     inputs = nyquist_device.analog_inputs
     _write_firmware_bitmask(nyquist_device, 0)
-    with pytest.raises(FeatureNotSupportedError):
-        inputs.configure_channels([0, 1, 2], range="10V", enabled=True)
-    # Channels stayed un-enabled — the failed range write short-
-    # circuited before reaching the (broken) enabled write.
-    bitmask = _read_firmware_bitmask(nyquist_device)
-    assert bitmask & 0x7 == 0, (
-        f"configure_channels left bits 0..2 set on NQ1 despite "
-        f"raising; bitmask=0x{bitmask:X}"
-    )
+    inputs.configure_channels([0, 1, 2], range="10V", enabled=True)
+    # Strict equality (not bits-0..2-set masked) — the setup wrote 0,
+    # so any extra bit set after the call is a regression.
+    _await_firmware_bitmask(nyquist_device, 0x7)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "configure_channels on NQ3 depends on the broken per-channel "
-        "enabled setter (see module docstring); range write succeeds "
-        "but the enabled write silently fails and the bitmask stays 0."
-    ),
-    strict=True,
-)
 def test_configure_channels_enables_listed_channels_on_nq3(
     nyquist_device: NyquistDevice,
 ) -> None:
-    """On NQ3 the bulk path SHOULD write both range AND enabled for
-    each listed channel. Currently broken on the enabled half (see
-    xfail). Skipped when the test rig isn't an NQ3."""
+    """On NQ3 the bulk path writes both range AND enabled for each
+    listed channel. Skipped when the test rig isn't an NQ3."""
     if nyquist_device.variant != BoardVariant.NQ3:
         pytest.skip(
             f"NQ3-only test (variant={nyquist_device.variant.value})"
