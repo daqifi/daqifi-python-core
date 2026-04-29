@@ -300,6 +300,64 @@ def parse_system_error(response: str) -> tuple[int, str]:
     return code, desc
 
 
+def check_setter_response(
+    success: bool, error_response: str, op_description: str
+) -> None:
+    """Resolve a setter outcome from the error response captured by
+    ``SerialInterface.send_set_with_error``.
+
+    Some setters return ``success=False`` even on a successful write —
+    typically because the firmware doesn't echo an explicit OK. The
+    authoritative signal is the SYST:ERR? response captured DURING
+    ``send_set_with_error`` — a second SYST:ERR? query would advance
+    the device's error queue past the actual error and silently
+    swallow it (Qodo PR #53 review #1).
+
+    Three outcomes:
+    * ``error_response`` parses as code 0 → success (closes #14).
+    * Empty / whitespace-only → raise. A timeout / missing reply on
+      the error query MUST NOT be treated as success (Qodo PR #53
+      review #2 — would leave the device in an unknown state).
+    * Any non-zero code → raise with the parsed (code, description).
+
+    Lives in this module rather than in ``daqifi.channels`` so that
+    higher-level callers (e.g. ``NyquistDevice.power_state``) can
+    use it without importing across module-internal boundaries
+    (Qodo PR #61 review #1).
+    """
+    # Imported here to avoid a hard dependency on the public
+    # exceptions module from this internal SCPI helper file —
+    # callers always go through here when they need this check.
+    from daqifi.exceptions import CommandError
+
+    if success:
+        return
+    if not error_response or not error_response.strip():
+        raise CommandError(
+            f"Failed to {op_description}: device did not respond to error query "
+            "(possible timeout or transport disconnect)"
+        )
+    raw = error_response.strip()
+    code_str, _, _ = raw.partition(",")
+    no_error_literal = "no error" in raw.lower()
+    try:
+        int(code_str.strip())
+        parsed_ok = True
+    except ValueError:
+        parsed_ok = False
+    if not no_error_literal and not parsed_ok:
+        raise CommandError(
+            f"Failed to {op_description}: malformed error response "
+            f"{error_response!r}"
+        )
+    code, desc = parse_system_error(error_response)
+    if code == 0:
+        # send_set returned False but the device explicitly reports no
+        # error — the operation actually succeeded. Bug-fix path for #14.
+        return
+    raise CommandError(f"Failed to {op_description}: {code},{desc!r}")
+
+
 def parse_string(response: str) -> str:
     """Parse SCPI string response (removes quotes)"""
     response = response.strip()

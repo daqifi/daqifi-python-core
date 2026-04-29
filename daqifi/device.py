@@ -7,13 +7,14 @@ Provides high-level API for device interaction.
 from typing import Dict, Any, Optional, Union, List
 from ._internal.comm import SerialInterface, PowerState
 from ._internal import scpi
+from ._internal.scpi import check_setter_response
 from .channels import (
     AnalogOutputChannel,
     AnalogInputChannel,
     DigitalIOChannel,
     AnalogOutputs,
     AnalogInputs,
-    DigitalIO
+    DigitalIO,
 )
 from .streaming import StreamManager, AsyncStreamManager
 from .discovery import DeviceInfo, BoardVariant
@@ -309,11 +310,17 @@ class NyquistDevice:
         Example:
             device.power_state = PowerState.POWERED_UP
         """
+        # Use send_set_with_error so the SYST:ERR? response captured
+        # by the setter is the one we evaluate — re-querying after a
+        # False return advances the device's error queue past the
+        # actual entry and silently swallows it (#14 / Qodo PR #53).
         try:
-            success = self._comm.send_set(scpi.System.POWER_STATE_SET, int(state), delay=1.0)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set power state: {error}")
+            success, error_response = self._comm.send_set_with_error(
+                scpi.System.POWER_STATE_SET, int(state), delay=1.0,
+            )
+            check_setter_response(success, error_response, "set power state")
+        except CommandError:
+            raise
         except Exception as e:
             raise CommandError(f"Failed to set power state: {e}")
 
