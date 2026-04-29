@@ -73,8 +73,12 @@ def test_drain_errors_caps_at_max_iterations():
     # Simulate device that never reports clean — caps at max_iterations.
     si.send_query = MagicMock(return_value='-100,"Bad command"')
     popped = si.drain_errors(max_iterations=5)
-    assert len(popped) == 5
-    # Caller can detect "didn't converge" via len == max.
+    # 5 real errors + the DRAIN_INCONCLUSIVE sentinel appended when
+    # the loop exits without seeing 0,"No error" (added in the
+    # Qodo PR #64 review pass).
+    assert len(popped) == 6
+    assert popped[-1].startswith("DRAIN_INCONCLUSIVE,")
+    assert popped[:-1] == ['-100,"Bad command"'] * 5
 
 
 def test_clear_errors_shim_still_works():

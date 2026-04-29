@@ -1486,13 +1486,27 @@ class SerialInterface:
         bounds the worst case at ~0.3s while still draining all
         errors when the device IS responsive.
 
-        A reply is "unproductive" if it's empty/whitespace OR
-        doesn't match the SCPI ``<int>,"<msg>"`` shape that
-        firmware uses for both error AND no-error responses —
-        i.e. the device gave us nothing we can act on.
+        Indeterminate-state signal — if we exit via empty_budget
+        OR max_iterations WITHOUT seeing ``0,"No error"``, append
+        a synthetic ``DRAIN_INCONCLUSIVE`` sentinel so callers
+        can detect "queue not confirmed clean" instead of treating
+        empty `popped` as success. Mirrors the conftest.py pattern
+        used by the integration error_drainer (Qodo PR #64 review
+        finding 1).
+
+        Reply parsing is strict — uses :func:`scpi.parse_system_error`
+        to require the canonical ``<int>,"<msg>"`` shape, and the
+        no-error check matches ONLY ``code == 0 AND
+        description == "No error"`` (case/whitespace tolerant).
+        Loose substring checks against ``"No error"`` would falsely
+        terminate on payloads like ``120,"No error in stream"``
+        (Qodo PR #64 review finding 3).
         """
+        from .scpi import parse_system_error
+
         popped: list[str] = []
         consecutive_empty = 0
+        saw_no_error = False
         for _ in range(max_iterations):
             error = self.send_query("SYST:ERR?", 0.05)
             stripped = error.strip() if error else ""
@@ -1501,19 +1515,36 @@ class SerialInterface:
                 if consecutive_empty >= empty_budget:
                     break
                 continue
-            if "No error" in stripped:
-                return popped
-            # Treat replies that don't have the SCPI error shape
-            # (no comma between code and message) as unproductive
-            # too — they're likely echo collisions or noise, not
-            # real error entries to track.
-            if "," not in stripped:
+            # Strict shape check: parse_system_error returns
+            # (0, "No error") for unrecognized/malformed input, so
+            # we can't trust its return alone — re-validate the raw
+            # shape (numeric code + comma + payload) before parsing.
+            code_str, sep, _ = stripped.partition(",")
+            if not sep:
+                # No comma — definitely not a SCPI error reply.
                 consecutive_empty += 1
                 if consecutive_empty >= empty_budget:
                     break
                 continue
+            try:
+                int(code_str.strip())
+            except ValueError:
+                # Code field isn't an int — likely echo collision.
+                consecutive_empty += 1
+                if consecutive_empty >= empty_budget:
+                    break
+                continue
+            code, desc = parse_system_error(stripped)
+            if code == 0 and desc.strip().lower() == "no error":
+                saw_no_error = True
+                break
             consecutive_empty = 0
             popped.append(stripped)
+        if not saw_no_error:
+            popped.append(
+                'DRAIN_INCONCLUSIVE,"did not observe 0,\\"No error\\" '
+                'before giving up"'
+            )
         return popped
 
     def clear_errors(self) -> None:
