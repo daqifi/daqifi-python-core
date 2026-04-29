@@ -1462,25 +1462,57 @@ class SerialInterface:
         error = self.send_query("SYST:ERR?", 0.1)
         return ("No error" in error, error)
 
-    def drain_errors(self, max_iterations: int = 256) -> list[str]:
-        """Pop ``SYST:ERR?`` until the queue reports ``"No error"`` or
-        ``max_iterations`` is hit. Returns the list of error strings
-        popped (empty if the queue was already clean).
+    def drain_errors(
+        self, max_iterations: int = 256, empty_budget: int = 3
+    ) -> list[str]:
+        """Pop ``SYST:ERR?`` until the queue reports ``"No error"``,
+        ``empty_budget`` consecutive empty/unparseable replies arrive,
+        or ``max_iterations`` is hit. Returns the popped errors.
 
         Closes Gap 2 of daqifi/daqifi-python-core#22: the prior
         ``clear_errors()`` discarded errors silently and capped at 10.
         On a device exercised by another session (or one that's
         crashed mid-stream) >10 errors can be queued — observed on
         COM7, ~12 errors had to drain before ``StartStreamData``
-        would succeed. The hardcoded 10 is now a much higher 256
-        with a no-progress guard via the for-loop bound; callers
-        decide whether to log, raise, or discard the popped errors.
+        would succeed.
+
+        ``empty_budget`` (default 3) is the **fail-fast** escape
+        hatch surfaced by Qodo PR #62 review #1: if the device
+        intermittently returns empty replies (USB CDC timeout, no
+        bytes within the read window), the prior unconditional
+        ``max_iterations`` cap could stall a caller for ~25s
+        (256 × 0.1s send_query delay) waiting for a response that
+        never comes. Bailing after N consecutive unproductive reads
+        bounds the worst case at ~0.3s while still draining all
+        errors when the device IS responsive.
+
+        A reply is "unproductive" if it's empty/whitespace OR
+        doesn't match the SCPI ``<int>,"<msg>"`` shape that
+        firmware uses for both error AND no-error responses —
+        i.e. the device gave us nothing we can act on.
         """
         popped: list[str] = []
+        consecutive_empty = 0
         for _ in range(max_iterations):
             error = self.send_query("SYST:ERR?", 0.05)
-            if "No error" in error:
+            stripped = error.strip() if error else ""
+            if not stripped:
+                consecutive_empty += 1
+                if consecutive_empty >= empty_budget:
+                    break
+                continue
+            if "No error" in stripped:
                 return popped
+            # Treat replies that don't have the SCPI error shape
+            # (no comma between code and message) as unproductive
+            # too — they're likely echo collisions or noise, not
+            # real error entries to track.
+            if "," not in stripped:
+                consecutive_empty += 1
+                if consecutive_empty >= empty_budget:
+                    break
+                continue
+            consecutive_empty = 0
             popped.append(error)
         return popped
 
