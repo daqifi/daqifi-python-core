@@ -7,6 +7,7 @@ Provides high-level API for device interaction.
 from typing import Dict, Any, Optional, Union, List
 from ._internal.comm import SerialInterface, PowerState
 from ._internal import scpi
+from ._internal.scpi import check_setter_response
 from .channels import (
     AnalogOutputChannel,
     AnalogInputChannel,
@@ -14,7 +15,6 @@ from .channels import (
     AnalogOutputs,
     AnalogInputs,
     DigitalIO,
-    _check_setter_response,
 )
 from .streaming import StreamManager, AsyncStreamManager
 from .discovery import DeviceInfo, BoardVariant
@@ -318,7 +318,7 @@ class NyquistDevice:
             success, error_response = self._comm.send_set_with_error(
                 scpi.System.POWER_STATE_SET, int(state), delay=1.0,
             )
-            _check_setter_response(success, error_response, "set power state")
+            check_setter_response(success, error_response, "set power state")
         except CommandError:
             raise
         except Exception as e:

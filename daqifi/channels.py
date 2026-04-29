@@ -8,63 +8,16 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from ._internal.comm import SerialInterface
 from ._internal import scpi
+from ._internal.scpi import check_setter_response
 from .exceptions import CommandError, ConfigurationError
 
 
-def _check_setter_response(
-    success: bool, error_response: str, op_description: str
-) -> None:
-    """Resolve a setter outcome from the error response captured by
-    ``SerialInterface.send_set_with_error``.
-
-    Some setters return ``success=False`` even on a successful write —
-    typically because the firmware doesn't echo an explicit OK. The
-    authoritative signal is the SYST:ERR? response captured DURING
-    ``send_set_with_error`` — a second SYST:ERR? query would advance
-    the device's error queue past the actual error and silently
-    swallow it (Qodo PR #53 review #1).
-
-    Three outcomes:
-    * ``error_response`` parses as code 0 → success (closes #14).
-    * Empty / whitespace-only → raise. A timeout / missing reply on
-      the error query MUST NOT be treated as success (Qodo PR #53
-      review #2 — would leave the device in an unknown state).
-    * Any non-zero code → raise with the parsed (code, description).
-    """
-    if success:
-        return
-    if not error_response or not error_response.strip():
-        raise CommandError(
-            f"Failed to {op_description}: device did not respond to error query "
-            "(possible timeout or transport disconnect)"
-        )
-    # parse_system_error is intentionally permissive — it falls back to
-    # (0, "No error") for unrecognized strings so non-setter callers
-    # can avoid try/except boilerplate. The setter path MUST NOT
-    # trust that fallback. Re-validate explicitly: success requires
-    # EITHER a parsable numeric code OR a literal "no error" substring
-    # — anything else is malformed and the device is in an unknown
-    # state. (Qodo PR #53 /improve pass 3 importance 9 — stricter than
-    # the prior "no comma" heuristic which let "garbage,nope" through.)
-    raw = error_response.strip()
-    code_str, _, _ = raw.partition(",")
-    no_error_literal = "no error" in raw.lower()
-    try:
-        int(code_str.strip())
-        parsed_ok = True
-    except ValueError:
-        parsed_ok = False
-    if not no_error_literal and not parsed_ok:
-        raise CommandError(
-            f"Failed to {op_description}: malformed error response "
-            f"{error_response!r}"
-        )
-    code, desc = scpi.parse_system_error(error_response)
-    if code == 0:
-        # send_set returned False but the device explicitly reports no
-        # error — the operation actually succeeded. Bug-fix path for #14.
-        return
-    raise CommandError(f"Failed to {op_description}: {code},{desc!r}")
+# Backward-compat alias — `_check_setter_response` was the original
+# private name. Now exposed publicly via `daqifi._internal.scpi`
+# so non-channel modules (e.g. NyquistDevice.power_state) can use
+# the same setter-response validation without importing across a
+# private (underscore-prefixed) boundary (Qodo PR #61 review #1).
+_check_setter_response = check_setter_response
 
 
 class AnalogOutputChannel:
