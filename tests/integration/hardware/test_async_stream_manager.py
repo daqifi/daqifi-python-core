@@ -47,6 +47,9 @@ def streaming_nyquist(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
         pytest.skip(f"device_info has no serial port: {device_info!r}")
     dev = NyquistDevice.connect(port.strip())
     try:
+        # Drain stale errors LEFT BY PRIOR TESTS BEFORE power_up so
+        # the SET command's send_set_with_error doesn't pop one.
+        dev.clear_errors()
         dev.power_up()
         dev.clear_errors()
         # Enable channel 0 so every test can start without first
