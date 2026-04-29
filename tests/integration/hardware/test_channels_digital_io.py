@@ -59,7 +59,9 @@ from daqifi.exceptions import ConfigurationError
 
 def _wake_and_drain(dev: NyquistDevice) -> None:
     """Bring the device into a state where DIO writes will be
-    accepted — wake from Standby and drain any stale SCPI errors."""
+    accepted — drain stale errors FIRST so power_up's send_set_with_error
+    can see its own SYST:ERR? response, then wake, then drain again."""
+    dev.clear_errors()
     dev.power_up()
     dev.clear_errors()
 

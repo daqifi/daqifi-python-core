@@ -51,6 +51,14 @@ def streaming_nyquist(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
         pytest.skip(f"device_info has no serial port: {device_info!r}")
     dev = NyquistDevice.connect(port.strip())
     try:
+        # Drain any stale errors LEFT BY PRIOR TESTS in the device's
+        # SCPI error queue BEFORE issuing power_up. Otherwise the
+        # send_set_with_error path inside the power_state setter
+        # pops a stale entry and raises on what would have been a
+        # successful command. (Surfaced post-#61 — the OLD setter
+        # silently swallowed the same race; the new one correctly
+        # propagates non-zero codes.)
+        dev.clear_errors()
         dev.power_up()
         dev.clear_errors()
         # Start with everything disabled so the precondition check

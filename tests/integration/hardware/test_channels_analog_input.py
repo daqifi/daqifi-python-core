@@ -65,15 +65,11 @@ _SCPI_NO_ERROR_STR_RE = re.compile(r'\b0\s*,\s*"?No error"?')
 
 def _wake_and_drain(dev: NyquistDevice) -> None:
     """Bring the device into a state where channel writes will be
-    accepted — wake from Standby and drain any stale SCPI errors.
-
-    Mirrors the wake/init sequence that ``clean_device`` does for
-    streaming tests, routed through the public ``NyquistDevice``
-    surface."""
+    accepted — drain stale errors FIRST so the power_up SET command
+    can see its own SYST:ERR? response, then wake, then drain again
+    in case the wake itself queued anything."""
+    dev.clear_errors()
     dev.power_up()
-    # Bounded clear (capped at 10 by the SerialInterface impl — that's
-    # plenty for our setup since we haven't issued any error-producing
-    # commands yet).
     dev.clear_errors()
 
 
