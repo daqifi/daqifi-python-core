@@ -69,87 +69,11 @@ class StreamInterface(IntEnum):
     All = 3      # Stream data to all interfaces simultaneously
 
 
-# System commands
-class System:
-    """System-level SCPI commands"""
-    IDN = "*IDN?"
-    RST = "*RST"
-    ERR = "SYST:ERR?"
-    INFO = "SYST:INFO?"
-    REBOOT = "SYST:REBOOT"
-    FORCE_BOOTLOADER = "SYST:FORceBoot"
-
-    # Power management
-    POWER_STATE_QUERY = "SYST:POW:STAT?"
-    POWER_STATE_SET = "SYST:POW:STAT"
-
-    # WiFi/LAN
-    WIFI_SSID_QUERY = "SYST:COMM:LAN:SSID?"
-    WIFI_SSID_SET = "SYST:COMM:LAN:SSID"
-    WIFI_IP_QUERY = "SYST:COMM:LAN:ADDR?"
-    WIFI_NETTYPE_QUERY = "SYST:COMM:LAN:NETTYPE?"  # Network type (1=STA client, 4=AP)
-    WIFI_NETTYPE_SET = "SYST:COMM:LAN:NETTYPE"
-    WIFI_SIGNAL_QUERY = "SYST:COMM:LAN:SSIDSTR?"  # Signal strength
-    WIFI_SECURITY_QUERY = "SYST:COMM:LAN:SECURITY?"  # Security mode (0=Open, 3=WPA)
-    WIFI_SECURITY_SET = "SYST:COMM:LAN:SECURITY"
-    WIFI_PASSKEY_SET = "SYST:COMM:LAN:PASS"  # Set password (WPA)
-    WIFI_PASSKEY_CHECK = "SYST:COMM:LAN:PASSCHECK?"  # Verify password matches
-    WIFI_APPLY = "SYST:COMM:LAN:APPLY"
-    WIFI_SAVE = "SYST:COMM:LAN:SAVE"
-    WIFI_LOAD = "SYST:COMM:LAN:LOAD"
-
-    # SD Card
-    SD_STATUS_QUERY = "SYST:STOR:SD:STAT?"
-    SD_ENABLE_SET = "SYST:STOR:SD:ENAble"
-    # Firmware #311 renamed the logging-set SCPI command from
-    # ``SYST:STOR:SD:LOGging`` to ``SYST:STOR:SD:FILE`` (PR #5 on
-    # main). The query form was not renamed, so keep both.
-    SD_FILE_SET = "SYST:STOR:SD:FILE"
-    SD_LOGGING_QUERY = "SYST:STOR:SD:LOGging?"
-    SD_LIST_QUERY = "SYST:STOR:SD:LISt?"
-    SD_GET = "SYST:STOR:SD:GET"
-    SD_DELETE = "SYST:STOR:SD:DELete"
-    SD_FORMAT = "SYST:STOR:SD:FORmat"
-    SD_BENCHMARK = "SYST:STOR:SD:BENCHmark"
-    SD_BENCHMARK_QUERY = "SYST:STOR:SD:BENCHmark?"
-
-    @staticmethod
-    def get_sd_logging_state() -> str:
-        """Build query to get the current SD card logging state."""
-        return System.SD_LOGGING_QUERY
-
-    @staticmethod
-    def enable_storage_sd() -> str:
-        """Build command to enable SD card logging.
-
-        Note: LAN must be disabled first to enable SD card logging.
-        """
-        return f"{System.SD_ENABLE_SET} 1"
-
-    @staticmethod
-    def get_sd_file_list() -> str:
-        """Build query to get the list of files on the SD card."""
-        return System.SD_LIST_QUERY
-
-    @staticmethod
-    def set_sd_logging_filename(filename: str) -> str:
-        """Build command to set the SD card logging file name.
-
-        The file is created if it doesn't exist, or appended to if it does.
-        """
-        return f'{System.SD_FILE_SET} "{filename}"'
-
-    @staticmethod
-    def get_sd_file(filename: str) -> str:
-        """Build command to retrieve a specific file from the SD card."""
-        return f'{System.SD_GET} "{filename}"'
-
-    @staticmethod
-    def delete_sd_file(filename: str) -> str:
-        """Build command to delete a file from the SD card."""
-        if not filename or not filename.strip():
-            raise ValueError("Filename cannot be null or empty.")
-        return f'{System.SD_DELETE} "{filename}"'
+# NOTE: SCPI command vocabulary lives in ``scpi_commands`` — call the
+# factory functions there (e.g. ``scpi_commands.get_idn()``) rather
+# than constructing strings here. Closes #12. The previous
+# ``System`` class (constants + static helpers, both duplicated by
+# ``scpi_commands``) was deleted to remove the drift risk.
 
 
 # Analog input (ADC) commands

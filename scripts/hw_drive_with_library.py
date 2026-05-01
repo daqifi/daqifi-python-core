@@ -6,7 +6,7 @@ Library inventory:
 - `daqifi._internal.scpi_commands` provides typed factories: turn_device_on,
   enable_adc_channels, set_stream_interface, set_protobuf_stream_format,
   start_streaming, stop_streaming, ... — each returns an ScpiMessage.
-- `daqifi._internal.scpi.System.POWER_STATE_QUERY/SET` for waking from Standby.
+- `daqifi._internal.scpi_commands.get_power_state / set_power_state` for waking from Standby.
 
 What this script does that the library doesn't (yet):
 1. Wraps `send_command` in a small `checked()` helper that ALWAYS queries
@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from daqifi._internal.comm import SerialInterface
 from daqifi._internal import scpi_commands as cmds
-from daqifi._internal.scpi import StreamInterface, System
+from daqifi._internal.scpi import StreamInterface
 
 
 PORT = "COM7"
@@ -104,7 +104,7 @@ def main() -> int:
         run_step("SYST:INFO?", is_no_error(err))
 
         # 3. Wake from Standby — POWer:STATe 1
-        pow_q, err = ser.query(System.POWER_STATE_QUERY)
+        pow_q, err = ser.query(cmds.get_power_state().data)
         print(f"  power state pre-wake: {pow_q!r}  err: {err!r}")
         run_step("SYST:POW:STAT? (pre)", is_no_error(err))
 
@@ -115,7 +115,7 @@ def main() -> int:
 
         time.sleep(0.5)
 
-        pow_q, err = ser.query(System.POWER_STATE_QUERY)
+        pow_q, err = ser.query(cmds.get_power_state().data)
         print(f"  power state post-wake: {pow_q!r}  err: {err!r}")
         run_step("SYST:POW:STAT? (post)", is_no_error(err))
 

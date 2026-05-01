@@ -15,9 +15,14 @@ class TestSimpleCommands:
     @pytest.mark.parametrize(
         "factory, expected",
         [
+            (scpi_commands.get_idn, "*IDN?"),
+            (scpi_commands.reset_device, "*RST"),
+            (scpi_commands.get_last_error, "SYSTem:ERRor?"),
+            (scpi_commands.get_system_info, "SYSTem:INFO?"),
             (scpi_commands.reboot_device, "SYSTem:REboot"),
             (scpi_commands.get_device_info, "SYSTem:SYSInfoPB?"),
             (scpi_commands.force_bootloader, "SYSTem:FORceBoot"),
+            (scpi_commands.get_power_state, "SYSTem:POWer:STATe?"),
             (scpi_commands.turn_device_on, "SYSTem:POWer:STATe 1"),
             (scpi_commands.disable_device_echo, "SYSTem:ECHO -1"),
             (scpi_commands.enable_device_echo, "SYSTem:ECHO 1"),
@@ -89,6 +94,31 @@ class TestParameterizedCommands:
 
     def test_run_sd_benchmark(self):
         assert scpi_commands.run_sd_benchmark(1024).data == "SYSTem:STORage:SD:BENCHmark 1024"
+
+    def test_set_power_state(self):
+        assert scpi_commands.set_power_state(0).data == "SYSTem:POWer:STATe 0"
+        assert scpi_commands.set_power_state(1).data == "SYSTem:POWer:STATe 1"
+        assert scpi_commands.set_power_state(2).data == "SYSTem:POWer:STATe 2"
+
+    @pytest.mark.parametrize("bad", [True, False, 1.0, "1", None])
+    def test_set_power_state_rejects_non_int(self, bad):
+        with pytest.raises(TypeError, match="state must be an int"):
+            scpi_commands.set_power_state(bad)  # type: ignore[arg-type]
+
+    def test_set_power_state_rejects_negative(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            scpi_commands.set_power_state(-1)
+
+    def test_get_sd_file_list_for_directory(self):
+        assert (
+            scpi_commands.get_sd_file_list_for_directory("logs").data
+            == 'SYSTem:STORage:SD:LIST? "logs"'
+        )
+
+    @pytest.mark.parametrize("bad", ["", "   "])
+    def test_get_sd_file_list_for_directory_rejects_empty(self, bad):
+        with pytest.raises(ValueError, match="null or empty"):
+            scpi_commands.get_sd_file_list_for_directory(bad)
 
     @pytest.mark.parametrize("bad", [0, -1])
     def test_run_sd_benchmark_rejects_non_positive(self, bad):

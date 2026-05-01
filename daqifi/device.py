@@ -6,7 +6,7 @@ Provides high-level API for device interaction.
 
 from typing import Dict, Any, Optional, Union, List
 from ._internal.comm import SerialInterface, PowerState
-from ._internal import scpi
+from ._internal import scpi, scpi_commands
 from ._internal.scpi import check_setter_response
 from .channels import (
     AnalogOutputChannel,
@@ -116,7 +116,7 @@ class NyquistDevice:
 
         try:
             # Query device identification
-            idn = self._comm.send_query(scpi.System.IDN)
+            idn = self._comm.send_query(scpi_commands.get_idn().data)
             self._device_info["idn"] = idn
 
             # Parse variant from IDN
@@ -293,7 +293,7 @@ class NyquistDevice:
                 print("Device fully powered")
         """
         try:
-            response = self._comm.send_query(scpi.System.POWER_STATE_QUERY)
+            response = self._comm.send_query(scpi_commands.get_power_state().data)
             state_val = scpi.parse_int(response)
             return PowerState(state_val)
         except Exception as e:
@@ -315,8 +315,8 @@ class NyquistDevice:
         # False return advances the device's error queue past the
         # actual entry and silently swallows it (#14 / Qodo PR #53).
         try:
-            success, error_response = self._comm.send_set_with_error(
-                scpi.System.POWER_STATE_SET, int(state), delay=1.0,
+            success, error_response = self._comm.send_command_with_error(
+                scpi_commands.set_power_state(int(state)).data, delay=1.0,
             )
             check_setter_response(success, error_response, "set power state")
         except CommandError:
@@ -366,7 +366,7 @@ class NyquistDevice:
             print(info)
         """
         try:
-            return self._comm.send_query(scpi.System.INFO)
+            return self._comm.send_query(scpi_commands.get_system_info().data)
         except Exception as e:
             raise CommandError(f"Failed to get system info: {e}")
 
@@ -383,7 +383,7 @@ class NyquistDevice:
                 print(f"Device error: {error}")
         """
         try:
-            return self._comm.send_query(scpi.System.ERR)
+            return self._comm.send_query(scpi_commands.get_last_error().data)
         except Exception as e:
             raise CommandError(f"Failed to query error: {e}")
 
@@ -410,8 +410,9 @@ class NyquistDevice:
         Example:
             device.sd_enable(True)
         """
-        from ._internal.scpi import System
-        self._comm.send_command(f"{System.SD_ENABLE_SET} {1 if enable else 0}")
+        msg = scpi_commands.enable_storage_sd() if enable else scpi_commands.disable_storage_sd()
+        success, error_response = self._comm.send_command_with_error(msg.data)
+        check_setter_response(success, error_response, f"set SD enabled={enable}")
 
     def sd_list_files(self, directory: str = "") -> List[str]:
         """
@@ -428,11 +429,11 @@ class NyquistDevice:
             for f in files:
                 print(f)
         """
-        from ._internal.scpi import System
         if directory:
-            response = self._comm.send_command(f'{System.SD_LIST_QUERY} "{directory}"')
+            cmd = scpi_commands.get_sd_file_list_for_directory(directory)
         else:
-            response = self._comm.send_command(System.SD_LIST_QUERY)
+            cmd = scpi_commands.get_sd_file_list()
+        response = self._comm.send_command(cmd.data)
 
         # Parse file list from response (format: path,size per line)
         files = []
@@ -474,13 +475,12 @@ class NyquistDevice:
             print(data)
         """
         import time
-        from ._internal.scpi import System
 
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
         # Send GET command
-        cmd = f'{System.SD_GET} "{filename}"'
+        cmd = scpi_commands.get_sd_file(filename).data
         cmd_bytes = (cmd + "\r").encode('ascii')
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
@@ -546,13 +546,12 @@ class NyquistDevice:
             assert len(data) == expected_size
         """
         import time
-        from ._internal.scpi import System
 
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
         # Send GET command
-        cmd = f'{System.SD_GET} "{filename}"'
+        cmd = scpi_commands.get_sd_file(filename).data
         cmd_bytes = (cmd + "\r").encode('ascii')
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
@@ -605,8 +604,10 @@ class NyquistDevice:
         Example:
             device.sd_delete_file("old_data.csv")
         """
-        from ._internal.scpi import System
-        self._comm.send_command(f'{System.SD_DELETE} "{filename}"')
+        success, error_response = self._comm.send_command_with_error(
+            scpi_commands.delete_sd_file(filename).data
+        )
+        check_setter_response(success, error_response, f"delete SD file {filename!r}")
 
     def sd_format(self):
         """
@@ -617,8 +618,10 @@ class NyquistDevice:
         Example:
             device.sd_format()  # Careful!
         """
-        from ._internal.scpi import System
-        self._comm.send_command(System.SD_FORMAT)
+        success, error_response = self._comm.send_command_with_error(
+            scpi_commands.format_sd_card().data
+        )
+        check_setter_response(success, error_response, "format SD card")
 
     def sd_set_logging(self, filename: str):
         """
@@ -632,8 +635,10 @@ class NyquistDevice:
             device.sd_set_logging("data.csv")
             # Now streaming will log to SD card
         """
-        from ._internal.scpi import System
-        self._comm.send_command(f'{System.SD_FILE_SET} "{filename}"')
+        success, error_response = self._comm.send_command_with_error(
+            scpi_commands.set_sd_logging_file_name(filename).data
+        )
+        check_setter_response(success, error_response, f"set SD logging file {filename!r}")
 
     def sd_benchmark(self, size_kb: int = 1024) -> dict:
         """
@@ -649,12 +654,11 @@ class NyquistDevice:
             results = device.sd_benchmark(1024)
             print(f"Speed: {results['speed_mbps']:.2f} MB/s")
         """
-        from ._internal.scpi import System
         # Run benchmark
-        self._comm.send_command(f"{System.SD_BENCHMARK} {size_kb}")
+        self._comm.send_command(scpi_commands.run_sd_benchmark(size_kb).data)
 
         # Query results
-        response = self._comm.send_command(System.SD_BENCHMARK_QUERY)
+        response = self._comm.send_command(scpi_commands.get_sd_benchmark_results().data)
         parts = response.strip().split(',')
 
         if len(parts) == 3:
