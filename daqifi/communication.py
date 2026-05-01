@@ -28,6 +28,7 @@ __all__ = [
     "LineBasedMessageParser",
     "ProtobufMessageParser",
     "CompositeMessageParser",
+    "StreamConsumerTelemetry",
     "StreamMessageConsumer",
 ]
 
@@ -408,6 +409,39 @@ class _ConsumerErrorArgs:
     timestamp: datetime
 
 
+@dataclass
+class StreamConsumerTelemetry:
+    """Lightweight performance counters for :class:`StreamMessageConsumer`.
+
+    Closes #18 §3 — gives operators visibility into what the consumer
+    thread is actually doing without attaching a profiler. All counters
+    are running totals from consumer start; reset by ``start()``.
+
+    Counters:
+    * ``read_calls``       successful ``stream.read()`` calls
+    * ``read_bytes_total`` bytes returned by those reads (sum)
+    * ``read_bytes_max``   largest single ``stream.read()`` payload
+    * ``read_seconds``     wall-clock spent in ``stream.read()``
+    * ``parse_calls``      ``parser.parse_messages()`` invocations
+    * ``parse_seconds``    wall-clock spent in ``parser.parse_messages()``
+    * ``messages_emitted`` total messages handed to ``MessageReceived``
+      callbacks (after parse, regardless of decode success)
+    """
+
+    read_calls: int = 0
+    read_bytes_total: int = 0
+    read_bytes_max: int = 0
+    read_seconds: float = 0.0
+    parse_calls: int = 0
+    parse_seconds: float = 0.0
+    messages_emitted: int = 0
+
+    @property
+    def read_bytes_avg(self) -> float:
+        """Average payload per ``stream.read()``. ``0.0`` when no reads yet."""
+        return self.read_bytes_total / self.read_calls if self.read_calls else 0.0
+
+
 class StreamMessageConsumer(Generic[T]):
     """Background-thread consumer that pulls bytes off a stream and emits
     parsed messages via callback.
@@ -470,6 +504,12 @@ class StreamMessageConsumer(Generic[T]):
         # Lock around the message buffer mutation so ClearBuffer doesn't
         # race the consumer thread.
         self._buffer_lock = threading.Lock()
+        # Telemetry — closes #18 §3. Mutated only from the consumer
+        # thread (read in ``_process_messages``); read from any thread
+        # via the ``telemetry`` property. The dataclass holds plain
+        # numbers so concurrent reads see a torn-but-monotonic snapshot
+        # rather than locking the hot path.
+        self._telemetry = StreamConsumerTelemetry()
 
     @property
     def is_running(self) -> bool:
@@ -479,6 +519,15 @@ class StreamMessageConsumer(Generic[T]):
     def queued_message_count(self) -> int:
         with self._buffer_lock:
             return len(self._message_buffer)
+
+    @property
+    def telemetry(self) -> StreamConsumerTelemetry:
+        """Snapshot of consumer-thread performance counters (#18 §3).
+
+        Returns the live telemetry dataclass — counters keep advancing
+        while the consumer is running. Reset by ``start()``.
+        """
+        return self._telemetry
 
     # ---- event subscription ------------------------------------------------
 
@@ -506,6 +555,9 @@ class StreamMessageConsumer(Generic[T]):
         self._raise_if_disposed()
         if self._is_running:
             return
+        # Reset telemetry so each start/stop cycle reports its own
+        # counters (#18 §3).
+        self._telemetry = StreamConsumerTelemetry()
         self._is_running = True
         thread_name = f"MessageConsumer-{type(self).__name__}"
         self._thread = threading.Thread(
@@ -586,15 +638,24 @@ class StreamMessageConsumer(Generic[T]):
         # idle window would post a noisy "error" callback (Qodo PR 17
         # finding 5).
         import socket as _socket
+        tel = self._telemetry
         while self._is_running:
             try:
                 bytes_read = b""
                 try:
+                    _read_start = time.monotonic()
                     bytes_read = self._stream.read(self._buffer_size)
+                    tel.read_seconds += time.monotonic() - _read_start
                     # Some stream-like objects return None on timeout (pyserial
                     # with non-blocking reads); coerce to empty bytes.
                     if bytes_read is None:
                         bytes_read = b""
+                    if bytes_read:
+                        tel.read_calls += 1
+                        n = len(bytes_read)
+                        tel.read_bytes_total += n
+                        if n > tel.read_bytes_max:
+                            tel.read_bytes_max = n
                 except _socket.timeout:
                     # Expected idle path — no data this window.
                     if not self._is_running:
@@ -631,7 +692,10 @@ class StreamMessageConsumer(Generic[T]):
                     snapshot = bytes(self._message_buffer)
 
                 try:
+                    _parse_start = time.monotonic()
                     messages, consumed = self._parser.parse_messages(snapshot)
+                    tel.parse_seconds += time.monotonic() - _parse_start
+                    tel.parse_calls += 1
                 except Exception as exc:
                     self._on_error(exc, snapshot)
                     # Force forward progress so a parser that
@@ -691,6 +755,7 @@ class StreamMessageConsumer(Generic[T]):
                         return
                     try:
                         self._on_message(msg, raw_for_message)
+                        tel.messages_emitted += 1
                     except Exception as exc:
                         self._on_error(exc, raw_for_message)
             except Exception as exc:
