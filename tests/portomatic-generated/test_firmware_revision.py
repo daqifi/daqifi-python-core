@@ -15,6 +15,7 @@ from daqifi.firmware import (
     FirmwareVersion,
     parse_firmware_string,
 )
+from daqifi.firmware.version import compare
 
 
 # ---------------------------------------------------------------------------
@@ -106,3 +107,34 @@ def test_revision_form_takes_precedence_over_semver():
     """``01-02`` is hyphenated — must NOT fall through to FirmwareVersion."""
     parsed = parse_firmware_string("01-02")
     assert isinstance(parsed, FirmwareRevision)
+
+
+# ---------------------------------------------------------------------------
+# compare() — works on both shapes (Qodo PR #65 review #1)
+# ---------------------------------------------------------------------------
+
+class TestCompare:
+    def test_same_shape_revision(self):
+        assert compare("01-01", "01-02") < 0
+        assert compare("01-02", "01-01") > 0
+        assert compare("01-02", "01-02") == 0
+        assert compare("01-99", "02-00") < 0
+
+    def test_same_shape_semver(self):
+        assert compare("3.0.0", "3.1.0") < 0
+        assert compare("3.4.6b1", "3.4.6") < 0  # pre-release < release
+
+    def test_revision_sorts_before_semver(self):
+        """A SemVer firmware is strictly newer than any hyphenated revision."""
+        assert compare("01-02", "3.4.6b1") < 0
+        assert compare("3.4.6b1", "01-02") > 0
+        assert compare("99-99", "0.0.1") < 0  # even tiny SemVer beats huge revision
+
+    def test_unparseable_sorts_before_anything(self):
+        assert compare("garbage", "01-02") < 0
+        assert compare("01-02", "garbage") > 0
+        assert compare("garbage", "3.0.0") < 0
+
+    def test_both_none_returns_zero(self):
+        assert compare(None, None) == 0
+        assert compare(None, "junk") == 0  # both unparseable

@@ -219,24 +219,34 @@ def parse_firmware_string(value: Optional[str]) -> Optional[ParsedFirmware]:
 
 
 def compare(left: Optional[str], right: Optional[str]) -> int:
-    """Compare two version strings.
+    """Compare two firmware strings (SemVer or hyphenated revision).
 
-    Returns negative if `left` is older, positive if newer, 0 if equal.
-    Unparseable strings sort BEFORE valid versions (matching the C# behavior).
+    Returns negative if ``left`` is older, positive if newer, 0 if equal.
+
+    Sort policy:
+    * Unparseable strings sort BEFORE everything (mirrors C# behavior on
+      ``TryParse → false``).
+    * ``FirmwareRevision`` (hyphenated) sorts BEFORE ``FirmwareVersion``
+      (SemVer) — the hyphenated shape is the legacy form on Nyquist
+      images, and a release that has migrated to SemVer should compare
+      strictly newer than any pre-migration revision.
+    * Same-shape comparisons use the native ordering on the parsed type.
     """
-    parsed_left = FirmwareVersion.parse(left)
-    parsed_right = FirmwareVersion.parse(right)
+    parsed_left = parse_firmware_string(left)
+    parsed_right = parse_firmware_string(right)
     if parsed_left is None and parsed_right is None:
         return 0
     if parsed_left is None:
         return -1
     if parsed_right is None:
         return 1
-    if parsed_left < parsed_right:
-        return -1
-    if parsed_left > parsed_right:
-        return 1
-    return 0
+    if type(parsed_left) is type(parsed_right):
+        if parsed_left < parsed_right:
+            return -1
+        if parsed_left > parsed_right:
+            return 1
+        return 0
+    return -1 if isinstance(parsed_left, FirmwareRevision) else 1
 
 
 def _precedence_rank(label: Optional[str]) -> int:
