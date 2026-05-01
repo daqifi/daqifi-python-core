@@ -436,6 +436,16 @@ class StreamConsumerTelemetry:
     parse_seconds: float = 0.0
     messages_emitted: int = 0
 
+    # Idle-window counter — bumped each time the read loop spins up
+    # but ``stream.read()`` returned no data. A consistently-rising
+    # value while a stream is supposed to be flowing means the device
+    # has gone quiet (likely a firmware-side stop or a USB CDC pause).
+    # Closes the drop-detection requirement gap from Qodo PR #68
+    # review #1: msg_time_stamp deltas are unreliable on fw 3.4.6b1
+    # (timestamp_freq=0 ⇒ the per-frame counter is disabled), so this
+    # transport-level signal is the portable observability primitive.
+    idle_reads: int = 0
+
     @property
     def read_bytes_avg(self) -> float:
         """Average payload per ``stream.read()``. ``0.0`` when no reads yet."""
@@ -688,6 +698,7 @@ class StreamMessageConsumer(Generic[T]):
                     return
 
                 if not bytes_read:
+                    tel.idle_reads += 1
                     time.sleep(0.01)
                     continue
 

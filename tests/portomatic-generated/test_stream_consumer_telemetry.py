@@ -237,3 +237,6 @@ def test_consumer_idle_stream_does_not_inflate_read_calls():
     assert consumer.telemetry.read_calls == 0
     assert consumer.telemetry.read_bytes_total == 0
     assert consumer.telemetry.messages_emitted == 0
+    # idle_reads is the gap-detection primitive — should rise each
+    # spin where stream.read() returned nothing.
+    assert consumer.telemetry.idle_reads > 0

@@ -45,6 +45,39 @@ import serial  # noqa: E402  pyserial
 from daqifi._internal import scpi_commands  # noqa: E402
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage  # noqa: E402
 from daqifi.communication import CompositeMessageParser, StreamMessageConsumer  # noqa: E402
+from daqifi.devices import DaqifiDeviceFactory  # noqa: E402
+
+
+def _verify_device_identity(port: str, expected_sn: Optional[str]) -> str:
+    """Connect, query metadata, return the device serial number.
+
+    Raises ``RuntimeError`` if ``expected_sn`` is given and does not
+    match. Multi-device rigs (CI labs, parallel agents) MUST set
+    ``DAQIFI_BENCHMARK_EXPECTED_SN`` to prevent the benchmark from
+    accidentally writing to another instance's device — those writes
+    would corrupt the other run (Qodo PR #68 review #2 + #4).
+    """
+    dev = DaqifiDeviceFactory.connect_serial(
+        port_name=port, baud_rate=115200, device_name="bench-id-check",
+    )
+    try:
+        time.sleep(2.0)
+        sn = dev.metadata.serial_number
+    finally:
+        dev.close()
+    time.sleep(0.5)  # let the port settle before the benchmark reopens it
+    if not sn:
+        raise RuntimeError(
+            f"could not read serial number from {port}; "
+            "device may be in a non-responsive state"
+        )
+    if expected_sn and sn != expected_sn:
+        raise RuntimeError(
+            f"device on {port} has SN={sn!r}, but "
+            f"DAQIFI_BENCHMARK_EXPECTED_SN={expected_sn!r} — refusing "
+            "to drive an unintended unit"
+        )
+    return sn
 
 
 DEFAULT_RATES_HZ = (100, 1_000, 5_000, 10_000, 50_000)
@@ -227,11 +260,17 @@ def main() -> int:
                     help="Buffer sizes in bytes (comma-separated)")
     ap.add_argument("--out", type=Path, default=None,
                     help="Optional JSON output path")
+    ap.add_argument("--expected-sn",
+                    default=os.environ.get("DAQIFI_BENCHMARK_EXPECTED_SN"),
+                    help="If set, refuse to run unless the device on --port matches this SN")
     args = ap.parse_args()
 
     print(f"# benchmark_streaming.py port={args.port} duration={args.duration}s")
     print(f"# rates={args.rates}  channels={args.channels}  "
           f"buffers={args.buffers}")
+
+    sn = _verify_device_identity(args.port, args.expected_sn)
+    print(f"# device SN={sn} on {args.port}")
 
     runs: List[BenchmarkRun] = []
     for buffer_bytes in args.buffers:

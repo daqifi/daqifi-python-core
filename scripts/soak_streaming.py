@@ -36,6 +36,32 @@ import serial  # noqa: E402
 from daqifi._internal import scpi_commands  # noqa: E402
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage  # noqa: E402
 from daqifi.communication import CompositeMessageParser, StreamMessageConsumer  # noqa: E402
+from daqifi.devices import DaqifiDeviceFactory  # noqa: E402
+
+
+def _verify_device_identity(port: str, expected_sn: Optional[str]) -> str:
+    """Same shape as ``benchmark_streaming.py``'s SN guard — refuse to
+    drive a device that doesn't match ``expected_sn``. Multi-device rigs
+    (CI labs, parallel agents) MUST set ``DAQIFI_BENCHMARK_EXPECTED_SN``
+    (Qodo PR #68 review #2 + #4).
+    """
+    dev = DaqifiDeviceFactory.connect_serial(
+        port_name=port, baud_rate=115200, device_name="soak-id-check",
+    )
+    try:
+        time.sleep(2.0)
+        sn = dev.metadata.serial_number
+    finally:
+        dev.close()
+    time.sleep(0.5)
+    if not sn:
+        raise RuntimeError(f"could not read serial number from {port}")
+    if expected_sn and sn != expected_sn:
+        raise RuntimeError(
+            f"device on {port} has SN={sn!r}, but "
+            f"DAQIFI_BENCHMARK_EXPECTED_SN={expected_sn!r} — refusing"
+        )
+    return sn
 
 
 _stop_requested = False
@@ -144,6 +170,9 @@ def main() -> int:
     ap.add_argument("--report-seconds", type=float, default=60.0)
     ap.add_argument("--out", type=Path, default=None,
                     help="Optional JSONL output path (one line per report)")
+    ap.add_argument("--expected-sn",
+                    default=os.environ.get("DAQIFI_BENCHMARK_EXPECTED_SN"),
+                    help="If set, refuse to soak unless the device on --port matches this SN")
     args = ap.parse_args()
 
     bitmask = str((1 << args.channels) - 1)
@@ -151,6 +180,9 @@ def main() -> int:
     print(f"# soak_streaming.py port={args.port} rate={args.rate_hz}Hz "
           f"channels={args.channels} duration={'unbounded' if duration_s == 0 else f'{args.duration_hours:.2f}h'}")
     print(f"# reporting every {args.report_seconds:.0f}s; SIGINT to stop early")
+
+    sn = _verify_device_identity(args.port, args.expected_sn)
+    print(f"# device SN={sn} on {args.port}")
 
     signal.signal(signal.SIGINT, _request_stop)
     signal.signal(signal.SIGTERM, _request_stop)
