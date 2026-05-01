@@ -248,7 +248,10 @@ def _emit_table(runs: List[BenchmarkRun]) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default=os.environ.get("DAQIFI_BENCHMARK_PORT", "/dev/ttyACM1"))
+    ap.add_argument("--port", default=os.environ.get("DAQIFI_BENCHMARK_PORT"),
+                    help="Serial port path (or set DAQIFI_BENCHMARK_PORT). "
+                         "No default — must be specified explicitly to avoid "
+                         "writing to an unintended device on multi-unit rigs.")
     ap.add_argument("--duration", type=float, default=3.0,
                     help="Stream duration per combo (seconds)")
     ap.add_argument("--rates", type=lambda s: tuple(int(x) for x in s.split(",")),
@@ -264,6 +267,12 @@ def main() -> int:
                     default=os.environ.get("DAQIFI_BENCHMARK_EXPECTED_SN"),
                     help="If set, refuse to run unless the device on --port matches this SN")
     args = ap.parse_args()
+
+    if not args.port:
+        ap.error(
+            "no --port given and DAQIFI_BENCHMARK_PORT is unset. "
+            "Specify the serial device path explicitly."
+        )
 
     print(f"# benchmark_streaming.py port={args.port} duration={args.duration}s")
     print(f"# rates={args.rates}  channels={args.channels}  "

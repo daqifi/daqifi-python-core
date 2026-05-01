@@ -162,7 +162,10 @@ def _emit_report(
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default=os.environ.get("DAQIFI_BENCHMARK_PORT", "/dev/ttyACM0"))
+    ap.add_argument("--port", default=os.environ.get("DAQIFI_BENCHMARK_PORT"),
+                    help="Serial port path (or set DAQIFI_BENCHMARK_PORT). "
+                         "No default — must be specified explicitly to avoid "
+                         "soaking an unintended device on multi-unit rigs.")
     ap.add_argument("--rate-hz", type=int, default=100)
     ap.add_argument("--channels", type=int, default=1, help="Number of channels (1=ch0, 16=ch0..15)")
     ap.add_argument("--duration-hours", type=float, default=6.0,
@@ -174,6 +177,12 @@ def main() -> int:
                     default=os.environ.get("DAQIFI_BENCHMARK_EXPECTED_SN"),
                     help="If set, refuse to soak unless the device on --port matches this SN")
     args = ap.parse_args()
+
+    if not args.port:
+        ap.error(
+            "no --port given and DAQIFI_BENCHMARK_PORT is unset. "
+            "Specify the serial device path explicitly."
+        )
 
     bitmask = str((1 << args.channels) - 1)
     duration_s = args.duration_hours * 3600.0
