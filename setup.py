@@ -62,6 +62,10 @@ setup(
             # Without it, modules using `pytest.mark.asyncio` and
             # `async def` test functions error at collection time.
             "pytest-asyncio>=0.21",
+            # Required to regenerate the Python protobuf bindings via
+            # ``python3 scripts/regenerate_protobuf.py`` whenever the
+            # ``daqifi/_internal/proto/*.proto`` files change.
+            "grpcio-tools>=1.60",
             "black>=22.0",
             "mypy>=0.950",
             "flake8>=4.0",
