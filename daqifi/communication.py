@@ -664,10 +664,9 @@ class StreamMessageConsumer(Generic[T]):
         while self._is_running:
             try:
                 bytes_read = b""
+                _read_start = time.monotonic()
                 try:
-                    _read_start = time.monotonic()
                     bytes_read = self._stream.read(self._buffer_size)
-                    tel.read_seconds += time.monotonic() - _read_start
                     # Some stream-like objects return None on timeout (pyserial
                     # with non-blocking reads); coerce to empty bytes.
                     if bytes_read is None:
@@ -679,7 +678,11 @@ class StreamMessageConsumer(Generic[T]):
                         if n > tel.read_bytes_max:
                             tel.read_bytes_max = n
                 except _socket.timeout:
-                    # Expected idle path — no data this window.
+                    # Expected idle path — no data this window. Count
+                    # the timeout as idle so the gap-detection signal
+                    # tracks both empty-byte returns and timeout
+                    # raises (Qodo PR #68 /improve pass 3 importance 9).
+                    tel.idle_reads += 1
                     if not self._is_running:
                         return
                     continue
@@ -689,6 +692,13 @@ class StreamMessageConsumer(Generic[T]):
                     self._on_error(exc)
                     time.sleep(0.1)  # back off on error
                     continue
+                finally:
+                    # read_seconds covers ALL ``stream.read()`` time —
+                    # successful reads, timeouts, and other exceptions.
+                    # The operator needs to see time spent waiting on
+                    # the device whether or not bytes arrived (Qodo PR
+                    # #68 /improve pass 3 importance 9).
+                    tel.read_seconds += time.monotonic() - _read_start
 
                 # `read()` may have blocked while a stop request flipped
                 # `_is_running`. Re-check before doing any further work

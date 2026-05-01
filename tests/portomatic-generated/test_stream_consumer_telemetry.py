@@ -240,3 +240,36 @@ def test_consumer_idle_stream_does_not_inflate_read_calls():
     # idle_reads is the gap-detection primitive — should rise each
     # spin where stream.read() returned nothing.
     assert consumer.telemetry.idle_reads > 0
+    # read_seconds covers idle reads too (it's wall-clock spent
+    # in stream.read() regardless of the outcome).
+    assert consumer.telemetry.read_seconds > 0
+
+
+def test_socket_timeout_counts_as_idle():
+    """``socket.timeout`` raises from ``stream.read()`` should bump
+    idle_reads (matches the empty-byte-return path) — without this,
+    sockets that signal idleness via timeout exception would look
+    different from pyserial's empty-bytes idle path (Qodo PR #68
+    /improve pass 3 importance 9)."""
+    import socket
+
+    class _AlwaysTimeout:
+        def read(self, n: int) -> bytes:
+            time.sleep(0.005)
+            raise socket.timeout("idle")
+
+    consumer = StreamMessageConsumer(
+        stream=_AlwaysTimeout(), message_parser=_CountingParser(),
+    )
+    consumer.start()
+    try:
+        time.sleep(0.1)
+    finally:
+        consumer.stop()
+        consumer.close()
+
+    assert consumer.telemetry.idle_reads > 0
+    # read_seconds also accumulates on timeout raises (covered by
+    # the finally clause).
+    assert consumer.telemetry.read_seconds > 0
+    assert consumer.telemetry.read_calls == 0
