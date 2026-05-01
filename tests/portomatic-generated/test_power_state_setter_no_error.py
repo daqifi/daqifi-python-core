@@ -5,7 +5,7 @@ Same shape as #14 (channels.py setters) but in the higher-level
 NyquistDevice — the setter relied on `send_set` returning True, and
 when the device replied with `0,"No error"` the setter would
 double-query SYST:ERR? (advancing the queue) and raise CommandError.
-The fix routes through send_set_with_error + _check_setter_response
+The fix routes through send_command_with_error + _check_setter_response
 so the captured response is the authoritative success signal."""
 from __future__ import annotations
 
@@ -23,18 +23,18 @@ def _make_device_with_mock_comm(
 ) -> NyquistDevice:
     """Build a NyquistDevice whose SerialInterface is a MagicMock that
     returns ``(success_value, error_response)`` from every
-    send_set_with_error call. Bypasses the connect() path so we can
+    send_command_with_error call. Bypasses the connect() path so we can
     drive the setter against a controlled response."""
     dev = NyquistDevice.__new__(NyquistDevice)
     dev._comm = MagicMock()
-    dev._comm.send_set_with_error = MagicMock(
+    dev._comm.send_command_with_error = MagicMock(
         return_value=(success_value, error_response)
     )
     return dev
 
 
 def test_power_state_setter_treats_no_error_as_success() -> None:
-    """Even if send_set_with_error returns success=False, a
+    """Even if send_command_with_error returns success=False, a
     `0,"No error"` response means the device accepted the command."""
     dev = _make_device_with_mock_comm(False, '0,"No error"')
     # Should NOT raise — the setter must treat the explicit no-error
@@ -61,7 +61,7 @@ def test_power_state_setter_raises_on_empty_response() -> None:
 
 def test_power_state_setter_does_not_double_query_err() -> None:
     """The setter must rely on the response captured by
-    send_set_with_error and NOT issue a second SYST:ERR? query — the
+    send_command_with_error and NOT issue a second SYST:ERR? query — the
     second query would advance the queue past the actual entry."""
     dev = _make_device_with_mock_comm(False, '0,"No error"')
     dev._comm.send_query = MagicMock(

@@ -18,6 +18,26 @@ from .scpi import StreamInterface
 
 # ---- System control ----
 
+def get_idn() -> ScpiMessage:
+    """Query the device identification string (``*IDN?``)."""
+    return ScpiMessage("*IDN?")
+
+
+def reset_device() -> ScpiMessage:
+    """Reset the device to its default state (``*RST``)."""
+    return ScpiMessage("*RST")
+
+
+def get_last_error() -> ScpiMessage:
+    """Pop one entry from the device's error queue (``SYSTem:ERRor?``)."""
+    return ScpiMessage("SYSTem:ERRor?")
+
+
+def get_system_info() -> ScpiMessage:
+    """Request the human-readable system info text block (``SYSTem:INFO?``)."""
+    return ScpiMessage("SYSTem:INFO?")
+
+
 def reboot_device() -> ScpiMessage:
     """Reboot the device. Maps ``ScpiMessageProducer.RebootDevice``."""
     return ScpiMessage("SYSTem:REboot")
@@ -31,6 +51,20 @@ def get_device_info() -> ScpiMessage:
 def force_bootloader() -> ScpiMessage:
     """Force the device into bootloader mode."""
     return ScpiMessage("SYSTem:FORceBoot")
+
+
+def get_power_state() -> ScpiMessage:
+    """Query the current power state (``SYSTem:POWer:STATe?``)."""
+    return ScpiMessage("SYSTem:POWer:STATe?")
+
+
+def set_power_state(state: int) -> ScpiMessage:
+    """Set the device power state to ``state`` (0=Standby, 1=PoweredUp, ...)."""
+    if isinstance(state, bool) or not isinstance(state, int):
+        raise TypeError("state must be an int.")
+    if state < 0:
+        raise ValueError("state must be non-negative.")
+    return ScpiMessage(f"SYSTem:POWer:STATe {state}")
 
 
 def turn_device_on() -> ScpiMessage:
@@ -65,6 +99,13 @@ def get_sd_logging_state() -> ScpiMessage:
 
 def get_sd_file_list() -> ScpiMessage:
     return ScpiMessage("SYSTem:STORage:SD:LIST?")
+
+
+def get_sd_file_list_for_directory(directory: str) -> ScpiMessage:
+    """List files under ``directory`` on the SD card. Empty/whitespace rejected."""
+    if not directory or not directory.strip():
+        raise ValueError("Directory cannot be null or empty.")
+    return ScpiMessage(f"SYSTem:STORage:SD:LIST? {_scpi_quote(directory)}")
 
 
 def _scpi_quote(value: str) -> str:

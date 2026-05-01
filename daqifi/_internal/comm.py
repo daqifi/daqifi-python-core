@@ -1454,11 +1454,19 @@ class SerialInterface:
         else:
             cmd = f"{command} {str(value)}"
 
-        self.send_command(cmd, delay)
+        return self.send_command_with_error(cmd, delay)
 
-        # Read the error queue exactly once — repeated queries advance
-        # it. The raw response is returned so callers can parse it
-        # without re-reading.
+    def send_command_with_error(
+        self, command: str, delay: float = 0.1
+    ) -> tuple[bool, str]:
+        """Send a fully-formed SCPI command and return (success, raw_error).
+
+        Same atomic error-capture semantics as :meth:`send_set_with_error`
+        but accepts a complete command string — lets callers pass the
+        output of a ``scpi_commands`` factory directly without splitting
+        the base command from the value.
+        """
+        self.send_command(command, delay)
         error = self.send_query("SYST:ERR?", 0.1)
         return ("No error" in error, error)
 
