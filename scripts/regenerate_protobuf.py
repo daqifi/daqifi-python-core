@@ -11,6 +11,11 @@ The regenerated ``*_pb2.py`` files are checked into the repo so that
 Generator: ``grpc_tools.protoc`` (ships with grpcio-tools, includes its own
 embedded ``protoc`` binary). We don't depend on a system-installed
 ``protoc`` so contributors only need ``pip install grpcio-tools``.
+
+No gRPC service stubs (``*_pb2_grpc.py``) are emitted: the .proto file
+defines messages only — no ``service`` blocks. If a future .proto adds
+an RPC service definition, also pass ``--grpc_python_out=PROTO_DIR`` to
+``protoc.main`` and check the generated stubs in.
 """
 from __future__ import annotations
 
