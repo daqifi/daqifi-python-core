@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from functools import total_ordering
-from typing import Optional
+from typing import Optional, Union
 
 
 # Compiled once. Mirrors the C# regex semantics, plus an extension for
@@ -157,25 +157,96 @@ class FirmwareVersion:
         )
 
 
-def compare(left: Optional[str], right: Optional[str]) -> int:
-    """Compare two version strings.
+# ---------------------------------------------------------------------------
+# FirmwareRevision — non-SemVer hyphenated form (e.g. Nyquist's "01-02")
+# ---------------------------------------------------------------------------
+# Some firmware images self-report a revision identifier rather than a
+# semantic version: the Nyquist NQ1/NQ2 returns "01-02" from
+# SYST:INFo? as `<group>-<id>`. The C# `FirmwareVersion` rejects this
+# shape and there is no equivalent type upstream — we add one here
+# rather than widen `FirmwareVersion`, keeping the SemVer parser
+# faithful to daqifi-core. Closes #9.
 
-    Returns negative if `left` is older, positive if newer, 0 if equal.
-    Unparseable strings sort BEFORE valid versions (matching the C# behavior).
+_REVISION_RE = re.compile(r"^\s*(?P<group>\d+)-(?P<rev>\d+)\s*$")
+
+
+@total_ordering
+@dataclass(frozen=True)
+class FirmwareRevision:
+    """Hyphenated firmware revision: ``<group>-<id>`` (e.g. ``01-02``)."""
+
+    group: int
+    revision: int
+
+    def __str__(self) -> str:
+        return f"{self.group:02d}-{self.revision:02d}"
+
+    def _sort_key(self) -> tuple:
+        return (self.group, self.revision)
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, FirmwareRevision):
+            return NotImplemented
+        return self._sort_key() < other._sort_key()
+
+    @classmethod
+    def parse(cls, value: Optional[str]) -> Optional["FirmwareRevision"]:
+        """Parse a hyphenated revision string. Returns None on missing/bad input."""
+        if not value or not value.strip():
+            return None
+        m = _REVISION_RE.match(value)
+        if m is None:
+            return None
+        return cls(group=int(m.group("group")), revision=int(m.group("rev")))
+
+
+ParsedFirmware = Union[FirmwareVersion, FirmwareRevision]
+
+
+def parse_firmware_string(value: Optional[str]) -> Optional[ParsedFirmware]:
+    """Parse either a SemVer firmware version or a hyphenated revision.
+
+    Picks the right shape based on input — returns ``FirmwareRevision`` for
+    ``<int>-<int>`` and ``FirmwareVersion`` for SemVer-shaped values. Returns
+    ``None`` if neither parser accepts the string.
     """
-    parsed_left = FirmwareVersion.parse(left)
-    parsed_right = FirmwareVersion.parse(right)
+    if not value or not value.strip():
+        return None
+    rev = FirmwareRevision.parse(value)
+    if rev is not None:
+        return rev
+    return FirmwareVersion.parse(value)
+
+
+def compare(left: Optional[str], right: Optional[str]) -> int:
+    """Compare two firmware strings (SemVer or hyphenated revision).
+
+    Returns negative if ``left`` is older, positive if newer, 0 if equal.
+
+    Sort policy:
+    * Unparseable strings sort BEFORE everything (mirrors C# behavior on
+      ``TryParse → false``).
+    * ``FirmwareRevision`` (hyphenated) sorts BEFORE ``FirmwareVersion``
+      (SemVer) — the hyphenated shape is the legacy form on Nyquist
+      images, and a release that has migrated to SemVer should compare
+      strictly newer than any pre-migration revision.
+    * Same-shape comparisons use the native ordering on the parsed type.
+    """
+    parsed_left = parse_firmware_string(left)
+    parsed_right = parse_firmware_string(right)
     if parsed_left is None and parsed_right is None:
         return 0
     if parsed_left is None:
         return -1
     if parsed_right is None:
         return 1
-    if parsed_left < parsed_right:
-        return -1
-    if parsed_left > parsed_right:
-        return 1
-    return 0
+    if type(parsed_left) is type(parsed_right):
+        if parsed_left < parsed_right:
+            return -1
+        if parsed_left > parsed_right:
+            return 1
+        return 0
+    return -1 if isinstance(parsed_left, FirmwareRevision) else 1
 
 
 def _precedence_rank(label: Optional[str]) -> int:

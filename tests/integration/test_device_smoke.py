@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import pytest
 
-from daqifi.firmware import FirmwareVersion
+from daqifi.firmware import (
+    FirmwareRevision,
+    FirmwareVersion,
+    parse_firmware_string,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -40,54 +44,37 @@ def test_device_firmware_string_shape(device):
     print(f"\n[diagnostic] device firmware string: {fw_str!r} (len={len(fw_str)})")
 
 
-# --- Divergence found 2026-04-21 ----------------------------------------------
-# The Nyquist device under test returns its firmware version as `'01-02'`
-# (a `<group>-<id>` shape, NOT semantic versioning). The C# `FirmwareVersion`
-# in daqifi-core ASSUMES SemVer (`Major.Minor.Patch[suffix]`) and would
-# return `false` from `TryParse` on this string. So the port matches the
-# C# spec correctly — but the spec doesn't match the actual hardware.
-#
-# Decision needed (track in correspondence map):
-#   (a) widen FirmwareVersion to accept hyphen-separated firmware IDs, OR
-#   (b) introduce a separate `FirmwareRevision` type for the hyphenated shape
-#       and only use FirmwareVersion for the SemVer path, OR
-#   (c) update Nyquist firmware to report SemVer (out of scope for the port)
-#
-# Until then, the parsing tests xfail to keep the divergence visible.
-# ---------------------------------------------------------------------------
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DIV: Nyquist device returns firmware as '01-02' (hyphen-separated), "
-        "not SemVer. C# FirmwareVersion would also reject this — schema "
-        "divergence between daqifi-core spec and Nyquist firmware response."
-    ),
-)
 def test_firmware_version_parses_device_string(device):
-    """End-to-end check: ported FirmwareVersion handles the actual device string.
+    """End-to-end: parse_firmware_string handles whatever shape the device returns.
 
-    Currently xfail-strict because the Nyquist device's firmware string
-    doesn't match the SemVer shape the C# port expects (see DIV note above).
+    Nyquist NQ1/NQ2 reports a hyphenated revision (e.g. ``01-02``); other
+    images may report SemVer (e.g. ``3.4.6b1``). Either is acceptable —
+    parse_firmware_string picks the right type. Closes #9.
     """
     fw_str = device.firmware_version
-    parsed = FirmwareVersion.parse(fw_str)
+    parsed = parse_firmware_string(fw_str)
     assert parsed is not None, (
-        f"FirmwareVersion.parse() rejected device firmware string {fw_str!r}"
+        f"parse_firmware_string rejected device firmware string {fw_str!r}"
     )
-    assert parsed.major >= 0
-    assert parsed.minor >= 0
-    assert parsed.patch >= 0
+    if isinstance(parsed, FirmwareRevision):
+        assert parsed.group >= 0
+        assert parsed.revision >= 0
+    else:
+        assert isinstance(parsed, FirmwareVersion)
+        assert parsed.major >= 0
+        assert parsed.minor >= 0
+        assert parsed.patch >= 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DIV: device firmware not in SemVer shape — same root as the parse test above.",
-)
 def test_device_firmware_version_is_release_or_meaningful_pre(device):
-    """If the device firmware DID parse, check the pre-release label."""
-    parsed = FirmwareVersion.parse(device.firmware_version)
-    assert parsed is not None  # xfails here for the Nyquist hardware
+    """If the device returned a SemVer firmware version, check its pre-release label."""
+    parsed = parse_firmware_string(device.firmware_version)
+    assert parsed is not None
+    if not isinstance(parsed, FirmwareVersion):
+        pytest.skip(
+            f"device firmware is not SemVer-shaped ({type(parsed).__name__}); "
+            "pre-release label check does not apply"
+        )
     if parsed.is_pre_release:
         known_labels = {
             "alpha", "a", "pre", "preview", "dev",
