@@ -555,6 +555,18 @@ class StreamMessageConsumer(Generic[T]):
         self._raise_if_disposed()
         if self._is_running:
             return
+        # Refuse to start if a previous thread didn't fully stop —
+        # otherwise we'd race two daemon threads on the same stream
+        # (Qodo PR #68 review #3). The 1.0s join in ``stop()`` can
+        # time out if the underlying ``stream.read()`` is blocked;
+        # caller should ``stop_safely(timeout_ms=...)`` with a longer
+        # window or close the stream before retrying.
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError(
+                "previous consumer thread is still alive; "
+                "call stop_safely() with a larger timeout or close "
+                "the underlying stream before restarting"
+            )
         # Reset telemetry so each start/stop cycle reports its own
         # counters (#18 §3).
         self._telemetry = StreamConsumerTelemetry()
@@ -691,12 +703,16 @@ class StreamMessageConsumer(Generic[T]):
                         del self._message_buffer[:drop]
                     snapshot = bytes(self._message_buffer)
 
+                # Telemetry covers BOTH successful and raising parse
+                # invocations — if the parser is broken the operator
+                # needs to see the time being spent (Qodo PR #68
+                # review #5).
+                _parse_start = time.monotonic()
                 try:
-                    _parse_start = time.monotonic()
                     messages, consumed = self._parser.parse_messages(snapshot)
+                except Exception as exc:
                     tel.parse_seconds += time.monotonic() - _parse_start
                     tel.parse_calls += 1
-                except Exception as exc:
                     self._on_error(exc, snapshot)
                     # Force forward progress so a parser that
                     # consistently raises on a particular byte
@@ -708,6 +724,8 @@ class StreamMessageConsumer(Generic[T]):
                             del self._message_buffer[:1]
                     time.sleep(0.01)
                     continue
+                tel.parse_seconds += time.monotonic() - _parse_start
+                tel.parse_calls += 1
 
                 # Defensive: parsers are duck-typed (the project's
                 # IMessageParser is a Protocol). A faulty

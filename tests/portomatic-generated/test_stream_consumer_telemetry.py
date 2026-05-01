@@ -150,6 +150,70 @@ def test_consumer_start_resets_telemetry():
     assert first_cycle.messages_emitted == 2  # unchanged
 
 
+def test_start_refuses_when_prior_thread_alive():
+    """If stop() times out (1 s join) and the prior thread is still
+    alive, start() must NOT spawn a second thread (would race two
+    daemon readers on the same stream and corrupt telemetry —
+    Qodo PR #68 review #3)."""
+
+    class _SlowStream:
+        """Read blocks for 5 s — longer than stop()'s 1 s join timeout."""
+
+        def read(self, n: int) -> bytes:
+            time.sleep(5.0)
+            return b""
+
+    consumer = StreamMessageConsumer(
+        stream=_SlowStream(), message_parser=_CountingParser(),
+    )
+    consumer.start()
+    try:
+        # Issue a stop — it should time out internally because read() blocks.
+        consumer.stop()
+        # Thread is still alive (the read() is mid-flight).
+        assert consumer._thread is not None
+        assert consumer._thread.is_alive()
+
+        # start() must refuse rather than spawn a second thread.
+        with pytest.raises(RuntimeError, match="previous consumer thread"):
+            consumer.start()
+    finally:
+        # Daemon thread will be reaped at interpreter exit — no clean
+        # shutdown path for a permanently blocked read().
+        pass
+
+
+def test_parse_telemetry_counts_failed_invocations():
+    """Even when parse_messages raises, the call + duration are counted
+    so an operator sees the parser is broken (Qodo PR #68 review #5)."""
+
+    class _AlwaysRaisingParser:
+        def __init__(self):
+            self.calls = 0
+
+        def parse_messages(self, data: bytes):
+            self.calls += 1
+            raise RuntimeError("parser is intentionally broken")
+
+    stream = _OneShotStream(b"x")
+    parser = _AlwaysRaisingParser()
+    consumer = StreamMessageConsumer(stream=stream, message_parser=parser)
+    consumer.start()
+    try:
+        # Wait for at least one parse attempt.
+        assert _wait_until(lambda: parser.calls >= 1)
+        # Give the consumer time to record the failure.
+        time.sleep(0.05)
+    finally:
+        consumer.stop()
+        consumer.close()
+
+    tel = consumer.telemetry
+    assert tel.parse_calls >= 1, (
+        f"failed parse_messages must still bump parse_calls; got {tel.parse_calls}"
+    )
+
+
 def test_consumer_idle_stream_does_not_inflate_read_calls():
     """Empty reads (timeout / no data) should not bump read_calls —
     only productive reads count, so the operator can spot a stream

@@ -158,16 +158,26 @@ def _run_one(
 
         harness = _StreamHarness(serial_obj, buffer_bytes)
         harness.consumer.start()
+        streaming_started = False
         try:
             # Bypass scpi_commands.start_streaming: its 1-1000 Hz cap is
             # a Python-side guard that pre-dates the firmware accepting
             # higher rates. The benchmark explicitly targets 5/10/50 kHz
             # per the #18 spec.
             _send(serial_obj, f"SYSTem:StartStreamData {rate_hz}", 0.05)
+            streaming_started = True
             time.sleep(duration_s)
-            _send(serial_obj, scpi_commands.stop_streaming().data, 0.5)
-            time.sleep(0.3)
         finally:
+            # Always issue stop_streaming if we started — otherwise an
+            # interrupted sleep would leave the device stuck mid-stream
+            # and break every subsequent benchmark iteration (Qodo PR
+            # #68 /improve pass 1 importance 7).
+            if streaming_started:
+                try:
+                    _send(serial_obj, scpi_commands.stop_streaming().data, 0.5)
+                    time.sleep(0.3)
+                except Exception:
+                    pass
             harness.consumer.stop()
             harness.consumer.close()
         _drain(serial_obj, 0.5)
@@ -227,12 +237,26 @@ def main() -> int:
     for buffer_bytes in args.buffers:
         for channels in args.channels:
             for rate_hz in args.rates:
-                serial_obj = serial.Serial(
-                    port=args.port, baudrate=115200, timeout=1.0,
-                )
+                print(f"  running rate={rate_hz}Hz ch={channels} "
+                      f"buf={buffer_bytes // 1024}KiB ...", flush=True)
+                # Serial open in the loop so a transient port issue
+                # (USB unplug, permission denied) records as one
+                # failed combo rather than crashing the whole sweep
+                # (Qodo PR #68 review #6).
                 try:
-                    print(f"  running rate={rate_hz}Hz ch={channels} "
-                          f"buf={buffer_bytes // 1024}KiB ...", flush=True)
+                    serial_obj = serial.Serial(
+                        port=args.port, baudrate=115200, timeout=1.0,
+                    )
+                except (serial.SerialException, OSError) as exc:
+                    runs.append(BenchmarkRun(
+                        rate_hz=rate_hz, channels=channels,
+                        buffer_bytes=buffer_bytes, duration_s=args.duration,
+                        frames_pc=0, frames_exp=int(rate_hz * args.duration),
+                        yield_pct=0.0, ts_gap_max=0, decode_errors=0,
+                        error=f"{type(exc).__name__}: {exc}"[:120],
+                    ))
+                    continue
+                try:
                     run = _run_one(
                         serial_obj, rate_hz=rate_hz, channels=channels,
                         buffer_bytes=buffer_bytes, duration_s=args.duration,
