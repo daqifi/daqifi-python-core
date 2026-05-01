@@ -411,7 +411,8 @@ class NyquistDevice:
             device.sd_enable(True)
         """
         msg = scpi_commands.enable_storage_sd() if enable else scpi_commands.disable_storage_sd()
-        self._comm.send_command(msg.data)
+        success, error_response = self._comm.send_command_with_error(msg.data)
+        check_setter_response(success, error_response, f"set SD enabled={enable}")
 
     def sd_list_files(self, directory: str = "") -> List[str]:
         """
@@ -603,7 +604,10 @@ class NyquistDevice:
         Example:
             device.sd_delete_file("old_data.csv")
         """
-        self._comm.send_command(scpi_commands.delete_sd_file(filename).data)
+        success, error_response = self._comm.send_command_with_error(
+            scpi_commands.delete_sd_file(filename).data
+        )
+        check_setter_response(success, error_response, f"delete SD file {filename!r}")
 
     def sd_format(self):
         """
@@ -614,7 +618,10 @@ class NyquistDevice:
         Example:
             device.sd_format()  # Careful!
         """
-        self._comm.send_command(scpi_commands.format_sd_card().data)
+        success, error_response = self._comm.send_command_with_error(
+            scpi_commands.format_sd_card().data
+        )
+        check_setter_response(success, error_response, "format SD card")
 
     def sd_set_logging(self, filename: str):
         """
@@ -628,7 +635,10 @@ class NyquistDevice:
             device.sd_set_logging("data.csv")
             # Now streaming will log to SD card
         """
-        self._comm.send_command(scpi_commands.set_sd_logging_file_name(filename).data)
+        success, error_response = self._comm.send_command_with_error(
+            scpi_commands.set_sd_logging_file_name(filename).data
+        )
+        check_setter_response(success, error_response, f"set SD logging file {filename!r}")
 
     def sd_benchmark(self, size_kb: int = 1024) -> dict:
         """

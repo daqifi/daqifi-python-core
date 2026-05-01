@@ -1467,7 +1467,7 @@ class SerialInterface:
         the base command from the value.
         """
         self.send_command(command, delay)
-        error = self.send_query("SYST:ERR?", 0.1)
+        error = self.send_query("SYSTem:ERRor?", 0.1)
         return ("No error" in error, error)
 
     def drain_errors(
@@ -1516,7 +1516,7 @@ class SerialInterface:
         consecutive_empty = 0
         saw_no_error = False
         for _ in range(max_iterations):
-            error = self.send_query("SYST:ERR?", 0.05)
+            error = self.send_query("SYSTem:ERRor?", 0.05)
             stripped = error.strip() if error else ""
             if not stripped:
                 consecutive_empty += 1
