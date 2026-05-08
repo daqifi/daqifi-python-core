@@ -238,16 +238,6 @@ def test_update_network_configuration_rejects_empty_ssid(
 # `SYSTem:REboot` call drops the device from USB for ~5s while it
 # re-enumerates, so any tests collected after it would fail to open
 # their `streaming_device` fixture.
-#
-# SKIP per daqifi/daqifi-nyquist-firmware#419 — `LAN:APPLY` against a
-# Currently-Connected WINC reliably wedges the chip in a half-init
-# state from which no in-band recovery succeeds (`*RST` and
-# `SYSTem:REboot` use the same broken `wifi_manager_FixWincResetState`
-# GPIO-toggle path). Running this test wedges the WINC for the rest
-# of the suite. Re-enable when fw#419 lands.
-@pytest.mark.skip(
-    reason="daqifi/daqifi-nyquist-firmware#419 — LAN:APPLY against Connected WINC wedges chip; no in-band recovery"
-)
 def test_update_network_configuration_round_trip(
     streaming_device: DaqifiStreamingDevice,
     destructive_ok,
