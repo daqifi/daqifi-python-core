@@ -409,7 +409,18 @@ def test_update_network_configuration_round_trip(
                 return False
             try:
                 probe.initialize()
-                return probe.metadata.serial_number == expected_sn
+                # `metadata.serial_number` is populated asynchronously
+                # from the protobuf status message; `initialize()`
+                # already sleeps 1.0s waiting for it, but under load
+                # the message can arrive late. Poll briefly so a slow
+                # status frame doesn't cause a false-negative SN check.
+                sn_deadline = time.monotonic() + 2.0
+                while time.monotonic() < sn_deadline:
+                    sn = probe.metadata.serial_number
+                    if sn:
+                        return sn == expected_sn
+                    time.sleep(0.05)
+                return False
             except Exception:
                 return False
             finally:
