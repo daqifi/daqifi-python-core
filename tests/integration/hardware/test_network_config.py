@@ -37,15 +37,17 @@ configured.
 """
 from __future__ import annotations
 
+import math
 import os
 import time
+import warnings
 from typing import Iterator
 
 import pytest
 
 from daqifi._internal import scpi_commands
 from daqifi.devices import DaqifiDeviceFactory, DaqifiStreamingDevice
-from daqifi.discovery import DeviceInfo
+from daqifi.discovery import DeviceFinder, DeviceInfo
 from daqifi.enums import WifiMode, WifiSecurityType
 from daqifi.network import NetworkConfiguration
 
@@ -238,18 +240,10 @@ def test_update_network_configuration_rejects_empty_ssid(
 # `SYSTem:REboot` call drops the device from USB for ~5s while it
 # re-enumerates, so any tests collected after it would fail to open
 # their `streaming_device` fixture.
-#
-# SKIP per daqifi/daqifi-nyquist-firmware#419 — `LAN:APPLY` against a
-# Currently-Connected WINC reliably wedges the chip in a half-init
-# state from which no in-band recovery succeeds (`*RST` and
-# `SYSTem:REboot` use the same broken `wifi_manager_FixWincResetState`
-# GPIO-toggle path). Running this test wedges the WINC for the rest
-# of the suite. Re-enable when fw#419 lands.
-@pytest.mark.skip(
-    reason="daqifi/daqifi-nyquist-firmware#419 — LAN:APPLY against Connected WINC wedges chip; no in-band recovery"
-)
+@pytest.mark.hardware_destructive
 def test_update_network_configuration_round_trip(
     streaming_device: DaqifiStreamingDevice,
+    device_info: DeviceInfo,
     destructive_ok,
 ) -> None:
     """Full canonical sequence: read current snapshot, apply a
@@ -267,12 +261,46 @@ def test_update_network_configuration_round_trip(
     """
     dev = streaming_device
 
+    # Identity gate — never write to a device the operator hasn't
+    # explicitly declared as ours. CLAUDE.md requires SN
+    # verification before any flash-touching write because
+    # multiple DAQiFi units may be exposed on the same workstation.
+    expected_sn = os.environ.get("DAQIFI_EXPECTED_SERIAL_NUMBER")
+    if not expected_sn:
+        pytest.skip(
+            "DAQIFI_EXPECTED_SERIAL_NUMBER not set; refusing to run "
+            "destructive test on unverified device. Set this to "
+            "your unit's SN (see .claude/hardware-rig.md)"
+        )
+    actual_sn = dev.metadata.serial_number
+    if actual_sn != expected_sn:
+        pytest.fail(
+            f"Device identity mismatch: expected SN {expected_sn!r}, "
+            f"got {actual_sn!r}. Refusing to run destructive test on "
+            f"a different unit."
+        )
+
     saved_ssid = os.environ.get("DAQIFI_TEST_WIFI_SSID")
     saved_password = os.environ.get("DAQIFI_TEST_WIFI_PASSWORD")
     if not saved_ssid or not saved_password:
         pytest.skip(
             "DAQIFI_TEST_WIFI_SSID + DAQIFI_TEST_WIFI_PASSWORD not set; "
             "round-trip would leave the device mis-configured"
+        )
+
+    # Transient creds must come from env per CLAUDE.md compliance —
+    # tests must not embed WiFi credentials in tracked files. The
+    # transient SSID/password is intentionally chosen NOT to match
+    # any real AP (it gets written briefly then overwritten by the
+    # restore step below), but it's still credential-shaped data
+    # and the policy doesn't carve out exceptions.
+    transient_ssid = os.environ.get("DAQIFI_TEST_WIFI_TRANSIENT_SSID")
+    transient_password = os.environ.get("DAQIFI_TEST_WIFI_TRANSIENT_PASSWORD")
+    if not transient_ssid or not transient_password:
+        pytest.skip(
+            "DAQIFI_TEST_WIFI_TRANSIENT_SSID + "
+            "DAQIFI_TEST_WIFI_TRANSIENT_PASSWORD not set; transient "
+            "creds must come from env (CLAUDE.md compliance)"
         )
 
     restore = NetworkConfiguration(
@@ -294,8 +322,8 @@ def test_update_network_configuration_round_trip(
     transient = NetworkConfiguration(
         mode=WifiMode.EXISTING_NETWORK,
         security_type=WifiSecurityType.WPA_PSK_PHRASE,
-        ssid="b12-transient-do-not-associate",
-        password="b12-transient-password-x",
+        ssid=transient_ssid,
+        password=transient_password,
     )
 
     try:
@@ -345,12 +373,105 @@ def test_update_network_configuration_round_trip(
             # actually matters.
             pass
 
-        # Hold for ~6s so the device finishes USB re-enumeration
-        # before any subsequent test in the same pytest session
-        # tries to open the port. Without this guard the next
-        # test's fixture would race the re-enumeration window
-        # and intermittently fail to connect.
-        time.sleep(6)
+        # Best-effort wait for the device to come back on USB after
+        # reboot, updating the session-cached `device_info.port` if
+        # the kernel assigned it a new path (Linux/WSL2 may renumber;
+        # Windows usually keeps the same COM port). Defensive for
+        # downstream test fixtures — if the device doesn't return
+        # (e.g. WSL2/usbipd doesn't auto-reattach), emit a warning so
+        # the next failing test's error message has context, but
+        # don't fail the round-trip itself: it already succeeded
+        # before the reboot.
+        #
+        # Identity is verified by connect+initialize+match against
+        # `metadata.serial_number` (populated from the protobuf
+        # status message), NOT against `DeviceFinder._identify_device`'s
+        # parsed *IDN? — the firmware reports a "0" placeholder in the
+        # *IDN? serial field, so `DeviceInfo.serial_number` from
+        # discovery cannot uniquely identify a unit. Only the
+        # protobuf-populated metadata can.
+        original_port = device_info.port
+        deadline = time.monotonic() + 30.0
+        device_returned = False
+
+        def _port_is_our_device(port: str) -> bool:
+            # `initialize_device=False` skips connect_serial's
+            # auto-initialize so the explicit `probe.initialize()`
+            # below isn't redundant. Lets us catch connect-time
+            # vs init-time exceptions separately.
+            try:
+                probe = DaqifiDeviceFactory.connect_serial(
+                    port_name=port,
+                    baud_rate=_USB_CDC_BAUD,
+                    initialize_device=False,
+                )
+            except Exception:
+                return False
+            try:
+                probe.initialize()
+                # `metadata.serial_number` is populated asynchronously
+                # from the protobuf status message; `initialize()`
+                # already sleeps 1.0s waiting for it, but under load
+                # the message can arrive late. Poll briefly so a slow
+                # status frame doesn't cause a false-negative SN check.
+                sn_deadline = time.monotonic() + 2.0
+                while time.monotonic() < sn_deadline:
+                    sn = probe.metadata.serial_number
+                    if sn:
+                        return sn == expected_sn
+                    time.sleep(0.05)
+                return False
+            except Exception:
+                return False
+            finally:
+                try:
+                    probe.disconnect()
+                except Exception:
+                    pass
+
+        # `DeviceFinder.discover()` can be slow on Windows where
+        # `get_serial_ports()` returns COM1..COM255 and each port is
+        # probed via *IDN?. Cap discovery to once per ~5s and skip
+        # the call if too little budget remains, so a single slow
+        # discovery scan can't blow past the 30s wait deadline.
+        last_discovery = -math.inf
+        DISCOVERY_INTERVAL_S = 5.0
+        DISCOVERY_BUDGET_S = 5.0
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            if _port_is_our_device(original_port):
+                # Same port came back AND it's us — no update needed.
+                device_returned = True
+                break
+            # Either the original port didn't respond, or it
+            # responded with a different unit. Walk all candidates
+            # and re-bind `device_info.port` only if we positively
+            # identify ours by SN.
+            now = time.monotonic()
+            if now - last_discovery < DISCOVERY_INTERVAL_S:
+                continue
+            if deadline - now < DISCOVERY_BUDGET_S:
+                # Not enough time left to safely run a discovery
+                # scan; bail out of the loop.
+                break
+            last_discovery = now
+            for candidate in DeviceFinder.discover():
+                if candidate.port == original_port:
+                    continue  # already tried above
+                if _port_is_our_device(candidate.port):
+                    device_info.port = candidate.port
+                    device_returned = True
+                    break
+            if device_returned:
+                break
+        if not device_returned:
+            warnings.warn(
+                f"Device (SN {expected_sn!r}) did not return on USB "
+                f"within 30s of reboot. Subsequent hardware tests in "
+                f"this session may fail to connect. On WSL2 a manual "
+                f"`usbipd attach` may be needed.",
+                stacklevel=2,
+            )
 
         if restore_failed is not None:
             pytest.fail(
