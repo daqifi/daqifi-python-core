@@ -37,6 +37,7 @@ configured.
 """
 from __future__ import annotations
 
+import math
 import os
 import time
 import warnings
@@ -394,9 +395,15 @@ def test_update_network_configuration_round_trip(
         device_returned = False
 
         def _port_is_our_device(port: str) -> bool:
+            # `initialize_device=False` skips connect_serial's
+            # auto-initialize so the explicit `probe.initialize()`
+            # below isn't redundant. Lets us catch connect-time
+            # vs init-time exceptions separately.
             try:
                 probe = DaqifiDeviceFactory.connect_serial(
-                    port_name=port, baud_rate=_USB_CDC_BAUD,
+                    port_name=port,
+                    baud_rate=_USB_CDC_BAUD,
+                    initialize_device=False,
                 )
             except Exception:
                 return False
@@ -411,16 +418,32 @@ def test_update_network_configuration_round_trip(
                 except Exception:
                     pass
 
+        # `DeviceFinder.discover()` can be slow on Windows where
+        # `get_serial_ports()` returns COM1..COM255 and each port is
+        # probed via *IDN?. Cap discovery to once per ~5s and skip
+        # the call if too little budget remains, so a single slow
+        # discovery scan can't blow past the 30s wait deadline.
+        last_discovery = -math.inf
+        DISCOVERY_INTERVAL_S = 5.0
+        DISCOVERY_BUDGET_S = 5.0
         while time.monotonic() < deadline:
             time.sleep(1.0)
             if _port_is_our_device(original_port):
                 # Same port came back AND it's us — no update needed.
                 device_returned = True
                 break
-            # Either the original port didn't respond, or it responded
-            # with a different unit. Walk all candidates and re-bind
-            # `device_info.port` only if we positively identify ours
-            # by SN.
+            # Either the original port didn't respond, or it
+            # responded with a different unit. Walk all candidates
+            # and re-bind `device_info.port` only if we positively
+            # identify ours by SN.
+            now = time.monotonic()
+            if now - last_discovery < DISCOVERY_INTERVAL_S:
+                continue
+            if deadline - now < DISCOVERY_BUDGET_S:
+                # Not enough time left to safely run a discovery
+                # scan; bail out of the loop.
+                break
+            last_discovery = now
             for candidate in DeviceFinder.discover():
                 if candidate.port == original_port:
                     continue  # already tried above
