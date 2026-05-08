@@ -381,20 +381,50 @@ def test_update_network_configuration_round_trip(
         # the next failing test's error message has context, but
         # don't fail the round-trip itself: it already succeeded
         # before the reboot.
+        #
+        # Identity is verified by connect+initialize+match against
+        # `metadata.serial_number` (populated from the protobuf
+        # status message), NOT against `DeviceFinder._identify_device`'s
+        # parsed *IDN? — the firmware reports a "0" placeholder in the
+        # *IDN? serial field, so `DeviceInfo.serial_number` from
+        # discovery cannot uniquely identify a unit. Only the
+        # protobuf-populated metadata can.
         original_port = device_info.port
         deadline = time.monotonic() + 30.0
         device_returned = False
+
+        def _port_is_our_device(port: str) -> bool:
+            try:
+                probe = DaqifiDeviceFactory.connect_serial(
+                    port_name=port, baud_rate=_USB_CDC_BAUD,
+                )
+            except Exception:
+                return False
+            try:
+                probe.initialize()
+                return probe.metadata.serial_number == expected_sn
+            except Exception:
+                return False
+            finally:
+                try:
+                    probe.disconnect()
+                except Exception:
+                    pass
+
         while time.monotonic() < deadline:
             time.sleep(1.0)
-            if DeviceFinder._identify_device(original_port) is not None:  # noqa: SLF001
-                # Same port came back — no update needed.
+            if _port_is_our_device(original_port):
+                # Same port came back AND it's us — no update needed.
                 device_returned = True
                 break
-            # Same port didn't respond. Walk all candidates in case
-            # the kernel renamed it. Match by SN to avoid binding to
-            # a different attached unit.
+            # Either the original port didn't respond, or it responded
+            # with a different unit. Walk all candidates and re-bind
+            # `device_info.port` only if we positively identify ours
+            # by SN.
             for candidate in DeviceFinder.discover():
-                if candidate.serial_number == expected_sn:
+                if candidate.port == original_port:
+                    continue  # already tried above
+                if _port_is_our_device(candidate.port):
                     device_info.port = candidate.port
                     device_returned = True
                     break
