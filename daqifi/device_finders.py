@@ -742,11 +742,19 @@ class WiFiDeviceFinder:
             # timeout_s to initialize() — the auto-init path uses the
             # default 5.0 s ceiling, which would override the caller's
             # choice of a tighter probe timeout.
+            #
+            # ValueError + TypeError propagate (caller passed bad input
+            # — those are misconfiguration, not "device unreachable").
+            # connect_tcp validates host/port explicitly; swallowing
+            # those would silently mask DAQIFI_DEVICE_LAN_IP typos
+            # (Qodo PR #76 /agentic_review pass 2 bug #1).
             device = DaqifiDeviceFactory.connect_tcp(
                 host=ip, port=port,
                 initialize_device=False,
                 retry_options=retry,
             )
+        except (ValueError, TypeError):
+            raise
         except Exception:
             return None
         try:
@@ -755,15 +763,23 @@ class WiFiDeviceFinder:
             except Exception:
                 return None
             meta = device.metadata
+            host_name = (meta.host_name or "").strip()
             pn = (meta.part_number or "").strip()
+            # Prefer the device-reported port from protobuf metadata
+            # so probe_ip output matches discover() output for the
+            # same device. Falls back to the input ``port`` arg via
+            # _coerce_device_port when the protobuf field is 0/missing
+            # (Qodo PR #76 /agentic_review pass 2 bug #4).
+            reported_port = _coerce_device_port(meta.device_port) \
+                if meta.device_port else port
             return DeviceInfo(
-                name=meta.host_name or f"DAQiFi-{ip}",
+                name=host_name or f"DAQiFi-{ip}",
                 serial_number=meta.serial_number,
                 firmware_version=meta.firmware_version,
                 connection_type=ConnectionType.WIFI,
                 device_type=_device_type_from_part_number(pn),
                 ip_address=ip,
-                port=port,
+                port=reported_port,
                 mac_address=meta.mac_address,
             )
         finally:

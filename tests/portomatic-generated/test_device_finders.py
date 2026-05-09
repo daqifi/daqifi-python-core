@@ -386,6 +386,20 @@ class TestWiFiDeviceFinderProbeIp:
         with pytest.raises(RuntimeError, match="closed"):
             f.probe_ip("127.0.0.1")
 
+    def test_probe_ip_propagates_invalid_input(self):
+        """Closes Qodo PR #76 /agentic_review pass 2 bug #1: a bad
+        host/port arg must propagate the underlying ValueError so the
+        caller sees the misconfiguration, not a silent None that looks
+        like 'device unreachable'."""
+        f = WiFiDeviceFinder()
+        try:
+            with pytest.raises(ValueError):
+                f.probe_ip("", port=9760)
+            with pytest.raises(ValueError):
+                f.probe_ip("127.0.0.1", port=70000)
+        finally:
+            f.close()
+
     def test_probe_ip_returns_none_on_silent_init(self):
         """Simulate the WiFi-SCPI silence pattern: connect succeeds but
         the device never delivers a SYSInfoPB? frame so initialize()
