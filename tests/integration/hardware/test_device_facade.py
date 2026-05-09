@@ -208,15 +208,37 @@ def test_reset_returns_to_clean_baseline(
     ``device_info.port`` may have been renamed.
     """
     dev = device_facade
+
+    # NOTE: an SN identity gate here would require accessing the
+    # protobuf-populated `metadata.serial_number` (only available on
+    # `DaqifiStreamingDevice`, not on the `NyquistDevice` facade —
+    # `NyquistDevice.serial_number` reads the *IDN? field, which is
+    # a "0" placeholder for all units on this firmware). Doing an
+    # out-of-band probe via a second `DaqifiStreamingDevice` would
+    # conflict with the device_facade fixture's owned serial port.
+    # Mitigation in lieu of an inline gate:
+    #   - Operator-side: `DAQIFI_DEVICE_PORT` must point at the
+    #     intended unit (verified by the operator before running).
+    #   - `wait_for_device_back` below DOES verify SN before
+    #     binding to a candidate port, so the post-`*RST`
+    #     reconnect can't bind to a different attached unit even
+    #     if the kernel renames our device.
+    # See daqifi-python-core PR comment thread for the proposed
+    # follow-up (`NyquistDevice.metadata.serial_number` accessor).
+
     # `dev.reset()` calls `_comm.reset()` which sends *RST then
     # immediately runs `clear_errors()`. The follow-on SYST:ERR?
-    # races the USB drop and typically raises Input/output error —
-    # that's an artifact of the racing teardown, not a reset
-    # failure. The *RST itself was sent before the drop.
+    # races the USB drop and raises a "Serial communication error"
+    # `RuntimeError` — that's an artifact of the racing teardown,
+    # not a reset failure. The *RST itself was sent before the
+    # drop. Match only that specific error message so we don't
+    # silently swallow unrelated failures (e.g. a transport bug
+    # before the *RST is even sent).
     try:
         dev.reset()
-    except (RuntimeError, OSError):
-        pass
+    except RuntimeError as e:
+        if "Serial communication error" not in str(e):
+            raise
     # Release the stale serial handle before the kernel realizes
     # the underlying device has gone away. Best-effort — the
     # device may already be disconnected at this point.

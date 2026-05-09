@@ -19,14 +19,15 @@ fixtures live one directory up — see
 
 from __future__ import annotations
 
-import math
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
 import pytest
 
+from daqifi._internal.comm import SerialInterface
 from daqifi.devices import DaqifiDeviceFactory
 from daqifi.discovery import DeviceFinder, DeviceInfo
 
@@ -92,7 +93,38 @@ def wait_for_device_back(
             "(see .claude/hardware-rig.md)."
         )
 
+    def _quick_port_has_daqifi(port: str) -> bool:
+        """Read-only liveness probe: opens the port, queries `*IDN?`,
+        returns True iff the response begins with `DAQiFi`. No SCPI
+        write commands sent — safe to call against arbitrary ports
+        without modifying the state of any other agent's device."""
+        try:
+            comm = SerialInterface(port, timeout=0.5)
+            if not comm.open():
+                return False
+            try:
+                idn = comm.send_query("*IDN?", delay=0.2)
+                return bool(idn and idn.lstrip().startswith("DAQiFi"))
+            finally:
+                comm.close()
+        except Exception:
+            return False
+
     def _port_is_our_device(port: str) -> bool:
+        # Two-stage to avoid writing setup SCPI commands to a port
+        # that doesn't belong to us:
+        #   1. Quick read-only `*IDN?` to confirm a DAQiFi unit is
+        #      there at all (no state mutation).
+        #   2. Full connect+initialize to read the real SN from the
+        #      protobuf status message (SN field of `*IDN?` is a
+        #      "0" placeholder for all units on this firmware).
+        # Step 2's `initialize()` does send writes (turn_device_on,
+        # set_protobuf_stream_format, etc.) but only after step 1
+        # has confirmed there's a DAQiFi-shaped responder on the
+        # port — narrowing the blast radius if the port belongs to
+        # a non-DAQiFi USB-serial device.
+        if not _quick_port_has_daqifi(port):
+            return False
         # `initialize_device=False` skips connect_serial's
         # auto-initialize so the explicit `probe.initialize()` below
         # isn't redundant — lets connect-time vs init-time exceptions
@@ -127,14 +159,18 @@ def wait_for_device_back(
             except Exception:
                 pass
 
-    def _try_usbipd_attach() -> None:
+    def _try_usbipd_attach(*, max_seconds: float = 10.0) -> None:
         """If running under WSL2 and DAQIFI_USBIPD_BUSID is set,
         invoke ``usbipd.exe attach --wsl --busid <BUSID>`` once to
         re-bind the device after a USB drop. usbipd doesn't
         auto-reattach after device re-enumeration, so on WSL2 a
         post-reset device is invisible to the kernel until this
         runs. No-op on Windows native (where the COM port comes
-        back automatically) and on bare Linux."""
+        back automatically) and on bare Linux.
+
+        ``max_seconds`` caps the subprocess timeout so a hung
+        usbipd call can't blow past the caller's deadline budget.
+        """
         busid = os.environ.get("DAQIFI_USBIPD_BUSID")
         if not busid:
             return
@@ -144,13 +180,15 @@ def wait_for_device_back(
                     return  # not WSL
         except (FileNotFoundError, PermissionError):
             return
+        # Clamp to a reasonable floor so we always give the
+        # subprocess at least a tick to start.
+        timeout = max(0.5, max_seconds)
         try:
-            import subprocess
             subprocess.run(
                 ["usbipd.exe", "attach", "--wsl", "--busid", busid],
                 check=False,
                 capture_output=True,
-                timeout=10,
+                timeout=timeout,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             pass
@@ -160,12 +198,14 @@ def wait_for_device_back(
         deadline = time.monotonic() + timeout_s
         # `DeviceFinder.discover()` can be slow on Windows where
         # `get_serial_ports()` returns COM1..COM255 and each port is
-        # probed via *IDN?. Cap discovery to once per ~5s and skip
-        # the call when too little budget remains.
-        last_discovery = -math.inf
-        last_usbipd_attach = -math.inf
-        DISCOVERY_INTERVAL_S = 5.0
-        DISCOVERY_BUDGET_S = 5.0
+        # probed via *IDN?. Cap discovery to a fraction of the budget
+        # so the call can't blow past the deadline; scale interval
+        # too so short budgets still get at least one discovery
+        # attempt.
+        last_discovery = -float("inf")
+        last_usbipd_attach = -float("inf")
+        DISCOVERY_INTERVAL_S = max(1.0, min(5.0, timeout_s / 6.0))
+        DISCOVERY_BUDGET_S = max(1.0, min(5.0, timeout_s / 6.0))
         # Re-try usbipd attach periodically: the device drops from USB
         # a few seconds AFTER *RST returns, so a single attach at t=0
         # often misses the window. Re-attaching every ~3s catches it
@@ -179,9 +219,11 @@ def wait_for_device_back(
             now = time.monotonic()
             # Re-attach via usbipd if enough time has passed. Cheap
             # no-op on Windows native; only WSL2 with the env var
-            # set actually invokes the subprocess.
+            # set actually invokes the subprocess. Cap subprocess
+            # timeout to whatever budget remains so a hung
+            # `usbipd attach` can't push us past `deadline`.
             if now - last_usbipd_attach >= USBIPD_ATTACH_INTERVAL_S:
-                _try_usbipd_attach()
+                _try_usbipd_attach(max_seconds=max(0.5, deadline - now))
                 last_usbipd_attach = now
             if now - last_discovery < DISCOVERY_INTERVAL_S:
                 continue
