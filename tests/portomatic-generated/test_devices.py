@@ -487,27 +487,25 @@ class TestStreamInterfaceAutoPin:
         )
 
     def test_tcp_transport_pins_stream_interface_to_wifi(self):
-        import threading
-        import time as _time
         from daqifi.transport import TcpStreamTransport
         t = _make_fake_transport(TcpStreamTransport)
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
-        # Fake transport never delivers a SYSInfoPB? frame; deliver a
-        # synthetic SN from a background thread so initialize() doesn't
-        # trip the silent-init guard (#73), which fires only on TCP.
-        # initialize() clears stale SN at the top so a pre-populate
-        # doesn't work — this thread mimics the protocol-handler
-        # delivery path.
-        def _deliver_sn() -> None:
-            _time.sleep(0.05)
-            dev._metadata.serial_number = "TEST_SN_PLACEHOLDER"
-        deliver = threading.Thread(target=_deliver_sn, daemon=True)
-        deliver.start()
-        try:
-            dev.initialize()
-        finally:
-            deliver.join(timeout=1.0)
+        # Fake transport never delivers a SYSInfoPB? frame; hook send()
+        # to set SN synchronously when get_device_info() is sent — no
+        # background-thread race against initialize()'s SN-clear (Qodo
+        # PR #75 /agentic_review pass 2 bug #4).
+        original_send = dev.send
+
+        def synthetic_send(msg):
+            text = msg.data if hasattr(msg, "data") else str(msg)
+            result = original_send(msg)
+            if "SYSInfoPB" in text:
+                dev._metadata.serial_number = "TEST_SN_PLACEHOLDER"
+            return result
+
+        dev.send = synthetic_send  # type: ignore[method-assign]
+        dev.initialize()
         sent = self._scpi_text_sent(dev)
         assert "SYSTem:STReam:INTerface 1" in sent, (
             f"TCP-transport device did not pin stream interface to 1; "
@@ -669,41 +667,41 @@ class TestSilentInitDetection:
                 pass
 
     def test_tcp_init_returns_early_when_sn_arrives(self):
-        """Healthy TCP path: simulate a fast protobuf reply by setting
-        SN from a background thread shortly after init starts; confirm
-        initialize() returns well under the configured timeout (poll-
-        loop early-exit on SN arrival).
+        """Healthy TCP path: hook send() so SN arrives synchronously
+        when get_device_info() fires; confirm initialize() returns
+        well under the configured timeout (poll-loop early-exit on
+        SN arrival).
 
-        Pre-populating SN before calling initialize() doesn't work
-        because initialize() now clears stale SN at the start (Qodo
-        PR #75 /agentic_review pass 1 bug #2 fix) — the thread mimics
-        the real protocol-handler delivery path."""
-        import threading
+        Hooking send() instead of using a background thread avoids
+        racing with initialize()'s SN-clear at entry (Qodo PR #75
+        /agentic_review pass 2 bug #4)."""
         from daqifi.transport import TcpStreamTransport
         t = _make_fake_transport(TcpStreamTransport)
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
+        original_send = dev.send
 
-        # Fire SN delivery 0.05 s in. Pre-init SCPI sleeps total
-        # ~0.5 s, so the SN is already set by the time the wait
-        # loop polls.
-        def _deliver_sn() -> None:
-            time.sleep(0.05)
-            dev._metadata.serial_number = "TEST_SN_PLACEHOLDER"
-        deliver = threading.Thread(target=_deliver_sn, daemon=True)
-        deliver.start()
+        def synthetic_send(msg):
+            text = msg.data if hasattr(msg, "data") else str(msg)
+            result = original_send(msg)
+            if "SYSInfoPB" in text:
+                dev._metadata.serial_number = "TEST_SN_PLACEHOLDER"
+            return result
+
+        dev.send = synthetic_send  # type: ignore[method-assign]
         try:
             t0 = time.monotonic()
             dev.initialize(response_timeout_s=5.0)
             elapsed = time.monotonic() - t0
-            # Pre-init SCPI sleeps total ~0.5 s; the SN-wait loop
-            # should NOT add the full 5 s ceiling.
+            # Pre-init SCPI sleeps total ~0.5 s; SN-wait loop returns
+            # immediately on first iteration (synthetic_send already
+            # populated SN), so total should be well under the 5 s
+            # ceiling.
             assert elapsed < 1.5, (
-                f"TCP init with delivered SN took {elapsed:.2f} s; "
+                f"TCP init with synthetic SN took {elapsed:.2f} s; "
                 f"poll-loop should have returned in well under 1.5 s"
             )
         finally:
-            deliver.join(timeout=1.0)
             try:
                 dev.close()
             except Exception:

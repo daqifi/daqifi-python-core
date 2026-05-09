@@ -696,12 +696,17 @@ class DaqifiDevice:
         # register it. (Closes daqifi/daqifi-python-core#26 + Qodo
         # PR #54 review #2.)
         init_succeeded = False
-        # Clear the SN so the post-``get_device_info()`` poll waits for a
+        # Clear SN so the post-``get_device_info()`` poll waits for a
         # fresh SYSInfoPB? frame instead of breaking out instantly on a
-        # value left over from a prior init on the same instance. Without
-        # this, a re-init against a wedged TCP listener could skip the
-        # silent-init detection (Qodo PR #75 /agentic_review pass 1 bug
-        # #2). disconnect() doesn't clear metadata.
+        # value left over from a prior init on the same instance —
+        # without this, a re-init against a wedged TCP listener would
+        # skip the silent-init detection (Qodo PR #75 /agentic_review
+        # pass 1 bug #2). disconnect() doesn't touch metadata.
+        # Snapshot first so a mid-init failure can restore the previous
+        # SN — leaving identity metadata cleared on a recoverable
+        # failure makes retries/debugging harder (Qodo PR #75
+        # /agentic_review pass 2 bug #3).
+        prev_serial_number = self._metadata.serial_number
         self._metadata.serial_number = ""
         try:
             self._protocol_handler = ProtobufProtocolHandler(
@@ -781,6 +786,12 @@ class DaqifiDevice:
                 # blocked on a permanent transient state.
                 if self._state == DeviceState.Initializing:
                     self._set_state(prev_state)
+                # Restore the SN we cleared at the top — but only if
+                # the in-flight protobuf frame didn't already deliver
+                # a fresh value (we'd be clobbering the new one with
+                # the old). Qodo PR #75 /agentic_review pass 2 bug #3.
+                if not self._metadata.serial_number:
+                    self._metadata.serial_number = prev_serial_number
 
     def close(self) -> None:
         if self._disposed:
