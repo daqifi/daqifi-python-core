@@ -38,3 +38,16 @@ class FeatureNotSupportedError(DAQiFiError):
 class PowerStateError(DAQiFiError):
     """Device is not in required power state for operation"""
     pass
+
+
+class DeviceUnresponsiveError(DAQiFiError):
+    """Transport connected but the device's SCPI listener never replied.
+
+    Raised by :meth:`DaqifiDevice.initialize` on TCP transports when
+    the protobuf SYSInfoPB? response does not arrive within the
+    configured timeout. The TCP socket is healthy, but the device's
+    WiFi-SCPI parser has wedged — typically after cumulative
+    connect/disconnect cycles in the same session. Recovery: reboot
+    the device via USB (``SYSTem:REboot``).
+    """
+    pass

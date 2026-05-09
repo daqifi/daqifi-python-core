@@ -7,6 +7,7 @@ factory validation."""
 
 from __future__ import annotations
 
+import time
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -490,6 +491,10 @@ class TestStreamInterfaceAutoPin:
         t = _make_fake_transport(TcpStreamTransport)
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
+        # Fake transport never delivers a SYSInfoPB? frame; pre-populate
+        # SN so initialize() doesn't trip the silent-init guard (#73)
+        # which fires only on TCP transports.
+        dev._metadata.serial_number = "fake-sn-for-test"
         dev.initialize()
         sent = self._scpi_text_sent(dev)
         assert "SYSTem:STReam:INTerface 1" in sent, (
@@ -605,3 +610,73 @@ class TestInitializeFailureUnwindsHandlerSubscription:
         handlers_after = list(dev._consumer._message_handlers) if dev._consumer else []
         assert handlers_after == handlers_before
         assert dev._protocol_handler is None
+
+
+# ---- Silent-init detection on TCP (#73) -------------------------------------
+
+
+class TestSilentInitDetection:
+    """Closes daqifi/daqifi-python-core#73: when a TCP-connected device
+    accepts the socket but never replies to ``SYSInfoPB?`` (the
+    WiFi-SCPI wedge pattern), :meth:`initialize` must raise
+    :class:`DeviceUnresponsiveError` instead of returning silently with
+    empty metadata."""
+
+    def test_tcp_silent_init_raises_unresponsive(self):
+        """No SN ever delivered → raise on TCP."""
+        from daqifi.exceptions import DeviceUnresponsiveError
+        from daqifi.transport import TcpStreamTransport
+        t = _make_fake_transport(TcpStreamTransport)
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        try:
+            with pytest.raises(DeviceUnresponsiveError, match="WiFi-SCPI"):
+                dev.initialize(response_timeout_s=0.1)
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass
+
+    def test_serial_silent_init_does_not_raise(self):
+        """Serial fake never delivers SN either, but matches historical
+        behavior — no raise, just empty metadata. Backwards-compat
+        with existing fakes that don't run a real protobuf consumer."""
+        from daqifi.transport import SerialStreamTransport
+        t = _make_fake_transport(SerialStreamTransport)
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        try:
+            # Should NOT raise, even though SN never arrives.
+            dev.initialize(response_timeout_s=0.1)
+            assert dev.metadata.serial_number == ""
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass
+
+    def test_tcp_init_returns_early_when_sn_arrives(self):
+        """Healthy TCP path: pre-populate SN to simulate a fast
+        protobuf reply, confirm initialize() returns well under the
+        configured timeout (poll-loop early-exit on SN arrival)."""
+        from daqifi.transport import TcpStreamTransport
+        t = _make_fake_transport(TcpStreamTransport)
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        try:
+            dev._metadata.serial_number = "9090603604263365351"
+            t0 = time.monotonic()
+            dev.initialize(response_timeout_s=5.0)
+            elapsed = time.monotonic() - t0
+            # Pre-init SCPI sleeps total ~0.5 s; the SN-wait loop
+            # should NOT add the full 5 s ceiling.
+            assert elapsed < 1.0, (
+                f"TCP init with pre-populated SN took {elapsed:.2f} s; "
+                f"poll-loop should have returned in well under 1 s"
+            )
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass
