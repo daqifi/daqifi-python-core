@@ -112,7 +112,7 @@ when the device is reachable on the LAN. Set the device's known
 LAN IP to bypass UDP and probe via TCP (`probe_ip`):
 
 ```bash
-DAQIFI_DEVICE_LAN_IP=192.168.1.60 \
+DAQIFI_DEVICE_LAN_IP=<DEVICE_IP> \
     DAQIFI_DEVICE_PORT=/dev/ttyACM<N> DAQIFI_DEVICE_REQUIRED=1 \
     python -m pytest tests/integration/hardware/test_discovery.py -v
 ```
