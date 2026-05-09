@@ -252,22 +252,47 @@ def test_wifi_device_finder_filters_to_our_sn(
 ) -> None:
     """When our unit IS on the LAN's WiFi, it must appear in the discover
     results — identified by serial number, not by 'first hit' (multiple
-    DAQiFi units may be present)."""
+    DAQiFi units may be present).
+
+    On WSL2, UDP broadcast is dropped by mirrored networking and
+    ``discover()`` returns nothing even when the device is reachable on
+    the LAN (#72). Set ``DAQIFI_DEVICE_LAN_IP`` to the device's IP
+    address to bypass UDP and probe via TCP directly."""
     expected_sn = _expected_wifi_sn()
     finder = WiFiDeviceFinder()
+    lan_ip = os.environ.get("DAQIFI_DEVICE_LAN_IP")
     try:
-        # 3 s gives every device on a typical home LAN time to respond.
-        results = finder.discover(timeout=timedelta(seconds=3))
+        if lan_ip:
+            # Unicast bypass for WSL2 / firewalled networks where UDP
+            # broadcast doesn't reach back. probe_ip returns None on
+            # connect/init failure.
+            info = finder.probe_ip(lan_ip)
+            results = [info] if info is not None else []
+        else:
+            # 3 s gives every device on a typical home LAN time to respond.
+            results = finder.discover(timeout=timedelta(seconds=3))
     finally:
         finder.close()
 
     matches = [r for r in results if r.serial_number == expected_sn]
     if not matches:
+        wsl2_hint = ""
+        try:
+            with open("/proc/sys/kernel/osrelease") as f:
+                if "microsoft" in f.read().lower() and not lan_ip:
+                    wsl2_hint = (
+                        " On WSL2 mirrored networking drops UDP "
+                        "broadcast responses; set DAQIFI_DEVICE_LAN_IP "
+                        "to bypass UDP and probe via TCP."
+                    )
+        except (FileNotFoundError, PermissionError):
+            pass
         pytest.skip(
             f"our device (SN={expected_sn}) not present in WiFi discovery; "
-            f"got {len(results)} other DAQiFi unit(s): "
+            f"got {len(results)} DAQiFi unit(s): "
             f"{[r.serial_number for r in results]!r}. "
-            f"Device may be in self-hosted (AP) mode rather than client mode."
+            f"Device may be in self-hosted (AP) mode rather than "
+            f"client mode.{wsl2_hint}"
         )
     # If we're here, our SN was found exactly once (de-dupe is the
     # finder's job).
