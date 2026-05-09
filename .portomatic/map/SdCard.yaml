@@ -41,15 +41,22 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileParser.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/sdcard.py
+  relation: divergent
+  notes: "Sync (parse_stream / parse_file block until the file is read)
+    rather than C#'s async Task<SdCardLogSession>. Samples are returned
+    as Iterator[SdCardLogEntry] in lieu of IAsyncEnumerable. Project
+    convention is sync end-to-end (see module docstring)."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileParserFactory.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/sdcard.py
+  relation: divergent
+  notes: "Sync API (parse_with_format / parse_stream / parse_file). JSON
+    and CSV variants raise NotImplementedError until SdCardJsonFileParser
+    / SdCardCsvFileParser are ported in a follow-up PR. detect_format
+    already classifies all three extensions so callers can probe a file
+    without invoking a parser."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileReceiver.cs
@@ -65,8 +72,8 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardLogEntry.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream: daqifi/sdcard.py
+  relation: one_to_one
   notes: null
   rationale: null
   last_synced_sha: null
@@ -77,9 +84,11 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardLogSession.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/sdcard.py
+  relation: divergent
+  notes: "samples is Iterator[SdCardLogEntry] (sync) rather than
+    IAsyncEnumerable<SdCardLogEntry>. Project convention is sync
+    end-to-end."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardParseOptions.cs
@@ -287,40 +296,58 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardFileParser
     file: src/Daqifi.Core/Device/SdCard/SdCardFileParser.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardFileParser
+    file: daqifi/sdcard.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Sync API; ParseAsync → parse_stream and ParseFileAsync →
+    parse_file (no async/Task wrapper). Internals factored as module-level
+    helpers (_read_all_messages, _produce_samples, _scale_raw_analog_values,
+    _scan_messages_for_configuration, _merge_configurations) — Python
+    convention prefers free functions over private static methods on a
+    class."
   members:
   - upstream: ParseAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_stream
+    relation: divergent
+    notes: Renamed from ParseAsync; sync (no Task wrapper).
   - upstream: ParseFileAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_file
+    relation: divergent
+    notes: Renamed from ParseFileAsync; sync (no Task wrapper).
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardFileParserFactory
     file: src/Daqifi.Core/Device/SdCard/SdCardFileParserFactory.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardFileParserFactory
+    file: daqifi/sdcard.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Sync API. JSON / CSV variants raise NotImplementedError until
+    the corresponding parsers land in a follow-up port."
   members:
   - upstream: ParseFileAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_file
+    relation: divergent
+    notes: Renamed from ParseFileAsync; sync (no Task wrapper).
   - upstream: ParseAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_stream
+    relation: divergent
+    notes: Renamed from ParseAsync; sync (no Task wrapper).
   - upstream: ParseWithFormatAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_with_format
+    relation: divergent
+    notes: Renamed from ParseWithFormatAsync; sync. JSON / CSV branches
+      raise NotImplementedError pending downstream parsers.
   - upstream: DetectFormat
-    downstream: null
-    relation: not_yet_ported
+    downstream: detect_format
+    relation: one_to_one
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardFileReceiver
@@ -354,12 +381,27 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardLogEntry
     file: src/Daqifi.Core/Device/SdCard/SdCardLogEntry.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardLogEntry
+    file: daqifi/sdcard.py
+  relation: one_to_one
   last_synced_sha: null
   notes: null
   rationale: null
-  members: []
+  members:
+  - upstream: Timestamp
+    downstream: timestamp
+    relation: one_to_one
+  - upstream: AnalogValues
+    downstream: analog_values
+    relation: one_to_one
+  - upstream: DigitalData
+    downstream: digital_data
+    relation: one_to_one
+  - upstream: AnalogTimestamps
+    downstream: analog_timestamps
+    relation: one_to_one
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Device.SdCard.SdCardLogFormat
@@ -386,24 +428,29 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardLogSession
     file: src/Daqifi.Core/Device/SdCard/SdCardLogSession.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardLogSession
+    file: daqifi/sdcard.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "samples is a sync Iterator[SdCardLogEntry] rather than
+    IAsyncEnumerable<SdCardLogEntry>."
   members:
   - upstream: FileName
-    downstream: null
-    relation: not_yet_ported
+    downstream: file_name
+    relation: one_to_one
   - upstream: FileCreatedDate
-    downstream: null
-    relation: not_yet_ported
+    downstream: file_created_date
+    relation: one_to_one
   - upstream: DeviceConfig
-    downstream: null
-    relation: not_yet_ported
+    downstream: device_config
+    relation: one_to_one
   - upstream: Samples
-    downstream: null
-    relation: not_yet_ported
+    downstream: samples
+    relation: divergent
+    notes: Iterator[SdCardLogEntry] rather than IAsyncEnumerable.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardParseOptions
