@@ -216,8 +216,12 @@ symbols:
   - upstream: ToString
     downstream: null
     relation: divergent
-    notes: DIV-001 (explicit) — Python dataclass __repr__ is the
-      equivalent; no separate to_string method.
+    notes: Ported as the dunder ``DataSample.__str__`` (mirrors the
+      C# ToString format "yyyy-MM-dd HH:mm:ss.fff - value"
+      explicitly — see daqifi/_internal/comm.py). Marked divergent
+      with downstream=null because the IR extractor doesn't track
+      Python dunders as public API surface; the behavior IS ported,
+      it just doesn't show up as a method in the audit.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Channel.DigitalChannel
