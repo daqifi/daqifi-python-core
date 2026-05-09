@@ -69,5 +69,74 @@ in `.env` (gitignored). The integration suite reads them from
 ```bash
 set -a; source .env; set +a
 DAQIFI_DEVICE_PORT=/dev/ttyACM<N> DAQIFI_DEVICE_REQUIRED=1 \
+    DAQIFI_EXPECTED_SERIAL_NUMBER=<YOUR_SN> \
+    DAQIFI_TEST_WIFI_TRANSIENT_SSID=b12-transient-do-not-associate \
+    DAQIFI_TEST_WIFI_TRANSIENT_PASSWORD=b12-transient-password-x \
+    python -m pytest tests/integration/hardware/ -v
+```
+
+`.env` keys this expects:
+
+| Key | Purpose |
+|---|---|
+| `DAQIFI_TEST_WIFI_SSID` | Real AP the destructive round-trip test restores to (the device is left associated to this SSID after each round-trip) |
+| `DAQIFI_TEST_WIFI_PASSWORD` | Password for `DAQIFI_TEST_WIFI_SSID` |
+
+These are credential-shaped values; never paste them into PR
+descriptions, commit messages, or chat transcripts. If a password
+ever leaks into chat, rotate it on the AP and update `.env`.
+
+## STA-mode hardware testing (device on the LAN)
+
+By default the NQ1 boots in **AP mode** (broadcasts its own
+`DAQiFi-XXXX` SSID, sits at `192.168.1.1`). To exercise the WiFi
+discovery + LAN-streaming tests, the device must first be
+associated to a real AP — i.e. run the round-trip
+network-config test once, then either reboot or wait for the
+saved credentials to drive a fresh association on next boot.
+
+Once the device is in **STA mode** and on the workstation's LAN:
+
+- `tests/integration/hardware/test_discovery.py` — the WiFi
+  discovery test that previously skipped (because our unit wasn't
+  in discovery results) starts passing once the device is
+  reachable on the LAN.
+- The B3 LAN-streaming tests can also exercise TCP streaming over
+  WiFi.
+
+The `wait_for_device_back` fixture (in
+`tests/integration/hardware/conftest.py`) handles the post-`*RST` /
+post-`SYSTem:REboot` USB drop + re-enumeration cleanly, so STA-mode
+tests that toggle WiFi state can run alongside USB-CDC tests
+without leaving the suite in a cascading-failure state.
+
+## WSL2 / usbipd setup (one-time, then per-disconnect)
+
+WSL2 doesn't see USB devices without [usbipd-win](https://github.com/dorssel/usbipd-win):
+
+```powershell
+# Once, from elevated PowerShell on Windows
+usbipd list                                    # find Bus-ID for your DAQiFi
+usbipd bind --busid <X-Y>                      # share it (one-time per device)
+usbipd attach --wsl --busid <X-Y>              # bind it into WSL
+```
+
+After each `*RST` or `SYSTem:REboot` the device drops from USB
+and usbipd does NOT auto-reattach. Two ways to handle this in
+the hardware suite:
+
+1. **Manual** — `usbipd attach --wsl --busid <X-Y>` between
+   destructive test runs. Tedious for full-suite runs because
+   `test_reset_returns_to_clean_baseline` and
+   `test_update_network_configuration_round_trip` both reboot.
+2. **Automatic** — set `DAQIFI_USBIPD_BUSID=<X-Y>` and the
+   `wait_for_device_back` fixture will re-attach every ~3s
+   inside its 30s polling window. No-op on Windows native and
+   bare Linux:
+
+```bash
+DAQIFI_DEVICE_PORT=/dev/ttyACM<N> DAQIFI_DEVICE_REQUIRED=1 \
+    DAQIFI_EXPECTED_SERIAL_NUMBER=<YOUR_SN> \
+    DAQIFI_USBIPD_BUSID=<X-Y> \
     python -m pytest tests/integration/hardware/ -v
 ```
