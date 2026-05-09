@@ -10,10 +10,11 @@ Spun out of #18 §1.
 
 `SerialStreamTransport.connect()` requests a 64 KiB OS-level RX/TX
 buffer via pyserial's `set_buffer_size()`. On Windows that maps to
-Win32 `SetupComm()` and the `usbser.sys` driver honors it. On Linux
-the call raises `NotImplementedError` — pyserial catches it, the
-debug-log line in `transport.py` records the no-op, and the kernel
-keeps using its built-in `cdc_acm` defaults:
+Win32 `SetupComm()` and the `usbser.sys` driver honors it. On
+Linux the call is gated by a `getattr` check — depending on
+pyserial version the method is either absent or raises
+`NotImplementedError`; either way the transport treats it as a
+no-op and the kernel keeps using its built-in `cdc_acm` defaults:
 
 - One IN / one OUT URB pool (`NR_URBS = 16` per direction in modern
   kernels, hard-coded in `drivers/usb/class/cdc-acm.c`).
@@ -111,11 +112,15 @@ DAQIFI_BENCHMARK_EXPECTED_SN=<your-sn> \
     --out /tmp/bench-after.json
 ```
 
-The `yield_pct` column should improve at the highest rate × channel
-combination if the change is doing anything. If yield is unchanged,
-either the kernel doesn't honor `nr_urbs` for your build, or the
-bottleneck is elsewhere (Python parser, serial driver, USB host
-controller).
+> **Note:** the benchmark numbers documented below show that on
+> this rig the bottleneck is firmware-side, so the modprobe change
+> measurably does NOT improve `yield_pct` here. The "before/after"
+> comparison is still useful as a smoke test (it'll catch a
+> regression where the call breaks something), but don't expect a
+> material yield improvement at the high-rate combos. If your rig
+> shows different host-side numbers — e.g. drops below ~10 kHz × 16
+> ch on stock kernel — then the URB pool may be the limit for you
+> and the recipe is worth trying.
 
 ## Measured baseline (WSL2, stock kernel, no nr_urbs exposed)
 
@@ -133,17 +138,24 @@ PC-side frames ÷ expected frames × 100), so 100% = no drops, lower
 |  10 000 | ~103% | **~51%** |
 |  50 000 | **~27%** | **~10%** |
 
-(Yields slightly above 100% are protobuf-stream warm-up frames
-counted past the wall-clock window.)
+(Yields slightly above 100% are a measurement artifact: the
+benchmark's consumer thread starts before `StartStreamData` is
+issued and continues through the start/stop SCPI command +
+settle delays, so the effective measurement window is a bit
+longer than the `--duration` value used to compute
+`frames_exp = rate_hz × duration_s`. The bias is uniform across
+combos.)
 
 Headline takeaways:
 
 - **Buffer size makes ~zero difference at the bottleneck**. Across
   4 KiB, 64 KiB, and 256 KiB Python read chunks, every cell is
   identical to within σ < 0.5%. The `set_buffer_size()` call from
-  PR #19 is a no-op on Linux/WSL2 (pyserial raises
-  `NotImplementedError`), and the matching consumer-side chunk
-  size also doesn't matter once the kernel URB pool is full.
+  PR #19 is gated by a `getattr` check in `SerialStreamTransport`
+  and is effectively a no-op on Linux/WSL2 (the method is either
+  absent or raises `NotImplementedError`); the matching consumer-
+  side chunk size also doesn't matter once the kernel URB pool is
+  full.
 - **Soak (120 s) yields the same as 5 s and 30 s** at the worst
   combo (50 kHz × 16 ch). The bottleneck is steady-state, not a
   warm-up artifact.
@@ -154,7 +166,7 @@ Headline takeaways:
 ## Cross-check: WSL2 vs Windows native
 
 Re-ran the same matrix on Windows native (Python 3.12, pyserial
-3.5 against `usbser.sys`, COM9, no usbipd) for N=3 iterations.
+3.5 against `usbser.sys`, COM<N>, no usbipd) for N=3 iterations.
 The hypothesis from PR #19 — that Windows would do better because
 `pyserial.set_buffer_size()` calls Win32 `SetupComm()` which
 `usbser.sys` honors — is **not supported by the data**:
@@ -173,9 +185,10 @@ The hypothesis from PR #19 — that Windows would do better because
 |  50 000 | 16 |  10.2% |  10.0% | −0.2% |
 
 Windows is consistently 0.2–2.3% LOWER than WSL2 — well within
-measurement noise (the 1–2% gap is likely WSL2 counting protobuf
-warm-up frames past the wall-clock window, since WSL2 yields
-trend slightly above 100% on combos that should clip at 100%).
+measurement noise (consistent with the ~1% measurement window
+artifact described above; WSL2 yields trend slightly above 100%
+on combos that should clip at 100%, Windows reports more
+conservatively for the same workload).
 Crucially: **the bottleneck combos drop the same amount on both
 platforms**: 50 kHz × 16 ch yields 10.0–10.2% on either, soak
 behavior identical.
