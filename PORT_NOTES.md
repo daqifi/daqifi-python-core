@@ -140,9 +140,11 @@ to drain it. A small driver buffer + slow read = drops.
 - **Linux / WSL2.** `pyserial` on Linux raises `NotImplementedError`
   for `set_buffer_size()`; the call is caught and ignored. The
   `cdc_acm` kernel driver allocates URBs based on the device's USB
-  endpoint MaxPacketSize and a fixed `NR_URBS` (default 16). Tuning
-  requires kernel-side changes — see follow-up ticket for the
-  benchmark-driven recommendation.
+  endpoint MaxPacketSize and a fixed `NR_URBS` (default 16). The
+  recommended modprobe.d recipe + WSL2 caveats live in
+  [`docs/usb_cdc_tuning_linux.md`](docs/usb_cdc_tuning_linux.md);
+  run `scripts/cdc_acm_inspect.py` to check what's tunable on
+  the current kernel.
 - **macOS.** Similar to Linux — pyserial's call is a no-op.
 
 ## Known coverage-classifier quirks (cosmetic, not real port gaps)
