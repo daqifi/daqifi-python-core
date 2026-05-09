@@ -882,7 +882,10 @@ class SdCardFileParser:
         # keeps the directory in the stem, so a path-like input would
         # silently fail to extract its embedded date. Normalize once
         # here so callers can pass either a basename or a full path.
-        file_name = os.path.basename(file_name)
+        # Replace ``\\`` first so Windows-style paths split correctly
+        # on POSIX hosts (mirrors the existing pattern in
+        # parse_sd_card_file_list).
+        file_name = os.path.basename(file_name.replace("\\", "/"))
 
         file_created_date = options.session_start_time or _try_parse_log_filename_date(
             file_name

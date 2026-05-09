@@ -597,6 +597,17 @@ class TestSdCardFileParser:
         assert session.file_created_date == datetime(2026, 5, 9, 12, 0, 0)
         assert session.file_name == "log_20260509_120000.bin"
 
+    def test_windows_path_like_filename_still_extracts_date(self):
+        # Same regression but with a Windows-style path. POSIX
+        # ``os.path.basename`` won't split on ``\\``, so the parser
+        # has to normalize separators first.
+        wire = _encode_message(_build_status_frame())
+        session = SdCardFileParser().parse_stream(
+            io.BytesIO(wire), r"C:\sdcard\log_20260509_120000.bin"
+        )
+        assert session.file_created_date == datetime(2026, 5, 9, 12, 0, 0)
+        assert session.file_name == "log_20260509_120000.bin"
+
     def test_session_start_time_overrides_filename_date(self):
         wire = _encode_message(_build_status_frame())
         opts = SdCardParseOptions(session_start_time=datetime(2030, 1, 1))
@@ -695,6 +706,17 @@ class TestSdCardFileParserFactory:
         wire = _encode_message(_build_status_frame())
         session = SdCardFileParserFactory.parse_stream(io.BytesIO(wire), "log.bin")
         assert session.device_config is not None
+
+    def test_parse_stream_with_path_like_name_extracts_date(self):
+        # The factory forwards file_name to the parser, which is
+        # responsible for basenaming. Verify the round trip end-to-end
+        # so the factory layer is also covered.
+        wire = _encode_message(_build_status_frame())
+        session = SdCardFileParserFactory.parse_stream(
+            io.BytesIO(wire), "/tmp/sdcard/log_20260509_120000.bin"
+        )
+        assert session.file_created_date == datetime(2026, 5, 9, 12, 0, 0)
+        assert session.file_name == "log_20260509_120000.bin"
 
     def test_parse_stream_unknown_extension_raises(self):
         with pytest.raises(ValueError):
