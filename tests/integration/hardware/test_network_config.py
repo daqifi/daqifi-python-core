@@ -37,9 +37,7 @@ configured.
 """
 from __future__ import annotations
 
-import math
 import os
-import time
 import warnings
 from typing import Iterator
 
@@ -47,7 +45,7 @@ import pytest
 
 from daqifi._internal import scpi_commands
 from daqifi.devices import DaqifiDeviceFactory, DaqifiStreamingDevice
-from daqifi.discovery import DeviceFinder, DeviceInfo
+from daqifi.discovery import DeviceInfo
 from daqifi.enums import WifiMode, WifiSecurityType
 from daqifi.network import NetworkConfiguration
 
@@ -244,6 +242,7 @@ def test_update_network_configuration_rejects_empty_ssid(
 def test_update_network_configuration_round_trip(
     streaming_device: DaqifiStreamingDevice,
     device_info: DeviceInfo,
+    wait_for_device_back,
     destructive_ok,
 ) -> None:
     """Full canonical sequence: read current snapshot, apply a
@@ -374,102 +373,21 @@ def test_update_network_configuration_round_trip(
             pass
 
         # Best-effort wait for the device to come back on USB after
-        # reboot, updating the session-cached `device_info.port` if
-        # the kernel assigned it a new path (Linux/WSL2 may renumber;
-        # Windows usually keeps the same COM port). Defensive for
-        # downstream test fixtures — if the device doesn't return
-        # (e.g. WSL2/usbipd doesn't auto-reattach), emit a warning so
-        # the next failing test's error message has context, but
+        # reboot. Defensive for downstream test fixtures — if the
+        # device doesn't return (e.g. WSL2/usbipd doesn't auto-
+        # reattach and DAQIFI_USBIPD_BUSID isn't set), emit a warning
+        # so the next failing test's error message has context, but
         # don't fail the round-trip itself: it already succeeded
-        # before the reboot.
-        #
-        # Identity is verified by connect+initialize+match against
-        # `metadata.serial_number` (populated from the protobuf
-        # status message), NOT against `DeviceFinder._identify_device`'s
-        # parsed *IDN? — the firmware reports a "0" placeholder in the
-        # *IDN? serial field, so `DeviceInfo.serial_number` from
-        # discovery cannot uniquely identify a unit. Only the
-        # protobuf-populated metadata can.
-        original_port = device_info.port
-        deadline = time.monotonic() + 30.0
-        device_returned = False
-
-        def _port_is_our_device(port: str) -> bool:
-            # `initialize_device=False` skips connect_serial's
-            # auto-initialize so the explicit `probe.initialize()`
-            # below isn't redundant. Lets us catch connect-time
-            # vs init-time exceptions separately.
-            try:
-                probe = DaqifiDeviceFactory.connect_serial(
-                    port_name=port,
-                    baud_rate=_USB_CDC_BAUD,
-                    initialize_device=False,
-                )
-            except Exception:
-                return False
-            try:
-                probe.initialize()
-                # `metadata.serial_number` is populated asynchronously
-                # from the protobuf status message; `initialize()`
-                # already sleeps 1.0s waiting for it, but under load
-                # the message can arrive late. Poll briefly so a slow
-                # status frame doesn't cause a false-negative SN check.
-                sn_deadline = time.monotonic() + 2.0
-                while time.monotonic() < sn_deadline:
-                    sn = probe.metadata.serial_number
-                    if sn:
-                        return sn == expected_sn
-                    time.sleep(0.05)
-                return False
-            except Exception:
-                return False
-            finally:
-                try:
-                    probe.disconnect()
-                except Exception:
-                    pass
-
-        # `DeviceFinder.discover()` can be slow on Windows where
-        # `get_serial_ports()` returns COM1..COM255 and each port is
-        # probed via *IDN?. Cap discovery to once per ~5s and skip
-        # the call if too little budget remains, so a single slow
-        # discovery scan can't blow past the 30s wait deadline.
-        last_discovery = -math.inf
-        DISCOVERY_INTERVAL_S = 5.0
-        DISCOVERY_BUDGET_S = 5.0
-        while time.monotonic() < deadline:
-            time.sleep(1.0)
-            if _port_is_our_device(original_port):
-                # Same port came back AND it's us — no update needed.
-                device_returned = True
-                break
-            # Either the original port didn't respond, or it
-            # responded with a different unit. Walk all candidates
-            # and re-bind `device_info.port` only if we positively
-            # identify ours by SN.
-            now = time.monotonic()
-            if now - last_discovery < DISCOVERY_INTERVAL_S:
-                continue
-            if deadline - now < DISCOVERY_BUDGET_S:
-                # Not enough time left to safely run a discovery
-                # scan; bail out of the loop.
-                break
-            last_discovery = now
-            for candidate in DeviceFinder.discover():
-                if candidate.port == original_port:
-                    continue  # already tried above
-                if _port_is_our_device(candidate.port):
-                    device_info.port = candidate.port
-                    device_returned = True
-                    break
-            if device_returned:
-                break
-        if not device_returned:
+        # before the reboot. The fixture handles SN-matched identity
+        # verification, in-place `device_info.port` update if the
+        # kernel renamed our device, and optional usbipd reattach.
+        if wait_for_device_back() is None:
             warnings.warn(
-                f"Device (SN {expected_sn!r}) did not return on USB "
-                f"within 30s of reboot. Subsequent hardware tests in "
-                f"this session may fail to connect. On WSL2 a manual "
-                f"`usbipd attach` may be needed.",
+                f"Device (SN {os.environ.get('DAQIFI_EXPECTED_SERIAL_NUMBER')!r}) "
+                f"did not return on USB within 30s of reboot. Subsequent "
+                f"hardware tests in this session may fail to connect. "
+                f"On WSL2 set DAQIFI_USBIPD_BUSID=<busid> to enable "
+                f"auto-reattach.",
                 stacklevel=2,
             )
 
