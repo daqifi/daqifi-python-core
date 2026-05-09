@@ -296,6 +296,12 @@ symbols:
     downstream: close
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:probe_ip>
+    downstream: probe_ip
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart. Synchronous
+      TCP unicast reachability probe used as a WSL2 bypass when UDP
+      broadcast doesn't reach back (#72).
   - upstream: <downstream-only:remove_device_discovered>
     downstream: remove_device_discovered
     relation: divergent
