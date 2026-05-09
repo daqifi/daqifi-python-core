@@ -5,6 +5,10 @@ Includes the small value classes the parser surface needs:
 - `SdCardParseProgress` — progress callback payload
 - `SdCardDeviceConfiguration` — device snapshot for parsing context
 - `SdCardParseOptions` — knobs the caller passes to a parse run
+- `SdCardLogEntry` / `SdCardLogSession` — one parsed sample / a
+  whole parsed file
+- `SdCardFileParser` — protobuf log file parser (`.bin`)
+- `SdCardFileParserFactory` — picks the right parser by file extension
 
 **Divergence from upstream:**
 - `SdCardDeviceConfiguration.from_device()` is intentionally
@@ -22,17 +26,27 @@ Includes the small value classes the parser surface needs:
   ``DaqifiStreamingDevice`` block until the device responds. Wrap
   in a thread / ``asyncio.to_thread`` if you need non-blocking
   semantics.
+- ``SdCardFileParser`` and ``SdCardFileParserFactory`` are sync —
+  ``parse_stream`` / ``parse_file`` block until the whole file is
+  read, and ``SdCardLogSession.samples`` is an
+  ``Iterator[SdCardLogEntry]`` rather than ``IAsyncEnumerable``.
+- ``SdCardFileParserFactory`` only handles the protobuf format
+  today; CSV and JSON variants raise ``NotImplementedError`` until
+  their parsers are ported. ``detect_format`` already returns the
+  right enum for ``.csv`` / ``.json``, so callers can probe the
+  format without invoking a parser.
 """
 from __future__ import annotations
 
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import (
     Any,
     Callable,
     Iterable,
+    Iterator,
     List,
     Optional,
     Protocol,
@@ -41,6 +55,7 @@ from typing import (
     runtime_checkable,
 )
 
+from daqifi.communication import ProtobufMessageParser
 from daqifi.enums import SdCardLogFormat
 
 
@@ -52,6 +67,10 @@ __all__ = [
     "SdCardTransferProgress",
     "SdCardDownloadResult",
     "SdCardOperations",
+    "SdCardLogEntry",
+    "SdCardLogSession",
+    "SdCardFileParser",
+    "SdCardFileParserFactory",
     "parse_sd_card_file_list",
     "END_OF_FILE_MARKER",
 ]
@@ -376,3 +395,645 @@ class SdCardOperations(Protocol):
             ValueError: if ``file_name`` is empty or invalid.
         """
         ...
+
+
+@dataclass(frozen=True)
+class SdCardLogEntry:
+    """One sample row read from an SD-card log file.
+
+    Ports the C# ``sealed record SdCardLogEntry`` from
+    ``Daqifi.Core/Device/SdCard/SdCardLogEntry.cs``. Frozen because
+    the upstream record is immutable and the parser yields a fresh
+    instance per sample.
+    """
+
+    timestamp: datetime
+    analog_values: Tuple[float, ...]
+    digital_data: int
+    analog_timestamps: Optional[Tuple[int, ...]] = None
+
+    def __post_init__(self) -> None:
+        # Coerce the iterable inputs to tuples so mutating the
+        # caller's source list after construction can't change the
+        # entry — matches the frozen-dataclass guarantee already
+        # used by ``SdCardDeviceConfiguration``.
+        object.__setattr__(self, "analog_values", tuple(self.analog_values))
+        if self.analog_timestamps is not None:
+            object.__setattr__(
+                self, "analog_timestamps", tuple(self.analog_timestamps)
+            )
+
+
+class SdCardLogSession:
+    """A whole parsed SD-card log file.
+
+    Ports ``Daqifi.Core/Device/SdCard/SdCardLogSession.cs``.
+    ``samples`` is an ``Iterator[SdCardLogEntry]`` (sync) rather than
+    ``IAsyncEnumerable<SdCardLogEntry>`` to match this project's
+    sync-end-to-end convention. Iterate to drive parsing forward.
+    """
+
+    def __init__(
+        self,
+        file_name: str,
+        file_created_date: Optional[datetime],
+        device_config: Optional[SdCardDeviceConfiguration],
+        samples: Iterator[SdCardLogEntry],
+    ) -> None:
+        if file_name is None:
+            raise TypeError("file_name must not be None")
+        if samples is None:
+            raise TypeError("samples must not be None")
+        self.file_name = file_name
+        self.file_created_date = file_created_date
+        self.device_config = device_config
+        self.samples = samples
+
+
+def _has_stream_payload(message: Any) -> bool:
+    return (
+        len(message.analog_in_data) > 0
+        or len(message.analog_in_data_float) > 0
+        or len(message.digital_data) > 0
+    )
+
+
+def _strip_end_of_file_marker(data: bytes) -> bytes:
+    if len(data) < len(END_OF_FILE_MARKER):
+        return data
+    if data.endswith(END_OF_FILE_MARKER):
+        return data[: -len(END_OF_FILE_MARKER)]
+    return data
+
+
+def _compute_tick_delta(previous: int, current: int) -> int:
+    """Tick delta between two uint32 timestamps with rollover."""
+    if current >= previous:
+        return current - previous
+    # Rollover: ticks remaining to UINT32_MAX + current + 1
+    return (0xFFFFFFFF - previous) + current + 1
+
+
+def _scale_raw_analog_values(
+    raw_values: Sequence[int],
+    config: Optional[SdCardDeviceConfiguration],
+) -> Tuple[float, ...]:
+    """Apply calibration/range/scale factors to raw ADC integers.
+
+    Formula mirrors the upstream ``SdCardFileParser.ScaleRawAnalogValues``:
+    ``(raw / resolution * port_range * cal_m + cal_b) * internal_scale_m``.
+    Returns the raw values cast to ``float`` when no usable config is
+    available.
+    """
+    if config is None or config.resolution == 0:
+        return tuple(float(v) for v in raw_values)
+
+    resolution = float(config.resolution)
+    cal = config.calibration_values
+    port_range = config.port_range
+    int_scale = config.internal_scale_m
+
+    out: List[float] = []
+    for ch, raw in enumerate(raw_values):
+        cal_m, cal_b = (cal[ch] if cal is not None and ch < len(cal) else (1.0, 0.0))
+        rng = (
+            port_range[ch] if port_range is not None and ch < len(port_range) else 1.0
+        )
+        scale_m = (
+            int_scale[ch] if int_scale is not None and ch < len(int_scale) else 1.0
+        )
+        normalized = raw / resolution
+        out.append((normalized * rng * cal_m + cal_b) * scale_m)
+    return tuple(out)
+
+
+def _extract_device_configuration(
+    status_message: Any,
+) -> SdCardDeviceConfiguration:
+    """Build a :class:`SdCardDeviceConfiguration` from a status frame."""
+    cal_m = list(status_message.analog_in_cal_m)
+    cal_b = list(status_message.analog_in_cal_b)
+    calibration: Optional[Tuple[Tuple[float, float], ...]] = None
+    if cal_m and cal_b:
+        count = min(len(cal_m), len(cal_b))
+        calibration = tuple((cal_m[i], cal_b[i]) for i in range(count))
+
+    port_range: Optional[Tuple[float, ...]] = (
+        tuple(float(v) for v in status_message.analog_in_port_range)
+        if len(status_message.analog_in_port_range) > 0
+        else None
+    )
+    internal_scale_m: Optional[Tuple[float, ...]] = (
+        tuple(float(v) for v in status_message.analog_in_int_scale_m)
+        if len(status_message.analog_in_int_scale_m) > 0
+        else None
+    )
+
+    return SdCardDeviceConfiguration(
+        analog_port_count=int(status_message.analog_in_port_num),
+        digital_port_count=int(status_message.digital_port_num),
+        timestamp_frequency=int(status_message.timestamp_freq),
+        device_serial_number=(
+            str(status_message.device_sn) if status_message.device_sn != 0 else None
+        ),
+        device_part_number=status_message.device_pn or None,
+        firmware_revision=status_message.device_fw_rev or None,
+        calibration_values=calibration,
+        resolution=int(status_message.analog_in_res),
+        port_range=port_range,
+        internal_scale_m=internal_scale_m,
+    )
+
+
+def _scan_messages_for_configuration(
+    messages: Sequence[Any],
+) -> Optional[SdCardDeviceConfiguration]:
+    """Walk every message looking for the first non-zero value of
+    each config field.
+
+    Some firmware versions embed config fields (``timestamp_freq``,
+    ``device_sn``, calibration arrays, …) inside streaming data
+    messages rather than writing a dedicated status header. Mirrors
+    the upstream ``ScanMessagesForConfiguration`` exit-early
+    behavior — we stop scanning once every tracked field has been
+    populated.
+    """
+    timestamp_freq = 0
+    analog_port_num = 0
+    digital_port_num = 0
+    device_sn = 0
+    device_pn: Optional[str] = None
+    fw_rev: Optional[str] = None
+    calibration: Optional[Tuple[Tuple[float, float], ...]] = None
+    resolution = 0
+    port_range: Optional[Tuple[float, ...]] = None
+    internal_scale_m: Optional[Tuple[float, ...]] = None
+
+    for msg in messages:
+        if timestamp_freq == 0 and msg.timestamp_freq != 0:
+            timestamp_freq = int(msg.timestamp_freq)
+        if analog_port_num == 0 and msg.analog_in_port_num != 0:
+            analog_port_num = int(msg.analog_in_port_num)
+        if digital_port_num == 0 and msg.digital_port_num != 0:
+            digital_port_num = int(msg.digital_port_num)
+        if device_sn == 0 and msg.device_sn != 0:
+            device_sn = int(msg.device_sn)
+        if device_pn is None and msg.device_pn:
+            device_pn = msg.device_pn
+        if fw_rev is None and msg.device_fw_rev:
+            fw_rev = msg.device_fw_rev
+        if (
+            calibration is None
+            and len(msg.analog_in_cal_m) > 0
+            and len(msg.analog_in_cal_b) > 0
+        ):
+            count = min(len(msg.analog_in_cal_m), len(msg.analog_in_cal_b))
+            calibration = tuple(
+                (float(msg.analog_in_cal_m[i]), float(msg.analog_in_cal_b[i]))
+                for i in range(count)
+            )
+        if resolution == 0 and msg.analog_in_res != 0:
+            resolution = int(msg.analog_in_res)
+        if port_range is None and len(msg.analog_in_port_range) > 0:
+            port_range = tuple(float(v) for v in msg.analog_in_port_range)
+        if internal_scale_m is None and len(msg.analog_in_int_scale_m) > 0:
+            internal_scale_m = tuple(float(v) for v in msg.analog_in_int_scale_m)
+
+        if (
+            timestamp_freq != 0
+            and analog_port_num != 0
+            and digital_port_num != 0
+            and device_sn != 0
+            and device_pn is not None
+            and fw_rev is not None
+            and calibration is not None
+            and resolution != 0
+            and port_range is not None
+            and internal_scale_m is not None
+        ):
+            break
+
+    if (
+        timestamp_freq == 0
+        and analog_port_num == 0
+        and digital_port_num == 0
+        and device_sn == 0
+        and device_pn is None
+        and fw_rev is None
+        and calibration is None
+        and resolution == 0
+        and port_range is None
+        and internal_scale_m is None
+    ):
+        return None
+
+    return SdCardDeviceConfiguration(
+        analog_port_count=analog_port_num,
+        digital_port_count=digital_port_num,
+        timestamp_frequency=timestamp_freq,
+        device_serial_number=str(device_sn) if device_sn != 0 else None,
+        device_part_number=device_pn,
+        firmware_revision=fw_rev,
+        calibration_values=calibration,
+        resolution=resolution,
+        port_range=port_range,
+        internal_scale_m=internal_scale_m,
+    )
+
+
+def _merge_configurations(
+    primary: Optional[SdCardDeviceConfiguration],
+    fallback: SdCardDeviceConfiguration,
+) -> SdCardDeviceConfiguration:
+    """Per-field non-zero/non-None preference of ``primary`` over
+    ``fallback`` (mirrors the upstream ``MergeConfigurations``)."""
+    if primary is None:
+        return fallback
+
+    return SdCardDeviceConfiguration(
+        analog_port_count=(
+            primary.analog_port_count
+            if primary.analog_port_count != 0
+            else fallback.analog_port_count
+        ),
+        digital_port_count=(
+            primary.digital_port_count
+            if primary.digital_port_count != 0
+            else fallback.digital_port_count
+        ),
+        timestamp_frequency=(
+            primary.timestamp_frequency
+            if primary.timestamp_frequency != 0
+            else fallback.timestamp_frequency
+        ),
+        device_serial_number=(
+            primary.device_serial_number or fallback.device_serial_number
+        ),
+        device_part_number=(
+            primary.device_part_number or fallback.device_part_number
+        ),
+        firmware_revision=primary.firmware_revision or fallback.firmware_revision,
+        calibration_values=(
+            primary.calibration_values
+            if primary.calibration_values is not None
+            else fallback.calibration_values
+        ),
+        resolution=primary.resolution if primary.resolution != 0 else fallback.resolution,
+        port_range=(
+            primary.port_range if primary.port_range is not None else fallback.port_range
+        ),
+        internal_scale_m=(
+            primary.internal_scale_m
+            if primary.internal_scale_m is not None
+            else fallback.internal_scale_m
+        ),
+    )
+
+
+def _read_all_messages(
+    stream: Any,
+    options: SdCardParseOptions,
+) -> List[Any]:
+    """Drain ``stream`` into a list of ``DaqifiOutMessage`` objects.
+
+    Reuses :class:`ProtobufMessageParser` (the same length-prefixed
+    reader the live transport uses), wired to
+    ``DaqifiOutMessage.FromString``. Carries unconsumed bytes between
+    chunks so a frame straddling a buffer boundary still parses.
+    """
+    # Lazy import — keeps this module importable in environments where
+    # the generated protobuf modules aren't available (tests can
+    # monkeypatch the factory directly via ``parser._message_factory``).
+    from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+
+    parser = ProtobufMessageParser(message_factory=DaqifiOutMessage.FromString)
+    messages: List[Any] = []
+    carry = b""
+    total_bytes_read = 0
+    try:
+        total_bytes = os.fstat(stream.fileno()).st_size
+    except (AttributeError, OSError):
+        total_bytes = -1
+
+    while True:
+        chunk = stream.read(options.buffer_size)
+        if not chunk:
+            break
+        if not isinstance(chunk, (bytes, bytearray)):
+            # Text streams would otherwise blow up later in `carry +
+            # chunk` with an opaque "can't concat str to bytes" — fail
+            # at the source with a message that names the actual fix.
+            raise TypeError(
+                "file_stream must be opened in binary mode "
+                "(read() must return bytes / bytearray)"
+            )
+        # Normalize to bytes so downstream slicing/comparisons stay
+        # type-stable across iterations regardless of whether the
+        # stream returns ``bytes`` or ``bytearray``.
+        if not isinstance(chunk, bytes):
+            chunk = bytes(chunk)
+        total_bytes_read += len(chunk)
+
+        combined = carry + chunk
+        # Only strip the EOF marker on what is plausibly the final
+        # chunk — testing every chunk would be wasteful, but the
+        # upstream parser strips on every iteration as a defensive
+        # measure against unexpectedly-short reads. We mirror that.
+        combined = _strip_end_of_file_marker(combined)
+
+        parsed, consumed = parser.parse_messages(combined)
+        for inbound in parsed:
+            messages.append(inbound.data)
+
+        carry = combined[consumed:] if consumed < len(combined) else b""
+
+        if options.progress is not None:
+            options.progress(
+                SdCardParseProgress(
+                    bytes_read=total_bytes_read,
+                    total_bytes=total_bytes,
+                    messages_read=len(messages),
+                )
+            )
+
+    if carry:
+        parsed, _ = parser.parse_messages(carry)
+        for inbound in parsed:
+            messages.append(inbound.data)
+        if options.progress is not None:
+            options.progress(
+                SdCardParseProgress(
+                    bytes_read=total_bytes_read,
+                    total_bytes=total_bytes,
+                    messages_read=len(messages),
+                )
+            )
+
+    return messages
+
+
+def _produce_samples(
+    messages: List[Any],
+    start_index: int,
+    anchor_time: Optional[datetime],
+    tick_period: float,
+    config: Optional[SdCardDeviceConfiguration],
+) -> Iterator[SdCardLogEntry]:
+    # Tz-naive UTC for parity with the C# port's DateTime.UtcNow.
+    # ``utcnow()`` is deprecated; build the same tz-naive value via
+    # ``now(timezone.utc).replace(tzinfo=None)``. If a caller hands
+    # us a tz-aware anchor, normalize to UTC then drop the tzinfo so
+    # ``base_time + timedelta(...)`` produces tz-naive entries that
+    # compare cleanly with anything else in the parser pipeline.
+    if anchor_time is None:
+        base_time = datetime.now(timezone.utc).replace(tzinfo=None)
+    elif anchor_time.tzinfo is not None:
+        base_time = anchor_time.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        base_time = anchor_time
+    previous_timestamp: Optional[int] = None
+    elapsed_seconds = 0.0
+
+    i = start_index
+    while i < len(messages):
+        msg = messages[i]
+        if not _has_stream_payload(msg):
+            i += 1
+            continue
+
+        # Merge consecutive messages sharing the same MsgTimeStamp into
+        # one entry — firmware often splits analog and digital data
+        # across separate frames at the same tick.
+        analog_float = list(msg.analog_in_data_float)
+        analog_raw = list(msg.analog_in_data)
+        digital = bytes(msg.digital_data)
+        analog_ts = list(msg.analog_in_data_ts)
+
+        while i + 1 < len(messages) and messages[i + 1].msg_time_stamp == msg.msg_time_stamp:
+            nxt = messages[i + 1]
+            if not _has_stream_payload(nxt):
+                break
+            i += 1
+            if not analog_float and len(nxt.analog_in_data_float) > 0:
+                analog_float = list(nxt.analog_in_data_float)
+            elif not analog_raw and len(nxt.analog_in_data) > 0:
+                analog_raw = list(nxt.analog_in_data)
+            if not digital and len(nxt.digital_data) > 0:
+                digital = bytes(nxt.digital_data)
+            if not analog_ts and len(nxt.analog_in_data_ts) > 0:
+                analog_ts = list(nxt.analog_in_data_ts)
+
+        # Reconstruct the absolute timestamp from the device's tick
+        # counter. The first stream message anchors elapsed_seconds=0;
+        # subsequent messages add (delta_ticks * tick_period). When
+        # tick_period is 0 (no timestamp_freq known) every entry just
+        # gets the base time — matches the upstream behavior.
+        timestamp = base_time
+        if msg.msg_time_stamp != 0 and tick_period > 0:
+            if previous_timestamp is None:
+                previous_timestamp = int(msg.msg_time_stamp)
+            else:
+                delta = _compute_tick_delta(previous_timestamp, int(msg.msg_time_stamp))
+                elapsed_seconds += delta * tick_period
+                previous_timestamp = int(msg.msg_time_stamp)
+            timestamp = base_time + timedelta(seconds=elapsed_seconds)
+
+        if analog_float:
+            analog_values: Tuple[float, ...] = tuple(float(v) for v in analog_float)
+        elif analog_raw:
+            analog_values = _scale_raw_analog_values(analog_raw, config)
+        else:
+            analog_values = ()
+
+        digital_data = 0
+        if digital:
+            for b_index, byte_val in enumerate(digital[:4]):
+                digital_data |= (byte_val & 0xFF) << (b_index * 8)
+
+        analog_timestamps: Optional[Tuple[int, ...]] = (
+            tuple(int(v) for v in analog_ts) if analog_ts else None
+        )
+
+        yield SdCardLogEntry(
+            timestamp=timestamp,
+            analog_values=analog_values,
+            digital_data=digital_data,
+            analog_timestamps=analog_timestamps,
+        )
+        i += 1
+
+
+class SdCardFileParser:
+    """Parses SD-card ``.bin`` log files (varint-prefixed protobuf).
+
+    Ports ``Daqifi.Core/Device/SdCard/SdCardFileParser.cs``. Sync —
+    see module docstring divergence note. ``parse_stream`` reads the
+    entire input before yielding samples (matches upstream, which
+    materializes the message list before iterating); the returned
+    :class:`SdCardLogSession` exposes samples as an
+    ``Iterator[SdCardLogEntry]`` so the caller still pays per-sample
+    cost lazily.
+    """
+
+    def parse_stream(
+        self,
+        file_stream: Any,
+        file_name: str,
+        options: Optional[SdCardParseOptions] = None,
+    ) -> SdCardLogSession:
+        if file_stream is None:
+            raise TypeError("file_stream must not be None")
+        if file_name is None:
+            raise TypeError("file_name must not be None")
+
+        options = options if options is not None else SdCardParseOptions()
+        if options.buffer_size <= 0:
+            raise ValueError("options.buffer_size must be greater than zero")
+
+        # The filename-date regex is anchored at ``^log_`` against the
+        # stem of ``file_name``. ``os.path.splitext("/tmp/log_x.bin")``
+        # keeps the directory in the stem, so a path-like input would
+        # silently fail to extract its embedded date. Normalize once
+        # here so callers can pass either a basename or a full path.
+        # Replace ``\\`` first so Windows-style paths split correctly
+        # on POSIX hosts (mirrors the existing pattern in
+        # parse_sd_card_file_list).
+        file_name = os.path.basename(file_name.replace("\\", "/"))
+
+        file_created_date = options.session_start_time or _try_parse_log_filename_date(
+            file_name
+        )
+
+        all_messages = _read_all_messages(file_stream, options)
+
+        config: Optional[SdCardDeviceConfiguration] = None
+        stream_start_index = 0
+
+        # First message is treated as a status frame only when it has
+        # no stream payload — some firmware embeds config fields
+        # inside streaming messages and we can't lose those samples.
+        if all_messages and not _has_stream_payload(all_messages[0]):
+            config = _extract_device_configuration(all_messages[0])
+            stream_start_index = 1
+
+        if config is None or config.timestamp_frequency == 0:
+            scanned = _scan_messages_for_configuration(all_messages)
+            if scanned is not None:
+                config = _merge_configurations(config, scanned)
+
+        if options.configuration_override is not None:
+            # Override is INTENTIONALLY the fallback, not the primary —
+            # mirrors C# SdCardFileParser.cs:82-89. The override exists
+            # to fill in fields the file lacks (e.g. when a connected
+            # device supplies live calibration absent from the SD log),
+            # NOT to second-guess values the file already provides.
+            config = _merge_configurations(config, options.configuration_override)
+
+        timestamp_frequency = config.timestamp_frequency if config is not None else 0
+        if timestamp_frequency == 0 and options.fallback_timestamp_frequency > 0:
+            timestamp_frequency = options.fallback_timestamp_frequency
+
+        tick_period = 1.0 / timestamp_frequency if timestamp_frequency > 0 else 0.0
+
+        samples = _produce_samples(
+            all_messages,
+            stream_start_index,
+            file_created_date,
+            tick_period,
+            config,
+        )
+
+        return SdCardLogSession(
+            file_name=file_name,
+            file_created_date=file_created_date,
+            device_config=config,
+            samples=samples,
+        )
+
+    def parse_file(
+        self,
+        file_path: str,
+        options: Optional[SdCardParseOptions] = None,
+    ) -> SdCardLogSession:
+        if file_path is None:
+            raise TypeError("file_path must not be None")
+
+        options = options if options is not None else SdCardParseOptions()
+        if options.buffer_size <= 0:
+            raise ValueError("options.buffer_size must be greater than zero")
+
+        with open(file_path, "rb") as stream:
+            return self.parse_stream(stream, os.path.basename(file_path), options)
+
+
+class SdCardFileParserFactory:
+    """Picks the right SD-card parser by file extension.
+
+    Ports ``Daqifi.Core/Device/SdCard/SdCardFileParserFactory.cs``.
+    Currently only the protobuf parser is wired up — calling
+    ``parse_with_format`` with ``JSON`` or ``CSV`` raises
+    :class:`NotImplementedError` until those parsers land.
+    ``detect_format`` already classifies all three extensions so
+    callers can inspect a file's format without invoking a parser.
+    """
+
+    @staticmethod
+    def detect_format(file_name: str) -> SdCardLogFormat:
+        if file_name is None:
+            raise TypeError("file_name must not be None")
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext == ".bin":
+            return SdCardLogFormat.PROTOBUF
+        if ext == ".json":
+            return SdCardLogFormat.JSON
+        if ext == ".csv":
+            return SdCardLogFormat.CSV
+        raise ValueError(
+            f"Unsupported file extension: {ext}. "
+            f"Supported extensions are .bin, .json, .csv"
+        )
+
+    @staticmethod
+    def parse_with_format(
+        file_stream: Any,
+        file_name: str,
+        format: SdCardLogFormat,
+        options: Optional[SdCardParseOptions] = None,
+    ) -> SdCardLogSession:
+        if format is SdCardLogFormat.PROTOBUF:
+            return SdCardFileParser().parse_stream(file_stream, file_name, options)
+        if format is SdCardLogFormat.JSON:
+            raise NotImplementedError(
+                "JSON SD-card log parser is not yet ported "
+                "(SdCardJsonFileParser)."
+            )
+        if format is SdCardLogFormat.CSV:
+            raise NotImplementedError(
+                "CSV SD-card log parser is not yet ported "
+                "(SdCardCsvFileParser)."
+            )
+        raise ValueError(f"Unsupported format: {format}")
+
+    @staticmethod
+    def parse_stream(
+        file_stream: Any,
+        file_name: str,
+        options: Optional[SdCardParseOptions] = None,
+    ) -> SdCardLogSession:
+        format = SdCardFileParserFactory.detect_format(file_name)
+        return SdCardFileParserFactory.parse_with_format(
+            file_stream, file_name, format, options
+        )
+
+    @staticmethod
+    def parse_file(
+        file_path: str,
+        options: Optional[SdCardParseOptions] = None,
+    ) -> SdCardLogSession:
+        if file_path is None:
+            raise TypeError("file_path must not be None")
+        format = SdCardFileParserFactory.detect_format(file_path)
+        with open(file_path, "rb") as stream:
+            return SdCardFileParserFactory.parse_with_format(
+                stream, os.path.basename(file_path), format, options
+            )
