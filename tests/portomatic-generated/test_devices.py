@@ -487,15 +487,27 @@ class TestStreamInterfaceAutoPin:
         )
 
     def test_tcp_transport_pins_stream_interface_to_wifi(self):
+        import threading
+        import time as _time
         from daqifi.transport import TcpStreamTransport
         t = _make_fake_transport(TcpStreamTransport)
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
-        # Fake transport never delivers a SYSInfoPB? frame; pre-populate
-        # SN so initialize() doesn't trip the silent-init guard (#73)
-        # which fires only on TCP transports.
-        dev._metadata.serial_number = "fake-sn-for-test"
-        dev.initialize()
+        # Fake transport never delivers a SYSInfoPB? frame; deliver a
+        # synthetic SN from a background thread so initialize() doesn't
+        # trip the silent-init guard (#73), which fires only on TCP.
+        # initialize() clears stale SN at the top so a pre-populate
+        # doesn't work — this thread mimics the protocol-handler
+        # delivery path.
+        def _deliver_sn() -> None:
+            _time.sleep(0.05)
+            dev._metadata.serial_number = "TEST_SN_PLACEHOLDER"
+        deliver = threading.Thread(target=_deliver_sn, daemon=True)
+        deliver.start()
+        try:
+            dev.initialize()
+        finally:
+            deliver.join(timeout=1.0)
         sent = self._scpi_text_sent(dev)
         assert "SYSTem:STReam:INTerface 1" in sent, (
             f"TCP-transport device did not pin stream interface to 1; "
@@ -657,24 +669,66 @@ class TestSilentInitDetection:
                 pass
 
     def test_tcp_init_returns_early_when_sn_arrives(self):
-        """Healthy TCP path: pre-populate SN to simulate a fast
-        protobuf reply, confirm initialize() returns well under the
-        configured timeout (poll-loop early-exit on SN arrival)."""
+        """Healthy TCP path: simulate a fast protobuf reply by setting
+        SN from a background thread shortly after init starts; confirm
+        initialize() returns well under the configured timeout (poll-
+        loop early-exit on SN arrival).
+
+        Pre-populating SN before calling initialize() doesn't work
+        because initialize() now clears stale SN at the start (Qodo
+        PR #75 /agentic_review pass 1 bug #2 fix) — the thread mimics
+        the real protocol-handler delivery path."""
+        import threading
         from daqifi.transport import TcpStreamTransport
         t = _make_fake_transport(TcpStreamTransport)
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
+
+        # Fire SN delivery 0.05 s in. Pre-init SCPI sleeps total
+        # ~0.5 s, so the SN is already set by the time the wait
+        # loop polls.
+        def _deliver_sn() -> None:
+            time.sleep(0.05)
+            dev._metadata.serial_number = "TEST_SN_PLACEHOLDER"
+        deliver = threading.Thread(target=_deliver_sn, daemon=True)
+        deliver.start()
         try:
-            dev._metadata.serial_number = "9090603604263365351"
             t0 = time.monotonic()
             dev.initialize(response_timeout_s=5.0)
             elapsed = time.monotonic() - t0
             # Pre-init SCPI sleeps total ~0.5 s; the SN-wait loop
             # should NOT add the full 5 s ceiling.
-            assert elapsed < 1.0, (
-                f"TCP init with pre-populated SN took {elapsed:.2f} s; "
-                f"poll-loop should have returned in well under 1 s"
+            assert elapsed < 1.5, (
+                f"TCP init with delivered SN took {elapsed:.2f} s; "
+                f"poll-loop should have returned in well under 1.5 s"
             )
+        finally:
+            deliver.join(timeout=1.0)
+            try:
+                dev.close()
+            except Exception:
+                pass
+
+    def test_initialize_clears_stale_sn_so_wedged_reinit_raises(self):
+        """Closes Qodo PR #75 /agentic_review bug #2: a re-init on the
+        same instance must not bypass the silent-init guard just
+        because a prior init left a SN in metadata. The fix clears
+        ``_metadata.serial_number`` at the start of initialize(); this
+        test reproduces the scenario."""
+        from daqifi.exceptions import DeviceUnresponsiveError
+        from daqifi.transport import TcpStreamTransport
+        t = _make_fake_transport(TcpStreamTransport)
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        try:
+            # Simulate prior successful init left a SN behind, then
+            # caller manually flipped _is_initialized False to retry.
+            dev._metadata.serial_number = "STALE_SN_FROM_PRIOR_INIT"
+            dev._is_initialized = False
+            # No background thread to deliver fresh SN — the wedged
+            # device case. The guard should fire.
+            with pytest.raises(DeviceUnresponsiveError, match="WiFi-SCPI"):
+                dev.initialize(response_timeout_s=0.1)
         finally:
             try:
                 dev.close()

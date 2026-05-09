@@ -696,6 +696,13 @@ class DaqifiDevice:
         # register it. (Closes daqifi/daqifi-python-core#26 + Qodo
         # PR #54 review #2.)
         init_succeeded = False
+        # Clear the SN so the post-``get_device_info()`` poll waits for a
+        # fresh SYSInfoPB? frame instead of breaking out instantly on a
+        # value left over from a prior init on the same instance. Without
+        # this, a re-init against a wedged TCP listener could skip the
+        # silent-init detection (Qodo PR #75 /agentic_review pass 1 bug
+        # #2). disconnect() doesn't clear metadata.
+        self._metadata.serial_number = ""
         try:
             self._protocol_handler = ProtobufProtocolHandler(
                 status_message_handler=self._on_status_message_received,

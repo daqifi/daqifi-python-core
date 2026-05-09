@@ -126,7 +126,7 @@ Recovery is a USB-side reboot:
 
 ```python
 from daqifi.devices import DaqifiDeviceFactory
-usb = DaqifiDeviceFactory.connect_serial(port_name="/dev/ttyACM0")
+usb = DaqifiDeviceFactory.connect_serial(port_name="/dev/ttyACM<N>")
 usb.send("SYSTem:REboot")  # WiFi-SCPI listener restarts on the next boot
 ```
 
