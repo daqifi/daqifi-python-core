@@ -727,13 +727,25 @@ class WiFiDeviceFinder:
         # Lazy import — daqifi.devices imports protocol/network and
         # finders are typically imported earlier in user code.
         from daqifi.devices import DaqifiDeviceFactory
+        from daqifi._internal.comm import ConnectionRetryOptions
+        # Apply timeout_s to the TCP connect too, not just initialize().
+        # Without retry_options the connect would use the 5 s default,
+        # so a probe with `timeout_s=0.5` could still block 5 s on an
+        # unreachable IP (Qodo PR #76 /agentic_review pass 1 bug #2).
+        retry = ConnectionRetryOptions(
+            enabled=False,
+            max_attempts=1,
+            connection_timeout=timeout_s,
+        )
         try:
-            # initialize_device=False so we can pass our explicit
+            # initialize_device=False so we can pass the explicit
             # timeout_s to initialize() — the auto-init path uses the
-            # default 5.0s ceiling, which would override the caller's
+            # default 5.0 s ceiling, which would override the caller's
             # choice of a tighter probe timeout.
             device = DaqifiDeviceFactory.connect_tcp(
-                host=ip, port=port, initialize_device=False,
+                host=ip, port=port,
+                initialize_device=False,
+                retry_options=retry,
             )
         except Exception:
             return None
