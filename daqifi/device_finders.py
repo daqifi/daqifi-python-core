@@ -700,6 +700,66 @@ class WiFiDeviceFinder:
             mac_address="",
         )
 
+    def probe_ip(
+        self,
+        ip: str,
+        port: int = _DEFAULT_SCPI_TCP_PORT,
+        timeout_s: float = 5.0,
+    ) -> Optional[DeviceInfo]:
+        """Probe a known device IP directly via TCP, bypassing UDP broadcast.
+
+        Useful when UDP broadcast doesn't reach back (e.g. WSL2's
+        mirrored networking drops inbound broadcast responses) but the
+        operator already knows the device's IP — closes #72.
+
+        Opens a short-lived TCP connection to ``ip:port``, runs the
+        standard initialize sequence so the protobuf metadata
+        populates, and returns a single :class:`DeviceInfo` shaped the
+        same way :meth:`discover` would have. Returns ``None`` if the
+        connection fails or the device is unresponsive.
+
+        Does NOT fire the ``device_discovered`` / ``discovery_completed``
+        callbacks — this is a synchronous reachability probe, not a
+        discovery scan.
+        """
+        if self._disposed:
+            raise RuntimeError("WiFiDeviceFinder has been closed.")
+        # Lazy import — daqifi.devices imports protocol/network and
+        # finders are typically imported earlier in user code.
+        from daqifi.devices import DaqifiDeviceFactory
+        try:
+            # initialize_device=False so we can pass our explicit
+            # timeout_s to initialize() — the auto-init path uses the
+            # default 5.0s ceiling, which would override the caller's
+            # choice of a tighter probe timeout.
+            device = DaqifiDeviceFactory.connect_tcp(
+                host=ip, port=port, initialize_device=False,
+            )
+        except Exception:
+            return None
+        try:
+            try:
+                device.initialize(response_timeout_s=timeout_s)
+            except Exception:
+                return None
+            meta = device.metadata
+            pn = (meta.part_number or "").strip()
+            return DeviceInfo(
+                name=meta.host_name or f"DAQiFi-{ip}",
+                serial_number=meta.serial_number,
+                firmware_version=meta.firmware_version,
+                connection_type=ConnectionType.WIFI,
+                device_type=_device_type_from_part_number(pn),
+                ip_address=ip,
+                port=port,
+                mac_address=meta.mac_address,
+            )
+        finally:
+            try:
+                device.close()
+            except Exception:
+                pass
+
     def close(self) -> None:
         self._disposed = True
 
