@@ -765,13 +765,16 @@ class WiFiDeviceFinder:
             meta = device.metadata
             host_name = (meta.host_name or "").strip()
             pn = (meta.part_number or "").strip()
-            # Prefer the device-reported port from protobuf metadata
-            # so probe_ip output matches discover() output for the
-            # same device. Falls back to the input ``port`` arg via
-            # _coerce_device_port when the protobuf field is 0/missing
-            # (Qodo PR #76 /agentic_review pass 2 bug #4).
-            reported_port = _coerce_device_port(meta.device_port) \
-                if meta.device_port else port
+            # Prefer the device-reported port from protobuf metadata so
+            # probe_ip output matches discover() output for the same
+            # device. ``_coerce_device_port`` handles the 0/out-of-range
+            # fallback to the firmware's default — feed the caller's
+            # ``port`` arg into it when the protobuf field is empty so
+            # that path also gets validation, not a raw passthrough
+            # (Qodo PR #76 pass 4 bug #3 — comment/code mismatch).
+            reported_port = _coerce_device_port(
+                meta.device_port if meta.device_port else port
+            )
             return DeviceInfo(
                 name=host_name or f"DAQiFi-{ip}",
                 serial_number=meta.serial_number,
