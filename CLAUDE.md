@@ -104,6 +104,24 @@ Once the device is in **STA mode** and on the workstation's LAN:
 - The B3 LAN-streaming tests can also exercise TCP streaming over
   WiFi.
 
+### WSL2: bypass UDP discovery with `DAQIFI_DEVICE_LAN_IP` (#72)
+
+WSL2's mirrored networking drops inbound UDP-broadcast responses,
+so `WiFiDeviceFinder.discover()` returns 0 results from WSL2 even
+when the device is reachable on the LAN. Set the device's known
+LAN IP to bypass UDP and probe via TCP (`probe_ip`):
+
+```bash
+DAQIFI_DEVICE_LAN_IP=<DEVICE_IP> \
+    DAQIFI_DEVICE_PORT=/dev/ttyACM<N> DAQIFI_DEVICE_REQUIRED=1 \
+    python -m pytest tests/integration/hardware/test_discovery.py -v
+```
+
+The `test_wifi_device_finder_filters_to_our_sn` test honors this
+env var and uses `WiFiDeviceFinder.probe_ip(<ip>)` instead of the
+broadcast scan. Native Linux / Windows hosts don't need it —
+broadcast works there.
+
 The `wait_for_device_back` fixture (in
 `tests/integration/hardware/conftest.py`) handles the post-`*RST` /
 post-`SYSTem:REboot` USB drop + re-enumeration cleanly, so STA-mode

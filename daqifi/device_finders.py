@@ -700,6 +700,97 @@ class WiFiDeviceFinder:
             mac_address="",
         )
 
+    def probe_ip(
+        self,
+        ip: str,
+        port: int = _DEFAULT_SCPI_TCP_PORT,
+        timeout_s: float = 5.0,
+    ) -> Optional[DeviceInfo]:
+        """Probe a known device IP directly via TCP, bypassing UDP broadcast.
+
+        Useful when UDP broadcast doesn't reach back (e.g. WSL2's
+        mirrored networking drops inbound broadcast responses) but the
+        operator already knows the device's IP — closes #72.
+
+        Opens a short-lived TCP connection to ``ip:port``, runs the
+        standard initialize sequence so the protobuf metadata
+        populates, and returns a single :class:`DeviceInfo` shaped the
+        same way :meth:`discover` would have. Returns ``None`` if the
+        connection fails or the device is unresponsive.
+
+        Does NOT fire the ``device_discovered`` / ``discovery_completed``
+        callbacks — this is a synchronous reachability probe, not a
+        discovery scan.
+        """
+        if self._disposed:
+            raise RuntimeError("WiFiDeviceFinder has been closed.")
+        # Lazy import — daqifi.devices imports protocol/network and
+        # finders are typically imported earlier in user code.
+        from daqifi.devices import DaqifiDeviceFactory
+        from daqifi._internal.comm import ConnectionRetryOptions
+        # Apply timeout_s to the TCP connect too, not just initialize().
+        # Without retry_options the connect would use the 5 s default,
+        # so a probe with `timeout_s=0.5` could still block 5 s on an
+        # unreachable IP (Qodo PR #76 /agentic_review pass 1 bug #2).
+        retry = ConnectionRetryOptions(
+            enabled=False,
+            max_attempts=1,
+            connection_timeout=timeout_s,
+        )
+        try:
+            # initialize_device=False so we can pass the explicit
+            # timeout_s to initialize() — the auto-init path uses the
+            # default 5.0 s ceiling, which would override the caller's
+            # choice of a tighter probe timeout.
+            #
+            # ValueError + TypeError propagate (caller passed bad input
+            # — those are misconfiguration, not "device unreachable").
+            # connect_tcp validates host/port explicitly; swallowing
+            # those would silently mask DAQIFI_DEVICE_LAN_IP typos
+            # (Qodo PR #76 /agentic_review pass 2 bug #1).
+            device = DaqifiDeviceFactory.connect_tcp(
+                host=ip, port=port,
+                initialize_device=False,
+                retry_options=retry,
+            )
+        except (ValueError, TypeError):
+            raise
+        except Exception:
+            return None
+        try:
+            try:
+                device.initialize(response_timeout_s=timeout_s)
+            except Exception:
+                return None
+            meta = device.metadata
+            host_name = (meta.host_name or "").strip()
+            pn = (meta.part_number or "").strip()
+            # Prefer the device-reported port from protobuf metadata so
+            # probe_ip output matches discover() output for the same
+            # device. ``_coerce_device_port`` handles the 0/out-of-range
+            # fallback to the firmware's default — feed the caller's
+            # ``port`` arg into it when the protobuf field is empty so
+            # that path also gets validation, not a raw passthrough
+            # (Qodo PR #76 pass 4 bug #3 — comment/code mismatch).
+            reported_port = _coerce_device_port(
+                meta.device_port if meta.device_port else port
+            )
+            return DeviceInfo(
+                name=host_name or f"DAQiFi-{ip}",
+                serial_number=meta.serial_number,
+                firmware_version=meta.firmware_version,
+                connection_type=ConnectionType.WIFI,
+                device_type=_device_type_from_part_number(pn),
+                ip_address=ip,
+                port=reported_port,
+                mac_address=meta.mac_address,
+            )
+        finally:
+            try:
+                device.close()
+            except Exception:
+                pass
+
     def close(self) -> None:
         self._disposed = True
 

@@ -362,3 +362,87 @@ class TestWiFiDeviceFinderProtobuf:
         # broadcast back, we must NOT report it as a device.
         results = _run_finder_against_payload(b"DAQiFi?\r\n")
         assert results == []
+
+
+# ---- WiFiDeviceFinder.probe_ip — unicast bypass for #72 ---------------------
+
+
+class TestWiFiDeviceFinderProbeIp:
+    """Closes #72: ``probe_ip`` lets callers bypass UDP broadcast when
+    they already know the device's IP — needed on WSL2 where mirrored
+    networking drops broadcast responses."""
+
+    def test_probe_ip_returns_none_on_connect_failure(self):
+        # 127.0.0.1:1 is reserved/unbound — TCP connect fails fast.
+        f = WiFiDeviceFinder()
+        try:
+            assert f.probe_ip("127.0.0.1", port=1, timeout_s=0.5) is None
+        finally:
+            f.close()
+
+    def test_probe_ip_raises_after_close(self):
+        f = WiFiDeviceFinder()
+        f.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            f.probe_ip("127.0.0.1")
+
+    def test_probe_ip_propagates_invalid_input(self):
+        """Closes Qodo PR #76 /agentic_review pass 2 bug #1: a bad
+        host/port arg must propagate the underlying ValueError so the
+        caller sees the misconfiguration, not a silent None that looks
+        like 'device unreachable'."""
+        f = WiFiDeviceFinder()
+        try:
+            with pytest.raises(ValueError):
+                f.probe_ip("", port=9760)
+            with pytest.raises(ValueError):
+                f.probe_ip("127.0.0.1", port=70000)
+        finally:
+            f.close()
+
+    def test_probe_ip_returns_none_on_silent_init(self):
+        """Simulate the WiFi-SCPI silence pattern: connect succeeds but
+        the device never delivers a SYSInfoPB? frame so initialize()
+        raises. ``probe_ip`` must swallow the exception and return
+        None instead of propagating, since the discovery surface is
+        meant to be tolerant of unreachable / wedged devices."""
+        # Listen on an ephemeral port that accepts TCP but never sends
+        # any SCPI replies — that's the silent-WiFi-SCPI shape.
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        srv_port = srv.getsockname()[1]
+
+        accepted: list = []
+
+        def _accept_loop():
+            try:
+                c, _ = srv.accept()
+                accepted.append(c)
+            except OSError:
+                pass
+
+        t = threading.Thread(target=_accept_loop, daemon=True)
+        t.start()
+        try:
+            f = WiFiDeviceFinder()
+            try:
+                # Tight timeout so the test stays fast — silent-init
+                # detection (#73) raises after this window.
+                result = f.probe_ip(
+                    "127.0.0.1", port=srv_port, timeout_s=0.5,
+                )
+            finally:
+                f.close()
+            assert result is None
+        finally:
+            try:
+                srv.close()
+            except Exception:
+                pass
+            t.join(timeout=1.0)
+            for c in accepted:
+                try:
+                    c.close()
+                except Exception:
+                    pass
