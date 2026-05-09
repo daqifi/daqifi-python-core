@@ -110,6 +110,30 @@ post-`SYSTem:REboot` USB drop + re-enumeration cleanly, so STA-mode
 tests that toggle WiFi state can run alongside USB-CDC tests
 without leaving the suite in a cascading-failure state.
 
+### Recovering from WiFi-SCPI silence (#73)
+
+After many TCP/9760 connect-disconnect cycles in the same session
+(especially mixed with USB CDC SCPI activity), the device's
+WiFi-SCPI listener can wedge: the TCP socket still establishes
+cleanly but `*IDN?` / `SYSTem:INFo?` / the protobuf `SYSInfoPB?`
+return nothing. `DaqifiDeviceFactory.connect_tcp(...).initialize()`
+now detects this — the call raises
+`daqifi.exceptions.DeviceUnresponsiveError` after the configured
+timeout (default 5 s on TCP) instead of returning silently with
+empty metadata.
+
+Recovery is a USB-side reboot:
+
+```python
+from daqifi.devices import DaqifiDeviceFactory
+usb = DaqifiDeviceFactory.connect_serial(port_name="/dev/ttyACM<N>")
+usb.send("SYSTem:REboot")  # WiFi-SCPI listener restarts on the next boot
+```
+
+The wedge is on the firmware side (parser context corruption on
+the WiFi-SCPI path); the matching firmware ticket is
+[daqifi-nyquist-firmware#437](https://github.com/daqifi/daqifi-nyquist-firmware/issues/437).
+
 ## WSL2 / usbipd setup (one-time, then per-disconnect)
 
 WSL2 doesn't see USB devices without [usbipd-win](https://github.com/dorssel/usbipd-win):

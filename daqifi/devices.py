@@ -44,6 +44,7 @@ from .communication import (
     StreamMessageConsumer,
 )
 from .enums import SdCardLogFormat, WifiMode, WifiSecurityType
+from .exceptions import DeviceUnresponsiveError
 from .network import NetworkConfiguration
 from .protocol import ProtobufProtocolHandler
 from .sdcard import (
@@ -655,13 +656,24 @@ class DaqifiDevice:
 
         return captured
 
-    def initialize(self) -> None:
+    def initialize(self, response_timeout_s: Optional[float] = None) -> None:
         """Run the standard SCPI init sequence.
 
         Ports the upstream ``InitializeAsync`` (sync here per project
         convention). Wires the protocol handler before sending the
         text-mode setup commands, then queries device info -- the
         protobuf consumer's status callback updates :attr:`metadata`.
+
+        :param response_timeout_s: max time to wait for the protobuf
+            ``SYSInfoPB?`` reply after sending ``get_device_info()``.
+            Polled every 50 ms, so a healthy device returns well under
+            a second. Defaults to 1.0 s on serial transports (matches
+            historical fixed sleep) and 5.0 s on TCP. On TCP, a
+            timeout raises :class:`DeviceUnresponsiveError` to surface
+            the WiFi-SCPI silence pattern (#73) instead of returning
+            with empty metadata; on other transports, a timeout
+            currently completes silently for backwards compatibility
+            with fakes that never deliver a status frame.
         """
         if not self.is_connected:
             raise RuntimeError(
@@ -684,6 +696,18 @@ class DaqifiDevice:
         # register it. (Closes daqifi/daqifi-python-core#26 + Qodo
         # PR #54 review #2.)
         init_succeeded = False
+        # Clear SN so the post-``get_device_info()`` poll waits for a
+        # fresh SYSInfoPB? frame instead of breaking out instantly on a
+        # value left over from a prior init on the same instance —
+        # without this, a re-init against a wedged TCP listener would
+        # skip the silent-init detection (Qodo PR #75 /agentic_review
+        # pass 1 bug #2). disconnect() doesn't touch metadata.
+        # Snapshot first so a mid-init failure can restore the previous
+        # SN — leaving identity metadata cleared on a recoverable
+        # failure makes retries/debugging harder (Qodo PR #75
+        # /agentic_review pass 2 bug #3).
+        prev_serial_number = self._metadata.serial_number
+        self._metadata.serial_number = ""
         try:
             self._protocol_handler = ProtobufProtocolHandler(
                 status_message_handler=self._on_status_message_received,
@@ -712,13 +736,28 @@ class DaqifiDevice:
 
             # Query device info -- the protobuf consumer dispatches the
             # response to OnStatusMessageReceived which fills metadata.
-            # 1.0s wait: NQ1 over USB CDC needs ~500 ms for the
-            # SYSInfoPB? push to land + parse + handler chain to fire;
-            # 0.5s was right at the threshold and metadata sometimes
-            # arrived just after initialize() returned (verified
-            # 2026-04-23 hardware test). Doubling provides margin.
+            # Polled (was a fixed 1.0 s sleep) so a healthy device
+            # returns early — needed roughly 500 ms over USB CDC on
+            # the 2026-04-23 NQ1 hardware run. TCP gets a longer
+            # ceiling because the WiFi-SCPI wedge (#73) is the case
+            # we want to detect distinctly from a routine slow reply.
+            is_tcp = isinstance(self._transport, TcpStreamTransport)
+            if response_timeout_s is None:
+                response_timeout_s = 5.0 if is_tcp else 1.0
             self.send(scpi_commands.get_device_info())
-            time.sleep(1.0)
+            deadline = time.monotonic() + response_timeout_s
+            while time.monotonic() < deadline:
+                if self._metadata.serial_number:
+                    break
+                time.sleep(0.05)
+            if not self._metadata.serial_number and is_tcp:
+                raise DeviceUnresponsiveError(
+                    f"No SYSInfoPB? reply on TCP within "
+                    f"{response_timeout_s:.1f} s — TCP socket is up "
+                    f"but the device's WiFi-SCPI listener appears "
+                    f"wedged. Recovery: reboot the device via USB "
+                    f"(SYSTem:REboot)."
+                )
 
             self._is_initialized = True
             self._set_state(DeviceState.Ready)
@@ -747,6 +786,12 @@ class DaqifiDevice:
                 # blocked on a permanent transient state.
                 if self._state == DeviceState.Initializing:
                     self._set_state(prev_state)
+                # Restore the SN we cleared at the top — but only if
+                # the in-flight protobuf frame didn't already deliver
+                # a fresh value (we'd be clobbering the new one with
+                # the old). Qodo PR #75 /agentic_review pass 2 bug #3.
+                if not self._metadata.serial_number:
+                    self._metadata.serial_number = prev_serial_number
 
     def close(self) -> None:
         if self._disposed:

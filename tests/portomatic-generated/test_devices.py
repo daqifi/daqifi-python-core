@@ -7,6 +7,7 @@ factory validation."""
 
 from __future__ import annotations
 
+import time
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -490,6 +491,20 @@ class TestStreamInterfaceAutoPin:
         t = _make_fake_transport(TcpStreamTransport)
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
+        # Fake transport never delivers a SYSInfoPB? frame; hook send()
+        # to set SN synchronously when get_device_info() is sent — no
+        # background-thread race against initialize()'s SN-clear (Qodo
+        # PR #75 /agentic_review pass 2 bug #4).
+        original_send = dev.send
+
+        def synthetic_send(msg):
+            text = msg.data if hasattr(msg, "data") else str(msg)
+            result = original_send(msg)
+            if "SYSInfoPB" in text:
+                dev._metadata.serial_number = "TEST_SN_PLACEHOLDER"
+            return result
+
+        dev.send = synthetic_send  # type: ignore[method-assign]
         dev.initialize()
         sent = self._scpi_text_sent(dev)
         assert "SYSTem:STReam:INTerface 1" in sent, (
@@ -605,3 +620,115 @@ class TestInitializeFailureUnwindsHandlerSubscription:
         handlers_after = list(dev._consumer._message_handlers) if dev._consumer else []
         assert handlers_after == handlers_before
         assert dev._protocol_handler is None
+
+
+# ---- Silent-init detection on TCP (#73) -------------------------------------
+
+
+class TestSilentInitDetection:
+    """Closes daqifi/daqifi-python-core#73: when a TCP-connected device
+    accepts the socket but never replies to ``SYSInfoPB?`` (the
+    WiFi-SCPI wedge pattern), :meth:`initialize` must raise
+    :class:`DeviceUnresponsiveError` instead of returning silently with
+    empty metadata."""
+
+    def test_tcp_silent_init_raises_unresponsive(self):
+        """No SN ever delivered → raise on TCP."""
+        from daqifi.exceptions import DeviceUnresponsiveError
+        from daqifi.transport import TcpStreamTransport
+        t = _make_fake_transport(TcpStreamTransport)
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        try:
+            with pytest.raises(DeviceUnresponsiveError, match="WiFi-SCPI"):
+                dev.initialize(response_timeout_s=0.1)
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass
+
+    def test_serial_silent_init_does_not_raise(self):
+        """Serial fake never delivers SN either, but matches historical
+        behavior — no raise, just empty metadata. Backwards-compat
+        with existing fakes that don't run a real protobuf consumer."""
+        from daqifi.transport import SerialStreamTransport
+        t = _make_fake_transport(SerialStreamTransport)
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        try:
+            # Should NOT raise, even though SN never arrives.
+            dev.initialize(response_timeout_s=0.1)
+            assert dev.metadata.serial_number == ""
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass
+
+    def test_tcp_init_returns_early_when_sn_arrives(self):
+        """Healthy TCP path: hook send() so SN arrives synchronously
+        when get_device_info() fires; confirm initialize() returns
+        well under the configured timeout (poll-loop early-exit on
+        SN arrival).
+
+        Hooking send() instead of using a background thread avoids
+        racing with initialize()'s SN-clear at entry (Qodo PR #75
+        /agentic_review pass 2 bug #4)."""
+        from daqifi.transport import TcpStreamTransport
+        t = _make_fake_transport(TcpStreamTransport)
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        original_send = dev.send
+
+        def synthetic_send(msg):
+            text = msg.data if hasattr(msg, "data") else str(msg)
+            result = original_send(msg)
+            if "SYSInfoPB" in text:
+                dev._metadata.serial_number = "TEST_SN_PLACEHOLDER"
+            return result
+
+        dev.send = synthetic_send  # type: ignore[method-assign]
+        try:
+            t0 = time.monotonic()
+            dev.initialize(response_timeout_s=5.0)
+            elapsed = time.monotonic() - t0
+            # Pre-init SCPI sleeps total ~0.5 s; SN-wait loop returns
+            # immediately on first iteration (synthetic_send already
+            # populated SN), so total should be well under the 5 s
+            # ceiling.
+            assert elapsed < 1.5, (
+                f"TCP init with synthetic SN took {elapsed:.2f} s; "
+                f"poll-loop should have returned in well under 1.5 s"
+            )
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass
+
+    def test_initialize_clears_stale_sn_so_wedged_reinit_raises(self):
+        """Closes Qodo PR #75 /agentic_review bug #2: a re-init on the
+        same instance must not bypass the silent-init guard just
+        because a prior init left a SN in metadata. The fix clears
+        ``_metadata.serial_number`` at the start of initialize(); this
+        test reproduces the scenario."""
+        from daqifi.exceptions import DeviceUnresponsiveError
+        from daqifi.transport import TcpStreamTransport
+        t = _make_fake_transport(TcpStreamTransport)
+        dev = DaqifiStreamingDevice(name="d", transport=t)
+        dev.connect()
+        try:
+            # Simulate prior successful init left a SN behind, then
+            # caller manually flipped _is_initialized False to retry.
+            dev._metadata.serial_number = "STALE_SN_FROM_PRIOR_INIT"
+            dev._is_initialized = False
+            # No background thread to deliver fresh SN — the wedged
+            # device case. The guard should fire.
+            with pytest.raises(DeviceUnresponsiveError, match="WiFi-SCPI"):
+                dev.initialize(response_timeout_s=0.1)
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass
