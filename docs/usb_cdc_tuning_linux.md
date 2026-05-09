@@ -117,6 +117,52 @@ either the kernel doesn't honor `nr_urbs` for your build, or the
 bottleneck is elsewhere (Python parser, serial driver, USB host
 controller).
 
+## Measured baseline (WSL2, stock kernel, no nr_urbs exposed)
+
+Numbers below are from N=13 iterations of the full matrix on this
+host: WSL2 + usbipd-win, `cdc_acm` from the stock WSL2 kernel,
+DAQiFi NQ1 fw 3.4.6b1 over USB CDC. Each cell is yield_pct (parsed
+PC-side frames ÷ expected frames × 100), so 100% = no drops, lower
+= drops.
+
+| rate (Hz) | 1 channel | 16 channels |
+|---:|---:|---:|
+|     100 | ~102% | ~102% |
+|   1 000 | ~102% | ~102% |
+|   5 000 | ~102% | ~102% |
+|  10 000 | ~103% | **~51%** |
+|  50 000 | **~27%** | **~10%** |
+
+(Yields slightly above 100% are protobuf-stream warm-up frames
+counted past the wall-clock window.)
+
+Headline takeaways:
+
+- **Buffer size makes ~zero difference at the bottleneck**. Across
+  4 KiB, 64 KiB, and 256 KiB Python read chunks, every cell is
+  identical to within σ < 0.5%. The `set_buffer_size()` call from
+  PR #19 is a no-op on Linux/WSL2 (pyserial raises
+  `NotImplementedError`), and the matching consumer-side chunk
+  size also doesn't matter once the kernel URB pool is full.
+- **Soak (120 s) yields the same as 5 s and 30 s** at the worst
+  combo (50 kHz × 16 ch). The bottleneck is steady-state, not a
+  warm-up artifact.
+- **Cap is around the cdc_acm URB pool**. On WSL2's compile-time
+  `NR_URBS=16` × `wMaxPacketSize=512` (High-Speed bulk), effective
+  host buffering is ≈8 KiB per direction. Above ~10 kHz × 16 ch
+  the device emits bursts faster than the kernel can drain into
+  user-space, and the firmware's USB-CDC writer drops bytes when
+  its internal queue overflows.
+
+Practical guidance for streaming on WSL2:
+
+| target rate | recommendation |
+|---|---|
+| ≤ 10 kHz × 1 ch | works as-is |
+| ≤ 5 kHz × 16 ch | works as-is |
+| 10 kHz × 16 ch | **expect ~50% drops** — switch to Windows native, or split into two 5 kHz × 8 ch sessions |
+| ≥ 50 kHz any width | **not viable on WSL2** — Windows native (`usbser.sys` honors 64 KiB `SetupComm`) |
+
 ## Out of scope here
 
 - Telemetry / drop detection — landed in #68 (`consumer.stats`).
