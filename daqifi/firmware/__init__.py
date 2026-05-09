@@ -16,6 +16,7 @@ from daqifi.firmware.external_process import (
 from daqifi.firmware.intel_hex import HexFileRecord, IntelHexParser
 from daqifi.firmware.lan_chip_info import LanChipInfo
 from daqifi.firmware.release_info import FirmwareReleaseInfo
+from daqifi.firmware.update_service import FirmwareUpdateService
 from daqifi.firmware.version import (
     FirmwareRevision,
     FirmwareVersion,
@@ -33,6 +34,7 @@ __all__ = [
     "FirmwareReleaseInfo",
     "FirmwareRevision",
     "FirmwareUpdateCheckResult",
+    "FirmwareUpdateService",
     "FirmwareVersion",
     "HexFileRecord",
     "IntelHexParser",
