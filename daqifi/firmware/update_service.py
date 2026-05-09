@@ -26,7 +26,7 @@ Divergences from upstream:
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Optional, Protocol, runtime_checkable
 
 from daqifi.enums import FirmwareUpdateState
 from daqifi.firmware.update_events import (
