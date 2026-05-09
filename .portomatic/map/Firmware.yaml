@@ -71,9 +71,13 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/FirmwareVersion.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/firmware/version.py
+  relation: divergent
+  notes: "C# `readonly record struct` with static `TryParse` / `Compare`
+    becomes a frozen `@dataclass` plus module-level `parse_firmware_string`
+    and `compare` helpers — Python idiom replaces the static-method
+    container with free functions. Operator overloads (`<`, `==`, etc.)
+    are provided via `@total_ordering` rather than explicit `__lt__`."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/GitHubFirmwareDownloadService.cs
@@ -107,9 +111,14 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/IFirmwareUpdateService.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/firmware/update_service.py
+  relation: divergent
+  notes: "Sync `runtime_checkable` Protocol; `UpdateFirmwareAsync` /
+    `UpdateWifiModuleAsync` → `update_firmware` / `update_wifi_module`
+    (no `Async` suffix). `event StateChanged` becomes a `state_changed`
+    callable attribute, idiomatic Python observer pattern. Concrete
+    implementation (FirmwareUpdateService.cs, 1156 lines) is deferred
+    to a follow-up PR."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/ILanChipInfoProvider.cs
@@ -131,21 +140,31 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/LanChipInfoParser.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/firmware/lan_chip_info.py
+  relation: divergent
+  notes: "Static C# class collapses to module-level free functions
+    `try_parse` / `try_parse_lines` per project port convention.
+    Both return `Optional[LanChipInfo]` rather than the C#
+    `bool TryParse(out)` pattern."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/Pic32BootloaderMessageConsumer.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/firmware/bootloader.py
+  relation: divergent
+  notes: "Static C# class becomes module-level free functions
+    `decode_version_response` / `decode_program_flash_response` /
+    `decode_erase_flash_response`, colocated with the Producer free
+    functions and the `Pic32BootloaderProtocol` concrete class in
+    `bootloader.py`."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/Pic32BootloaderMessageProducer.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/firmware/bootloader.py
+  relation: divergent
+  notes: "Static C# class becomes module-level free functions
+    `create_request_version_message` / `create_erase_flash_message` /
+    `create_program_flash_message` / `create_jump_to_application_message`,
+    colocated with the Consumer free functions in `bootloader.py`."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/Pic32BootloaderProtocol.cs
@@ -155,9 +174,12 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/ProcessExternalProcessRunner.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/firmware/external_process.py
+  relation: divergent
+  notes: "Renamed to `SubprocessRunner` (Pythonic — `Subprocess` is
+    what callers actually search for, mirrors `subprocess` stdlib).
+    `RunAsync` → `run` (sync, project convention). Implements the
+    `ExternalProcessRunner` Protocol (port of `IExternalProcessRunner`)."
   rationale: null
   last_synced_sha: null
 symbols:
@@ -710,24 +732,34 @@ symbols:
     kind: interface
     qualified: Daqifi.Core.Firmware.IFirmwareUpdateService
     file: src/Daqifi.Core/Firmware/IFirmwareUpdateService.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: interface
+    qualified: daqifi.firmware.update_service.FirmwareUpdateService
+    file: daqifi/firmware/update_service.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Sync `runtime_checkable` Protocol; no `Async` suffix on
+    methods (project sync convention). The C# `event StateChanged`
+    becomes a callable attribute `state_changed` (idiomatic Python
+    observer pattern)."
   members:
   - upstream: CurrentState
-    downstream: null
-    relation: not_yet_ported
+    downstream: current_state
+    relation: one_to_one
   - upstream: StateChanged
-    downstream: null
-    relation: not_yet_ported
+    downstream: state_changed
+    relation: divergent
+    notes: C# `event` → Python callable attribute (set to a callable to
+      observe transitions). One handler at a time; wrap to multiplex.
   - upstream: UpdateFirmwareAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: update_firmware
+    relation: divergent
+    notes: Renamed (no `Async` suffix); sync.
   - upstream: UpdateWifiModuleAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: update_wifi_module
+    relation: divergent
+    notes: Renamed (no `Async` suffix); sync.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Firmware.ILanChipInfoProvider
@@ -798,59 +830,80 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Firmware.LanChipInfoParser
     file: src/Daqifi.Core/Firmware/LanChipInfoParser.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: module
+    qualified: daqifi.firmware.lan_chip_info
+    file: daqifi/firmware/lan_chip_info.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Static C# class of parsing helpers becomes a Python
+    module of free functions (project port convention; matches
+    ScpiMessageProducer / Pic32BootloaderMessageProducer / Consumer).
+    Both members switch from `bool TryParse(out)` to
+    `Optional[LanChipInfo]` — Pythonic, no out-params."
   members:
   - upstream: TryParse
-    downstream: null
-    relation: not_yet_ported
+    downstream: try_parse
+    relation: divergent
+    notes: Returns Optional[LanChipInfo] instead of bool + out-param.
   - upstream: TryParseLines
-    downstream: null
-    relation: not_yet_ported
+    downstream: try_parse_lines
+    relation: divergent
+    notes: Returns Optional[LanChipInfo] instead of bool + out-param.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.Pic32BootloaderMessageConsumer
     file: src/Daqifi.Core/Firmware/Pic32BootloaderMessageConsumer.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: module
+    qualified: daqifi.firmware.bootloader
+    file: daqifi/firmware/bootloader.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Static C# class becomes module-level free functions in
+    `bootloader.py`, colocated with the Producer free functions and
+    the `Pic32BootloaderProtocol` concrete class (project port
+    convention)."
   members:
   - upstream: DecodeVersionResponse
-    downstream: null
-    relation: not_yet_ported
+    downstream: decode_version_response
+    relation: one_to_one
   - upstream: DecodeProgramFlashResponse
-    downstream: null
-    relation: not_yet_ported
+    downstream: decode_program_flash_response
+    relation: one_to_one
   - upstream: DecodeEraseFlashResponse
-    downstream: null
-    relation: not_yet_ported
+    downstream: decode_erase_flash_response
+    relation: one_to_one
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.Pic32BootloaderMessageProducer
     file: src/Daqifi.Core/Firmware/Pic32BootloaderMessageProducer.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: module
+    qualified: daqifi.firmware.bootloader
+    file: daqifi/firmware/bootloader.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Static C# class becomes module-level free functions in
+    `bootloader.py`, colocated with the Consumer free functions and
+    the `Pic32BootloaderProtocol` concrete class (project port
+    convention)."
   members:
   - upstream: CreateRequestVersionMessage
-    downstream: null
-    relation: not_yet_ported
+    downstream: create_request_version_message
+    relation: one_to_one
   - upstream: CreateEraseFlashMessage
-    downstream: null
-    relation: not_yet_ported
+    downstream: create_erase_flash_message
+    relation: one_to_one
   - upstream: CreateProgramFlashMessage
-    downstream: null
-    relation: not_yet_ported
+    downstream: create_program_flash_message
+    relation: one_to_one
   - upstream: CreateJumpToApplicationMessage
-    downstream: null
-    relation: not_yet_ported
+    downstream: create_jump_to_application_message
+    relation: one_to_one
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.Pic32BootloaderProtocol
@@ -896,18 +949,6 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Firmware.ProcessExternalProcessRunner
     file: src/Daqifi.Core/Firmware/ProcessExternalProcessRunner.cs
-  downstream: null
-  relation: not_yet_ported
-  last_synced_sha: null
-  notes: null
-  rationale: null
-  members:
-  - upstream: RunAsync
-    downstream: null
-    relation: not_yet_ported
-- upstream:
-    kind: class
-    qualified: <downstream-only:SubprocessRunner>
   downstream:
     kind: class
     qualified: daqifi.firmware.external_process.SubprocessRunner
@@ -915,13 +956,16 @@ symbols:
   relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: Python-only helper wrapping subprocess.run for the firmware-update CLI
-    shell-out path. C# uses System.Diagnostics.Process inline.
+  rationale: "Renamed to `SubprocessRunner` — `Subprocess` is what
+    Python callers actually search for (mirrors the stdlib
+    `subprocess` module name). `RunAsync` → `run` (sync, project
+    convention). Implements the `ExternalProcessRunner` Protocol
+    (port of `IExternalProcessRunner`)."
   members:
-  - upstream: <downstream-only:run>
+  - upstream: RunAsync
     downstream: run
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Renamed (no `Async` suffix); sync.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareVersion
@@ -930,39 +974,55 @@ symbols:
     kind: class
     qualified: daqifi.firmware.version.FirmwareVersion
     file: daqifi/firmware/version.py
-  relation: one_to_one
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "C# `readonly record struct` with positional-record fields
+    becomes a `@dataclass(frozen=True)`. C# static `TryParse(string,
+    out)` / `Compare(string, string)` collapse to `FirmwareVersion.parse`
+    classmethod plus module-level `compare` helper. Operator overloads
+    (`<`, `>`, `<=`, `>=`) come from `@total_ordering` rather than
+    explicit operator overloads."
   members:
-  - upstream: <downstream-only:major>
+  - upstream: Major
     downstream: major
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:minor>
+    relation: one_to_one
+  - upstream: Minor
     downstream: minor
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:patch>
+    relation: one_to_one
+  - upstream: Patch
     downstream: patch
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:pre_label>
+    relation: one_to_one
+  - upstream: PreLabel
     downstream: pre_label
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:pre_number>
+    relation: one_to_one
+  - upstream: PreNumber
     downstream: pre_number
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:is_pre_release>
+    relation: one_to_one
+  - upstream: IsPreRelease
     downstream: is_pre_release
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:parse>
+    relation: one_to_one
+  - upstream: TryParse
     downstream: parse
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: "Returns Optional[FirmwareVersion] from a classmethod
+      instead of bool + out-param."
+  - upstream: Compare
+    downstream: null
+    relation: divergent
+    notes: "Surfaced as module-level free function `compare(left, right)`
+      rather than a static class method."
+  - upstream: CompareTo
+    downstream: null
+    relation: divergent
+    notes: "Replaced by `@total_ordering`-generated `__lt__` / `__eq__`
+      / etc. — the comparison contract is the same; the dispatch shape
+      is Pythonic."
+  - upstream: ToString
+    downstream: null
+    relation: divergent
+    notes: "Surfaced as `__str__`. IR extractor doesn't track dunders,
+      hence downstream null."
 - upstream:
     kind: class
     qualified: <downstream-only:FirmwareRevision>
