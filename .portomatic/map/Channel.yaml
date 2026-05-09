@@ -86,8 +86,11 @@ symbols:
     device-delegated; they don''t carry calibration/scaling state. '
   members:
   - upstream: ChannelNumber
-    downstream: channel_number
-    relation: not_yet_ported
+    downstream: index
+    relation: divergent
+    notes: Same concept (zero-based slot identifier), renamed in
+      Python — the dataclass field carries `index` not
+      `channel_number`. Tracked as the same semantic field.
   - upstream: Name
     downstream: name
     relation: one_to_one
@@ -98,14 +101,21 @@ symbols:
     downstream: direction
     relation: one_to_one
   - upstream: ActiveSample
-    downstream: active_sample
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: DIV-001 — Python delegates scaling/calibration to the
+      device firmware, so the active-sample cache + event
+      mechanism that ActiveSample/SetActiveSample/SampleReceived
+      drive in C# has no Python counterpart.
   - upstream: MinValue
-    downstream: min_value
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: DIV-001 — Python doesn't recompute scaled bounds
+      client-side; min/max scaling lives in firmware.
   - upstream: MaxValue
-    downstream: max_value
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: DIV-001 — see MinValue.
   - upstream: Resolution
     downstream: resolution
     relation: one_to_one
@@ -122,21 +132,25 @@ symbols:
     downstream: port_range
     relation: one_to_one
   - upstream: SampleReceived
-    downstream: sample_received
-    relation: not_yet_ported
-  - upstream: GetScaledValue
-    downstream: get_scaled_value
-    relation: not_yet_ported
-  - upstream: SetActiveSample
-    downstream: set_active_sample
-    relation: not_yet_ported
-  - upstream: ToString
-    downstream: to_string
-    relation: not_yet_ported
-  - upstream: <downstream-only:index>
-    downstream: index
+    downstream: null
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: DIV-001 — Python doesn't expose a per-channel sample
+      event because there's no client-side scaling pipeline.
+      Stream consumers receive raw protobuf frames instead.
+  - upstream: GetScaledValue
+    downstream: null
+    relation: divergent
+    notes: DIV-001 (explicit) — scaling math lives in firmware on
+      the Python port.
+  - upstream: SetActiveSample
+    downstream: null
+    relation: divergent
+    notes: DIV-001 — see ActiveSample.
+  - upstream: ToString
+    downstream: null
+    relation: divergent
+    notes: DIV-001 (explicit) — ToString_ReturnsChannelName has no
+      Python equivalent. Python dataclasses get a default __repr__.
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Channel.ChannelDirection
@@ -200,8 +214,10 @@ symbols:
     downstream: value
     relation: one_to_one
   - upstream: ToString
-    downstream: to_string
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: DIV-001 (explicit) — Python dataclass __repr__ is the
+      equivalent; no separate to_string method.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Channel.DigitalChannel
@@ -216,8 +232,10 @@ symbols:
   rationale: "Same as AnalogChannel \u2014 Python DigitalIOChannel is SCPI-delegated."
   members:
   - upstream: ChannelNumber
-    downstream: channel_number
-    relation: not_yet_ported
+    downstream: index
+    relation: divergent
+    notes: Same concept (zero-based slot identifier), renamed in
+      Python to `index`.
   - upstream: Name
     downstream: name
     relation: one_to_one
@@ -228,27 +246,32 @@ symbols:
     downstream: direction
     relation: one_to_one
   - upstream: ActiveSample
-    downstream: active_sample
-    relation: not_yet_ported
-  - upstream: OutputValue
-    downstream: output_value
-    relation: not_yet_ported
-  - upstream: IsHigh
-    downstream: is_high
-    relation: not_yet_ported
-  - upstream: SampleReceived
-    downstream: sample_received
-    relation: not_yet_ported
-  - upstream: SetActiveSample
-    downstream: set_active_sample
-    relation: not_yet_ported
-  - upstream: ToString
-    downstream: to_string
-    relation: not_yet_ported
-  - upstream: <downstream-only:index>
-    downstream: index
+    downstream: null
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: DIV-001 — Python delegates state to firmware; no
+      client-side per-channel sample cache.
+  - upstream: OutputValue
+    downstream: null
+    relation: divergent
+    notes: DIV-001 — Python's DigitalIOChannel writes are SCPI-
+      delegated; no buffered output_value field client-side.
+  - upstream: IsHigh
+    downstream: null
+    relation: divergent
+    notes: DIV-001 — see OutputValue.
+  - upstream: SampleReceived
+    downstream: null
+    relation: divergent
+    notes: DIV-001 — no per-channel sample event in Python.
+  - upstream: SetActiveSample
+    downstream: null
+    relation: divergent
+    notes: DIV-001 — see ActiveSample.
+  - upstream: ToString
+    downstream: null
+    relation: divergent
+    notes: DIV-001 (explicit). Python dataclass __repr__ is the
+      equivalent.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Channel.IAnalogChannel
