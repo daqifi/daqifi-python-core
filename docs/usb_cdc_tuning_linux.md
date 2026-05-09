@@ -147,21 +147,57 @@ Headline takeaways:
 - **Soak (120 s) yields the same as 5 s and 30 s** at the worst
   combo (50 kHz × 16 ch). The bottleneck is steady-state, not a
   warm-up artifact.
-- **Cap is around the cdc_acm URB pool**. On WSL2's compile-time
-  `NR_URBS=16` × `wMaxPacketSize=512` (High-Speed bulk), effective
-  host buffering is ≈8 KiB per direction. Above ~10 kHz × 16 ch
-  the device emits bursts faster than the kernel can drain into
-  user-space, and the firmware's USB-CDC writer drops bytes when
-  its internal queue overflows.
+- **Cap is firmware-side, not host-side.** Originally suspected to
+  be the cdc_acm URB pool, but the Windows-native cross-check
+  below ruled that out.
 
-Practical guidance for streaming on WSL2:
+## Cross-check: WSL2 vs Windows native
 
-| target rate | recommendation |
+Re-ran the same matrix on Windows native (Python 3.12, pyserial
+3.5 against `usbser.sys`, COM9, no usbipd) for N=3 iterations.
+The hypothesis from PR #19 — that Windows would do better because
+`pyserial.set_buffer_size()` calls Win32 `SetupComm()` which
+`usbser.sys` honors — is **not supported by the data**:
+
+| rate (Hz) | ch | WSL2 yield (N=13) | Win yield (N=3) | Δ (Win − WSL) |
+|---:|---:|---:|---:|---:|
+|     100 |  1 | 102.0% | 100.8% | −1.2% |
+|   1 000 |  1 | 102.6% | 100.4% | −2.2% |
+|   5 000 |  1 | 102.6% | 100.7% | −1.9% |
+|  10 000 |  1 | 102.7% | 100.6% | −2.1% |
+|  50 000 |  1 |  26.6% |  26.0% | −0.6% |
+|     100 | 16 | 101.9% | 100.6% | −1.3% |
+|   1 000 | 16 | 102.1% | 100.0% | −2.1% |
+|   5 000 | 16 | 102.9% | 100.6% | −2.3% |
+|  10 000 | 16 |  51.2% |  50.4% | −0.8% |
+|  50 000 | 16 |  10.2% |  10.0% | −0.2% |
+
+Windows is consistently 0.2–2.3% LOWER than WSL2 — well within
+measurement noise (the 1–2% gap is likely WSL2 counting protobuf
+warm-up frames past the wall-clock window, since WSL2 yields
+trend slightly above 100% on combos that should clip at 100%).
+Crucially: **the bottleneck combos drop the same amount on both
+platforms**: 50 kHz × 16 ch yields 10.0–10.2% on either, soak
+behavior identical.
+
+This means the cap is **the DAQiFi NQ1's USB-CDC writer in
+firmware**, not the host driver, kernel URB pool, or Python-side
+buffer. PR #19's `set_buffer_size()` call is harmless on Windows
+but doesn't move the needle at the rates that matter, and the
+modprobe.d recipe in this doc would similarly do nothing if WSL2
+ever exposed `nr_urbs`.
+
+Practical guidance:
+
+| target rate | guidance |
 |---|---|
-| ≤ 10 kHz × 1 ch | works as-is |
-| ≤ 5 kHz × 16 ch | works as-is |
-| 10 kHz × 16 ch | **expect ~50% drops** — switch to Windows native, or split into two 5 kHz × 8 ch sessions |
-| ≥ 50 kHz any width | **not viable on WSL2** — Windows native (`usbser.sys` honors 64 KiB `SetupComm`) |
+| ≤ 10 kHz × 1 ch | works on WSL2 and Windows native |
+| ≤ 5 kHz × 16 ch | works on WSL2 and Windows native |
+| 10 kHz × 16 ch | ~50% drops on either — split into two 5 kHz × 8 ch sessions, or fix in firmware |
+| ≥ 50 kHz any width | not viable on either OS — firmware-side fix required (firmware ticket needed) |
+
+The "switch to Windows" remediation in earlier drafts of this
+doc was based on an unvalidated hypothesis; it doesn't help.
 
 ## Out of scope here
 
