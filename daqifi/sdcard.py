@@ -727,6 +727,11 @@ def _read_all_messages(
                 "file_stream must be opened in binary mode "
                 "(read() must return bytes / bytearray)"
             )
+        # Normalize to bytes so downstream slicing/comparisons stay
+        # type-stable across iterations regardless of whether the
+        # stream returns ``bytes`` or ``bytearray``.
+        if not isinstance(chunk, bytes):
+            chunk = bytes(chunk)
         total_bytes_read += len(chunk)
 
         combined = carry + chunk

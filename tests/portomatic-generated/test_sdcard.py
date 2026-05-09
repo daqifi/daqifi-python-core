@@ -655,6 +655,32 @@ class TestSdCardFileParser:
         with pytest.raises(TypeError, match="binary mode"):
             SdCardFileParser().parse_stream(io.StringIO("not bytes"), "log.bin")
 
+    def test_bytearray_stream_parses_cleanly(self):
+        # Some stream types (e.g. asyncio readers, custom buffers)
+        # return ``bytearray`` from ``read()``. The parser must
+        # normalize to ``bytes`` so downstream type stays stable
+        # iteration-to-iteration.
+        class _ByteArrayStream:
+            def __init__(self, data: bytes) -> None:
+                self._buf = bytearray(data)
+                self._pos = 0
+
+            def read(self, n: int) -> bytearray:
+                chunk = self._buf[self._pos : self._pos + n]
+                self._pos += len(chunk)
+                return chunk  # bytearray, NOT bytes
+
+        wire = (
+            _encode_message(_build_status_frame())
+            + _encode_message(
+                _build_stream_frame(msg_time_stamp=10, analog_float=(1.0,))
+            )
+        )
+        session = SdCardFileParser().parse_stream(_ByteArrayStream(wire), "log.bin")
+        samples = list(session.samples)
+        assert len(samples) == 1
+        assert samples[0].analog_values == (1.0,)
+
     def test_chunked_buffer_handles_frame_straddle(self):
         # Buffer size of 8 forces frames to straddle reads — verifies
         # the carry-over logic preserves split frames.
