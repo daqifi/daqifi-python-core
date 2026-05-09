@@ -331,8 +331,63 @@ symbols:
     downstream: remove_message_received
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:telemetry>
+    downstream: telemetry
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:__init__>
     downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: <downstream-only:StreamConsumerTelemetry>
+  downstream:
+    kind: class
+    qualified: daqifi.communication.StreamConsumerTelemetry
+    file: daqifi/communication.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only — exposes per-iteration counters from
+    StreamMessageConsumer (bytes_read, frames_emitted, parse_errors,
+    etc.) so integration tests can assert no drops without parsing
+    log lines. Landed in #68."
+  members:
+  - upstream: <downstream-only:read_calls>
+    downstream: read_calls
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:read_bytes_total>
+    downstream: read_bytes_total
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:read_bytes_max>
+    downstream: read_bytes_max
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:read_bytes_avg>
+    downstream: read_bytes_avg
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:read_seconds>
+    downstream: read_seconds
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:parse_calls>
+    downstream: parse_calls
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:parse_seconds>
+    downstream: parse_seconds
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:messages_emitted>
+    downstream: messages_emitted
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:idle_reads>
+    downstream: idle_reads
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
 divergences: []

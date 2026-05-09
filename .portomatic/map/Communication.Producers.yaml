@@ -17,9 +17,14 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/_internal/scpi_commands.py
+  relation: divergent
+  notes: "Static C# class of factory methods → Python module of free
+    functions, per project port convention. 44 SCPI command factories
+    plus helpers, full parametrize tests. Classifier reports the
+    upstream class as 'missing' because it doesn't recognize the
+    static-class → module-of-functions pattern; tracked upstream in
+    portomatic#140."
   rationale: null
   last_synced_sha: null
 symbols:
@@ -80,57 +85,63 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Communication.Producers.ScpiMessageProducer
     file: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: module
+    qualified: daqifi._internal.scpi_commands
+    file: daqifi/_internal/scpi_commands.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Static C# class of factory methods → Python module of free
+    functions, per project port convention. 44 SCPI command factories
+    plus helpers, full parametrize tests in
+    tests/portomatic-generated/."
   members:
   - upstream: GetSdFile
-    downstream: null
-    relation: not_yet_ported
+    downstream: get_sd_file
+    relation: one_to_one
   - upstream: SetSdLoggingFileName
-    downstream: null
-    relation: not_yet_ported
+    downstream: set_sd_logging_file_name
+    relation: one_to_one
   - upstream: DeleteSdFile
-    downstream: null
-    relation: not_yet_ported
+    downstream: delete_sd_file
+    relation: one_to_one
   - upstream: SetSdMaxFileSize
-    downstream: null
-    relation: not_yet_ported
+    downstream: set_sd_max_file_size
+    relation: one_to_one
   - upstream: RunSdBenchmark
-    downstream: null
-    relation: not_yet_ported
+    downstream: run_sd_benchmark
+    relation: one_to_one
   - upstream: SetStreamInterface
-    downstream: null
-    relation: not_yet_ported
+    downstream: set_stream_interface
+    relation: one_to_one
   - upstream: StartStreaming
-    downstream: null
-    relation: not_yet_ported
+    downstream: start_streaming
+    relation: one_to_one
   - upstream: EnableAdcChannels
-    downstream: null
-    relation: not_yet_ported
+    downstream: enable_adc_channels
+    relation: one_to_one
   - upstream: SetDioPortDirection
-    downstream: null
-    relation: not_yet_ported
+    downstream: set_dio_port_direction
+    relation: one_to_one
   - upstream: SetDioPortState
-    downstream: null
-    relation: not_yet_ported
+    downstream: set_dio_port_state
+    relation: one_to_one
   - upstream: EnableDioPorts
-    downstream: null
-    relation: not_yet_ported
+    downstream: enable_dio_ports
+    relation: one_to_one
   - upstream: DisableDioPorts
-    downstream: null
-    relation: not_yet_ported
+    downstream: disable_dio_ports
+    relation: one_to_one
   - upstream: SetNetworkWifiSsid
-    downstream: null
-    relation: not_yet_ported
+    downstream: set_network_wifi_ssid
+    relation: one_to_one
   - upstream: SetNetworkWifiPassword
-    downstream: null
-    relation: not_yet_ported
+    downstream: set_network_wifi_password
+    relation: one_to_one
   - upstream: SetUsbTransparencyMode
-    downstream: null
-    relation: not_yet_ported
+    downstream: set_usb_transparency_mode
+    relation: one_to_one
 divergences: []
 backlog: []
 hal_pairs: []

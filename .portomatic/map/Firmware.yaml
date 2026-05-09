@@ -963,6 +963,32 @@ symbols:
     downstream: parse
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: <downstream-only:FirmwareRevision>
+  downstream:
+    kind: class
+    qualified: daqifi.firmware.version.FirmwareRevision
+    file: daqifi/firmware/version.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only — wrapper around the hyphenated firmware
+    revision string the NQ1 reports (e.g. '01-02'). C# upstream
+    handles this via raw FirmwareVersion fields. Landed in #65."
+  members:
+  - upstream: <downstream-only:group>
+    downstream: group
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:revision>
+    downstream: revision
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:parse>
+    downstream: parse
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 divergences: []
 backlog: []
 hal_pairs: []

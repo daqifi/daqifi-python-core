@@ -270,6 +270,10 @@ symbols:
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:execute_text_command>
+    downstream: execute_text_command
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.DaqifiDeviceFactory
@@ -385,6 +389,10 @@ symbols:
     notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:enable_sd_card_logging>
     downstream: enable_sd_card_logging
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:get_sd_logging_state>
+    downstream: get_sd_logging_state
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:is_logging_to_sd_card>
@@ -1062,6 +1070,20 @@ symbols:
   last_synced_sha: null
   notes: null
   rationale: "Python-only \u2014 see DAQiFiError rationale."
+- upstream:
+    kind: class
+    qualified: <downstream-only:DeviceUnresponsiveError>
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.DeviceUnresponsiveError
+    file: daqifi/exceptions.py
+  relation: divergent
+  last_synced_sha: null
+  notes: null
+  rationale: "Python-only \u2014 surfaces the WiFi-SCPI silence pattern (#73)
+    on TCP transports when the protobuf SYSInfoPB? frame doesn't
+    arrive within the configured window. C# upstream returns silently
+    in that case; the Python facade prefers a clear raise."
 divergences: []
 backlog: []
 hal_pairs: []
