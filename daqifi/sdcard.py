@@ -719,6 +719,14 @@ def _read_all_messages(
         chunk = stream.read(options.buffer_size)
         if not chunk:
             break
+        if not isinstance(chunk, (bytes, bytearray)):
+            # Text streams would otherwise blow up later in `carry +
+            # chunk` with an opaque "can't concat str to bytes" — fail
+            # at the source with a message that names the actual fix.
+            raise TypeError(
+                "file_stream must be opened in binary mode "
+                "(read() must return bytes / bytearray)"
+            )
         total_bytes_read += len(chunk)
 
         combined = carry + chunk

@@ -648,6 +648,13 @@ class TestSdCardFileParser:
         with pytest.raises(TypeError):
             SdCardFileParser().parse_stream(io.BytesIO(b""), None)  # type: ignore[arg-type]
 
+    def test_text_stream_raises_type_error_with_useful_message(self):
+        # Common foot-gun: open the file as text instead of binary.
+        # Without an explicit check, the failure surfaces deep in the
+        # parser as `bytes + str` — fail upfront with a clear message.
+        with pytest.raises(TypeError, match="binary mode"):
+            SdCardFileParser().parse_stream(io.StringIO("not bytes"), "log.bin")
+
     def test_chunked_buffer_handles_frame_straddle(self):
         # Buffer size of 8 forces frames to straddle reads — verifies
         # the carry-over logic preserves split frames.
