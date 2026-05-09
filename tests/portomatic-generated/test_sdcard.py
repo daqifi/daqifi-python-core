@@ -266,7 +266,7 @@ def _build_status_frame(
     timestamp_freq: int = 1000,
     analog_in_port_num: int = 4,
     digital_port_num: int = 16,
-    device_sn: int = 9090603604263365351,
+    device_sn: int = 1234567890,
     device_pn: str = "Nq1",
     device_fw_rev: str = "3.4.6b1",
     analog_in_res: int = 16384,
@@ -403,7 +403,7 @@ class TestSdCardFileParser:
         session = SdCardFileParser().parse_stream(io.BytesIO(wire), "log.bin")
         assert session.device_config is not None
         assert session.device_config.timestamp_frequency == 1000
-        assert session.device_config.device_serial_number == "9090603604263365351"
+        assert session.device_config.device_serial_number == "1234567890"
         samples = list(session.samples)
         assert len(samples) == 2
         assert samples[0].analog_values == (0.5, 0.25)
@@ -538,6 +538,38 @@ class TestSdCardFileParser:
         assert samples[0].analog_values[0] == pytest.approx(5.0, rel=1e-9)
         assert session.device_config.resolution == 16384
 
+    def test_configuration_override_does_not_clobber_file_values(self):
+        # Locks in the documented override-as-fallback semantics
+        # (mirrors upstream SdCardFileParser.cs:82-89). When the file
+        # supplies a resolution, the override's resolution must NOT
+        # win — analog scaling should use the file's value. This is
+        # intentional: the override exists to fill gaps when the file
+        # lacks a status header, not to second-guess what the file
+        # said.
+        wire = (
+            _encode_message(_build_status_frame(analog_in_res=16384))
+            + _encode_message(
+                _build_stream_frame(msg_time_stamp=100, analog_raw=(8192,))
+            )
+        )
+        override = SdCardDeviceConfiguration(
+            analog_port_count=1,
+            digital_port_count=0,
+            timestamp_frequency=1000,
+            resolution=99999,  # bogus — must be ignored
+            port_range=(20.0,),  # bogus — must be ignored
+            internal_scale_m=(2.0,),  # bogus — must be ignored
+            calibration_values=((5.0, 1.0),),  # bogus — must be ignored
+        )
+        opts = SdCardParseOptions(configuration_override=override)
+        session = SdCardFileParser().parse_stream(io.BytesIO(wire), "log.bin", opts)
+        # File's (10.0 range, 16384 res, 1.0 scale, 1.0/0.0 cal) wins:
+        # 8192/16384 * 10 * 1 + 0 = 5.0
+        samples = list(session.samples)
+        assert samples[0].analog_values[0] == pytest.approx(5.0, rel=1e-9)
+        assert session.device_config.resolution == 16384
+        assert session.device_config.port_range == (10.0, 10.0, 10.0, 10.0)
+
     def test_progress_callback_invoked(self):
         wire = _encode_message(_build_status_frame()) * 1
         seen = []
@@ -552,6 +584,18 @@ class TestSdCardFileParser:
             io.BytesIO(wire), "log_20260509_120000.bin"
         )
         assert session.file_created_date == datetime(2026, 5, 9, 12, 0, 0)
+
+    def test_path_like_filename_still_extracts_date(self):
+        # Regression: callers may pass a full path as file_name. The
+        # parser must basename it before the date regex runs, otherwise
+        # ``log_YYYYMMDD_HHMMSS.bin`` wrapped in any directory loses
+        # its embedded creation date.
+        wire = _encode_message(_build_status_frame())
+        session = SdCardFileParser().parse_stream(
+            io.BytesIO(wire), "/tmp/sdcard/log_20260509_120000.bin"
+        )
+        assert session.file_created_date == datetime(2026, 5, 9, 12, 0, 0)
+        assert session.file_name == "log_20260509_120000.bin"
 
     def test_session_start_time_overrides_filename_date(self):
         wire = _encode_message(_build_status_frame())

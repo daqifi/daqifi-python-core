@@ -768,12 +768,16 @@ def _produce_samples(
 ) -> Iterator[SdCardLogEntry]:
     # Tz-naive UTC for parity with the C# port's DateTime.UtcNow.
     # ``utcnow()`` is deprecated; build the same tz-naive value via
-    # ``now(timezone.utc).replace(tzinfo=None)``.
-    base_time = (
-        anchor_time
-        if anchor_time is not None
-        else datetime.now(timezone.utc).replace(tzinfo=None)
-    )
+    # ``now(timezone.utc).replace(tzinfo=None)``. If a caller hands
+    # us a tz-aware anchor, normalize to UTC then drop the tzinfo so
+    # ``base_time + timedelta(...)`` produces tz-naive entries that
+    # compare cleanly with anything else in the parser pipeline.
+    if anchor_time is None:
+        base_time = datetime.now(timezone.utc).replace(tzinfo=None)
+    elif anchor_time.tzinfo is not None:
+        base_time = anchor_time.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        base_time = anchor_time
     previous_timestamp: Optional[int] = None
     elapsed_seconds = 0.0
 
@@ -873,6 +877,13 @@ class SdCardFileParser:
         if options.buffer_size <= 0:
             raise ValueError("options.buffer_size must be greater than zero")
 
+        # The filename-date regex is anchored at ``^log_`` against the
+        # stem of ``file_name``. ``os.path.splitext("/tmp/log_x.bin")``
+        # keeps the directory in the stem, so a path-like input would
+        # silently fail to extract its embedded date. Normalize once
+        # here so callers can pass either a basename or a full path.
+        file_name = os.path.basename(file_name)
+
         file_created_date = options.session_start_time or _try_parse_log_filename_date(
             file_name
         )
@@ -895,6 +906,11 @@ class SdCardFileParser:
                 config = _merge_configurations(config, scanned)
 
         if options.configuration_override is not None:
+            # Override is INTENTIONALLY the fallback, not the primary —
+            # mirrors C# SdCardFileParser.cs:82-89. The override exists
+            # to fill in fields the file lacks (e.g. when a connected
+            # device supplies live calibration absent from the SD log),
+            # NOT to second-guess values the file already provides.
             config = _merge_configurations(config, options.configuration_override)
 
         timestamp_frequency = config.timestamp_frequency if config is not None else 0
