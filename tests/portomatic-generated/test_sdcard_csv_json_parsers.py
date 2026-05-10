@@ -62,9 +62,12 @@ def _json_stream(*objs: dict) -> io.StringIO:
 class TestSdCardCsvFileParserHeader:
     def test_extracts_device_metadata_from_comments(self):
         parser = SdCardCsvFileParser()
+        # Synthetic identifiers — the CSV parser only verbatim-copies
+        # the strings, so values that obviously aren't real SNs are
+        # fine for verifying the round-trip.
         stream = _csv_stream(
-            "# Device: Nyquist 1",
-            "# Serial Number: 1234567890123456789",
+            "# Device: TestDevice",
+            "# Serial Number: <placeholder-sn>",
             "# Timestamp Tick Rate: 50000000 Hz",
             "ain0_ts,ain0_val,dio_ts,dio_val",
             "100,32768,100,0",
@@ -72,8 +75,8 @@ class TestSdCardCsvFileParserHeader:
         session = parser.parse_stream(stream, "log_20260510_120000.csv")
         config = session.device_config
         assert config is not None
-        assert config.device_part_number == "Nyquist 1"
-        assert config.device_serial_number == "1234567890123456789"
+        assert config.device_part_number == "TestDevice"
+        assert config.device_serial_number == "<placeholder-sn>"
         assert config.timestamp_frequency == 50_000_000
         # Header counted 1 analog pair + 1 digital pair.
         assert config.analog_port_count == 1
@@ -347,6 +350,122 @@ class TestSdCardJsonFileParserBasics:
         assert session.file_name == json_path.name
         assert session.device_config is not None
         assert session.device_config.analog_port_count == 1
+
+
+class TestThreeTierTimestampPrecedence:
+    """Regression for Qodo PR #89 finding #1: tick-rate precedence
+    must be parsed > override > fallback (matching the protobuf
+    parser's behavior)."""
+
+    def test_csv_override_used_when_header_lacks_tick_rate(self):
+        parser = SdCardCsvFileParser()
+        opts = SdCardParseOptions(
+            fallback_timestamp_frequency=999_999,  # decoy — should NOT win
+            configuration_override=SdCardDeviceConfiguration(
+                analog_port_count=0,
+                digital_port_count=0,
+                timestamp_frequency=12345,  # this should win
+            ),
+        )
+        stream = _csv_stream("ain0_ts,ain0_val", "100,32768")
+        session = parser.parse_stream(stream, "log.csv", opts)
+        assert session.device_config is not None
+        assert session.device_config.timestamp_frequency == 12345
+
+    def test_csv_fallback_used_when_neither_header_nor_override(self):
+        parser = SdCardCsvFileParser()
+        opts = SdCardParseOptions(fallback_timestamp_frequency=2000)
+        stream = _csv_stream("ain0_ts,ain0_val", "100,32768")
+        session = parser.parse_stream(stream, "log.csv", opts)
+        assert session.device_config is not None
+        assert session.device_config.timestamp_frequency == 2000
+
+    def test_csv_header_beats_override_and_fallback(self):
+        parser = SdCardCsvFileParser()
+        opts = SdCardParseOptions(
+            fallback_timestamp_frequency=999_999,
+            configuration_override=SdCardDeviceConfiguration(
+                analog_port_count=0,
+                digital_port_count=0,
+                timestamp_frequency=88_888,
+            ),
+        )
+        stream = _csv_stream(
+            "# Timestamp Tick Rate: 50000 Hz",
+            "ain0_ts,ain0_val",
+            "100,32768",
+        )
+        session = parser.parse_stream(stream, "log.csv", opts)
+        assert session.device_config is not None
+        assert session.device_config.timestamp_frequency == 50000
+
+    def test_json_override_used_when_format_lacks_tick_rate(self):
+        parser = SdCardJsonFileParser()
+        opts = SdCardParseOptions(
+            fallback_timestamp_frequency=999_999,
+            configuration_override=SdCardDeviceConfiguration(
+                analog_port_count=0,
+                digital_port_count=0,
+                timestamp_frequency=4321,
+            ),
+        )
+        stream = _json_stream(
+            {"ts": 100, "analog": [32768], "digital": "00"},
+        )
+        session = parser.parse_stream(stream, "log.json", opts)
+        assert session.device_config is not None
+        assert session.device_config.timestamp_frequency == 4321
+
+    def test_json_fallback_used_when_no_override(self):
+        parser = SdCardJsonFileParser()
+        opts = SdCardParseOptions(fallback_timestamp_frequency=3000)
+        stream = _json_stream({"ts": 100, "analog": [32768], "digital": "00"})
+        session = parser.parse_stream(stream, "log.json", opts)
+        assert session.device_config is not None
+        assert session.device_config.timestamp_frequency == 3000
+
+
+class TestZeroTickTimestampMatchesProtobuf:
+    """Regression for Qodo PR #89 finding #3: ts==0 must be treated
+    as 'no timestamp' so cross-format reconstruction is consistent
+    with the protobuf parser."""
+
+    def test_csv_first_row_zero_ts_does_not_anchor(self):
+        parser = SdCardCsvFileParser()
+        opts = SdCardParseOptions(
+            fallback_timestamp_frequency=1000,
+        )
+        stream = _csv_stream(
+            "ain0_ts,ain0_val",
+            "0,32768",     # ts=0 — should NOT anchor
+            "1000,32768",  # this should anchor (first non-zero ts)
+            "2000,32768",  # +1000 ticks → +1.0s
+        )
+        session = parser.parse_stream(stream, "log.csv", opts)
+        entries = list(session.samples)
+        assert len(entries) == 3
+        # First entry uses base_time (no anchor yet).
+        # Second entry anchors at ts=1000, so still base_time (first
+        # non-zero observation).
+        # Third entry: delta = 2000 - 1000 = 1000 ticks @ 1000 Hz = 1.0s.
+        delta_third_to_second = entries[2].timestamp - entries[1].timestamp
+        assert math.isclose(
+            delta_third_to_second.total_seconds(), 1.0, abs_tol=1e-6
+        )
+
+    def test_json_first_row_zero_ts_does_not_anchor(self):
+        parser = SdCardJsonFileParser()
+        opts = SdCardParseOptions(fallback_timestamp_frequency=1000)
+        stream = _json_stream(
+            {"ts": 0, "analog": [32768], "digital": "00"},
+            {"ts": 1000, "analog": [32768], "digital": "00"},
+            {"ts": 2000, "analog": [32768], "digital": "00"},
+        )
+        session = parser.parse_stream(stream, "log.json", opts)
+        entries = list(session.samples)
+        assert len(entries) == 3
+        delta = entries[2].timestamp - entries[1].timestamp
+        assert math.isclose(delta.total_seconds(), 1.0, abs_tol=1e-6)
 
 
 class TestSdCardFileParserFactoryDispatch:

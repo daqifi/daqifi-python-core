@@ -1034,6 +1034,29 @@ def _emit_progress(
         pass
 
 
+def _replace_timestamp_frequency(
+    config: SdCardDeviceConfiguration,
+    timestamp_frequency: int,
+) -> SdCardDeviceConfiguration:
+    """Return a copy of ``config`` with ``timestamp_frequency``
+    replaced. Used by the CSV/JSON parsers to apply
+    ``options.fallback_timestamp_frequency`` AFTER the parsed-vs-
+    override merge so the override gets priority over the fallback.
+    """
+    return SdCardDeviceConfiguration(
+        analog_port_count=config.analog_port_count,
+        digital_port_count=config.digital_port_count,
+        timestamp_frequency=timestamp_frequency,
+        device_serial_number=config.device_serial_number,
+        device_part_number=config.device_part_number,
+        firmware_revision=config.firmware_revision,
+        calibration_values=config.calibration_values,
+        resolution=config.resolution,
+        port_range=config.port_range,
+        internal_scale_m=config.internal_scale_m,
+    )
+
+
 def _merge_csv_json_config(
     parsed: SdCardDeviceConfiguration,
     override: Optional[SdCardDeviceConfiguration],
@@ -1137,6 +1160,13 @@ class SdCardCsvFileParser:
 
         header_config, layout = _parse_csv_header(lines, options)
         config = _merge_csv_json_config(header_config, options.configuration_override)
+        # Fallback applies last, only if neither file nor override
+        # supplied a tick rate — matches the protobuf parser's
+        # three-tier precedence.
+        if config.timestamp_frequency == 0 and options.fallback_timestamp_frequency > 0:
+            config = _replace_timestamp_frequency(
+                config, options.fallback_timestamp_frequency
+            )
 
         data_start = _find_csv_data_start_index(lines)
         if data_start >= len(lines):
@@ -1188,15 +1218,21 @@ class _CsvColumnLayout:
 
 def _parse_csv_header(
     lines: List[str],
-    options: SdCardParseOptions,
+    options: SdCardParseOptions,  # noqa: ARG001 — kept for API consistency with the JSON parser
 ) -> Tuple[SdCardDeviceConfiguration, _CsvColumnLayout]:
     """Pull device metadata + column layout out of the comment +
     column-header lines. Bails on the first non-comment line that
     doesn't look like the column header (i.e. data rows start).
+
+    Returns ``timestamp_frequency=0`` when the ``# Timestamp Tick Rate:``
+    header is absent so ``_merge_csv_json_config`` correctly defers to
+    ``configuration_override.timestamp_frequency`` (and finally to
+    ``options.fallback_timestamp_frequency`` only if both are zero).
+    Mirrors the protobuf parser's three-tier precedence.
     """
     device_name: Optional[str] = None
     serial_number: Optional[str] = None
-    timestamp_freq = options.fallback_timestamp_frequency
+    timestamp_freq = 0  # fallback applied AFTER override merge (see parse_stream)
     analog_count = 0
     digital_count = 0
     has_digital = False
@@ -1354,7 +1390,10 @@ def _produce_csv_samples(
         )
 
         absolute_time = base_time
-        if tick_period > 0:
+        # ``row_ts == 0`` is treated as "no timestamp" — matches the
+        # protobuf parser's behavior so cross-format reconstruction
+        # of the same physical log is consistent.
+        if tick_period > 0 and row_ts != 0:
             if previous_timestamp is None:
                 previous_timestamp = row_ts
             else:
@@ -1420,6 +1459,10 @@ class SdCardJsonFileParser:
             )
 
         config = _infer_json_configuration(lines[0], options)
+        if config.timestamp_frequency == 0 and options.fallback_timestamp_frequency > 0:
+            config = _replace_timestamp_frequency(
+                config, options.fallback_timestamp_frequency
+            )
         samples = _produce_json_samples(lines, config, file_created_date, options)
         return SdCardLogSession(
             file_name=file_name,
@@ -1500,13 +1543,19 @@ def _infer_json_configuration(
     """Infer the analog channel count from the first JSONL row, then
     merge with the caller's override (which fills in resolution /
     calibration / port_range for scaling). Mirrors the upstream
-    ``InferConfiguration``."""
+    ``InferConfiguration``.
+
+    JSONL has no in-band tick-rate header, so the inferred config
+    leaves ``timestamp_frequency=0`` and lets the merge / fallback
+    chain decide the final value (override → fallback). Same
+    three-tier precedence as the protobuf and CSV parsers.
+    """
     parsed = _try_parse_json_line(first_line)
     analog_count = len(parsed[1]) if parsed is not None else 0
     inferred = SdCardDeviceConfiguration(
         analog_port_count=analog_count,
         digital_port_count=0,  # cannot infer from JSONL data
-        timestamp_frequency=options.fallback_timestamp_frequency,
+        timestamp_frequency=0,  # fallback applied AFTER override merge
         device_serial_number=None,
         device_part_number=None,
         firmware_revision=None,
@@ -1545,7 +1594,10 @@ def _produce_json_samples(
         )
 
         absolute_time = base_time
-        if tick_period > 0:
+        # ``ts == 0`` is treated as "no timestamp" — matches the
+        # protobuf parser so the same physical log reconstructs to
+        # consistent absolute timestamps regardless of file format.
+        if tick_period > 0 and ts != 0:
             if previous_timestamp is None:
                 previous_timestamp = ts
             else:
