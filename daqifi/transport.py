@@ -101,6 +101,17 @@ class TcpStreamTransport:
         return self._stream
 
     @property
+    def hostname(self) -> str:
+        """The configured hostname or IP string (read-only).
+
+        Mirrors C# ``TcpStreamTransport.Hostname``. Returns whatever
+        was passed at construction — accepted unchanged at __init__
+        and resolved lazily at :meth:`connect`-time, so this may be
+        either a dotted-decimal IP or a DNS name.
+        """
+        return self._host
+
+    @property
     def is_connected(self) -> bool:
         # Beyond the simple None-check, also verify the underlying
         # FD is still open and the stream wrapper hasn't been
