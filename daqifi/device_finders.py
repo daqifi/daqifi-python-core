@@ -81,6 +81,13 @@ class DeviceInfo:
     # for non-WiFi finders or when the device pre-dates protobuf
     # discovery responses.
     mac_address: str = ""
+    # WiFi-only: dotted-decimal IPv4 of the local interface that
+    # received the discovery broadcast (e.g. "192.168.1.42"). Lets
+    # callers route a follow-up TCP connection back through the same
+    # interface in multi-homed setups. Empty for non-WiFi finders
+    # or when discovery didn't capture per-interface origin info.
+    # Mirrors C# ``IDeviceInfo.LocalInterfaceAddress``.
+    local_interface_address: str = ""
 
 
 @dataclass(frozen=True)

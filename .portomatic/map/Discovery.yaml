@@ -62,22 +62,27 @@ symbols:
   members:
   - upstream: VendorIdFilter
     downstream: vendor_id_filter
-    relation: not_yet_ported
+    relation: divergent
+    notes: "Same semantics as the C# property (Optional[int] filter for HID device enumeration); ported as a plain mutable instance attribute set in __init__ rather than @property/setter — extractor doesn't surface raw self.x assignments to the IR, so the audit can't see it as a public member."
   - upstream: ProductIdFilter
     downstream: product_id_filter
-    relation: not_yet_ported
+    relation: divergent
+    notes: "Same as VendorIdFilter above — plain instance attribute mirroring the C# property semantics."
   - upstream: DeviceDiscovered
-    downstream: device_discovered
-    relation: not_yet_ported
+    downstream: add_device_discovered
+    relation: divergent
+    notes: "C# event ported as a callable-list observer pattern: add_device_discovered(handler) / remove_device_discovered(handler) per project convention."
   - upstream: DiscoveryCompleted
-    downstream: discovery_completed
-    relation: not_yet_ported
+    downstream: add_discovery_completed
+    relation: divergent
+    notes: "C# event ported as add_discovery_completed(handler) / remove_discovery_completed(handler) callable list."
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
   - upstream: Dispose
-    downstream: dispose
-    relation: not_yet_ported
+    downstream: close
+    relation: one_to_one
+    notes: "C# IDisposable.Dispose → Python close() per project convention."
   - upstream: <downstream-only:DEFAULT_PRODUCT_ID>
     downstream: DEFAULT_PRODUCT_ID
     relation: divergent
@@ -86,26 +91,14 @@ symbols:
     downstream: DEFAULT_VENDOR_ID
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:add_device_discovered>
-    downstream: add_device_discovered
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:add_discovery_completed>
-    downstream: add_discovery_completed
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:close>
-    downstream: close
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:remove_device_discovered>
     downstream: remove_device_discovered
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_device_discovered observer (DeviceDiscovered event port).
   - upstream: <downstream-only:remove_discovery_completed>
     downstream: remove_discovery_completed
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_discovery_completed observer (DiscoveryCompleted event port).
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
@@ -124,11 +117,13 @@ symbols:
   rationale: null
   members:
   - upstream: DeviceDiscovered
-    downstream: device_discovered
-    relation: not_yet_ported
+    downstream: <downstream-only:N/A — DeviceFinder uses synchronous return-list API>
+    relation: divergent
+    notes: "daqifi.discovery.DeviceFinder is the simple NyquistDevice-flavoured finder that returns a list synchronously from discover(); it doesn't expose an event/observer surface. The Pythonic event-style port lives on the daqifi.device_finders.* finders (see HidDeviceFinder.add_device_discovered)."
   - upstream: DiscoveryCompleted
-    downstream: discovery_completed
-    relation: not_yet_ported
+    downstream: <downstream-only:N/A — see DeviceDiscovered above>
+    relation: divergent
+    notes: "Same as DeviceDiscovered: not exposed on the simple synchronous DeviceFinder facade."
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
@@ -173,10 +168,12 @@ symbols:
     relation: one_to_one
   - upstream: LocalInterfaceAddress
     downstream: local_interface_address
-    relation: not_yet_ported
+    relation: divergent
+    notes: "Field exists on the DeviceInfo dataclass (added 2026-05-10 closing #7 batch) but the current discover() uses a single-socket UDP broadcast model and doesn't track per-NIC origin. Callers can populate it themselves (e.g. probe_ip on a known interface); a future per-NIC broadcasting refactor would auto-populate."
   - upstream: Type
-    downstream: type
-    relation: not_yet_ported
+    downstream: device_type
+    relation: one_to_one
+    notes: "Renamed from Type→device_type to avoid collision with Python's built-in type() and the conventional `type` field name pattern. Same DeviceType enum semantics."
   - upstream: IsPowerOn
     downstream: is_power_on
     relation: one_to_one
@@ -189,10 +186,6 @@ symbols:
   - upstream: DevicePath
     downstream: device_path
     relation: one_to_one
-  - upstream: <downstream-only:device_type>
-    downstream: device_type
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Discovery.SerialDeviceFinder
@@ -207,37 +200,28 @@ symbols:
   rationale: null
   members:
   - upstream: DeviceDiscovered
-    downstream: device_discovered
-    relation: not_yet_ported
+    downstream: add_device_discovered
+    relation: divergent
+    notes: "C# event ported as add_device_discovered(handler) / remove_device_discovered(handler) callable list per project convention."
   - upstream: DiscoveryCompleted
-    downstream: discovery_completed
-    relation: not_yet_ported
+    downstream: add_discovery_completed
+    relation: divergent
+    notes: "C# event ported as add_discovery_completed(handler) / remove_discovery_completed(handler) callable list."
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
   - upstream: Dispose
-    downstream: dispose
-    relation: not_yet_ported
-  - upstream: <downstream-only:add_device_discovered>
-    downstream: add_device_discovered
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:add_discovery_completed>
-    downstream: add_discovery_completed
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:close>
     downstream: close
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    relation: one_to_one
+    notes: "C# IDisposable.Dispose → Python close() per project convention."
   - upstream: <downstream-only:remove_device_discovered>
     downstream: remove_device_discovered
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_device_discovered observer (DeviceDiscovered event port).
   - upstream: <downstream-only:remove_discovery_completed>
     downstream: remove_discovery_completed
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_discovery_completed observer (DiscoveryCompleted event port).
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
@@ -256,44 +240,38 @@ symbols:
   rationale: null
   members:
   - upstream: BroadcastEndpoint
-    downstream: broadcast_endpoint
-    relation: not_yet_ported
+    downstream: <downstream-only:N/A — C# private nested struct>
+    relation: divergent
+    notes: "C# WiFiDeviceFinder.NetworkInterfaceInfo.BroadcastEndpoint is a member of a PRIVATE readonly struct nested inside WiFiDeviceFinder. Not exposed as a public WiFiDeviceFinder property in C# — extractor surfaced it incorrectly. The Python finder uses a single-socket UDP broadcast model rather than the C# per-NIC model, so no equivalent surface is needed."
   - upstream: LocalAddress
-    downstream: local_address
-    relation: not_yet_ported
+    downstream: <downstream-only:N/A — C# private nested struct>
+    relation: divergent
+    notes: "Same as BroadcastEndpoint above: member of the PRIVATE NetworkInterfaceInfo struct nested in WiFiDeviceFinder, not a public property."
   - upstream: SubnetMask
-    downstream: subnet_mask
-    relation: not_yet_ported
+    downstream: <downstream-only:N/A — not present in current upstream>
+    relation: divergent
+    notes: "No SubnetMask member exists in the current upstream WiFiDeviceFinder.cs (verified at last_synced_upstream_sha). Map row appears to be a stale extractor artifact; left as divergent rather than deleted so a future schema change doesn't silently re-introduce it."
   - upstream: DeviceDiscovered
-    downstream: device_discovered
-    relation: not_yet_ported
+    downstream: add_device_discovered
+    relation: divergent
+    notes: "C# event ported as add_device_discovered(handler) / remove_device_discovered(handler) callable list per project convention."
   - upstream: DiscoveryCompleted
-    downstream: discovery_completed
-    relation: not_yet_ported
+    downstream: add_discovery_completed
+    relation: divergent
+    notes: "C# event ported as add_discovery_completed(handler) / remove_discovery_completed(handler) callable list."
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
   - upstream: Dispose
-    downstream: dispose
-    relation: not_yet_ported
+    downstream: close
+    relation: one_to_one
+    notes: "C# IDisposable.Dispose → Python close() per project convention."
   - upstream: <downstream-only:DAQIFI_FINDER_QUERY>
     downstream: DAQIFI_FINDER_QUERY
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:NATIVE_FINDER_QUERY>
     downstream: NATIVE_FINDER_QUERY
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:add_device_discovered>
-    downstream: add_device_discovered
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:add_discovery_completed>
-    downstream: add_discovery_completed
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:close>
-    downstream: close
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:probe_ip>

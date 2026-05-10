@@ -167,8 +167,9 @@ symbols:
     downstream: product_name
     relation: one_to_one
   - upstream: ToString
-    downstream: to_string
-    relation: not_yet_ported
+    downstream: __str__
+    relation: divergent
+    notes: "C# ToString() override → Python __str__ dunder per convention (idiomatic for str(x) / f-string formatting). Marked divergent rather than one_to_one because the audit's public-member set excludes dunders by design."
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.HidLibraryDeviceEnumerator
@@ -245,12 +246,9 @@ symbols:
     downstream: disconnect
     relation: one_to_one
   - upstream: Dispose
-    downstream: dispose
-    relation: not_yet_ported
-  - upstream: <downstream-only:close>
     downstream: close
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    relation: one_to_one
+    notes: "C# IDisposable.Dispose → Python close() per project convention."
   - upstream: <downstream-only:is_connected>
     downstream: is_connected
     relation: divergent
@@ -360,8 +358,9 @@ symbols:
     downstream: connection_info
     relation: one_to_one
   - upstream: StatusChanged
-    downstream: status_changed
-    relation: not_yet_ported
+    downstream: add_status_changed
+    relation: divergent
+    notes: "C# event ported as add_status_changed(handler) / remove_status_changed(handler) callable list per project convention."
   - upstream: ConnectAsync
     downstream: connect
     relation: one_to_one
@@ -374,10 +373,6 @@ symbols:
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
-  - upstream: <downstream-only:add_status_changed>
-    downstream: add_status_changed
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:close>
     downstream: close
     relation: divergent
@@ -385,7 +380,7 @@ symbols:
   - upstream: <downstream-only:remove_status_changed>
     downstream: remove_status_changed
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged event port).
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.SerialStreamTransport
@@ -406,8 +401,9 @@ symbols:
     downstream: connection_info
     relation: one_to_one
   - upstream: StatusChanged
-    downstream: status_changed
-    relation: not_yet_ported
+    downstream: add_status_changed
+    relation: divergent
+    notes: "C# event ported as add_status_changed(handler) / remove_status_changed(handler) callable list per project convention."
   - upstream: ConnectAsync
     downstream: connect
     relation: one_to_one
@@ -424,22 +420,15 @@ symbols:
     downstream: get_available_port_names
     relation: one_to_one
   - upstream: Dispose
-    downstream: dispose
-    relation: not_yet_ported
+    downstream: close
+    relation: one_to_one
+    notes: "C# IDisposable.Dispose → Python close() per project convention."
   - upstream: <downstream-only:DEFAULT_OS_RX_BUFFER_BYTES>
     downstream: DEFAULT_OS_RX_BUFFER_BYTES
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:DEFAULT_OS_TX_BUFFER_BYTES>
     downstream: DEFAULT_OS_TX_BUFFER_BYTES
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:add_status_changed>
-    downstream: add_status_changed
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:close>
-    downstream: close
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:is_connected>
@@ -449,7 +438,7 @@ symbols:
   - upstream: <downstream-only:remove_status_changed>
     downstream: remove_status_changed
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged event port).
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
@@ -469,7 +458,7 @@ symbols:
   members:
   - upstream: Hostname
     downstream: hostname
-    relation: not_yet_ported
+    relation: one_to_one
   - upstream: Stream
     downstream: stream
     relation: one_to_one
@@ -477,8 +466,9 @@ symbols:
     downstream: connection_info
     relation: one_to_one
   - upstream: StatusChanged
-    downstream: status_changed
-    relation: not_yet_ported
+    downstream: add_status_changed
+    relation: divergent
+    notes: "C# event ported as add_status_changed(handler) / remove_status_changed(handler) callable list per project convention."
   - upstream: ConnectAsync
     downstream: connect
     relation: one_to_one
@@ -492,16 +482,9 @@ symbols:
     downstream: disconnect
     relation: one_to_one
   - upstream: Dispose
-    downstream: dispose
-    relation: not_yet_ported
-  - upstream: <downstream-only:add_status_changed>
-    downstream: add_status_changed
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:close>
     downstream: close
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    relation: one_to_one
+    notes: "C# IDisposable.Dispose → Python close() per project convention."
   - upstream: <downstream-only:is_connected>
     downstream: is_connected
     relation: divergent
@@ -509,7 +492,7 @@ symbols:
   - upstream: <downstream-only:remove_status_changed>
     downstream: remove_status_changed
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged event port).
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
