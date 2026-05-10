@@ -7,7 +7,7 @@ destructive operations like ``*RST`` without falling back to *IDN?'s
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -197,14 +197,20 @@ class TestRefreshMetadata:
         with pytest.raises(DAQiFiConnectionError, match="Cannot refresh metadata"):
             dev.refresh_metadata()
 
-    def test_no_metadata_frame_returns_cached_without_mutation(self):
+    def test_no_metadata_frame_raises_command_error(self):
         """If the buffer contained ONLY streaming frames (no
         SYSInfoPB? reply) — e.g. SYSInfoPB? was lost on the wire
         but background streaming was active — refresh_metadata
-        should return the cached metadata unchanged rather than
-        feeding a stream frame to update_from_protobuf."""
+        must raise CommandError so callers can detect the silent
+        failure (and identity-gate tests can skip safely instead
+        of proceeding with stale metadata).
+
+        Cache stays unchanged — the destructive operation gate
+        relies on this so a failed refresh doesn't leave a stale
+        SN that would compare-equal to ``DAQIFI_EXPECTED_SERIAL_NUMBER``.
+        """
         dev = _make_device_with_mock_comm()
-        # Pre-populate cache so we can detect mutation.
+        # Pre-populate cache so we can detect non-mutation.
         dev._metadata.serial_number = "999999"
         dev._metadata.host_name = "previously-cached"
         # Buffer contains only a stream frame (no device_pn/device_sn).
@@ -212,10 +218,10 @@ class TestRefreshMetadata:
         stream.msg_time_stamp = 12345
         dev._comm.query_binary.return_value = _length_prefixed(stream)
 
-        result = dev.refresh_metadata()
+        with pytest.raises(CommandError, match="none of which carried"):
+            dev.refresh_metadata()
 
-        # Cache preserved — no frame had metadata-shaped fields.
-        assert result is dev.metadata
+        # Cache preserved — the failed refresh didn't clobber it.
         assert dev.metadata.serial_number == "999999"
         assert dev.metadata.host_name == "previously-cached"
 
@@ -330,17 +336,17 @@ class TestConnectIsResilientToMetadataFailure:
         dev._comm.is_open.return_value = True
         dev._comm.open.return_value = True
         dev._comm.send_query.return_value = "DAQiFi,Nq1,0,01-02"
-        # Patch refresh_metadata directly to raise raw RuntimeError
-        original_refresh = NyquistDevice.refresh_metadata
-        try:
-            NyquistDevice.refresh_metadata = MagicMock(
-                side_effect=RuntimeError("simulated low-level failure")
-            )
+        # Patch refresh_metadata to raise raw RuntimeError; patch.object
+        # auto-restores the original on context exit (idiomatic vs
+        # manual save/restore + finally).
+        with patch.object(
+            NyquistDevice,
+            "refresh_metadata",
+            MagicMock(side_effect=RuntimeError("simulated low-level failure")),
+        ):
             dev._connect()
             assert dev.is_connected is True
             assert isinstance(dev.last_metadata_refresh_error, RuntimeError)
-        finally:
-            NyquistDevice.refresh_metadata = original_refresh
 
     def test_successful_refresh_clears_last_error(self):
         """If the connect-time refresh succeeds, the observability

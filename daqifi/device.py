@@ -343,11 +343,18 @@ class NyquistDevice:
                 metadata_msg = data
                 break
         if metadata_msg is None:
-            # No frame carried metadata fields — return the unchanged
-            # cached metadata rather than feeding a stream frame to
-            # update_from_protobuf (which would no-op anyway, but
-            # short-circuiting keeps the contract explicit).
-            return self._metadata
+            # Parseable frames arrived but none carried SYSInfoPB-
+            # shaped metadata (e.g. only background-streaming
+            # frames were in the buffer when SYSInfoPB? was lost on
+            # the wire). Surface this as a CommandError rather than
+            # returning silently — the cache stays unchanged, but
+            # callers (especially destructive-op identity gates)
+            # need to know the refresh didn't actually succeed.
+            raise CommandError(
+                f"SYSInfoPB? returned {len(messages)} parseable frame(s), "
+                f"none of which carried SYSInfoPB metadata fields "
+                f"(received {len(raw)} bytes; metadata cache unchanged)"
+            )
         self._metadata.update_from_protobuf(metadata_msg)
         return self._metadata
 
