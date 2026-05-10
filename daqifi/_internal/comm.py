@@ -1411,6 +1411,124 @@ class SerialInterface:
         response = response.strip('"').strip("'")
         return response
 
+    def query_binary(
+        self,
+        query: str,
+        timeout: float = 2.0,
+        idle_settle: float = 0.1,
+    ) -> bytes:
+        """Send a SCPI query and return the raw response bytes.
+
+        Use this for protobuf-typed queries (e.g. ``SYSTem:SYSInfoPB?``)
+        where the device replies with binary that must NOT be ASCII-
+        decoded or whitespace-stripped. Reads until either ``timeout``
+        seconds elapse OR the device stops sending bytes for
+        ``idle_settle`` seconds (whichever comes first).
+
+        Resets the input buffer before writing so stale bytes from a
+        prior text query can't bleed into the binary response.
+
+        Args:
+            query: SCPI query string (without terminator)
+            timeout: Total deadline in seconds.
+            idle_settle: Stop early after this many seconds of no
+                inbound bytes once at least one byte has arrived.
+
+        Returns:
+            Raw response bytes (may be empty if the device didn't
+            reply within ``timeout``).
+
+        Raises:
+            RuntimeError: If serial port not open or I/O fails.
+        """
+        if not self.is_open():
+            raise RuntimeError("Serial port not open")
+        if timeout <= 0:
+            raise ValueError(f"timeout must be > 0 (got {timeout!r})")
+        if idle_settle < 0:
+            raise ValueError(f"idle_settle must be >= 0 (got {idle_settle!r})")
+
+        # Cache the serial handle in a local so a concurrent close()
+        # mid-call can't trip an AttributeError on ``self._serial`` —
+        # we either hold a valid reference for the whole call or we
+        # already failed the is_open() guard above.
+        ser = self._serial
+        if ser is None:
+            # Defensive — close() could have nulled _serial between
+            # the is_open() check above and this read. Surface the
+            # same error the guard would have.
+            raise RuntimeError("Serial port not open")
+
+        # Force non-blocking reads for the duration so a single
+        # ``read(pending)`` cannot exceed our wall-clock deadline by
+        # falling back to the port's pre-configured ``timeout``.
+        # Restored in ``finally`` so callers see no side-effect on
+        # subsequent ``send_command`` reads. ``None`` (blocking) is
+        # a legitimate prior value, so use a separate ``timeout_changed``
+        # flag rather than ``prev is not None`` to decide whether to
+        # restore — otherwise a port left in blocking mode by the
+        # caller would silently flip to non-blocking.
+        prev_serial_timeout = getattr(ser, "timeout", None)
+        timeout_changed = False
+        try:
+            try:
+                ser.timeout = 0
+                timeout_changed = True
+            except (serial.SerialException, OSError, ValueError, AttributeError):
+                # Some pyserial backends don't support runtime
+                # mutation; fall back to relying on `in_waiting`
+                # being accurate (the loop already gates on it).
+                pass
+            try:
+                ser.reset_input_buffer()
+                # Use \r\n to match ScpiMessage.get_bytes() — the canonical
+                # wire format. send_command() uses bare \r for legacy
+                # compatibility but binary queries expect the canonical form.
+                ser.write((query + "\r\n").encode("ascii"))
+                ser.flush()
+
+                received = bytearray()
+                deadline = time.monotonic() + timeout
+                last_byte_time: Optional[float] = None
+                while time.monotonic() < deadline:
+                    pending = ser.in_waiting
+                    if pending:
+                        chunk = ser.read(pending)
+                        if chunk:
+                            received.extend(chunk)
+                            last_byte_time = time.monotonic()
+                            # Got bytes — try to drain more before checking
+                            # idle-settle so a multi-chunk reply doesn't
+                            # break out of the loop on the first quiet poll.
+                            continue
+                    # No bytes this iteration (either ``pending == 0`` or
+                    # ``read()`` returned empty even though in_waiting was
+                    # non-zero — a corner case some pyserial backends hit
+                    # under USB CDC contention). Check the idle-settle
+                    # early-exit condition uniformly here.
+                    #
+                    # ``idle_settle == 0`` disables the early-exit entirely;
+                    # the loop then waits for the full timeout (useful when
+                    # the caller wants to keep accumulating bytes that may
+                    # come in bursts longer than 100ms).
+                    if (
+                        received
+                        and idle_settle > 0
+                        and last_byte_time is not None
+                        and (time.monotonic() - last_byte_time) >= idle_settle
+                    ):
+                        break
+                    time.sleep(0.01)
+                return bytes(received)
+            except (serial.SerialException, OSError) as e:
+                raise RuntimeError(f"Serial communication error: {e}")
+        finally:
+            if timeout_changed:
+                try:
+                    ser.timeout = prev_serial_timeout
+                except (serial.SerialException, OSError, ValueError, AttributeError):
+                    pass
+
     def send_set(self, command: str, value, delay: float = 0.1) -> bool:
         """
         Send SCPI set command with value.

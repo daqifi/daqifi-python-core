@@ -5,7 +5,7 @@ Provides high-level API for device interaction.
 """
 
 from typing import Dict, Any, Optional, Union, List
-from ._internal.comm import SerialInterface, PowerState
+from ._internal.comm import SerialInterface, PowerState, DeviceMetadata
 from ._internal import scpi, scpi_commands
 from ._internal.scpi import check_setter_response
 from .channels import (
@@ -23,6 +23,38 @@ from .exceptions import (
     CommandError,
     FeatureNotSupportedError
 )
+
+
+_METADATA_FIELD_NAMES = (
+    "device_pn",
+    "device_sn",
+    "device_fw_rev",
+    "device_hw_rev",
+    "host_name",
+    "ssid",
+)
+
+
+def _frame_has_metadata_fields(data: Any) -> bool:
+    """Heuristic: does ``data`` (a parsed DaqifiOutMessage) look like
+    a SYSInfoPB? reply rather than a streaming-status frame?
+
+    Returns True iff at least one of the canonical SystStatusPB-only
+    fields is populated. The string ``"0"`` is rejected explicitly —
+    firmware 3.4.6b1 uses it as a placeholder for the *IDN? SN field
+    and we don't want a future cross-wire bug to make that count as
+    real metadata. For numeric / bytes fields, falsy values (``0`` /
+    ``b""``) are skipped via the ``elif value:`` arm.
+    """
+    for name in _METADATA_FIELD_NAMES:
+        value = getattr(data, name, None)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and stripped != "0":
+                return True
+        elif value:
+            return True
+    return False
 
 
 class NyquistDevice:
@@ -66,6 +98,16 @@ class NyquistDevice:
         self._variant = BoardVariant.UNKNOWN
         self._device_info: Dict[str, Any] = {}
         self._connected = False
+        # Protobuf-populated metadata (real SN, MAC, IP, SSID, ...).
+        # Best-effort populated during `_connect()`; callers can re-
+        # fetch on demand via :meth:`refresh_metadata` (e.g. after a
+        # USB drop / reconnect).
+        self._metadata: DeviceMetadata = DeviceMetadata()
+        # Captured exception (if any) from the most recent best-
+        # effort metadata refresh inside `_connect()`. Lets callers
+        # observe an otherwise-silent SYSInfoPB? failure without
+        # changing the non-fatal behavior.
+        self._last_metadata_refresh_error: Optional[Exception] = None
 
         # Channel collections (created on connection)
         self._analog_outputs: Optional[AnalogOutputs] = None
@@ -142,6 +184,27 @@ class NyquistDevice:
             # Initialize channel collections based on variant
             self._initialize_channels()
 
+            # Best-effort populate `metadata` from SYSInfoPB? so callers
+            # can read `device.metadata.serial_number` without an extra
+            # round-trip. Failure is non-fatal — older firmware or a
+            # noisy USB enumeration may not respond in 2s, in which
+            # case `metadata` stays at its empty default and callers
+            # can call `refresh_metadata()` explicitly.
+            #
+            # Must include DAQiFiConnectionError because
+            # refresh_metadata translates query_binary's RuntimeError
+            # into DAQiFiConnectionError to honor its docstring
+            # contract — without this entry a transient I/O hiccup
+            # during SYSInfoPB? would abort an otherwise-successful
+            # connect via the outer except below.
+            try:
+                self.refresh_metadata(timeout=2.0)
+                self._last_metadata_refresh_error = None
+            except (CommandError, DAQiFiConnectionError, RuntimeError) as exc:
+                # Observability hook — see `last_metadata_refresh_error`.
+                # Behavior remains best-effort: connect still succeeds.
+                self._last_metadata_refresh_error = exc
+
         except Exception as e:
             self._connected = False
             self._comm.close()
@@ -205,8 +268,143 @@ class NyquistDevice:
 
     @property
     def serial_number(self) -> str:
-        """Get device serial number"""
+        """Get device serial number from the ``*IDN?`` response.
+
+        Note:
+            Firmware 3.4.6b1 (the current release) reports the SN
+            field of ``*IDN?`` as a literal ``"0"`` placeholder for
+            every unit. Use :attr:`metadata.serial_number` instead
+            for identity verification — that field is populated from
+            the protobuf ``SYSInfoPB?`` reply and contains the real
+            decimal SN.
+        """
         return self._device_info.get("serial_number", "Unknown")
+
+    @property
+    def last_metadata_refresh_error(self) -> Optional[Exception]:
+        """The exception captured by the most recent best-effort
+        metadata refresh inside :meth:`connect`, or ``None`` if the
+        refresh succeeded (or was never attempted).
+
+        Useful for observability: after :meth:`connect` returns, a
+        non-``None`` value here means SYSInfoPB? failed during
+        connect-time auto-refresh and ``self.metadata`` is at its
+        empty default. Callers can decide whether to retry via
+        :meth:`refresh_metadata` or proceed with limited identity.
+        """
+        return self._last_metadata_refresh_error
+
+    @property
+    def metadata(self) -> DeviceMetadata:
+        """Protobuf-populated device metadata (real SN, MAC, IP, ...).
+
+        Returns the cached :class:`DeviceMetadata`. Populated
+        automatically during :meth:`connect` via a best-effort
+        ``SYSTem:SYSInfoPB?`` query; if that round-trip failed at
+        connect-time the cache is left at its empty default and
+        callers can re-populate it explicitly via
+        :meth:`refresh_metadata`.
+
+        Distinct from :attr:`serial_number` (the ``*IDN?`` field,
+        which is a ``"0"`` placeholder on firmware 3.4.6b1).
+        ``metadata.serial_number`` is the canonical real SN —
+        suitable for identity verification before destructive
+        operations like :meth:`reset`.
+
+        Closes daqifi-python-core#74.
+        """
+        return self._metadata
+
+    def refresh_metadata(self, timeout: float = 2.0) -> DeviceMetadata:
+        """Re-query ``SYSInfoPB?`` and refresh the cached metadata.
+
+        Args:
+            timeout: Seconds to wait for a parseable protobuf reply.
+
+        Returns:
+            The refreshed :class:`DeviceMetadata` (also accessible
+            via :attr:`metadata`).
+
+        Raises:
+            CommandError: If no parseable protobuf message arrives
+                within ``timeout`` seconds.
+            DAQiFiConnectionError: If the device isn't connected.
+        """
+        # Use the public `is_connected` so a closed underlying serial
+        # handle (e.g. after USB drop while `_connected` is still
+        # True) surfaces as the documented `DAQiFiConnectionError`
+        # instead of falling through to query_binary's `RuntimeError`.
+        if not self.is_connected:
+            raise DAQiFiConnectionError(
+                "Cannot refresh metadata: device not connected"
+            )
+        from ._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+        from .communication import ProtobufMessageParser
+
+        try:
+            raw = self._comm.query_binary(
+                scpi_commands.get_device_info().data, timeout=timeout
+            )
+        except RuntimeError as e:
+            # SerialInterface.query_binary raises RuntimeError on
+            # closed-port / I/O failure; honor the documented
+            # exception contract by re-raising as a connection error.
+            raise DAQiFiConnectionError(
+                f"Cannot refresh metadata: {e}"
+            ) from e
+        parser = ProtobufMessageParser(message_factory=DaqifiOutMessage.FromString)
+        try:
+            messages, _consumed = parser.parse_messages(raw)
+        except Exception as e:
+            # ProtobufMessageParser is documented to be resilient
+            # (advances one byte on bad payloads), but defense-in-depth
+            # against a future schema change or a parser bug — keep the
+            # documented exception contract intact.
+            raise CommandError(
+                f"SYSInfoPB? returned unparseable bytes after {timeout}s "
+                f"(received {len(raw)} bytes): {e}"
+            ) from e
+        if not messages:
+            raise CommandError(
+                f"SYSInfoPB? returned no parseable protobuf message after "
+                f"{timeout}s (received {len(raw)} bytes)"
+            )
+        # Walk the parsed frames newest-to-oldest and pick the latest
+        # one that actually carries SYSInfoPB-shaped metadata. If
+        # background streaming is active when this query runs,
+        # query_binary's buffer can contain stream frames AFTER the
+        # SYSInfoPB reply; ``update_from_protobuf`` would no-op on
+        # those (it only writes non-empty fields) and leave metadata
+        # stale.
+        #
+        # The "metadata-shaped" check accepts any of the SystStatusPB-
+        # specific fields (pn, sn, fw_rev, hw_rev, host_name, ssid)
+        # being populated — a SYSInfoPB? response that omits pn/sn
+        # but carries other identity fields is still a valid refresh
+        # source, and stream frames carry none of these. The string
+        # ``"0"`` is rejected explicitly because firmware 3.4.6b1
+        # uses it as a placeholder in the *IDN? field, so a future
+        # cross-wiring bug couldn't sneak it through here.
+        metadata_msg = None
+        for candidate in reversed(messages):
+            if _frame_has_metadata_fields(candidate.data):
+                metadata_msg = candidate.data
+                break
+        if metadata_msg is None:
+            # Parseable frames arrived but none carried SYSInfoPB-
+            # shaped metadata (e.g. only background-streaming
+            # frames were in the buffer when SYSInfoPB? was lost on
+            # the wire). Surface this as a CommandError rather than
+            # returning silently — the cache stays unchanged, but
+            # callers (especially destructive-op identity gates)
+            # need to know the refresh didn't actually succeed.
+            raise CommandError(
+                f"SYSInfoPB? returned {len(messages)} parseable frame(s), "
+                f"none of which carried SYSInfoPB metadata fields "
+                f"(received {len(raw)} bytes; metadata cache unchanged)"
+            )
+        self._metadata.update_from_protobuf(metadata_msg)
+        return self._metadata
 
     @property
     def firmware_version(self) -> str:
