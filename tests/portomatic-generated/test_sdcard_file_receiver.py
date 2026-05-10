@@ -1,0 +1,265 @@
+"""Tests for SdCardFileReceiver (closes #7).
+
+Pure-Python stream scanner — accumulates source bytes into a
+destination, detecting the ``__END_OF_FILE__`` marker that signals
+firmware transfer completion. Marker can span chunk boundaries
+(verified). No hardware required.
+"""
+from __future__ import annotations
+
+import io
+import time
+
+import pytest
+
+from daqifi.sdcard import (
+    END_OF_FILE_MARKER,
+    SdCardFileReceiver,
+    SdCardTransferProgress,
+    _find_eof_marker,
+)
+
+
+pytestmark = pytest.mark.portomatic_generated
+
+
+# ---- helper streams --------------------------------------------------------
+
+
+class _ChunkedStream:
+    """Source stream that returns predetermined chunks per ``read``
+    call. After the chunks are exhausted, returns ``b""`` (simulating
+    a closed stream). Lets us drive boundary cases deterministically.
+    """
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self._idx = 0
+
+    def read(self, _n: int) -> bytes:
+        if self._idx >= len(self._chunks):
+            return b""
+        out = self._chunks[self._idx]
+        self._idx += 1
+        return out
+
+
+class _DelayedStream(_ChunkedStream):
+    """Like _ChunkedStream but optionally exposes ``in_waiting`` for
+    the receiver's "empty read but bytes pending" branch."""
+
+    def __init__(self, chunks: list[bytes], in_waiting_seq: list[int]) -> None:
+        super().__init__(chunks)
+        self._in_waiting_seq = list(in_waiting_seq)
+        self._iw_idx = 0
+
+    @property
+    def in_waiting(self) -> int:
+        if self._iw_idx >= len(self._in_waiting_seq):
+            return 0
+        v = self._in_waiting_seq[self._iw_idx]
+        self._iw_idx += 1
+        return v
+
+
+# ---- _find_eof_marker -----------------------------------------------------
+
+
+class TestFindEofMarker:
+    def test_marker_at_start_of_chunk(self):
+        found, pos = _find_eof_marker(b"", END_OF_FILE_MARKER + b"trail")
+        assert found is True
+        assert pos == 0
+
+    def test_marker_in_middle_of_chunk(self):
+        chunk = b"hello" + END_OF_FILE_MARKER + b"world"
+        found, pos = _find_eof_marker(b"", chunk)
+        assert found is True
+        assert pos == 5
+
+    def test_marker_split_across_boundary(self):
+        # Trailing has the first 5 bytes; chunk has the rest + payload.
+        marker_head = END_OF_FILE_MARKER[:5]
+        marker_tail = END_OF_FILE_MARKER[5:]
+        found, pos = _find_eof_marker(marker_head, marker_tail + b"after")
+        assert found is True
+        assert pos == 0
+
+    def test_no_marker_returns_false(self):
+        found, pos = _find_eof_marker(b"abcde", b"fghij")
+        assert found is False
+        assert pos == -1
+
+    def test_combined_too_short_returns_false(self):
+        found, pos = _find_eof_marker(b"a", b"b")
+        assert found is False
+        assert pos == -1
+
+
+# ---- SdCardFileReceiver — happy paths -------------------------------------
+
+
+class TestReceiveSingleChunk:
+    def test_receives_payload_then_marker_in_one_chunk(self):
+        payload = b"hello world this is the payload"
+        source = _ChunkedStream([payload + END_OF_FILE_MARKER])
+        dest = io.BytesIO()
+
+        receiver = SdCardFileReceiver(source, buffer_size=1024)
+        n = receiver.receive(dest, "log.bin", timeout_s=2.0)
+
+        assert n == len(payload)
+        assert dest.getvalue() == payload
+
+    def test_marker_only_no_payload(self):
+        source = _ChunkedStream([END_OF_FILE_MARKER])
+        dest = io.BytesIO()
+        n = SdCardFileReceiver(source).receive(dest, "log.bin", timeout_s=2.0)
+        assert n == 0
+        assert dest.getvalue() == b""
+
+
+class TestReceiveMultipleChunks:
+    def test_payload_split_across_chunks_then_marker(self):
+        chunks = [b"first-half-of-payload", b"second-half", END_OF_FILE_MARKER]
+        source = _ChunkedStream(chunks)
+        dest = io.BytesIO()
+
+        n = SdCardFileReceiver(source).receive(dest, "log.bin", timeout_s=2.0)
+
+        expected = b"first-half-of-payload" + b"second-half"
+        assert n == len(expected)
+        assert dest.getvalue() == expected
+
+    def test_marker_split_across_two_chunks(self):
+        # Chunk 1: payload + first 5 bytes of marker.
+        # Chunk 2: rest of marker + nothing (marker terminates).
+        chunks = [
+            b"actual-payload" + END_OF_FILE_MARKER[:5],
+            END_OF_FILE_MARKER[5:],
+        ]
+        source = _ChunkedStream(chunks)
+        dest = io.BytesIO()
+
+        n = SdCardFileReceiver(source).receive(dest, "log.bin", timeout_s=2.0)
+
+        assert n == len(b"actual-payload")
+        assert dest.getvalue() == b"actual-payload"
+
+    def test_marker_split_across_three_chunks(self):
+        # Marker spans 3 reads; trailing buffer must keep enough state.
+        chunks = [
+            b"payload-data" + END_OF_FILE_MARKER[:3],
+            END_OF_FILE_MARKER[3:8],
+            END_OF_FILE_MARKER[8:],
+        ]
+        source = _ChunkedStream(chunks)
+        dest = io.BytesIO()
+
+        n = SdCardFileReceiver(source).receive(dest, "log.bin", timeout_s=2.0)
+
+        assert n == len(b"payload-data")
+        assert dest.getvalue() == b"payload-data"
+
+    def test_payload_bigger_than_buffer(self):
+        # Buffer is 16 bytes; payload is 200 bytes; marker fits at end.
+        payload = b"x" * 200
+        chunks = []
+        # Simulate the source returning 16-byte chunks.
+        for i in range(0, len(payload), 16):
+            chunks.append(payload[i:i + 16])
+        chunks.append(END_OF_FILE_MARKER)
+        source = _ChunkedStream(chunks)
+        dest = io.BytesIO()
+
+        n = SdCardFileReceiver(source, buffer_size=16).receive(
+            dest, "log.bin", timeout_s=2.0
+        )
+
+        assert n == 200
+        assert dest.getvalue() == payload
+
+
+# ---- SdCardFileReceiver — error paths -------------------------------------
+
+
+class TestReceiveErrorPaths:
+    def test_stream_closed_before_marker_raises_timeout(self):
+        # Source closes (returns b"") before marker arrives.
+        source = _ChunkedStream([b"some-data"])
+        dest = io.BytesIO()
+
+        with pytest.raises(TimeoutError, match="closed before"):
+            SdCardFileReceiver(source).receive(dest, "log.bin", timeout_s=2.0)
+
+    def test_deadline_exceeded_raises_timeout(self):
+        # Source has bytes pending but never delivers — no closure
+        # signal, in_waiting > 0, so the receiver waits until deadline.
+        source = _DelayedStream(
+            chunks=[b""],  # always empty read
+            in_waiting_seq=[1] * 100,  # always claims bytes pending
+        )
+        dest = io.BytesIO()
+
+        start = time.monotonic()
+        with pytest.raises(TimeoutError, match="timed out"):
+            SdCardFileReceiver(source).receive(dest, "log.bin", timeout_s=0.2)
+        elapsed = time.monotonic() - start
+        # Should give up around timeout_s, not block forever.
+        assert elapsed < 1.0
+
+    def test_rejects_none_destination(self):
+        source = _ChunkedStream([END_OF_FILE_MARKER])
+        with pytest.raises(TypeError, match="destination_stream"):
+            SdCardFileReceiver(source).receive(None, "log.bin")  # type: ignore[arg-type]
+
+    def test_rejects_none_file_name(self):
+        source = _ChunkedStream([END_OF_FILE_MARKER])
+        with pytest.raises(TypeError, match="file_name"):
+            SdCardFileReceiver(source).receive(io.BytesIO(), None)  # type: ignore[arg-type]
+
+
+class TestConstructorValidation:
+    def test_rejects_none_source_stream(self):
+        with pytest.raises(TypeError, match="source_stream"):
+            SdCardFileReceiver(None)  # type: ignore[arg-type]
+
+    def test_rejects_zero_buffer_size(self):
+        with pytest.raises(ValueError, match="greater than zero"):
+            SdCardFileReceiver(io.BytesIO(b""), buffer_size=0)
+
+    def test_rejects_negative_buffer_size(self):
+        with pytest.raises(ValueError, match="greater than zero"):
+            SdCardFileReceiver(io.BytesIO(b""), buffer_size=-1)
+
+
+# ---- progress callback -----------------------------------------------------
+
+
+class TestProgressCallback:
+    def test_progress_fires_with_bytes_received_and_filename(self):
+        events: list[SdCardTransferProgress] = []
+        source = _ChunkedStream([b"chunk-one", b"chunk-two", END_OF_FILE_MARKER])
+        dest = io.BytesIO()
+
+        SdCardFileReceiver(source).receive(
+            dest, "test-log.bin", progress=events.append, timeout_s=2.0
+        )
+
+        assert events  # at least one event fired
+        # Final event should reflect total bytes written.
+        assert events[-1].bytes_received == len(b"chunk-onechunk-two")
+        assert events[-1].file_name == "test-log.bin"
+
+    def test_progress_callback_failure_doesnt_abort_receive(self):
+        def bad_progress(_p: SdCardTransferProgress) -> None:
+            raise RuntimeError("intentional")
+
+        source = _ChunkedStream([b"payload", END_OF_FILE_MARKER])
+        dest = io.BytesIO()
+
+        n = SdCardFileReceiver(source).receive(
+            dest, "log.bin", progress=bad_progress, timeout_s=2.0
+        )
+        assert n == len(b"payload")
+        assert dest.getvalue() == b"payload"
