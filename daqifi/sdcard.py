@@ -1042,19 +1042,15 @@ def _replace_timestamp_frequency(
     replaced. Used by the CSV/JSON parsers to apply
     ``options.fallback_timestamp_frequency`` AFTER the parsed-vs-
     override merge so the override gets priority over the fallback.
+
+    Uses ``dataclasses.replace`` so any future field added to
+    ``SdCardDeviceConfiguration`` is preserved automatically — a
+    manual field-by-field reconstruction would silently drop new
+    fields and reset them to their dataclass default.
     """
-    return SdCardDeviceConfiguration(
-        analog_port_count=config.analog_port_count,
-        digital_port_count=config.digital_port_count,
-        timestamp_frequency=timestamp_frequency,
-        device_serial_number=config.device_serial_number,
-        device_part_number=config.device_part_number,
-        firmware_revision=config.firmware_revision,
-        calibration_values=config.calibration_values,
-        resolution=config.resolution,
-        port_range=config.port_range,
-        internal_scale_m=config.internal_scale_m,
-    )
+    from dataclasses import replace as _dc_replace
+
+    return _dc_replace(config, timestamp_frequency=timestamp_frequency)
 
 
 def _merge_csv_json_config(
