@@ -490,7 +490,7 @@ class TestUpdateFirmwareFailureModes:
         try:
             hex_path = _make_temp_hex()
             try:
-                with pytest.raises(Exception):
+                with pytest.raises(FirmwareUpdateException) as exc_info:
                     service.update_firmware(
                         device, hex_path, cancel_event=cancel_event
                     )
@@ -500,6 +500,7 @@ class TestUpdateFirmwareFailureModes:
             timer.cancel()
 
         assert service.current_state == FirmwareUpdateState.FAILED
+        assert "canceled" in str(exc_info.value).lower()
 
     def test_when_program_ack_fails_retries_and_completes(self) -> None:
         device = _FakeStreamingDevice("COM3")

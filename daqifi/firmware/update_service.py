@@ -336,9 +336,15 @@ class DefaultFirmwareUpdateService:
         """Release internal resources. Idempotent.
 
         Mirrors C# ``IDisposable.Dispose``. After ``close()`` no further
-        update calls are accepted.
+        update calls are accepted. Acquires the operation lock so any
+        in-flight update finishes its ``_safe_disconnect_hid()`` call
+        before this method tears down the HID transport itself.
         """
-        self._closed = True
+        with self._operation_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._safe_disconnect_hid()
 
     # -- exclusive-access wrapper ---------------------------------------
 
@@ -562,9 +568,11 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
                 total_bytes,
             )
-        except _CancelledError:
+        except _CancelledError as exc:
+            failed_state = self._current_state
+            failed_operation = "PIC32 firmware update canceled."
             self._transition_to_state(
-                FirmwareUpdateState.FAILED, "PIC32 firmware update canceled."
+                FirmwareUpdateState.FAILED, failed_operation
             )
             self._report_progress(
                 progress,
@@ -575,7 +583,9 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
             )
             self._logger.warning("PIC32 firmware update canceled.")
-            raise
+            raise self._create_firmware_update_exception(
+                failed_state, failed_operation, exc
+            ) from exc
         except Exception as exc:
             failed_state = self._current_state
             failed_operation = self._current_operation
@@ -734,9 +744,11 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
                 total_bytes,
             )
-        except _CancelledError:
+        except _CancelledError as exc:
+            failed_state = self._current_state
+            failed_operation = "WiFi module update canceled."
             self._transition_to_state(
-                FirmwareUpdateState.FAILED, "WiFi module update canceled."
+                FirmwareUpdateState.FAILED, failed_operation
             )
             self._report_progress(
                 progress,
@@ -747,7 +759,9 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
             )
             self._logger.warning("WiFi module update canceled.")
-            raise
+            raise self._create_firmware_update_exception(
+                failed_state, failed_operation, exc
+            ) from exc
         except Exception as exc:
             failed_state = self._current_state
             failed_operation = self._current_operation
