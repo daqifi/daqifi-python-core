@@ -342,11 +342,12 @@ class NyquistDevice:
             if (pn and pn.strip()) or sn:
                 metadata_msg = data
                 break
-        # If no frame had metadata fields, fall back to the latest —
-        # update_from_protobuf is a no-op on stream frames so this
-        # preserves the prior metadata cache rather than clobbering.
         if metadata_msg is None:
-            metadata_msg = messages[-1].data
+            # No frame carried metadata fields — return the unchanged
+            # cached metadata rather than feeding a stream frame to
+            # update_from_protobuf (which would no-op anyway, but
+            # short-circuiting keeps the contract explicit).
+            return self._metadata
         self._metadata.update_from_protobuf(metadata_msg)
         return self._metadata
 

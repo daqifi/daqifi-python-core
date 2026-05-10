@@ -197,6 +197,28 @@ class TestRefreshMetadata:
         with pytest.raises(DAQiFiConnectionError, match="Cannot refresh metadata"):
             dev.refresh_metadata()
 
+    def test_no_metadata_frame_returns_cached_without_mutation(self):
+        """If the buffer contained ONLY streaming frames (no
+        SYSInfoPB? reply) — e.g. SYSInfoPB? was lost on the wire
+        but background streaming was active — refresh_metadata
+        should return the cached metadata unchanged rather than
+        feeding a stream frame to update_from_protobuf."""
+        dev = _make_device_with_mock_comm()
+        # Pre-populate cache so we can detect mutation.
+        dev._metadata.serial_number = "999999"
+        dev._metadata.host_name = "previously-cached"
+        # Buffer contains only a stream frame (no device_pn/device_sn).
+        stream = DaqifiOutMessage()
+        stream.msg_time_stamp = 12345
+        dev._comm.query_binary.return_value = _length_prefixed(stream)
+
+        result = dev.refresh_metadata()
+
+        # Cache preserved — no frame had metadata-shaped fields.
+        assert result is dev.metadata
+        assert dev.metadata.serial_number == "999999"
+        assert dev.metadata.host_name == "previously-cached"
+
     def test_skips_trailing_streaming_frames_to_find_metadata(self):
         """If query_binary's buffer contains a SYSInfoPB? reply
         followed by background-streaming frames (which carry

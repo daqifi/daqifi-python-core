@@ -243,12 +243,17 @@ def test_reset_returns_to_clean_baseline(
             f"refusing to send *RST. Re-run with a stable USB connection."
         )
     actual_sn = dev.metadata.serial_number
-    if not actual_sn:
+    # Reject ``"0"`` as well as empty — the *IDN? field is a literal
+    # ``"0"`` placeholder on fw 3.4.6b1, and if some future code
+    # accidentally cross-wires that into ``metadata.serial_number``
+    # we'd otherwise compare ``"0"`` to a real SN and fail loudly
+    # rather than skip safely.
+    if not actual_sn or actual_sn == "0":
         pytest.skip(
-            "metadata.serial_number is empty after refresh; refusing to "
-            "send *RST. Older firmware that doesn't reply to SYSInfoPB? "
-            "would land here — verify your unit reports a non-empty SN "
-            "with `dev.refresh_metadata()`."
+            "metadata.serial_number is missing or placeholder ('0') "
+            "after refresh; refusing to send *RST. Older firmware that "
+            "doesn't reply to SYSInfoPB? would land here — verify your "
+            "unit reports a non-empty SN with `dev.refresh_metadata()`."
         )
     if actual_sn != expected_sn:
         pytest.fail(
