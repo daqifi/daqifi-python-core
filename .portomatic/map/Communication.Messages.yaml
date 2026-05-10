@@ -5,9 +5,14 @@ downstream_root: daqifi
 last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
 files:
 - upstream: src/Daqifi.Core/Communication/Messages/DaqifiOutMessage.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/_internal/proto/DaqifiOutMessage_pb2.py
+  relation: divergent
+  notes: "Both sides are auto-generated from the same .proto schema
+    (Protos/DaqifiOutMessage.proto) by the protobuf compiler. The C#
+    file is `protoc --csharp_out`, the Python file is `protoc
+    --python_out`. Field accessors are PascalCase (.MsgTimeStamp) on
+    the C# side and snake_case (.msg_time_stamp) on the Python side
+    per their respective code-generator conventions."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Communication/Messages/GenericInboundMessage.cs
@@ -29,9 +34,14 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Communication/Messages/ProtobufMessage.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/communication.py
+  relation: divergent
+  notes: "C# `ProtobufMessage : IInboundMessage<DaqifiOutMessage>` is
+    a thin concrete wrapper. Python collapses the named subclass into
+    `daqifi.communication.ObjectInboundMessage`, the generic
+    object-payload `InboundMessage` shape — same `data` field, same
+    structural conformance to `IInboundMessage`. Avoids redundant
+    1-field subclasses (project port convention)."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Communication/Messages/ScpiMessage.cs
@@ -41,9 +51,13 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Communication/Messages/TestMessage.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/communication.py
+  relation: divergent
+  notes: "C# `TextMessage : IInboundMessage<string>` (file is
+    confusingly named `TestMessage.cs`) is a thin concrete wrapper.
+    Python uses `TextInboundMessage = InboundMessage[str]` — a
+    generic-instantiation alias rather than a named subclass. Same
+    `data` field, same structural conformance."
   rationale: null
   last_synced_sha: null
 symbols:
@@ -102,15 +116,22 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Communication.Messages.ProtobufMessage
     file: src/Daqifi.Core/Communication/Messages/ProtobufMessage.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: class
+    qualified: daqifi.communication.ObjectInboundMessage
+    file: daqifi/communication.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "C# `ProtobufMessage : IInboundMessage<DaqifiOutMessage>` is
+    a 1-field concrete wrapper. Python uses the generic
+    `ObjectInboundMessage` (any object payload, including a
+    `DaqifiOutMessage` instance) — same `data` field, same structural
+    conformance. Avoids redundant 1-field subclasses."
   members:
   - upstream: Data
-    downstream: null
-    relation: not_yet_ported
+    downstream: data
+    relation: one_to_one
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Messages.ScpiMessage
@@ -134,15 +155,21 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Communication.Messages.TextMessage
     file: src/Daqifi.Core/Communication/Messages/TestMessage.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: class
+    qualified: daqifi.communication.TextInboundMessage
+    file: daqifi/communication.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "C# `TextMessage : IInboundMessage<string>` is a 1-field
+    concrete wrapper. Python uses `TextInboundMessage = InboundMessage[str]`
+    — a generic instantiation alias rather than a named subclass. Same
+    `data` field, same structural conformance."
   members:
   - upstream: Data
-    downstream: null
-    relation: not_yet_ported
+    downstream: data
+    relation: one_to_one
 divergences: []
 backlog: []
 hal_pairs: []

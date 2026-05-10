@@ -11,9 +11,13 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/Network/NetworkAddressHelper.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/network.py
+  relation: divergent
+  notes: "Static C# class collapses to module-level free functions in
+    `daqifi/network.py` per project port convention (matches
+    ScpiMessageProducer / Pic32BootloaderMessageProducer / etc.).
+    Each `Get*String` decode helper is exposed as a `get_*_string`
+    free function operating on any DaqifiOutMessage-shaped object."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/Network/NetworkConfiguration.cs
@@ -64,30 +68,35 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Device.Network.NetworkAddressHelper
     file: src/Daqifi.Core/Device/Network/NetworkAddressHelper.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: module
+    qualified: daqifi.network
+    file: daqifi/network.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Static C# class becomes module-level free functions in
+    `daqifi/network.py` (project port convention). Each helper's
+    `Get*String` member maps to a snake_case `get_*_string` function."
   members:
   - upstream: GetIpAddressString
-    downstream: null
-    relation: not_yet_ported
+    downstream: get_ip_address_string
+    relation: one_to_one
   - upstream: GetMacAddressString
-    downstream: null
-    relation: not_yet_ported
+    downstream: get_mac_address_string
+    relation: one_to_one
   - upstream: GetSubnetMaskString
-    downstream: null
-    relation: not_yet_ported
+    downstream: get_subnet_mask_string
+    relation: one_to_one
   - upstream: GetGatewayString
-    downstream: null
-    relation: not_yet_ported
+    downstream: get_gateway_string
+    relation: one_to_one
   - upstream: GetPrimaryDnsString
-    downstream: null
-    relation: not_yet_ported
+    downstream: get_primary_dns_string
+    relation: one_to_one
   - upstream: GetSecondaryDnsString
-    downstream: null
-    relation: not_yet_ported
+    downstream: get_secondary_dns_string
+    relation: one_to_one
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Network.NetworkConfiguration

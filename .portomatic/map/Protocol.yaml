@@ -5,8 +5,8 @@ downstream_root: daqifi
 last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
 files:
 - upstream: src/Daqifi.Core/Device/Protocol/IProtocolHandler.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream: daqifi/protocol.py
+  relation: one_to_one
   notes: null
   rationale: null
   last_synced_sha: null

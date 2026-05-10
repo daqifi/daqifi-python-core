@@ -35,9 +35,14 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileListParser.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/sdcard.py
+  relation: divergent
+  notes: "Static C# class collapses to a module-level
+    `parse_sd_card_file_list` free function plus the helper
+    `_try_parse_log_filename_date` (per project port convention).
+    Same defensive parsing — strips DAQIFI/OK noise, normalizes path
+    separators, drops control characters, parses log_YYYYMMDD_HHMMSS
+    filenames into datetimes."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileParser.cs
