@@ -360,9 +360,10 @@ class DefaultFirmwareUpdateService:
             self._safe_disconnect_hid()
             try:
                 self._hid_transport.close()
-            except Exception as exc:
+            except Exception:
                 self._logger.warning(
-                    "Failed to close HID transport during cleanup: %s", exc
+                    "Failed to close HID transport during cleanup",
+                    exc_info=True,
                 )
 
     # -- exclusive-access wrapper ---------------------------------------
@@ -709,8 +710,14 @@ class DefaultFirmwareUpdateService:
                     f"{request.timeout_seconds:.0f} seconds."
                 )
 
+            # External flashing tools commonly write failure strings to
+            # either stdout or stderr depending on the tool / OS shell;
+            # check both so we don't miss a "Programming device failed"
+            # report that lands on stderr (divergence from upstream which
+            # only checks stdout).
             if _contains_wifi_programming_failure(
-                process_result.standard_output_lines
+                list(process_result.standard_output_lines)
+                + list(process_result.standard_error_lines)
             ):
                 raise IOError(
                     "WiFi flashing tool reported a programming failure."
@@ -1344,9 +1351,10 @@ class DefaultFirmwareUpdateService:
             return
         try:
             self._hid_transport.disconnect()
-        except Exception as exc:
+        except Exception:
             self._logger.warning(
-                "Failed to disconnect HID transport during cleanup: %s", exc
+                "Failed to disconnect HID transport during cleanup",
+                exc_info=True,
             )
 
     def _raise_if_closed(self) -> None:
@@ -1420,10 +1428,23 @@ def _build_recovery_guidance(state: FirmwareUpdateState) -> str:
 
 
 def _quote_argument(value: str) -> str:
+    """Quote a single argument so it survives shell-style parsing.
+
+    Windows ``cmd.exe`` does NOT honour ``\\"`` as an escape — embedded
+    double quotes have to be doubled (``""``). POSIX shells do the
+    opposite. Pick the right rule based on ``os.name`` so the WiFi
+    flash tool gets correctly-quoted paths regardless of host platform.
+    """
     if value is None or value == "":
         return '""'
-    if any(ch in value for ch in (" ", "\t")):
-        escaped = value.replace('"', '\\"')
+
+    if os.name == "nt":
+        if any(ch in value for ch in (" ", "\t", '"')):
+            return '"' + value.replace('"', '""') + '"'
+        return value
+
+    if any(ch in value for ch in (" ", "\t", '"')):
+        escaped = value.replace('"', r'\"')
         return f'"{escaped}"'
     return value
 
