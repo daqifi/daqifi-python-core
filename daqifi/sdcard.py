@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import (
     Any,
     Callable,
+    Dict,
     Iterable,
     Iterator,
     List,
@@ -966,15 +967,661 @@ class SdCardFileParser:
             return self.parse_stream(stream, os.path.basename(file_path), options)
 
 
+def _read_text_lines(file_stream: Any) -> List[str]:
+    """Drain a text/binary stream into a list of non-empty stripped
+    lines. Mirrors the C# ``StreamReader.ReadLineAsync`` loop in both
+    the CSV and JSON parsers — skip whitespace-only lines, keep
+    everything else verbatim.
+
+    Accepts text streams (``io.StringIO``, ``open(path, 'r')``) and
+    binary streams (``io.BytesIO``, ``open(path, 'rb')``). Binary
+    payloads are decoded as UTF-8 with the BOM stripped if present
+    — DAQiFi firmware writes plain ASCII so this is safe; UTF-8 is
+    the strict superset that handles future i18n in headers.
+    """
+    if file_stream is None:
+        raise TypeError("file_stream must not be None")
+
+    raw = file_stream.read()
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        text = bytes(raw).decode("utf-8-sig", errors="replace")
+    else:
+        text = str(raw)
+
+    lines: List[str] = []
+    for line in text.splitlines():
+        if line and line.strip():
+            lines.append(line)
+    return lines
+
+
+def _resolve_session_base_time(file_created_date: Optional[datetime]) -> datetime:
+    """Return the absolute base time used to anchor reconstructed
+    sample timestamps. Mirrors the upstream ``baseTime`` rule: use
+    the parsed/overridden file-created date when present, else the
+    current UTC time. Naive UTC matches the rest of the SD-card
+    code's tz-naive convention."""
+    if file_created_date is not None:
+        if file_created_date.tzinfo is not None:
+            return file_created_date.astimezone(timezone.utc).replace(tzinfo=None)
+        return file_created_date
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _emit_progress(
+    progress: Optional[Callable[[SdCardParseProgress], None]],
+    bytes_read: int,
+    total_bytes: int,
+    lines_processed: int,
+) -> None:
+    """Best-effort progress callback. Mirrors the C# IProgress<T>
+    pattern: any callback failure is swallowed so a buggy progress
+    handler can't abort an otherwise-successful parse.
+
+    SdCardParseProgress's third field is named ``messages_read``
+    after the protobuf-parser origin; here it carries the same
+    meaning for CSV/JSON (one line = one row).
+    """
+    if progress is None:
+        return
+    try:
+        progress(SdCardParseProgress(
+            bytes_read=bytes_read,
+            total_bytes=total_bytes,
+            messages_read=lines_processed,
+        ))
+    except Exception:
+        pass
+
+
+def _replace_timestamp_frequency(
+    config: SdCardDeviceConfiguration,
+    timestamp_frequency: int,
+) -> SdCardDeviceConfiguration:
+    """Return a copy of ``config`` with ``timestamp_frequency``
+    replaced. Used by the CSV/JSON parsers to apply
+    ``options.fallback_timestamp_frequency`` AFTER the parsed-vs-
+    override merge so the override gets priority over the fallback.
+
+    Uses ``dataclasses.replace`` so any future field added to
+    ``SdCardDeviceConfiguration`` is preserved automatically — a
+    manual field-by-field reconstruction would silently drop new
+    fields and reset them to their dataclass default.
+    """
+    from dataclasses import replace as _dc_replace
+
+    return _dc_replace(config, timestamp_frequency=timestamp_frequency)
+
+
+def _merge_csv_json_config(
+    parsed: SdCardDeviceConfiguration,
+    override: Optional[SdCardDeviceConfiguration],
+) -> SdCardDeviceConfiguration:
+    """Merge a parser-derived config with the caller's override. The
+    parser values are primary; the override fills in zero/None gaps.
+    Mirrors the C# CSV/JSON parsers' ``MergeConfiguration``.
+
+    Distinct from :func:`_merge_configurations` (which targets the
+    protobuf parser's two-way merge) because the CSV/JSON paths only
+    populate a subset of fields and need to inherit the rest from
+    the override."""
+    if override is None:
+        return parsed
+    return SdCardDeviceConfiguration(
+        analog_port_count=(
+            parsed.analog_port_count
+            if parsed.analog_port_count > 0
+            else override.analog_port_count
+        ),
+        digital_port_count=(
+            parsed.digital_port_count
+            if parsed.digital_port_count > 0
+            else override.digital_port_count
+        ),
+        timestamp_frequency=(
+            parsed.timestamp_frequency
+            if parsed.timestamp_frequency > 0
+            else override.timestamp_frequency
+        ),
+        device_serial_number=(
+            parsed.device_serial_number or override.device_serial_number
+        ),
+        device_part_number=(
+            parsed.device_part_number or override.device_part_number
+        ),
+        firmware_revision=(
+            parsed.firmware_revision or override.firmware_revision
+        ),
+        calibration_values=(
+            parsed.calibration_values or override.calibration_values
+        ),
+        resolution=(
+            parsed.resolution if parsed.resolution > 0 else override.resolution
+        ),
+        port_range=parsed.port_range or override.port_range,
+        internal_scale_m=parsed.internal_scale_m or override.internal_scale_m,
+    )
+
+
+class SdCardCsvFileParser:
+    """Parses SD-card ``.csv`` log files (DAQiFi firmware format).
+
+    Ports ``Daqifi.Core/Device/SdCard/SdCardCsvFileParser.cs``. Sync
+    end-to-end per project convention. The firmware CSV format:
+
+    1. Up to three ``#``-prefixed comment lines carrying device
+       metadata (``# Device:``, ``# Serial Number:``,
+       ``# Timestamp Tick Rate:``).
+    2. A column header row: ``ain0_ts,ain0_val,ain1_ts,ain1_val,...,dio_ts,dio_val``
+    3. Data rows with interleaved per-channel ``timestamp,value``
+       pairs. Analog values are raw ADC counts that get scaled via
+       the device calibration (see :func:`_scale_raw_analog_values`).
+
+    Like the protobuf parser, ``parse_stream`` reads the entire input
+    before yielding samples; the returned :class:`SdCardLogSession`
+    exposes samples as a fresh ``Iterator[SdCardLogEntry]``.
+    """
+
+    def parse_stream(
+        self,
+        file_stream: Any,
+        file_name: str,
+        options: Optional[SdCardParseOptions] = None,
+    ) -> SdCardLogSession:
+        if file_stream is None:
+            raise TypeError("file_stream must not be None")
+        if file_name is None:
+            raise TypeError("file_name must not be None")
+
+        options = options if options is not None else SdCardParseOptions()
+        if options.buffer_size <= 0:
+            raise ValueError("options.buffer_size must be greater than zero")
+
+        # Same path-normalize trick as the protobuf parser so callers
+        # can pass either a basename or a full path.
+        file_name = os.path.basename(file_name.replace("\\", "/"))
+
+        file_created_date = options.session_start_time or _try_parse_log_filename_date(
+            file_name
+        )
+
+        lines = _read_text_lines(file_stream)
+        if not lines:
+            return SdCardLogSession(
+                file_name=file_name,
+                file_created_date=file_created_date,
+                device_config=None,
+                samples=iter(()),
+            )
+
+        header_config, layout = _parse_csv_header(lines, options)
+        config = _merge_csv_json_config(header_config, options.configuration_override)
+        # Fallback applies last, only if neither file nor override
+        # supplied a tick rate — matches the protobuf parser's
+        # three-tier precedence.
+        if config.timestamp_frequency == 0 and options.fallback_timestamp_frequency > 0:
+            config = _replace_timestamp_frequency(
+                config, options.fallback_timestamp_frequency
+            )
+
+        data_start = _find_csv_data_start_index(lines)
+        if data_start >= len(lines):
+            return SdCardLogSession(
+                file_name=file_name,
+                file_created_date=file_created_date,
+                device_config=config,
+                samples=iter(()),
+            )
+
+        samples = _produce_csv_samples(
+            lines, data_start, config, layout, file_created_date, options,
+        )
+        return SdCardLogSession(
+            file_name=file_name,
+            file_created_date=file_created_date,
+            device_config=config,
+            samples=samples,
+        )
+
+    def parse_file(
+        self,
+        file_path: str,
+        options: Optional[SdCardParseOptions] = None,
+    ) -> SdCardLogSession:
+        if file_path is None:
+            raise TypeError("file_path must not be None")
+        options = options if options is not None else SdCardParseOptions()
+        if options.buffer_size <= 0:
+            raise ValueError("options.buffer_size must be greater than zero")
+        # Open in text mode — CSV is always ASCII per the firmware
+        # contract; ``newline=""`` lets the universal-newline split
+        # handle CR / LF / CRLF the same way as the C# StreamReader.
+        with open(file_path, "r", encoding="utf-8-sig", newline="") as stream:
+            return self.parse_stream(
+                stream, os.path.basename(file_path), options
+            )
+
+
+@dataclass(frozen=True)
+class _CsvColumnLayout:
+    """How the CSV column header is laid out.
+
+    Mirrors the C# private record ``CsvColumnLayout``.
+    """
+    analog_pair_count: int
+    has_digital_pair: bool
+
+
+def _parse_csv_header(
+    lines: List[str],
+    options: SdCardParseOptions,  # noqa: ARG001 — kept for API consistency with the JSON parser
+) -> Tuple[SdCardDeviceConfiguration, _CsvColumnLayout]:
+    """Pull device metadata + column layout out of the comment +
+    column-header lines. Bails on the first non-comment line that
+    doesn't look like the column header (i.e. data rows start).
+
+    Returns ``timestamp_frequency=0`` when the ``# Timestamp Tick Rate:``
+    header is absent so ``_merge_csv_json_config`` correctly defers to
+    ``configuration_override.timestamp_frequency`` (and finally to
+    ``options.fallback_timestamp_frequency`` only if both are zero).
+    Mirrors the protobuf parser's three-tier precedence.
+    """
+    device_name: Optional[str] = None
+    serial_number: Optional[str] = None
+    timestamp_freq = 0  # fallback applied AFTER override merge (see parse_stream)
+    analog_count = 0
+    digital_count = 0
+    has_digital = False
+
+    for line in lines:
+        if line.startswith("#"):
+            content = line[1:].strip()
+            if content.lower().startswith("device:"):
+                device_name = content[len("device:"):].strip() or None
+            elif content.lower().startswith("serial number:"):
+                serial_number = content[len("serial number:"):].strip() or None
+            elif content.lower().startswith("timestamp tick rate:"):
+                rate_str = content[len("timestamp tick rate:"):].strip()
+                # Strip trailing " Hz" if present.
+                space_idx = rate_str.find(" ")
+                if space_idx > 0:
+                    rate_str = rate_str[:space_idx]
+                if rate_str.isdigit():
+                    timestamp_freq = int(rate_str)
+            continue
+        # First non-comment line — treat it as the column header iff
+        # it contains the firmware's per-channel naming convention.
+        lower = line.lower()
+        if "_ts," in lower or lower.startswith("ch") or lower.startswith("ain"):
+            cols = line.split(",")
+            total_pairs = len(cols) // 2
+            for p in range(total_pairs):
+                name_col = cols[p * 2].lower()
+                if name_col.startswith("dio"):
+                    has_digital = True
+                    digital_count = 1
+                else:
+                    analog_count += 1
+        # Whether we matched a header or hit a data row, the comment
+        # block is over — bail.
+        break
+
+    config = SdCardDeviceConfiguration(
+        analog_port_count=analog_count,
+        digital_port_count=digital_count,
+        timestamp_frequency=timestamp_freq,
+        device_serial_number=serial_number,
+        device_part_number=device_name,
+        firmware_revision=None,
+        calibration_values=None,
+    )
+    return config, _CsvColumnLayout(
+        analog_pair_count=analog_count,
+        has_digital_pair=has_digital,
+    )
+
+
+def _find_csv_data_start_index(lines: List[str]) -> int:
+    """Return the index of the first data row, skipping comments and
+    the column header. Matches the upstream ``FindDataStartIndex``."""
+    for i, line in enumerate(lines):
+        if line.startswith("#"):
+            continue
+        lower = line.lower()
+        is_column_header = (
+            "_ts," in lower
+            or (lower.startswith("ch") and len(line) > 2 and not line[2].isdigit())
+            or lower.startswith("ain")
+        )
+        if is_column_header:
+            continue
+        return i
+    return len(lines)
+
+
+def _try_parse_csv_data_row(
+    line: str,
+    layout: _CsvColumnLayout,
+) -> Optional[Tuple[int, List[float], int, List[int]]]:
+    """Parse one CSV data row into ``(row_timestamp, analog_values,
+    digital_data, per_channel_timestamps)`` or None on malformed
+    input (mirrors the upstream ``TryParseCsvDataRow`` resilience).
+    """
+    try:
+        cols = line.split(",")
+        if len(cols) < 2 or len(cols) % 2 != 0:
+            return None
+        total_pairs = len(cols) // 2
+        if layout.analog_pair_count > 0:
+            analog_pair_count = min(layout.analog_pair_count, total_pairs)
+        else:
+            analog_pair_count = (
+                total_pairs - 1 if layout.has_digital_pair else total_pairs
+            )
+
+        analog_values: List[float] = []
+        per_channel_ts: List[int] = []
+        for ch in range(analog_pair_count):
+            ts_col = cols[ch * 2].strip()
+            val_col = cols[ch * 2 + 1].strip()
+            if not ts_col.isdigit():
+                return None
+            ts = int(ts_col)
+            try:
+                val = float(val_col)
+            except ValueError:
+                return None
+            per_channel_ts.append(ts)
+            analog_values.append(val)
+
+        digital_data = 0
+        dio_timestamp = 0
+        if layout.has_digital_pair and total_pairs > analog_pair_count:
+            dio_index = analog_pair_count
+            dio_ts_col = cols[dio_index * 2].strip()
+            dio_val_col = cols[dio_index * 2 + 1].strip()
+            if dio_ts_col.isdigit():
+                dio_timestamp = int(dio_ts_col)
+            if dio_val_col.isdigit():
+                digital_data = int(dio_val_col)
+
+        row_timestamp = per_channel_ts[0] if per_channel_ts else dio_timestamp
+        if not per_channel_ts and dio_timestamp == 0 and not layout.has_digital_pair:
+            return None
+        return row_timestamp, analog_values, digital_data, per_channel_ts
+    except Exception:
+        return None
+
+
+def _produce_csv_samples(
+    lines: List[str],
+    data_start: int,
+    config: Optional[SdCardDeviceConfiguration],
+    layout: _CsvColumnLayout,
+    file_created_date: Optional[datetime],
+    options: SdCardParseOptions,
+) -> Iterator[SdCardLogEntry]:
+    base_time = _resolve_session_base_time(file_created_date)
+    timestamp_freq = config.timestamp_frequency if config else 0
+    tick_period = 1.0 / timestamp_freq if timestamp_freq > 0 else 0.0
+
+    previous_timestamp: Optional[int] = None
+    elapsed_seconds = 0.0
+    lines_processed = 0
+    bytes_read = 0
+    progress = options.progress
+    total_bytes = sum(len(line) + 1 for line in lines)
+
+    for i in range(data_start, len(lines)):
+        line = lines[i]
+        lines_processed += 1
+        bytes_read += len(line) + 1
+
+        parsed = _try_parse_csv_data_row(line, layout)
+        if parsed is None:
+            continue
+        row_ts, raw_analog, digital_data, per_ch_ts = parsed
+        analog_values = _scale_raw_analog_values(
+            [int(v) for v in raw_analog], config
+        )
+
+        absolute_time = base_time
+        # ``row_ts == 0`` is treated as "no timestamp" — matches the
+        # protobuf parser's behavior so cross-format reconstruction
+        # of the same physical log is consistent.
+        if tick_period > 0 and row_ts != 0:
+            if previous_timestamp is None:
+                previous_timestamp = row_ts
+            else:
+                delta = _compute_tick_delta(previous_timestamp, row_ts)
+                elapsed_seconds += delta * tick_period
+                previous_timestamp = row_ts
+            absolute_time = base_time + timedelta(seconds=elapsed_seconds)
+
+        yield SdCardLogEntry(
+            timestamp=absolute_time,
+            analog_values=tuple(analog_values),
+            digital_data=digital_data,
+            analog_timestamps=tuple(per_ch_ts) if per_ch_ts else None,
+        )
+
+        if lines_processed % 100 == 0:
+            _emit_progress(progress, bytes_read, total_bytes, lines_processed)
+
+    _emit_progress(progress, bytes_read, total_bytes, lines_processed)
+
+
+class SdCardJsonFileParser:
+    """Parses SD-card ``.json`` log files (JSONL format).
+
+    Ports ``Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs``. Each
+    line is a JSON object: ``{"ts": <uint32>, "analog": [...],
+    "digital": "<hex>"}``. Sync end-to-end per project convention.
+
+    Configuration is *inferred* from the first line (analog channel
+    count = length of the ``analog`` array); merge with
+    ``options.configuration_override`` to fill in missing fields like
+    calibration / resolution / port range needed for raw-to-volts
+    scaling.
+    """
+
+    def parse_stream(
+        self,
+        file_stream: Any,
+        file_name: str,
+        options: Optional[SdCardParseOptions] = None,
+    ) -> SdCardLogSession:
+        if file_stream is None:
+            raise TypeError("file_stream must not be None")
+        if file_name is None:
+            raise TypeError("file_name must not be None")
+
+        options = options if options is not None else SdCardParseOptions()
+        if options.buffer_size <= 0:
+            raise ValueError("options.buffer_size must be greater than zero")
+
+        file_name = os.path.basename(file_name.replace("\\", "/"))
+        file_created_date = options.session_start_time or _try_parse_log_filename_date(
+            file_name
+        )
+
+        lines = _read_text_lines(file_stream)
+        if not lines:
+            return SdCardLogSession(
+                file_name=file_name,
+                file_created_date=file_created_date,
+                device_config=None,
+                samples=iter(()),
+            )
+
+        config = _infer_json_configuration(lines[0], options)
+        if config.timestamp_frequency == 0 and options.fallback_timestamp_frequency > 0:
+            config = _replace_timestamp_frequency(
+                config, options.fallback_timestamp_frequency
+            )
+        samples = _produce_json_samples(lines, config, file_created_date, options)
+        return SdCardLogSession(
+            file_name=file_name,
+            file_created_date=file_created_date,
+            device_config=config,
+            samples=samples,
+        )
+
+    def parse_file(
+        self,
+        file_path: str,
+        options: Optional[SdCardParseOptions] = None,
+    ) -> SdCardLogSession:
+        if file_path is None:
+            raise TypeError("file_path must not be None")
+        options = options if options is not None else SdCardParseOptions()
+        if options.buffer_size <= 0:
+            raise ValueError("options.buffer_size must be greater than zero")
+        with open(file_path, "r", encoding="utf-8-sig", newline="") as stream:
+            return self.parse_stream(
+                stream, os.path.basename(file_path), options
+            )
+
+
+def _try_parse_json_line(line: str) -> Optional[Tuple[int, List[float], int]]:
+    """Parse one JSONL row into ``(timestamp, analog_values,
+    digital_data)`` or None on malformed input. Matches the upstream
+    ``TryParseJsonLine`` — any exception → skip line."""
+    import json
+
+    try:
+        obj = json.loads(line)
+        if not isinstance(obj, dict):
+            return None
+        ts_raw = obj.get("ts")
+        if not isinstance(ts_raw, int) or isinstance(ts_raw, bool) or ts_raw < 0 or ts_raw > 0xFFFFFFFF:
+            return None
+        analog_raw = obj.get("analog")
+        if not isinstance(analog_raw, list):
+            return None
+        analog_values: List[float] = []
+        for v in analog_raw:
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return None
+            analog_values.append(float(v))
+        digital_data = 0
+        digital_raw = obj.get("digital")
+        if isinstance(digital_raw, str) and digital_raw:
+            digital_data = _parse_digital_hex_string(digital_raw)
+        return ts_raw, analog_values, digital_data
+    except Exception:
+        return None
+
+
+def _parse_digital_hex_string(hex_string: str) -> int:
+    """Decode a hyphen-separated hex byte sequence (e.g. ``"AB-CD"``)
+    into a uint32 with little-endian packing. Mirrors the upstream
+    ``ParseDigitalHexString``: at most 4 bytes, malformed bytes
+    contribute 0 to the result rather than aborting."""
+    if not hex_string:
+        return 0
+    parts = [p for p in hex_string.split("-") if p]
+    result = 0
+    for i, byte_str in enumerate(parts[:4]):
+        try:
+            byte_val = int(byte_str, 16)
+            if 0 <= byte_val <= 0xFF:
+                result |= byte_val << (i * 8)
+        except ValueError:
+            continue
+    return result
+
+
+def _infer_json_configuration(
+    first_line: str,
+    options: SdCardParseOptions,
+) -> SdCardDeviceConfiguration:
+    """Infer the analog channel count from the first JSONL row, then
+    merge with the caller's override (which fills in resolution /
+    calibration / port_range for scaling). Mirrors the upstream
+    ``InferConfiguration``.
+
+    JSONL has no in-band tick-rate header, so the inferred config
+    leaves ``timestamp_frequency=0`` and lets the merge / fallback
+    chain decide the final value (override → fallback). Same
+    three-tier precedence as the protobuf and CSV parsers.
+    """
+    parsed = _try_parse_json_line(first_line)
+    analog_count = len(parsed[1]) if parsed is not None else 0
+    inferred = SdCardDeviceConfiguration(
+        analog_port_count=analog_count,
+        digital_port_count=0,  # cannot infer from JSONL data
+        timestamp_frequency=0,  # fallback applied AFTER override merge
+        device_serial_number=None,
+        device_part_number=None,
+        firmware_revision=None,
+        calibration_values=None,
+    )
+    return _merge_csv_json_config(inferred, options.configuration_override)
+
+
+def _produce_json_samples(
+    lines: List[str],
+    config: SdCardDeviceConfiguration,
+    file_created_date: Optional[datetime],
+    options: SdCardParseOptions,
+) -> Iterator[SdCardLogEntry]:
+    base_time = _resolve_session_base_time(file_created_date)
+    timestamp_freq = config.timestamp_frequency
+    tick_period = 1.0 / timestamp_freq if timestamp_freq > 0 else 0.0
+
+    previous_timestamp: Optional[int] = None
+    elapsed_seconds = 0.0
+    lines_processed = 0
+    bytes_read = 0
+    progress = options.progress
+    total_bytes = sum(len(line) + 1 for line in lines)
+
+    for line in lines:
+        lines_processed += 1
+        bytes_read += len(line) + 1
+
+        parsed = _try_parse_json_line(line)
+        if parsed is None:
+            continue
+        ts, raw_analog, digital_data = parsed
+        analog_values = _scale_raw_analog_values(
+            [int(v) for v in raw_analog], config
+        )
+
+        absolute_time = base_time
+        # ``ts == 0`` is treated as "no timestamp" — matches the
+        # protobuf parser so the same physical log reconstructs to
+        # consistent absolute timestamps regardless of file format.
+        if tick_period > 0 and ts != 0:
+            if previous_timestamp is None:
+                previous_timestamp = ts
+            else:
+                delta = _compute_tick_delta(previous_timestamp, ts)
+                elapsed_seconds += delta * tick_period
+                previous_timestamp = ts
+            absolute_time = base_time + timedelta(seconds=elapsed_seconds)
+
+        yield SdCardLogEntry(
+            timestamp=absolute_time,
+            analog_values=tuple(analog_values),
+            digital_data=digital_data,
+            analog_timestamps=None,  # JSON format carries one ts per row
+        )
+
+        if lines_processed % 100 == 0:
+            _emit_progress(progress, bytes_read, total_bytes, lines_processed)
+
+    _emit_progress(progress, bytes_read, total_bytes, lines_processed)
+
+
 class SdCardFileParserFactory:
     """Picks the right SD-card parser by file extension.
 
     Ports ``Daqifi.Core/Device/SdCard/SdCardFileParserFactory.cs``.
-    Currently only the protobuf parser is wired up — calling
-    ``parse_with_format`` with ``JSON`` or ``CSV`` raises
-    :class:`NotImplementedError` until those parsers land.
-    ``detect_format`` already classifies all three extensions so
-    callers can inspect a file's format without invoking a parser.
+    Wires up all three parsers (protobuf ``.bin``, JSONL ``.json``,
+    DAQiFi-firmware-flavored ``.csv``); ``detect_format`` and the
+    parse helpers dispatch by extension.
     """
 
     @staticmethod
@@ -1003,15 +1650,9 @@ class SdCardFileParserFactory:
         if format is SdCardLogFormat.PROTOBUF:
             return SdCardFileParser().parse_stream(file_stream, file_name, options)
         if format is SdCardLogFormat.JSON:
-            raise NotImplementedError(
-                "JSON SD-card log parser is not yet ported "
-                "(SdCardJsonFileParser)."
-            )
+            return SdCardJsonFileParser().parse_stream(file_stream, file_name, options)
         if format is SdCardLogFormat.CSV:
-            raise NotImplementedError(
-                "CSV SD-card log parser is not yet ported "
-                "(SdCardCsvFileParser)."
-            )
+            return SdCardCsvFileParser().parse_stream(file_stream, file_name, options)
         raise ValueError(f"Unsupported format: {format}")
 
     @staticmethod
@@ -1033,7 +1674,19 @@ class SdCardFileParserFactory:
         if file_path is None:
             raise TypeError("file_path must not be None")
         format = SdCardFileParserFactory.detect_format(file_path)
-        with open(file_path, "rb") as stream:
+        # Open mode depends on format — protobuf is binary, CSV/JSON
+        # are text. Each parser's parse_file handles its own open(),
+        # but parse_with_format takes a pre-opened stream so we need
+        # to pick the right mode here.
+        if format is SdCardLogFormat.PROTOBUF:
+            mode, encoding = "rb", None
+        else:
+            mode, encoding = "r", "utf-8-sig"
+        open_kwargs: Dict[str, Any] = {"mode": mode}
+        if encoding is not None:
+            open_kwargs["encoding"] = encoding
+            open_kwargs["newline"] = ""
+        with open(file_path, **open_kwargs) as stream:
             return SdCardFileParserFactory.parse_with_format(
                 stream, os.path.basename(file_path), format, options
             )

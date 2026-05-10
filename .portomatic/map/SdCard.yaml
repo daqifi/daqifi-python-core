@@ -11,9 +11,9 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardCsvFileParser.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/sdcard.py
+  relation: divergent
+  notes: "Sync (parse_stream / parse_file block until the file is read) rather than C#'s async Task<SdCardLogSession>. Samples are returned as Iterator[SdCardLogEntry] in lieu of IAsyncEnumerable. Project convention is sync end-to-end (see SdCardFileParser entry above for the same pattern)."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardDeviceConfiguration.cs
@@ -57,11 +57,7 @@ files:
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileParserFactory.cs
   downstream: daqifi/sdcard.py
   relation: divergent
-  notes: "Sync API (parse_with_format / parse_stream / parse_file). JSON
-    and CSV variants raise NotImplementedError until SdCardJsonFileParser
-    / SdCardCsvFileParser are ported in a follow-up PR. detect_format
-    already classifies all three extensions so callers can probe a file
-    without invoking a parser."
+  notes: "Sync API (parse_with_format / parse_stream / parse_file). All three formats wired up: protobuf (.bin) → SdCardFileParser, JSON (.json) → SdCardJsonFileParser, CSV (.csv) → SdCardCsvFileParser. parse_file dispatches the open mode by format (binary for protobuf, UTF-8-with-BOM-stripping text for CSV/JSON) before forwarding to parse_with_format."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardFileReceiver.cs
@@ -71,9 +67,9 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/sdcard.py
+  relation: divergent
+  notes: "Sync (parse_stream / parse_file block until the file is read) rather than C#'s async Task<SdCardLogSession>. Samples are returned as Iterator[SdCardLogEntry] in lieu of IAsyncEnumerable. Project convention is sync end-to-end."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/SdCard/SdCardLogEntry.cs
@@ -163,18 +159,23 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardCsvFileParser
     file: src/Daqifi.Core/Device/SdCard/SdCardCsvFileParser.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardCsvFileParser
+    file: daqifi/sdcard.py
+  relation: one_to_one
   last_synced_sha: null
   notes: null
   rationale: null
   members:
   - upstream: ParseAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_stream
+    relation: divergent
+    notes: "Async/sync collapsed per project convention: parse_stream blocks until the file is read; samples returned as Iterator[SdCardLogEntry] in lieu of IAsyncEnumerable. Renamed parse_stream (matches the protobuf SdCardFileParser pattern in the same module)."
   - upstream: ParseFileAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_file
+    relation: divergent
+    notes: "Async/sync collapsed per project convention: parse_file opens in text mode (utf-8 with BOM stripping) and forwards to parse_stream."
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardDeviceConfiguration
@@ -371,18 +372,23 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardJsonFileParser
     file: src/Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: class
+    qualified: daqifi.sdcard.SdCardJsonFileParser
+    file: daqifi/sdcard.py
+  relation: one_to_one
   last_synced_sha: null
   notes: null
   rationale: null
   members:
   - upstream: ParseAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_stream
+    relation: divergent
+    notes: "Async/sync collapsed per project convention: parse_stream blocks until the file is read; samples returned as Iterator[SdCardLogEntry] in lieu of IAsyncEnumerable."
   - upstream: ParseFileAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: parse_file
+    relation: divergent
+    notes: "Async/sync collapsed per project convention: parse_file opens in text mode (utf-8 with BOM stripping) and forwards to parse_stream."
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardLogEntry
