@@ -153,9 +153,16 @@ class NyquistDevice:
             # noisy USB enumeration may not respond in 2s, in which
             # case `metadata` stays at its empty default and callers
             # can call `refresh_metadata()` explicitly.
+            #
+            # Must include DAQiFiConnectionError because
+            # refresh_metadata translates query_binary's RuntimeError
+            # into DAQiFiConnectionError to honor its docstring
+            # contract — without this entry a transient I/O hiccup
+            # during SYSInfoPB? would abort an otherwise-successful
+            # connect via the outer except below.
             try:
                 self.refresh_metadata(timeout=2.0)
-            except (CommandError, RuntimeError):
+            except (CommandError, DAQiFiConnectionError, RuntimeError):
                 pass
 
         except Exception as e:

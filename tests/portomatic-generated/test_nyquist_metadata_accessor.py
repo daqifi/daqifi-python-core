@@ -219,6 +219,70 @@ class TestRefreshMetadata:
         assert dev.metadata.ssid == "test-ssid"
 
 
+class TestConnectIsResilientToMetadataFailure:
+    """Regression tests: the best-effort metadata refresh in
+    _connect() must NOT abort an otherwise-successful connect, no
+    matter which subclass refresh_metadata raises (CommandError,
+    DAQiFiConnectionError, or a bare RuntimeError if a future
+    backend skips the wrap)."""
+
+    def _make_connectable_device(
+        self, refresh_side_effect: Exception
+    ) -> NyquistDevice:
+        """Build a NyquistDevice whose mocked SerialInterface accepts
+        open() and *IDN? but raises ``refresh_side_effect`` from
+        refresh_metadata's underlying call — so we exercise the
+        full _connect path through to the SYSInfoPB? swallow."""
+        dev = NyquistDevice("/dev/ttyACM0")
+        dev._comm = MagicMock()
+        dev._comm.is_open.return_value = True
+        dev._comm.open.return_value = True
+        dev._comm.send_query.return_value = "DAQiFi,Nq1,0,01-02"
+        dev._comm.query_binary.side_effect = refresh_side_effect
+        return dev
+
+    def test_connect_survives_command_error_during_refresh(self):
+        dev = self._make_connectable_device(
+            refresh_side_effect=Exception("forces empty bytes path")
+        )
+        # Make query_binary return empty bytes → CommandError
+        dev._comm.query_binary.side_effect = None
+        dev._comm.query_binary.return_value = b""
+        dev._connect()
+        assert dev.is_connected is True
+        assert dev.metadata.serial_number == ""  # unrefreshed default
+
+    def test_connect_survives_connection_error_during_refresh(self):
+        """The query_binary RuntimeError-to-DAQiFiConnectionError wrap
+        must NOT cause _connect to bail out with 'Failed to initialize
+        device'. Regression for Qodo PR #85 /improve pass 2 importance 9."""
+        dev = self._make_connectable_device(
+            refresh_side_effect=RuntimeError("Serial port not open")
+        )
+        dev._connect()
+        assert dev.is_connected is True
+        assert dev.metadata.serial_number == ""
+
+    def test_connect_survives_runtime_error_during_refresh(self):
+        """Defensive: if a future backend skips the RuntimeError wrap,
+        the bare RuntimeError is still in the swallow list."""
+        dev = NyquistDevice("/dev/ttyACM0")
+        dev._comm = MagicMock()
+        dev._comm.is_open.return_value = True
+        dev._comm.open.return_value = True
+        dev._comm.send_query.return_value = "DAQiFi,Nq1,0,01-02"
+        # Patch refresh_metadata directly to raise raw RuntimeError
+        original_refresh = NyquistDevice.refresh_metadata
+        try:
+            NyquistDevice.refresh_metadata = MagicMock(
+                side_effect=RuntimeError("simulated low-level failure")
+            )
+            dev._connect()
+            assert dev.is_connected is True
+        finally:
+            NyquistDevice.refresh_metadata = original_refresh
+
+
 class TestMetadataIsDistinctFromIdnSerialNumber:
     def test_idn_serial_number_property_unchanged(self):
         """``serial_number`` (the existing property) must still return
