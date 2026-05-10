@@ -327,7 +327,11 @@ class NyquistDevice:
                 f"SYSInfoPB? returned no parseable protobuf message after "
                 f"{timeout}s (received {len(raw)} bytes)"
             )
-        self._metadata.update_from_protobuf(messages[0].data)
+        # Use the LAST parsed message — SYSInfoPB? normally returns
+        # exactly one frame, but if the buffer also contained queued
+        # streaming-status frames (a race against background streaming)
+        # the most recent frame carries the freshest state.
+        self._metadata.update_from_protobuf(messages[-1].data)
         return self._metadata
 
     @property

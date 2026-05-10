@@ -1448,35 +1448,41 @@ class SerialInterface:
         if idle_settle < 0:
             raise ValueError(f"idle_settle must be >= 0 (got {idle_settle!r})")
 
+        # Cache the serial handle in a local so a concurrent close()
+        # mid-call can't trip an AttributeError on ``self._serial`` —
+        # we either hold a valid reference for the whole call or we
+        # already failed the is_open() guard above.
+        ser = self._serial
+
         # Force non-blocking reads for the duration so a single
         # ``read(pending)`` cannot exceed our wall-clock deadline by
         # falling back to the port's pre-configured ``timeout``.
         # Restored in ``finally`` so callers see no side-effect on
         # subsequent ``send_command`` reads.
-        prev_serial_timeout = self._serial.timeout
+        prev_serial_timeout = getattr(ser, "timeout", None)
         try:
             try:
-                self._serial.timeout = 0
-            except (serial.SerialException, OSError, ValueError):
+                ser.timeout = 0
+            except (serial.SerialException, OSError, ValueError, AttributeError):
                 # Some pyserial backends don't support runtime
                 # mutation; fall back to relying on `in_waiting`
                 # being accurate (the loop already gates on it).
                 pass
             try:
-                self._serial.reset_input_buffer()
+                ser.reset_input_buffer()
                 # Use \r\n to match ScpiMessage.get_bytes() — the canonical
                 # wire format. send_command() uses bare \r for legacy
                 # compatibility but binary queries expect the canonical form.
-                self._serial.write((query + "\r\n").encode("ascii"))
-                self._serial.flush()
+                ser.write((query + "\r\n").encode("ascii"))
+                ser.flush()
 
                 received = bytearray()
                 deadline = time.monotonic() + timeout
                 last_byte_time: Optional[float] = None
                 while time.monotonic() < deadline:
-                    pending = self._serial.in_waiting
+                    pending = ser.in_waiting
                     if pending:
-                        chunk = self._serial.read(pending)
+                        chunk = ser.read(pending)
                         if chunk:
                             received.extend(chunk)
                             last_byte_time = time.monotonic()
@@ -1506,10 +1512,11 @@ class SerialInterface:
             except (serial.SerialException, OSError) as e:
                 raise RuntimeError(f"Serial communication error: {e}")
         finally:
-            try:
-                self._serial.timeout = prev_serial_timeout
-            except (serial.SerialException, OSError, ValueError):
-                pass
+            if prev_serial_timeout is not None:
+                try:
+                    ser.timeout = prev_serial_timeout
+                except (serial.SerialException, OSError, ValueError, AttributeError):
+                    pass
 
     def send_set(self, command: str, value, delay: float = 0.1) -> bool:
         """
