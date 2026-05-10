@@ -729,11 +729,19 @@ class TestSdCardFileParserFactory:
     @pytest.mark.parametrize(
         "fmt", [SdCardLogFormat.JSON, SdCardLogFormat.CSV]
     )
-    def test_unported_formats_raise_not_implemented(self, fmt):
-        with pytest.raises(NotImplementedError):
-            SdCardFileParserFactory.parse_with_format(
-                io.BytesIO(b""), "x", fmt
-            )
+    def test_text_formats_dispatch_to_their_parsers(self, fmt):
+        """JSON + CSV parsers landed in the #7 batch. Empty-stream
+        smoke test ensures the factory routes correctly without
+        raising. Detailed parser behavior is covered in
+        test_sdcard_csv_json_parsers.py."""
+        # Pass an empty text stream — both parsers handle it (empty
+        # session, no samples) so the factory dispatch path is
+        # exercised without depending on format-specific fixtures.
+        session = SdCardFileParserFactory.parse_with_format(
+            io.StringIO(""), "x.csv" if fmt is SdCardLogFormat.CSV else "x.json", fmt
+        )
+        assert session.device_config is None
+        assert list(session.samples) == []
 
     def test_parse_stream_uses_extension_detection(self):
         wire = _encode_message(_build_status_frame())
