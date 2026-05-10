@@ -1052,8 +1052,25 @@ class DefaultFirmwareUpdateService:
                 self._sleep_with_cancel(self._options.poll_interval, deadline)
                 continue
 
-            for device in devices:
-                return device
+            devices_list = list(devices)
+            if len(devices_list) == 1:
+                return devices_list[0]
+            if len(devices_list) > 1:
+                # Multiple bootloader-mode units enumerated on the same
+                # workstation — refuse to pick one implicitly. The
+                # caller should narrow the field (e.g. detach all but
+                # the target unit via usbipd, or extend this Service to
+                # accept an expected serial filter) so we never flash
+                # the wrong device.
+                details = ", ".join(
+                    f"{getattr(d, 'serial_number', None)!r}:"
+                    f"{getattr(d, 'device_path', None)!r}"
+                    for d in devices_list
+                )
+                raise RuntimeError(
+                    "Multiple HID bootloader devices detected; refusing "
+                    f"to pick one implicitly. Candidates: {details}"
+                )
 
             self._sleep_with_cancel(self._options.poll_interval, deadline)
 

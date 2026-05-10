@@ -579,6 +579,35 @@ class TestUpdateFirmwareFailureModes:
         assert "VID=0x04D8" in msg
         assert "PID=0x003C" in msg
 
+    def test_when_multiple_bootloader_devices_enumerated_refuses_to_pick(
+        self,
+    ) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        info_a = HidDeviceInfo(0x04D8, 0x003C, "path-a", "SN-A", "Bootloader")
+        info_b = HidDeviceInfo(0x04D8, 0x003C, "path-b", "SN-B", "Bootloader")
+        enumerator = _FakeHidEnumerator([[info_a, info_b]])
+
+        service = _build_pic32_service(
+            hid,
+            enumerator,
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        exc = exc_info.value
+        assert exc.failed_state == FirmwareUpdateState.WAITING_FOR_BOOTLOADER
+        assert isinstance(exc.__cause__, RuntimeError)
+        assert "Multiple HID bootloader devices detected" in str(exc.__cause__)
+        assert "SN-A" in str(exc.__cause__)
+        assert "SN-B" in str(exc.__cause__)
+
     def test_rejects_empty_hex_file_path(self) -> None:
         service = _build_pic32_service(
             _FakeHidTransport(),
