@@ -23,9 +23,18 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Communication/Transport/HidLibraryPlatform.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/_internal/hid_enumerator.py
+  relation: divergent
+  notes: "C# file declares 4 internal types: `IHidPlatform` (interface),
+    `IHidTransportDevice` (interface), `HidTransportReadStatus` /
+    `HidTransportReadResult` (value types), and `HidLibraryPlatform`
+    (the concrete HidSharp-backed impl). Python collapses these into
+    `daqifi/_internal/hid_enumerator.py`: `HidPlatform` (Protocol)
+    plus `HidApiPlatform` (concrete, backed by the Python `hid`
+    library — the moral equivalent of HidSharp). The transport-device
+    abstraction is currently inlined into `HidApiPlatform.read` /
+    `.write` rather than exposed as a separate Protocol; revisit if a
+    second platform implementation lands."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Communication/Transport/HidLibraryTransport.cs

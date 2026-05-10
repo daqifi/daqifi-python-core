@@ -71,9 +71,13 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/DeviceTypeDetector.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/_internal/comm.py
+  relation: divergent
+  notes: "Static C# class becomes a module-level free function
+    `detect_device_type_from_part_number` in `daqifi/_internal/comm.py`
+    (project port convention). Same case-insensitive `Nq1` / `Nq2` /
+    `Nq3` → `DeviceType.NYQUIST_*` mapping, returns
+    `DeviceType.UNKNOWN` for blank/unrecognized input."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Device/IDevice.cs
@@ -657,15 +661,20 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Device.DeviceTypeDetector
     file: src/Daqifi.Core/Device/DeviceTypeDetector.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: module
+    qualified: daqifi._internal.comm
+    file: daqifi/_internal/comm.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Static C# class becomes module-level free function
+    `detect_device_type_from_part_number` per project port convention.
+    Same case-insensitive Nq1/Nq2/Nq3 → DeviceType.NYQUIST_* mapping."
   members:
   - upstream: DetectFromPartNumber
-    downstream: null
-    relation: not_yet_ported
+    downstream: detect_device_type_from_part_number
+    relation: one_to_one
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Device.IDevice

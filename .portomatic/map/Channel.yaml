@@ -47,9 +47,17 @@ files:
   rationale: Python uses duck typing; no separate interface file.
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Channel/IChannel.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/devices.py
+  relation: divergent
+  notes: "C# `IChannel` is the abstract base interface for both
+    analog and digital channels. Python doesn't surface a separate
+    base — the concrete `AnalogInputChannel` / `DigitalInputChannel`
+    / `AnalogOutputChannel` / `DigitalOutputChannel` classes on
+    `DaqifiStreamingDevice` carry the `index` / `name` / `is_enabled`
+    / `direction` shape directly (DIV-001 architectural divergence:
+    no event-driven SampleReceived/ActiveSample model, since the
+    Python streaming pipeline emits raw protobuf frames straight to
+    the consumer instead of fan-out per channel)."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Channel/IDataSample.cs
@@ -334,35 +342,51 @@ symbols:
     qualified: Daqifi.Core.Channel.IChannel
     file: src/Daqifi.Core/Channel/IChannel.cs
   downstream: null
-  relation: not_yet_ported
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "C# `IChannel` is collapsed in the Python port — no base
+    interface; the concrete `AnalogInputChannel` / `DigitalInputChannel`
+    / `AnalogOutputChannel` / `DigitalOutputChannel` classes on
+    `DaqifiStreamingDevice` carry the channel shape directly (already
+    documented per-class via the `IDigitalChannel` / `IAnalogChannel`
+    rows). Members map shape-by-shape rather than via a base; the
+    event-driven members (DIV-001) have no Python counterpart."
   members:
   - upstream: ChannelNumber
-    downstream: null
-    relation: not_yet_ported
+    downstream: index
+    relation: divergent
+    notes: "Surfaced as the `index` property on each concrete channel
+      class (matches IDigitalChannel.ChannelNumber → index mapping
+      already recorded in this shard)."
   - upstream: Name
-    downstream: null
-    relation: not_yet_ported
+    downstream: name
+    relation: one_to_one
+    notes: Same `name` property on each concrete channel.
   - upstream: IsEnabled
-    downstream: null
-    relation: not_yet_ported
+    downstream: is_enabled
+    relation: one_to_one
   - upstream: Type
     downstream: null
-    relation: not_yet_ported
+    relation: divergent
+    notes: "Encoded by the concrete class identity (AnalogInputChannel
+      vs DigitalInputChannel) rather than a separate `Type` enum."
   - upstream: Direction
-    downstream: null
-    relation: not_yet_ported
+    downstream: direction
+    relation: one_to_one
   - upstream: ActiveSample
     downstream: null
-    relation: not_yet_ported
+    relation: divergent
+    notes: DIV-001 — see AnalogChannel.ActiveSample row.
   - upstream: SampleReceived
     downstream: null
-    relation: not_yet_ported
+    relation: divergent
+    notes: DIV-001 — Python stream consumers receive raw protobuf frames
+      instead of per-channel events.
   - upstream: SetActiveSample
     downstream: null
-    relation: not_yet_ported
+    relation: divergent
+    notes: DIV-001 — see ActiveSample.
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Channel.IDataSample

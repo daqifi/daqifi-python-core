@@ -122,9 +122,11 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/ILanChipInfoProvider.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/firmware/lan_chip_info_provider.py
+  relation: divergent
+  notes: "Sync `runtime_checkable` Protocol; `GetLanChipInfoAsync` →
+    `get_lan_chip_info` (no `Async` suffix). Returns
+    `Optional[LanChipInfo]` directly instead of wrapping in `Task<>`."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/IntelHexParser.cs
@@ -764,15 +766,21 @@ symbols:
     kind: interface
     qualified: Daqifi.Core.Firmware.ILanChipInfoProvider
     file: src/Daqifi.Core/Firmware/ILanChipInfoProvider.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: interface
+    qualified: daqifi.firmware.lan_chip_info_provider.LanChipInfoProvider
+    file: daqifi/firmware/lan_chip_info_provider.py
+  relation: divergent
   last_synced_sha: null
   notes: null
-  rationale: null
+  rationale: "Sync `runtime_checkable` Protocol — drops the C# `I`
+    prefix per project convention. `GetLanChipInfoAsync` → sync
+    `get_lan_chip_info` returning `Optional[LanChipInfo]`."
   members:
   - upstream: GetLanChipInfoAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: get_lan_chip_info
+    relation: divergent
+    notes: Renamed (no `Async` suffix); sync.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.IntelHexParser

@@ -15,6 +15,7 @@ from daqifi.firmware.external_process import (
 )
 from daqifi.firmware.intel_hex import HexFileRecord, IntelHexParser
 from daqifi.firmware.lan_chip_info import LanChipInfo
+from daqifi.firmware.lan_chip_info_provider import LanChipInfoProvider
 from daqifi.firmware.release_info import FirmwareReleaseInfo
 from daqifi.firmware.update_service import FirmwareUpdateService
 from daqifi.firmware.version import (
@@ -39,6 +40,7 @@ __all__ = [
     "HexFileRecord",
     "IntelHexParser",
     "LanChipInfo",
+    "LanChipInfoProvider",
     "ParsedFirmware",
     "Pic32BootloaderProtocol",
     "ProgressReporter",
