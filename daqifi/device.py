@@ -71,6 +71,11 @@ class NyquistDevice:
         # fetch on demand via :meth:`refresh_metadata` (e.g. after a
         # USB drop / reconnect).
         self._metadata: DeviceMetadata = DeviceMetadata()
+        # Captured exception (if any) from the most recent best-
+        # effort metadata refresh inside `_connect()`. Lets callers
+        # observe an otherwise-silent SYSInfoPB? failure without
+        # changing the non-fatal behavior.
+        self._last_metadata_refresh_error: Optional[Exception] = None
 
         # Channel collections (created on connection)
         self._analog_outputs: Optional[AnalogOutputs] = None
@@ -162,8 +167,11 @@ class NyquistDevice:
             # connect via the outer except below.
             try:
                 self.refresh_metadata(timeout=2.0)
-            except (CommandError, DAQiFiConnectionError, RuntimeError):
-                pass
+                self._last_metadata_refresh_error = None
+            except (CommandError, DAQiFiConnectionError, RuntimeError) as exc:
+                # Observability hook — see `last_metadata_refresh_error`.
+                # Behavior remains best-effort: connect still succeeds.
+                self._last_metadata_refresh_error = exc
 
         except Exception as e:
             self._connected = False
@@ -239,6 +247,20 @@ class NyquistDevice:
             decimal SN.
         """
         return self._device_info.get("serial_number", "Unknown")
+
+    @property
+    def last_metadata_refresh_error(self) -> Optional[Exception]:
+        """The exception captured by the most recent best-effort
+        metadata refresh inside :meth:`connect`, or ``None`` if the
+        refresh succeeded (or was never attempted).
+
+        Useful for observability: after :meth:`connect` returns, a
+        non-``None`` value here means SYSInfoPB? failed during
+        connect-time auto-refresh and ``self.metadata`` is at its
+        empty default. Callers can decide whether to retry via
+        :meth:`refresh_metadata` or proceed with limited identity.
+        """
+        return self._last_metadata_refresh_error
 
     @property
     def metadata(self) -> DeviceMetadata:

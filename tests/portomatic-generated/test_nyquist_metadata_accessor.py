@@ -251,6 +251,9 @@ class TestConnectIsResilientToMetadataFailure:
         dev._connect()
         assert dev.is_connected is True
         assert dev.metadata.serial_number == ""  # unrefreshed default
+        # Observability: the swallowed CommandError is exposed for
+        # later inspection.
+        assert isinstance(dev.last_metadata_refresh_error, CommandError)
 
     def test_connect_survives_connection_error_during_refresh(self):
         """The query_binary RuntimeError-to-DAQiFiConnectionError wrap
@@ -262,6 +265,9 @@ class TestConnectIsResilientToMetadataFailure:
         dev._connect()
         assert dev.is_connected is True
         assert dev.metadata.serial_number == ""
+        # Observability: refresh_metadata translates RuntimeError to
+        # DAQiFiConnectionError, and that's what we capture.
+        assert isinstance(dev.last_metadata_refresh_error, DAQiFiConnectionError)
 
     def test_connect_survives_runtime_error_during_refresh(self):
         """Defensive: if a future backend skips the RuntimeError wrap,
@@ -279,8 +285,28 @@ class TestConnectIsResilientToMetadataFailure:
             )
             dev._connect()
             assert dev.is_connected is True
+            assert isinstance(dev.last_metadata_refresh_error, RuntimeError)
         finally:
             NyquistDevice.refresh_metadata = original_refresh
+
+    def test_successful_refresh_clears_last_error(self):
+        """If the connect-time refresh succeeds, the observability
+        slot should be ``None`` — distinguishes "never failed" from
+        "captured an error that was later forgotten"."""
+        dev = NyquistDevice("/dev/ttyACM0")
+        dev._comm = MagicMock()
+        dev._comm.is_open.return_value = True
+        dev._comm.open.return_value = True
+        dev._comm.send_query.return_value = "DAQiFi,Nq1,0,01-02"
+        msg = DaqifiOutMessage()
+        msg.device_sn = 1234567890123456789
+        dev._comm.query_binary.return_value = _length_prefixed(msg)
+
+        dev._connect()
+
+        assert dev.is_connected is True
+        assert dev.metadata.serial_number == "1234567890123456789"
+        assert dev.last_metadata_refresh_error is None
 
 
 class TestMetadataIsDistinctFromIdnSerialNumber:
