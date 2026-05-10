@@ -298,11 +298,13 @@ symbols:
   rationale: Python uses duck typing; no separate interface file.
   members:
   - upstream: MinValue
-    downstream: min_value
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: "No downstream member. Part of the C# AnalogChannel client-side scaling/calibration model that the Python port intentionally doesn't replicate (see file-level rationale on AnalogChannel.cs): the device computes scaled values and returns them via SCPI, so MinValue is implied by the configured PortRange and not a separate exposed property."
   - upstream: MaxValue
-    downstream: max_value
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: "No downstream member. Same rationale as MinValue — implied by configured PortRange in the device-delegated model."
   - upstream: Resolution
     downstream: resolution
     relation: one_to_one
@@ -319,8 +321,9 @@ symbols:
     downstream: port_range
     relation: one_to_one
   - upstream: GetScaledValue
-    downstream: get_scaled_value
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: "No downstream member. The device computes scaled values server-side and returns them via SCPI; no client-side scaling math lives in the Python AnalogChannel dataclass. See AnalogChannel.cs file-level rationale."
   - upstream: <downstream-only:index>
     downstream: index
     relation: divergent
@@ -420,11 +423,13 @@ symbols:
   rationale: null
   members:
   - upstream: OutputValue
-    downstream: output_value
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: "No downstream member. The Python DigitalChannel dataclass is metadata-only (index/name/direction/is_enabled); per-pin output state is set/read via the DigitalIOChannel SCPI wrapper in daqifi/channels.py rather than carried on the data model. Mirrors the device-delegated pattern documented in the IAnalogChannel rationale."
   - upstream: IsHigh
-    downstream: is_high
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: "No downstream member. Same rationale as OutputValue — current pin state is queried from the device via SCPI through the DigitalIOChannel wrapper, not cached on the data model."
   - upstream: <downstream-only:index>
     downstream: index
     relation: divergent

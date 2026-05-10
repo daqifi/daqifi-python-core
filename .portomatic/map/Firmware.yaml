@@ -236,8 +236,9 @@ symbols:
     downstream: working_directory
     relation: one_to_one
   - upstream: Timeout
-    downstream: timeout
-    relation: not_yet_ported
+    downstream: timeout_seconds
+    relation: one_to_one
+    notes: "C# uses TimeSpan; Python port uses a plain float (seconds) named timeout_seconds for clarity. Same semantics — wall-clock cap on the spawned process."
   - upstream: OnStandardOutputLine
     downstream: on_standard_output_line
     relation: one_to_one
@@ -247,10 +248,6 @@ symbols:
   - upstream: StandardInputResponseFactory
     downstream: standard_input_response_factory
     relation: one_to_one
-  - upstream: <downstream-only:timeout_seconds>
-    downstream: timeout_seconds
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.ExternalProcessResult
@@ -271,18 +268,15 @@ symbols:
     downstream: timed_out
     relation: one_to_one
   - upstream: Duration
-    downstream: duration
-    relation: not_yet_ported
+    downstream: duration_seconds
+    relation: one_to_one
+    notes: "C# uses TimeSpan; Python port uses a plain float (seconds) named duration_seconds for clarity. Same semantics — elapsed wall-clock for the process run."
   - upstream: StandardOutputLines
     downstream: standard_output_lines
     relation: one_to_one
   - upstream: StandardErrorLines
     downstream: standard_error_lines
     relation: one_to_one
-  - upstream: <downstream-only:duration_seconds>
-    downstream: duration_seconds
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareReleaseInfo
@@ -360,13 +354,16 @@ symbols:
   members:
   - upstream: FailedState
     downstream: failed_state
-    relation: not_yet_ported
+    relation: divergent
+    notes: "Same FirmwareUpdateState semantics as the C# property; ported as a plain instance attribute set in __init__ (see FirmwareUpdateException.__init__) rather than @property — extractor doesn't surface raw self.x assignments to the public-member set."
   - upstream: Operation
     downstream: operation
-    relation: not_yet_ported
+    relation: divergent
+    notes: "Same str semantics as the C# property; ported as a plain instance attribute set in __init__."
   - upstream: RecoveryGuidance
     downstream: recovery_guidance
-    relation: not_yet_ported
+    relation: divergent
+    notes: "Same Optional[str] semantics as the C# property; ported as a plain instance attribute set in __init__."
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
