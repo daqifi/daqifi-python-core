@@ -169,7 +169,7 @@ symbols:
   - upstream: LocalInterfaceAddress
     downstream: local_interface_address
     relation: divergent
-    notes: "Field exists on the DeviceInfo dataclass (added 2026-05-10 closing #7 batch) but the current discover() uses a single-socket UDP broadcast model and doesn't track per-NIC origin. Callers can populate it themselves (e.g. probe_ip on a known interface); a future per-NIC broadcasting refactor would auto-populate."
+    notes: "Field exists on the DeviceInfo dataclass (added 2026-05-10 closing #7 batch) but the current discover() uses a single-socket UDP broadcast model and doesn't track per-NIC origin. DeviceInfo is frozen, so callers wanting to set this on a discovered instance must construct a new one via dataclasses.replace(info, local_interface_address=...). A future per-NIC broadcasting refactor in WiFiDeviceFinder would auto-populate at construction time."
   - upstream: Type
     downstream: device_type
     relation: one_to_one

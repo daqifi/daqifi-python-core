@@ -10,8 +10,15 @@ model and doesn't yet auto-populate this field, so coverage here is
 focused on the dataclass contract — the field accepts strings, has
 the right default, and serializes alongside the other identifying
 fields.
+
+Identifiers are deliberately synthetic — IPs come from the RFC
+5737 documentation ranges (``192.0.2.0/24``, ``198.51.100.0/24``)
+and port paths are generic placeholders. No workstation-specific
+values per CLAUDE.md PR Compliance ID 5.
 """
 from __future__ import annotations
+
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -43,9 +50,10 @@ class TestDeviceInfoLocalInterfaceAddress:
     def test_dataclass_is_still_frozen(self):
         """Adding the field must not break frozen-dataclass semantics —
         DeviceInfo is constructed once during discovery and treated as
-        an immutable value object."""
+        an immutable value object. ``FrozenInstanceError`` is the
+        precise exception dataclasses raises on mutation."""
         info = DeviceInfo(name="x")
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             info.local_interface_address = "192.0.2.1"  # type: ignore[misc]
 
     def test_field_independent_of_ip_address(self):
@@ -55,11 +63,11 @@ class TestDeviceInfoLocalInterfaceAddress:
         info = DeviceInfo(
             name="x",
             connection_type=ConnectionType.WIFI,
-            ip_address="10.0.0.5",
-            local_interface_address="192.168.1.42",
+            ip_address="198.51.100.5",
+            local_interface_address="192.0.2.42",
         )
-        assert info.ip_address == "10.0.0.5"
-        assert info.local_interface_address == "192.168.1.42"
+        assert info.ip_address == "198.51.100.5"
+        assert info.local_interface_address == "192.0.2.42"
 
     def test_does_not_affect_serial_devices(self):
         """The field is meaningful only for WiFi finders; a serial-
@@ -68,7 +76,7 @@ class TestDeviceInfoLocalInterfaceAddress:
         info = DeviceInfo(
             name="x",
             connection_type=ConnectionType.SERIAL,
-            port_name="/dev/ttyACM0",
+            port_name="<placeholder-serial-port>",
         )
         assert info.local_interface_address == ""
         assert info.connection_type == ConnectionType.SERIAL
