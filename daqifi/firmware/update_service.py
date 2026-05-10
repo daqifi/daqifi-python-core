@@ -100,6 +100,15 @@ _PERCENT_RE = re.compile(r"(?P<percent>\d{1,3})\s*%")
 _PROCESS_CLEANUP_BUFFER_S = 5.0
 
 
+# Hard caps on the WiFi-tool directory walk to keep
+# _resolve_wifi_tool_path bounded even on accidentally-huge trees.
+# The walk runs BEFORE the PROGRAMMING state-timeout wrapper is
+# entered, so without these caps a missing tool under a giant
+# directory could hang update_wifi_module indefinitely.
+_WIFI_TOOL_SCAN_MAX_DIRS = 500
+_WIFI_TOOL_SCAN_MAX_FILES = 50_000
+
+
 # State-machine guard table (mirrors C# ``AllowedTransitions`` dict).
 _ALLOWED_TRANSITIONS: dict = {
     FirmwareUpdateState.IDLE: {
@@ -994,14 +1003,32 @@ class DefaultFirmwareUpdateService:
         if os.path.isdir(firmware_path):
             tool_name = self._options.wifi_flash_tool_file_name
             matches: List[str] = []
-            # Short-circuit at 2 matches: we only need to distinguish
-            # "0", "exactly 1", and ">1" cases. A user accidentally
-            # pointing at a huge tree can otherwise stall this lookup
-            # for unbounded time before the PROGRAMMING state timeout
-            # even starts (the walk runs in _build_wifi_process_request
-            # which is invoked outside the state-timeout wrapper).
+            # Two safeguards so the walk runs in bounded time before the
+            # PROGRAMMING state-timeout wrapper is even entered:
+            #   1. Short-circuit at 2 matches (we only need to distinguish
+            #      "0" / "exactly 1" / ">1" cases).
+            #   2. Hard cap on traversed dirs/files so a missing tool
+            #      under a huge tree fails fast instead of hanging
+            #      _build_wifi_process_request indefinitely.
+            scanned_dirs = 0
+            scanned_files = 0
             for root, _dirs, files in os.walk(firmware_path):
+                scanned_dirs += 1
+                if scanned_dirs > _WIFI_TOOL_SCAN_MAX_DIRS:
+                    raise FileNotFoundError(
+                        f"Search for {tool_name!r} under {firmware_path!r} "
+                        f"exceeded {_WIFI_TOOL_SCAN_MAX_DIRS} directories; "
+                        "please pass an explicit tool path."
+                    )
                 for name in files:
+                    scanned_files += 1
+                    if scanned_files > _WIFI_TOOL_SCAN_MAX_FILES:
+                        raise FileNotFoundError(
+                            f"Search for {tool_name!r} under "
+                            f"{firmware_path!r} exceeded "
+                            f"{_WIFI_TOOL_SCAN_MAX_FILES} files; please "
+                            "pass an explicit tool path."
+                        )
                     if name == tool_name:
                         matches.append(os.path.join(root, name))
                         if len(matches) >= 2:
