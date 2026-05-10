@@ -218,12 +218,62 @@ class TestRefreshMetadata:
         stream.msg_time_stamp = 12345
         dev._comm.query_binary.return_value = _length_prefixed(stream)
 
-        with pytest.raises(CommandError, match="none of which carried"):
+        # Match on type only — the exact wording isn't part of the
+        # contract, just the exception class.
+        with pytest.raises(CommandError):
             dev.refresh_metadata()
 
         # Cache preserved — the failed refresh didn't clobber it.
         assert dev.metadata.serial_number == "999999"
         assert dev.metadata.host_name == "previously-cached"
+
+    def test_accepts_frame_with_only_host_name_populated(self):
+        """A SYSInfoPB? reply that omits device_pn/device_sn but
+        carries host_name (or any other identity field) is still a
+        valid metadata source — the metadata-detection heuristic
+        must accept any populated SystStatusPB field, not require
+        pn or sn specifically. Regression for Qodo PR #85
+        /agentic_review pass 10 finding #1."""
+        dev = _make_device_with_mock_comm()
+        msg = DaqifiOutMessage()
+        msg.host_name = "DAQiFi-TEST"
+        msg.device_fw_rev = "9.9.9-test"
+        # Deliberately leave device_pn empty and device_sn = 0.
+        dev._comm.query_binary.return_value = _length_prefixed(msg)
+
+        result = dev.refresh_metadata()
+
+        assert result is dev.metadata
+        assert dev.metadata.host_name == "DAQiFi-TEST"
+        assert dev.metadata.firmware_version == "9.9.9-test"
+
+    def test_rejects_string_zero_placeholder_as_metadata(self):
+        """A frame whose only populated SN field is the string ``"0"``
+        (the *IDN? placeholder firmware 3.4.6b1 uses) should be
+        treated as no-metadata — otherwise a future cross-wiring
+        bug could let the placeholder past the detection."""
+        dev = _make_device_with_mock_comm()
+        # device_sn is `int` per the .proto, but a misconfigured
+        # backend / fake could hand us a string. Use the FakeProto
+        # double pattern to exercise the str-"0" rejection path.
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeProto:
+            device_pn: str = ""
+            device_sn: str = "0"  # placeholder — should NOT count
+            device_fw_rev: str = ""
+            device_hw_rev: str = ""
+            host_name: str = ""
+            ssid: str = ""
+
+        # Bypass the protobuf parser by going through the helper
+        # directly — simpler than wiring up a fake parser.
+        from daqifi.device import _frame_has_metadata_fields
+
+        assert _frame_has_metadata_fields(FakeProto()) is False
+        # And a non-"0" string SN counts:
+        assert _frame_has_metadata_fields(FakeProto(device_sn="123")) is True
 
     def test_skips_trailing_streaming_frames_to_find_metadata(self):
         """If query_binary's buffer contains a SYSInfoPB? reply

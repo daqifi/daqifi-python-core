@@ -25,6 +25,38 @@ from .exceptions import (
 )
 
 
+_METADATA_FIELD_NAMES = (
+    "device_pn",
+    "device_sn",
+    "device_fw_rev",
+    "device_hw_rev",
+    "host_name",
+    "ssid",
+)
+
+
+def _frame_has_metadata_fields(data: Any) -> bool:
+    """Heuristic: does ``data`` (a parsed DaqifiOutMessage) look like
+    a SYSInfoPB? reply rather than a streaming-status frame?
+
+    Returns True iff at least one of the canonical SystStatusPB-only
+    fields is populated. The string ``"0"`` is rejected explicitly —
+    firmware 3.4.6b1 uses it as a placeholder for the *IDN? SN field
+    and we don't want a future cross-wire bug to make that count as
+    real metadata. For numeric / bytes fields, falsy values (``0`` /
+    ``b""``) are skipped via the ``elif value:`` arm.
+    """
+    for name in _METADATA_FIELD_NAMES:
+        value = getattr(data, name, None)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and stripped != "0":
+                return True
+        elif value:
+            return True
+    return False
+
+
 class NyquistDevice:
     """
     Main controller for DAQiFi Nyquist devices.
@@ -328,19 +360,25 @@ class NyquistDevice:
                 f"{timeout}s (received {len(raw)} bytes)"
             )
         # Walk the parsed frames newest-to-oldest and pick the latest
-        # one that actually carries SYSInfoPB-shaped metadata
-        # (``device_pn`` or ``device_sn`` populated). If background
-        # streaming is active when this query runs, query_binary's
-        # buffer can contain stream frames AFTER the SYSInfoPB reply;
-        # ``update_from_protobuf`` would no-op on those (it only
-        # writes non-empty fields) and leave metadata stale.
+        # one that actually carries SYSInfoPB-shaped metadata. If
+        # background streaming is active when this query runs,
+        # query_binary's buffer can contain stream frames AFTER the
+        # SYSInfoPB reply; ``update_from_protobuf`` would no-op on
+        # those (it only writes non-empty fields) and leave metadata
+        # stale.
+        #
+        # The "metadata-shaped" check accepts any of the SystStatusPB-
+        # specific fields (pn, sn, fw_rev, hw_rev, host_name, ssid)
+        # being populated — a SYSInfoPB? response that omits pn/sn
+        # but carries other identity fields is still a valid refresh
+        # source, and stream frames carry none of these. The string
+        # ``"0"`` is rejected explicitly because firmware 3.4.6b1
+        # uses it as a placeholder in the *IDN? field, so a future
+        # cross-wiring bug couldn't sneak it through here.
         metadata_msg = None
         for candidate in reversed(messages):
-            data = candidate.data
-            pn = getattr(data, "device_pn", "")
-            sn = getattr(data, "device_sn", 0)
-            if (pn and pn.strip()) or sn:
-                metadata_msg = data
+            if _frame_has_metadata_fields(candidate.data):
+                metadata_msg = candidate.data
                 break
         if metadata_msg is None:
             # Parseable frames arrived but none carried SYSInfoPB-
