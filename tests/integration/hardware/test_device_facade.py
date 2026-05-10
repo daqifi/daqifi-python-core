@@ -226,7 +226,30 @@ def test_reset_returns_to_clean_baseline(
             "*RST without verifying the device identity. Set this "
             "to your unit's SN (see .claude/hardware-rig.md)."
         )
+    # connect() does a best-effort metadata refresh; do an explicit
+    # refresh here with a longer timeout so a transient SYSInfoPB?
+    # miss at connect-time doesn't make the gate falsely report a
+    # mismatch. If the explicit refresh ALSO fails, skip — we can't
+    # safely identity-verify, so we shouldn't proceed to *RST.
+    from daqifi.exceptions import (
+        ConnectionError as DAQiFiConnectionError,
+        CommandError,
+    )
+    try:
+        dev.refresh_metadata(timeout=5.0)
+    except (CommandError, DAQiFiConnectionError) as exc:
+        pytest.skip(
+            f"Cannot verify device identity (SYSInfoPB? failed: {exc}); "
+            f"refusing to send *RST. Re-run with a stable USB connection."
+        )
     actual_sn = dev.metadata.serial_number
+    if not actual_sn:
+        pytest.skip(
+            "metadata.serial_number is empty after refresh; refusing to "
+            "send *RST. Older firmware that doesn't reply to SYSInfoPB? "
+            "would land here — verify your unit reports a non-empty SN "
+            "with `dev.refresh_metadata()`."
+        )
     if actual_sn != expected_sn:
         pytest.fail(
             f"Device SN mismatch — refusing to send *RST. "

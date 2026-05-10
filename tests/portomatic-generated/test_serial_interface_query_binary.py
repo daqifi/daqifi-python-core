@@ -113,3 +113,42 @@ class TestQueryBinary:
         result = iface.query_binary("X?", timeout=0.1, idle_settle=0.02)
 
         assert result == b""
+
+    def test_forces_non_blocking_reads_and_restores_prior_timeout(self):
+        """The serial port's pre-configured ``timeout`` would let a
+        single ``read()`` block past the method's wall-clock deadline.
+        ``query_binary`` must temporarily set ``timeout=0`` and
+        restore the prior value when it returns."""
+        s = _make_fake_serial([b"\x05hello"])
+        s.timeout = 1.5  # arbitrary prior value
+        iface = _make_interface_with_serial(s)
+        observed_during_call: list[float | None] = []
+
+        original_read = s.read.side_effect
+
+        def read_with_observation(_n):
+            observed_during_call.append(s.timeout)
+            return original_read(_n)
+
+        s.read = MagicMock(side_effect=read_with_observation)
+
+        iface.query_binary("X?", timeout=0.5, idle_settle=0.02)
+
+        # While inside query_binary, timeout was forced to 0.
+        assert observed_during_call == [0]
+        # And it's restored on return.
+        assert s.timeout == 1.5
+
+    def test_rejects_non_positive_timeout(self):
+        s = _make_fake_serial([])
+        iface = _make_interface_with_serial(s)
+        with pytest.raises(ValueError, match="timeout must be > 0"):
+            iface.query_binary("X?", timeout=0)
+        with pytest.raises(ValueError, match="timeout must be > 0"):
+            iface.query_binary("X?", timeout=-1.0)
+
+    def test_rejects_negative_idle_settle(self):
+        s = _make_fake_serial([])
+        iface = _make_interface_with_serial(s)
+        with pytest.raises(ValueError, match="idle_settle must be >= 0"):
+            iface.query_binary("X?", timeout=1.0, idle_settle=-0.5)

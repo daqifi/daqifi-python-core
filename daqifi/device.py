@@ -67,10 +67,10 @@ class NyquistDevice:
         self._device_info: Dict[str, Any] = {}
         self._connected = False
         # Protobuf-populated metadata (real SN, MAC, IP, SSID, ...).
-        # Populated lazily — first access via `metadata` triggers a
-        # SYSInfoPB? round-trip if not already refreshed.
+        # Best-effort populated during `_connect()`; callers can re-
+        # fetch on demand via :meth:`refresh_metadata` (e.g. after a
+        # USB drop / reconnect).
         self._metadata: DeviceMetadata = DeviceMetadata()
-        self._metadata_populated = False
 
         # Channel collections (created on connection)
         self._analog_outputs: Optional[AnalogOutputs] = None
@@ -269,16 +269,28 @@ class NyquistDevice:
                 within ``timeout`` seconds.
             DAQiFiConnectionError: If the device isn't connected.
         """
-        if not self._connected:
+        # Use the public `is_connected` so a closed underlying serial
+        # handle (e.g. after USB drop while `_connected` is still
+        # True) surfaces as the documented `DAQiFiConnectionError`
+        # instead of falling through to query_binary's `RuntimeError`.
+        if not self.is_connected:
             raise DAQiFiConnectionError(
                 "Cannot refresh metadata: device not connected"
             )
         from ._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
         from .communication import ProtobufMessageParser
 
-        raw = self._comm.query_binary(
-            scpi_commands.get_device_info().data, timeout=timeout
-        )
+        try:
+            raw = self._comm.query_binary(
+                scpi_commands.get_device_info().data, timeout=timeout
+            )
+        except RuntimeError as e:
+            # SerialInterface.query_binary raises RuntimeError on
+            # closed-port / I/O failure; honor the documented
+            # exception contract by re-raising as a connection error.
+            raise DAQiFiConnectionError(
+                f"Cannot refresh metadata: {e}"
+            ) from e
         parser = ProtobufMessageParser(message_factory=DaqifiOutMessage.FromString)
         messages, _consumed = parser.parse_messages(raw)
         if not messages:
@@ -287,7 +299,6 @@ class NyquistDevice:
                 f"{timeout}s (received {len(raw)} bytes)"
             )
         self._metadata.update_from_protobuf(messages[0].data)
-        self._metadata_populated = True
         return self._metadata
 
     @property

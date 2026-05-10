@@ -44,10 +44,12 @@ def _length_prefixed(message: DaqifiOutMessage) -> bytes:
 
 def _make_device_with_mock_comm() -> NyquistDevice:
     """Build a NyquistDevice with a MagicMock SerialInterface and skip
-    the real ``_connect`` flow. Sets ``_connected = True`` so the
-    refresh_metadata pre-check passes."""
+    the real ``_connect`` flow. Sets ``_connected = True`` AND has the
+    fake ``is_open()`` return True, so ``is_connected`` evaluates True
+    and the refresh_metadata precondition passes."""
     dev = NyquistDevice("/dev/ttyACM0")
     dev._comm = MagicMock()
+    dev._comm.is_open.return_value = True
     dev._connected = True
     dev._variant = BoardVariant.NQ1
     return dev
@@ -60,15 +62,17 @@ class TestMetadataProperty:
 
     def test_default_metadata_is_empty(self):
         """Before any refresh, metadata fields are at the dataclass
-        defaults — empty strings, zero device_port, etc. (Verifies
-        the property doesn't auto-trigger a refresh on plain access;
-        the auto-refresh fires inside ``_connect`` and explicit calls
-        to ``refresh_metadata`` only.)"""
+        defaults — empty strings, zero device_port, etc. The property
+        is a pure accessor, so accessing it does NOT trigger a
+        SYSInfoPB? round-trip; auto-refresh only fires inside
+        ``_connect``, explicit refresh via ``refresh_metadata``."""
         dev = _make_device_with_mock_comm()
         md = dev.metadata
         assert md.serial_number == ""
         assert md.part_number == ""
         assert md.device_port == 0
+        # Pure accessor — no I/O attempted.
+        dev._comm.query_binary.assert_not_called()
 
     def test_metadata_property_returns_same_object(self):
         """The property is a thin accessor — repeat access returns the
@@ -80,35 +84,40 @@ class TestMetadataProperty:
 
 class TestRefreshMetadata:
     def test_populates_from_real_protobuf_round_trip(self):
-        """End-to-end: build a real DaqifiOutMessage with the
-        canonical SN of our test rig, serialize + length-prefix it,
-        feed it through query_binary, and verify the cached metadata
-        carries every populated field."""
+        """End-to-end: build a real DaqifiOutMessage, serialize +
+        length-prefix it, feed it through query_binary, and verify
+        the cached metadata carries every populated field.
+
+        Identifiers are deliberately synthetic — RFC 5737 IP, an IANA-
+        reserved locally-administered MAC, and a 19-digit non-real
+        SN. No workstation-specific values committed (PR Compliance
+        ID 5).
+        """
         dev = _make_device_with_mock_comm()
         msg = DaqifiOutMessage()
         msg.device_pn = "Nq1"
-        msg.device_sn = 9090696306837482193
-        msg.device_fw_rev = "3.4.6b1"
-        msg.device_hw_rev = "2.0.0"
-        msg.host_name = "DAQiFi-A781"
-        msg.ssid = "Tesla"
-        msg.device_port = 9760
-        msg.ip_addr = bytes([192, 168, 1, 60])
-        msg.mac_addr = bytes([0xF8, 0xF0, 0x05, 0xA4, 0xA7, 0x81])
+        msg.device_sn = 1234567890123456789
+        msg.device_fw_rev = "9.9.9-test"
+        msg.device_hw_rev = "0.0.0-test"
+        msg.host_name = "DAQiFi-TEST"
+        msg.ssid = "test-ssid"
+        msg.device_port = 9760  # protocol port — not workstation-specific
+        msg.ip_addr = bytes([192, 0, 2, 1])  # RFC 5737 TEST-NET-1
+        msg.mac_addr = bytes([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
         dev._comm.query_binary.return_value = _length_prefixed(msg)
 
         result = dev.refresh_metadata(timeout=2.0)
 
         assert result is dev.metadata
-        assert dev.metadata.serial_number == "9090696306837482193"
+        assert dev.metadata.serial_number == "1234567890123456789"
         assert dev.metadata.part_number == "Nq1"
-        assert dev.metadata.firmware_version == "3.4.6b1"
-        assert dev.metadata.hardware_revision == "2.0.0"
-        assert dev.metadata.host_name == "DAQiFi-A781"
-        assert dev.metadata.ssid == "Tesla"
+        assert dev.metadata.firmware_version == "9.9.9-test"
+        assert dev.metadata.hardware_revision == "0.0.0-test"
+        assert dev.metadata.host_name == "DAQiFi-TEST"
+        assert dev.metadata.ssid == "test-ssid"
         assert dev.metadata.device_port == 9760
-        assert dev.metadata.ip_address == "192.168.1.60"
-        assert dev.metadata.mac_address == "F8-F0-05-A4-A7-81"
+        assert dev.metadata.ip_address == "192.0.2.1"
+        assert dev.metadata.mac_address == "02-00-00-00-00-01"
 
     def test_passes_timeout_to_query_binary(self):
         dev = _make_device_with_mock_comm()
@@ -163,6 +172,31 @@ class TestRefreshMetadata:
         # Must short-circuit before any I/O attempt.
         dev._comm.query_binary.assert_not_called()
 
+    def test_raises_when_serial_handle_closed(self):
+        """``_connected`` may still be True after a USB drop while
+        the underlying serial handle is closed. Use the public
+        ``is_connected`` (which checks both) so this case surfaces
+        as the documented connection error, not an opaque
+        RuntimeError from query_binary."""
+        dev = _make_device_with_mock_comm()
+        # _connected stays True; is_open() returns False to simulate
+        # USB drop after a successful connect.
+        dev._comm.is_open.return_value = False
+
+        with pytest.raises(DAQiFiConnectionError, match="not connected"):
+            dev.refresh_metadata()
+        dev._comm.query_binary.assert_not_called()
+
+    def test_wraps_runtime_error_as_connection_error(self):
+        """If query_binary itself raises RuntimeError mid-call (port
+        was closed between is_connected check and write), the caller
+        should still see DAQiFiConnectionError per the docstring."""
+        dev = _make_device_with_mock_comm()
+        dev._comm.query_binary.side_effect = RuntimeError("Serial port not open")
+
+        with pytest.raises(DAQiFiConnectionError, match="Cannot refresh metadata"):
+            dev.refresh_metadata()
+
     def test_repeat_refresh_overlays_new_fields_without_clobbering_old(self):
         """``update_from_protobuf`` only writes non-empty fields, so a
         second protobuf reply that only carries the SN should leave a
@@ -172,17 +206,17 @@ class TestRefreshMetadata:
         first = DaqifiOutMessage()
         first.device_pn = "Nq1"
         first.device_sn = 111
-        first.ssid = "Tesla"
+        first.ssid = "test-ssid"
         dev._comm.query_binary.return_value = _length_prefixed(first)
         dev.refresh_metadata()
-        assert dev.metadata.ssid == "Tesla"
+        assert dev.metadata.ssid == "test-ssid"
 
         second = DaqifiOutMessage()
         second.device_sn = 222  # only SN, no SSID
         dev._comm.query_binary.return_value = _length_prefixed(second)
         dev.refresh_metadata()
         assert dev.metadata.serial_number == "222"
-        assert dev.metadata.ssid == "Tesla"
+        assert dev.metadata.ssid == "test-ssid"
 
 
 class TestMetadataIsDistinctFromIdnSerialNumber:
@@ -194,9 +228,9 @@ class TestMetadataIsDistinctFromIdnSerialNumber:
         dev._device_info["serial_number"] = "0"  # firmware 3.4.6b1 placeholder
 
         msg = DaqifiOutMessage()
-        msg.device_sn = 9090696306837482193
+        msg.device_sn = 1234567890123456789  # synthetic, not workstation-specific
         dev._comm.query_binary.return_value = _length_prefixed(msg)
         dev.refresh_metadata()
 
         assert dev.serial_number == "0"  # IDN field — unchanged
-        assert dev.metadata.serial_number == "9090696306837482193"  # protobuf SN
+        assert dev.metadata.serial_number == "1234567890123456789"  # protobuf SN
