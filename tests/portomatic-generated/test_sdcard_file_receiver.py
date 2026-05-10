@@ -312,6 +312,62 @@ class TestTimeoutValidation:
 # ---- progress callback -----------------------------------------------------
 
 
+class TestLeftoverBytes:
+    """Bytes read past the EOF marker must be preserved on
+    ``self.leftover`` so callers sharing the source stream don't
+    lose multi-byte protocol frames that arrived in the same chunk."""
+
+    def test_no_leftover_when_marker_at_end_of_chunk(self):
+        source = _ChunkedStream([b"payload" + END_OF_FILE_MARKER])
+        receiver = SdCardFileReceiver(source)
+        receiver.receive(io.BytesIO(), "log.bin", timeout_s=2.0)
+        assert receiver.leftover == b""
+
+    def test_leftover_captures_post_marker_chunk_bytes(self):
+        # Marker arrives mid-chunk; the bytes after the marker
+        # represent something the caller cares about (e.g. the start
+        # of a streaming-status frame on a shared transport).
+        post_marker = b"next-frame-data"
+        source = _ChunkedStream([
+            b"payload" + END_OF_FILE_MARKER + post_marker,
+        ])
+        receiver = SdCardFileReceiver(source)
+        n = receiver.receive(io.BytesIO(), "log.bin", timeout_s=2.0)
+        assert n == len(b"payload")
+        assert receiver.leftover == post_marker
+
+    def test_leftover_when_marker_spans_boundary_with_trailing_data(self):
+        # Marker starts at end of chunk 1, finishes in chunk 2 followed
+        # by extra data.
+        post_marker = b"after-marker"
+        chunks = [
+            b"head" + END_OF_FILE_MARKER[:5],
+            END_OF_FILE_MARKER[5:] + post_marker,
+        ]
+        source = _ChunkedStream(chunks)
+        receiver = SdCardFileReceiver(source)
+        receiver.receive(io.BytesIO(), "log.bin", timeout_s=2.0)
+        assert receiver.leftover == post_marker
+
+    def test_leftover_resets_on_subsequent_receive(self):
+        # Re-use the same receiver instance; second receive should
+        # NOT carry over the first call's leftover.
+        first_source = _ChunkedStream([b"a" + END_OF_FILE_MARKER + b"first-tail"])
+        receiver = SdCardFileReceiver(first_source)
+        receiver.receive(io.BytesIO(), "log.bin", timeout_s=2.0)
+        assert receiver.leftover == b"first-tail"
+
+        # Swap in a fresh source for the second call.
+        receiver._source = _ChunkedStream([b"b" + END_OF_FILE_MARKER])
+        receiver.receive(io.BytesIO(), "log.bin", timeout_s=2.0)
+        assert receiver.leftover == b""
+
+    def test_leftover_initially_empty(self):
+        source = _ChunkedStream([END_OF_FILE_MARKER])
+        receiver = SdCardFileReceiver(source)
+        assert receiver.leftover == b""
+
+
 class TestProgressCallback:
     def test_progress_fires_with_bytes_received_and_filename(self):
         events: list[SdCardTransferProgress] = []

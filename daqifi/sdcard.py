@@ -297,6 +297,26 @@ class SdCardFileReceiver:
             raise ValueError("buffer_size must be greater than zero")
         self._source = source_stream
         self._buffer_size = buffer_size
+        # Bytes read past the EOF marker — preserved here so callers
+        # sharing the source stream (e.g. a serial transport that
+        # multiplexes file download + streaming-status frames) can
+        # avoid silent data loss. Empty until ``receive`` finds the
+        # marker; then exposes anything after the marker via
+        # :attr:`leftover`.
+        self._leftover: bytes = b""
+
+    @property
+    def leftover(self) -> bytes:
+        """Bytes read past the EOF marker during the most recent
+        :meth:`receive` call.
+
+        Empty until ``receive`` finds the marker. After receive
+        returns, this holds any bytes that arrived in the final
+        chunk after the marker — callers that share the source
+        stream with subsequent reads should prepend this to their
+        next read so multi-byte protocol frames don't get split.
+        """
+        return self._leftover
 
     def receive(
         self,
@@ -368,6 +388,9 @@ class SdCardFileReceiver:
         marker_len = len(END_OF_FILE_MARKER)
         deadline = time.monotonic() + effective_timeout
         has_in_waiting = hasattr(self._source, "in_waiting")
+        # Reset leftover so a re-used receiver doesn't expose stale
+        # bytes from the previous receive() call.
+        self._leftover = b""
 
         # Trailing-byte window so the marker can be detected even
         # when split across chunk boundaries — matches the upstream
@@ -411,7 +434,14 @@ class SdCardFileReceiver:
             found, position = _find_eof_marker(trailing, chunk_bytes)
             if found:
                 # ``position`` is in the virtual [trailing + chunk] view.
-                # Write everything before it.
+                # Write everything before it; preserve everything after
+                # in ``self._leftover`` so callers sharing the source
+                # stream can avoid silent data loss.
+                marker_end_in_combined = position + marker_len
+                # Index in the chunk where the marker ends. If the
+                # marker started in trailing, this is < len(chunk) when
+                # the marker spans the boundary.
+                marker_end_in_chunk = marker_end_in_combined - len(trailing)
                 if position < len(trailing):
                     # Marker started inside the trailing buffer — only
                     # write the part of trailing before the marker.
@@ -424,10 +454,15 @@ class SdCardFileReceiver:
                     if trailing:
                         destination_stream.write(bytes(trailing))
                         total_bytes += len(trailing)
-                    new_data_file_bytes = position - len(trailing)
-                    if new_data_file_bytes > 0:
-                        destination_stream.write(chunk_bytes[:new_data_file_bytes])
-                        total_bytes += new_data_file_bytes
+                    marker_start_in_chunk = position - len(trailing)
+                    if marker_start_in_chunk > 0:
+                        destination_stream.write(chunk_bytes[:marker_start_in_chunk])
+                        total_bytes += marker_start_in_chunk
+                # Capture any bytes after the marker for the caller.
+                if 0 <= marker_end_in_chunk < len(chunk_bytes):
+                    self._leftover = chunk_bytes[marker_end_in_chunk:]
+                else:
+                    self._leftover = b""
                 _emit_transfer_progress(progress, total_bytes, file_name)
                 return total_bytes
 
