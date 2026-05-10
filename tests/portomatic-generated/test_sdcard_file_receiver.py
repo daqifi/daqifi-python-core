@@ -276,14 +276,14 @@ class TestConstructorValidation:
 class TestTimeoutValidation:
     def test_rejects_zero_timeout(self):
         source = _ChunkedStream([END_OF_FILE_MARKER])
-        with pytest.raises(ValueError, match="timeout_s must be > 0"):
+        with pytest.raises(ValueError, match="positive finite"):
             SdCardFileReceiver(source).receive(
                 io.BytesIO(), "log.bin", timeout_s=0
             )
 
     def test_rejects_negative_timeout(self):
         source = _ChunkedStream([END_OF_FILE_MARKER])
-        with pytest.raises(ValueError, match="timeout_s must be > 0"):
+        with pytest.raises(ValueError, match="positive finite"):
             SdCardFileReceiver(source).receive(
                 io.BytesIO(), "log.bin", timeout_s=-1.0
             )
