@@ -35,7 +35,6 @@ import asyncio
 import logging
 import os
 import re
-import shlex
 import sys
 import threading
 import time
@@ -577,7 +576,7 @@ class DefaultFirmwareUpdateService:
             )
             self._logger.warning("PIC32 firmware update canceled.")
             raise
-        except Exception as exc:  # noqa: BLE001 — re-raised below
+        except Exception as exc:
             failed_state = self._current_state
             failed_operation = self._current_operation
             self._transition_to_state(
@@ -749,7 +748,7 @@ class DefaultFirmwareUpdateService:
             )
             self._logger.warning("WiFi module update canceled.")
             raise
-        except Exception as exc:  # noqa: BLE001 — re-raised below
+        except Exception as exc:
             failed_state = self._current_state
             failed_operation = self._current_operation
             self._transition_to_state(
