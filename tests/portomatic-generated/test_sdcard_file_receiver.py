@@ -197,9 +197,12 @@ class TestReceiveErrorPaths:
         (open but no bytes incoming) should hit the deadline and
         raise TimeoutError("timed out") rather than block forever
         or false-claim the stream is closed."""
+        # ~25 entries comfortably covers a 0.2s timeout at 0.01s/poll.
+        # Avoid allocating a huge list — the receiver only polls a
+        # handful of times before the deadline trips.
         source = _DelayedStream(
             chunks=[],  # never used — in_waiting is always 0 so read isn't called
-            in_waiting_seq=[0] * 100_000,  # always idle
+            in_waiting_seq=[0] * 64,  # always idle for the polling window
         )
         dest = io.BytesIO()
 
@@ -283,6 +286,16 @@ class TestTimeoutValidation:
         with pytest.raises(ValueError, match="timeout_s must be > 0"):
             SdCardFileReceiver(source).receive(
                 io.BytesIO(), "log.bin", timeout_s=-1.0
+            )
+
+    def test_rejects_nan_timeout(self):
+        """``float('nan')`` slips past ``<= 0`` (NaN comparisons are
+        always False) and would make the deadline check never fire,
+        hanging the receiver forever. Must raise ValueError."""
+        source = _ChunkedStream([END_OF_FILE_MARKER])
+        with pytest.raises(ValueError, match="finite"):
+            SdCardFileReceiver(source).receive(
+                io.BytesIO(), "log.bin", timeout_s=float("nan")
             )
 
     def test_default_timeout_used_when_none(self):

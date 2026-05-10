@@ -354,9 +354,15 @@ class SdCardFileReceiver:
         effective_timeout = (
             timeout_s if timeout_s is not None else self._DEFAULT_TIMEOUT_S
         )
-        if effective_timeout <= 0:
+        # ``effective_timeout != effective_timeout`` is the canonical
+        # NaN check that doesn't require importing math here. NaN
+        # would slip past ``<= 0`` (NaN comparisons are always False)
+        # but make the deadline NaN, which then makes every
+        # ``time.monotonic() >= deadline`` comparison False — the
+        # loop would hang forever.
+        if effective_timeout != effective_timeout or effective_timeout <= 0:
             raise ValueError(
-                f"timeout_s must be > 0 (got {effective_timeout!r})"
+                f"timeout_s must be a positive finite number (got {effective_timeout!r})"
             )
 
         marker_len = len(END_OF_FILE_MARKER)
