@@ -117,13 +117,13 @@ symbols:
   rationale: null
   members:
   - upstream: DeviceDiscovered
-    downstream: <downstream-only:N/A — DeviceFinder uses synchronous return-list API>
+    downstream: null
     relation: divergent
-    notes: "daqifi.discovery.DeviceFinder is the simple NyquistDevice-flavoured finder that returns a list synchronously from discover(); it doesn't expose an event/observer surface. The Pythonic event-style port lives on the daqifi.device_finders.* finders (see HidDeviceFinder.add_device_discovered)."
+    notes: "No downstream member. daqifi.discovery.DeviceFinder is the simple NyquistDevice-flavoured finder that returns a list synchronously from discover(); it doesn't expose an event/observer surface. The Pythonic event-style port lives on the daqifi.device_finders.* finders (see HidDeviceFinder.add_device_discovered)."
   - upstream: DiscoveryCompleted
-    downstream: <downstream-only:N/A — see DeviceDiscovered above>
+    downstream: null
     relation: divergent
-    notes: "Same as DeviceDiscovered: not exposed on the simple synchronous DeviceFinder facade."
+    notes: "No downstream member. Same rationale as DeviceDiscovered: not exposed on the simple synchronous DeviceFinder facade."
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
@@ -240,17 +240,17 @@ symbols:
   rationale: null
   members:
   - upstream: BroadcastEndpoint
-    downstream: <downstream-only:N/A — C# private nested struct>
+    downstream: null
     relation: divergent
-    notes: "C# WiFiDeviceFinder.NetworkInterfaceInfo.BroadcastEndpoint is a member of a PRIVATE readonly struct nested inside WiFiDeviceFinder. Not exposed as a public WiFiDeviceFinder property in C# — extractor surfaced it incorrectly. The Python finder uses a single-socket UDP broadcast model rather than the C# per-NIC model, so no equivalent surface is needed."
+    notes: "No downstream member. C# WiFiDeviceFinder.NetworkInterfaceInfo.BroadcastEndpoint is a member of a PRIVATE readonly struct nested inside WiFiDeviceFinder, not exposed as a public WiFiDeviceFinder property — the extractor surfaced it incorrectly. The Python finder uses a single-socket UDP broadcast model rather than the C# per-NIC model, so no equivalent surface is needed."
   - upstream: LocalAddress
-    downstream: <downstream-only:N/A — C# private nested struct>
+    downstream: null
     relation: divergent
-    notes: "Same as BroadcastEndpoint above: member of the PRIVATE NetworkInterfaceInfo struct nested in WiFiDeviceFinder, not a public property."
+    notes: "No downstream member. Same as BroadcastEndpoint: member of the PRIVATE NetworkInterfaceInfo struct nested in WiFiDeviceFinder, not a public property."
   - upstream: SubnetMask
-    downstream: <downstream-only:N/A — not present in current upstream>
+    downstream: null
     relation: divergent
-    notes: "No SubnetMask member exists in the current upstream WiFiDeviceFinder.cs (verified at last_synced_upstream_sha). Map row appears to be a stale extractor artifact; left as divergent rather than deleted so a future schema change doesn't silently re-introduce it."
+    notes: "No downstream member. No SubnetMask member exists in the current upstream WiFiDeviceFinder.cs (verified at last_synced_upstream_sha). Map row appears to be a stale extractor artifact; left as divergent rather than deleted so a future schema change doesn't silently re-introduce it."
   - upstream: DeviceDiscovered
     downstream: add_device_discovered
     relation: divergent
