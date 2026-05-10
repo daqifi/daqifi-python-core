@@ -152,3 +152,65 @@ class TestQueryBinary:
         iface = _make_interface_with_serial(s)
         with pytest.raises(ValueError, match="idle_settle must be >= 0"):
             iface.query_binary("X?", timeout=1.0, idle_settle=-0.5)
+
+    def test_idle_settle_fires_when_read_returns_empty_after_pending(self):
+        """Some pyserial backends report ``in_waiting > 0`` and then
+        ``read()`` returns ``b""`` (USB CDC contention). The pre-fix
+        loop would never reach the idle-settle branch in that case
+        and would burn the full timeout. The fixed loop must still
+        exit via idle-settle: receive some bytes, then have read()
+        return b"" while in_waiting is still > 0, and confirm the
+        method exits well before the configured timeout."""
+        FakeSerial = type("FakeSerial", (MagicMock,), {})
+        s = FakeSerial()
+        s.is_open = True
+        s.write = MagicMock(return_value=None)
+        s.flush = MagicMock()
+        s.reset_input_buffer = MagicMock()
+        s.timeout = 1.0
+
+        # Sequence: first poll reports 5 pending → read returns b"hello".
+        # Subsequent polls keep reporting 5 pending but read returns
+        # b"" — simulating the contention bug. The loop must idle-
+        # settle out via the no-bytes-this-iteration path.
+        in_waiting_seq = iter([5] + [5] * 100)
+        FakeSerial.in_waiting = PropertyMock(
+            side_effect=lambda: next(in_waiting_seq, 0)
+        )
+        chunks = iter([b"hello"])
+        s.read = MagicMock(side_effect=lambda _n: next(chunks, b""))
+
+        iface = _make_interface_with_serial(s)
+        import time as _time
+
+        start = _time.monotonic()
+        result = iface.query_binary("X?", timeout=2.0, idle_settle=0.05)
+        elapsed = _time.monotonic() - start
+
+        assert result == b"hello"
+        # Should exit via idle-settle (~0.05s + a couple poll intervals),
+        # NOT burn the full 2.0s deadline. Generous upper bound to
+        # absorb scheduling jitter on slow CI.
+        assert elapsed < 1.0, f"loop overran idle-settle: {elapsed:.3f}s"
+
+    def test_idle_settle_zero_waits_for_full_timeout(self):
+        """``idle_settle=0`` disables the early-exit so the loop
+        keeps polling until the deadline expires — useful when the
+        caller wants to accumulate bursty traffic that may have gaps
+        longer than 100ms."""
+        # Bytes arrive immediately, then the source goes quiet. With
+        # idle_settle=0, the loop should NOT break on the quiet
+        # poll; it should wait for the full timeout.
+        s = _make_fake_serial([b"early"])
+        iface = _make_interface_with_serial(s)
+        import time as _time
+
+        start = _time.monotonic()
+        result = iface.query_binary("X?", timeout=0.3, idle_settle=0)
+        elapsed = _time.monotonic() - start
+
+        assert result == b"early"
+        # Should wait ~0.3s (with sleep granularity), NOT exit early.
+        assert elapsed >= 0.25, (
+            f"loop exited early despite idle_settle=0: {elapsed:.3f}s"
+        )

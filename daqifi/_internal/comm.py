@@ -1472,7 +1472,7 @@ class SerialInterface:
 
                 received = bytearray()
                 deadline = time.monotonic() + timeout
-                last_byte_time = 0.0
+                last_byte_time: Optional[float] = None
                 while time.monotonic() < deadline:
                     pending = self._serial.in_waiting
                     if pending:
@@ -1480,10 +1480,28 @@ class SerialInterface:
                         if chunk:
                             received.extend(chunk)
                             last_byte_time = time.monotonic()
-                    elif received and (time.monotonic() - last_byte_time) >= idle_settle:
+                            # Got bytes — try to drain more before checking
+                            # idle-settle so a multi-chunk reply doesn't
+                            # break out of the loop on the first quiet poll.
+                            continue
+                    # No bytes this iteration (either ``pending == 0`` or
+                    # ``read()`` returned empty even though in_waiting was
+                    # non-zero — a corner case some pyserial backends hit
+                    # under USB CDC contention). Check the idle-settle
+                    # early-exit condition uniformly here.
+                    #
+                    # ``idle_settle == 0`` disables the early-exit entirely;
+                    # the loop then waits for the full timeout (useful when
+                    # the caller wants to keep accumulating bytes that may
+                    # come in bursts longer than 100ms).
+                    if (
+                        received
+                        and idle_settle > 0
+                        and last_byte_time is not None
+                        and (time.monotonic() - last_byte_time) >= idle_settle
+                    ):
                         break
-                    else:
-                        time.sleep(0.01)
+                    time.sleep(0.01)
                 return bytes(received)
             except (serial.SerialException, OSError) as e:
                 raise RuntimeError(f"Serial communication error: {e}")
