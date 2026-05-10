@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import (
@@ -71,7 +72,10 @@ __all__ = [
     "SdCardLogEntry",
     "SdCardLogSession",
     "SdCardFileParser",
+    "SdCardCsvFileParser",
+    "SdCardJsonFileParser",
     "SdCardFileParserFactory",
+    "SdCardFileReceiver",
     "parse_sd_card_file_list",
     "END_OF_FILE_MARKER",
 ]
@@ -248,6 +252,310 @@ class SdCardTransferProgress:
 
     bytes_received: int
     file_name: str
+
+
+class SdCardFileReceiver:
+    """Receives raw bytes from a transport stream during an SD-card
+    file download, accumulating into a destination stream and
+    detecting the ``__END_OF_FILE__`` marker that signals transfer
+    completion.
+
+    Ports ``Daqifi.Core/Device/SdCard/SdCardFileReceiver.cs``. Sync
+    end-to-end per project convention (the C# original is async, but
+    the device-side flow is single-threaded SCPI). The marker
+    detection scans across chunk boundaries via a trailing-byte
+    window, so payloads that split the marker between two reads are
+    handled correctly.
+
+    Typical usage:
+
+    .. code-block:: python
+
+        receiver = SdCardFileReceiver(transport_stream)
+        with open("dest.bin", "wb") as out:
+            n = receiver.receive(out, "log.bin", timeout_s=60.0)
+        # n == bytes written to dest.bin (excludes the marker).
+
+    Distinct from the inline EOF-marker scan in
+    :meth:`DaqifiStreamingDevice.download_sd_card_file` — this class
+    accepts any byte-yielding stream so it can be reused outside
+    the streaming-device flow (tests, alternative transports, etc).
+    """
+
+    _DEFAULT_BUFFER_SIZE = 16 * 1024
+    _DEFAULT_TIMEOUT_S = 30 * 60  # 30 minutes — matches the C# default
+    _IDLE_SLEEP_S = 0.01
+
+    def __init__(
+        self,
+        source_stream: Any,
+        buffer_size: int = _DEFAULT_BUFFER_SIZE,
+    ) -> None:
+        if source_stream is None:
+            raise TypeError("source_stream must not be None")
+        if buffer_size <= 0:
+            raise ValueError("buffer_size must be greater than zero")
+        self._source = source_stream
+        self._buffer_size = buffer_size
+        # Bytes read past the EOF marker — preserved here so callers
+        # sharing the source stream (e.g. a serial transport that
+        # multiplexes file download + streaming-status frames) can
+        # avoid silent data loss. Empty until ``receive`` finds the
+        # marker; then exposes anything after the marker via
+        # :attr:`leftover`.
+        self._leftover: bytes = b""
+
+    @property
+    def leftover(self) -> bytes:
+        """Bytes read past the EOF marker during the most recent
+        :meth:`receive` call.
+
+        Empty until ``receive`` finds the marker. After receive
+        returns, this holds any bytes that arrived in the final
+        chunk after the marker — callers that share the source
+        stream with subsequent reads should prepend this to their
+        next read so multi-byte protocol frames don't get split.
+        """
+        return self._leftover
+
+    def receive(
+        self,
+        destination_stream: Any,
+        file_name: str,
+        progress: Optional[Callable[[SdCardTransferProgress], None]] = None,
+        timeout_s: Optional[float] = None,
+    ) -> int:
+        """Read until the EOF marker, write everything before it to
+        ``destination_stream``, and return the total bytes written.
+
+        Args:
+            destination_stream: a writable stream (must accept
+                ``write(bytes)``).
+            file_name: the file name — used for progress callback
+                payloads.
+            progress: optional callback fired after each write
+                (matches the C# ``IProgress<SdCardTransferProgress>``
+                pattern). Callback failures are swallowed.
+            timeout_s: wall-clock cap. Defaults to 30 minutes (matches
+                upstream). ``None`` uses the default; pass an
+                explicit value to override.
+
+        Returns:
+            Total bytes written to ``destination_stream`` (the EOF
+            marker itself is NOT written).
+
+        Raises:
+            TypeError: if ``destination_stream`` or ``file_name`` is None.
+            ValueError: if ``timeout_s`` is non-positive.
+            TimeoutError: if the marker isn't received within
+                ``timeout_s`` OR the source stream is closed before
+                the marker arrives.
+
+        Read-loop strategy:
+            Two source-stream shapes are supported. If the source
+            exposes ``in_waiting`` (pyserial-style), we poll it and
+            only call ``read(min(in_waiting, buffer_size))`` when
+            there are pending bytes — this avoids ``read()`` blocking
+            longer than the requested ``timeout_s``. When ``in_waiting``
+            is 0 we sleep briefly and retry until the deadline.
+
+            Sources without ``in_waiting`` (BytesIO and friends)
+            fall back to direct ``read(buffer_size)``; an empty
+            return means the stream is exhausted and we surface
+            it as ``TimeoutError("closed before receiving...")``.
+            BytesIO is unambiguous about EOF, but pyserial isn't,
+            which is why the in_waiting branch exists.
+        """
+        if destination_stream is None:
+            raise TypeError("destination_stream must not be None")
+        if file_name is None:
+            raise TypeError("file_name must not be None")
+
+        effective_timeout = (
+            timeout_s if timeout_s is not None else self._DEFAULT_TIMEOUT_S
+        )
+        # ``effective_timeout != effective_timeout`` is the canonical
+        # NaN check that doesn't require importing math here. NaN
+        # would slip past ``<= 0`` (NaN comparisons are always False)
+        # but make the deadline NaN, which then makes every
+        # ``time.monotonic() >= deadline`` comparison False — the
+        # loop would hang forever.
+        if effective_timeout != effective_timeout or effective_timeout <= 0:
+            raise ValueError(
+                f"timeout_s must be a positive finite number (got {effective_timeout!r})"
+            )
+
+        marker_len = len(END_OF_FILE_MARKER)
+        deadline = time.monotonic() + effective_timeout
+        has_in_waiting = hasattr(self._source, "in_waiting")
+        # Reset leftover so a re-used receiver doesn't expose stale
+        # bytes from the previous receive() call.
+        self._leftover = b""
+
+        # Trailing-byte window so the marker can be detected even
+        # when split across chunk boundaries — matches the upstream
+        # implementation. Sized to exactly the marker length.
+        trailing = bytearray()
+        total_bytes = 0
+
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"SD card file download timed out after "
+                    f"{effective_timeout:.3f} seconds. Received "
+                    f"{total_bytes} bytes before timeout."
+                )
+
+            if has_in_waiting:
+                pending = self._source.in_waiting
+                if not pending:
+                    time.sleep(self._IDLE_SLEEP_S)
+                    continue
+                read_n = min(pending, self._buffer_size)
+                chunk = self._source.read(read_n)
+                if not chunk:
+                    # Backed-off pyserial read: in_waiting reported >0
+                    # but read returned nothing. Treat as transient and
+                    # let the deadline check decide when to give up.
+                    time.sleep(self._IDLE_SLEEP_S)
+                    continue
+            else:
+                # BytesIO/SpooledTemporaryFile/etc — empty read is
+                # unambiguous EOF (no in-band "still open but idle"
+                # state), so treat as stream-closed.
+                chunk = self._source.read(self._buffer_size)
+                if not chunk:
+                    raise TimeoutError(
+                        f"Transport stream closed before receiving the EOF "
+                        f"marker. Received {total_bytes} bytes."
+                    )
+
+            chunk_bytes = bytes(chunk)
+            found, position = _find_eof_marker(trailing, chunk_bytes)
+            if found:
+                # ``position`` is in the virtual [trailing + chunk] view.
+                # Write everything before it; preserve everything after
+                # in ``self._leftover`` so callers sharing the source
+                # stream can avoid silent data loss.
+                marker_end_in_combined = position + marker_len
+                # Index in the chunk where the marker ends. If the
+                # marker started in trailing, this is < len(chunk) when
+                # the marker spans the boundary.
+                marker_end_in_chunk = marker_end_in_combined - len(trailing)
+                if position < len(trailing):
+                    # Marker started inside the trailing buffer — only
+                    # write the part of trailing before the marker.
+                    if position > 0:
+                        destination_stream.write(bytes(trailing[:position]))
+                        total_bytes += position
+                else:
+                    # Marker started inside the new chunk — write all
+                    # of trailing + the part of chunk before the marker.
+                    if trailing:
+                        destination_stream.write(bytes(trailing))
+                        total_bytes += len(trailing)
+                    marker_start_in_chunk = position - len(trailing)
+                    if marker_start_in_chunk > 0:
+                        destination_stream.write(chunk_bytes[:marker_start_in_chunk])
+                        total_bytes += marker_start_in_chunk
+                # Capture any bytes after the marker for the caller.
+                if 0 <= marker_end_in_chunk < len(chunk_bytes):
+                    self._leftover = chunk_bytes[marker_end_in_chunk:]
+                else:
+                    self._leftover = b""
+                _emit_transfer_progress(progress, total_bytes, file_name)
+                return total_bytes
+
+            # No marker yet — write everything except the last
+            # markerLength bytes (those become the new trailing window
+            # for next iteration's spanning check).
+            combined_len = len(trailing) + len(chunk_bytes)
+            if combined_len >= marker_len:
+                safe_count = combined_len - marker_len
+                if safe_count > 0:
+                    from_trailing = min(safe_count, len(trailing))
+                    if from_trailing > 0:
+                        destination_stream.write(bytes(trailing[:from_trailing]))
+                        total_bytes += from_trailing
+                    from_new = safe_count - from_trailing
+                    if from_new > 0:
+                        destination_stream.write(chunk_bytes[:from_new])
+                        total_bytes += from_new
+                # Rebuild trailing window: last marker_len bytes of
+                # the combined [trailing + chunk] sequence.
+                from_new_data = min(len(chunk_bytes), marker_len)
+                from_trailing_data = marker_len - from_new_data
+                new_trailing = bytearray()
+                if from_trailing_data > 0:
+                    new_trailing.extend(
+                        trailing[len(trailing) - from_trailing_data:]
+                    )
+                if from_new_data > 0:
+                    new_trailing.extend(
+                        chunk_bytes[len(chunk_bytes) - from_new_data:]
+                    )
+                trailing = new_trailing
+            else:
+                # Combined data still shorter than the marker —
+                # accumulate and keep waiting.
+                trailing.extend(chunk_bytes)
+            _emit_transfer_progress(progress, total_bytes, file_name)
+
+
+def _find_eof_marker(
+    trailing: bytes, chunk: bytes
+) -> Tuple[bool, int]:
+    """Scan the virtual ``trailing + chunk`` buffer for the EOF marker.
+
+    Returns ``(found, position)`` where ``position`` is the marker
+    start index in the combined view. The marker can span the
+    boundary, so the search starts at ``max(0, len(trailing) -
+    len(marker) + 1)`` and ends at ``len(combined) - len(marker)``.
+    Mirrors the upstream ``FindEndOfFileMarker``.
+    """
+    marker = END_OF_FILE_MARKER
+    marker_len = len(marker)
+    combined_len = len(trailing) + len(chunk)
+    if combined_len < marker_len:
+        return False, -1
+
+    search_start = max(0, len(trailing) - marker_len + 1)
+    search_end = combined_len - marker_len
+
+    for pos in range(search_start, search_end + 1):
+        match = True
+        for j in range(marker_len):
+            idx = pos + j
+            if idx < len(trailing):
+                b = trailing[idx]
+            else:
+                b = chunk[idx - len(trailing)]
+            if b != marker[j]:
+                match = False
+                break
+        if match:
+            return True, pos
+    return False, -1
+
+
+def _emit_transfer_progress(
+    progress: Optional[Callable[[SdCardTransferProgress], None]],
+    bytes_received: int,
+    file_name: str,
+) -> None:
+    """Best-effort SdCardTransferProgress callback. Mirrors the C#
+    IProgress<T> pattern: any callback failure is swallowed so a
+    buggy progress handler can't abort an otherwise-successful
+    transfer."""
+    if progress is None:
+        return
+    try:
+        progress(SdCardTransferProgress(
+            bytes_received=bytes_received,
+            file_name=file_name,
+        ))
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
