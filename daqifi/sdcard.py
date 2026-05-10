@@ -326,9 +326,25 @@ class SdCardFileReceiver:
 
         Raises:
             TypeError: if ``destination_stream`` or ``file_name`` is None.
+            ValueError: if ``timeout_s`` is non-positive.
             TimeoutError: if the marker isn't received within
-                ``timeout_s`` OR the source stream returns 0 bytes
-                before the marker arrives.
+                ``timeout_s`` OR the source stream is closed before
+                the marker arrives.
+
+        Read-loop strategy:
+            Two source-stream shapes are supported. If the source
+            exposes ``in_waiting`` (pyserial-style), we poll it and
+            only call ``read(min(in_waiting, buffer_size))`` when
+            there are pending bytes — this avoids ``read()`` blocking
+            longer than the requested ``timeout_s``. When ``in_waiting``
+            is 0 we sleep briefly and retry until the deadline.
+
+            Sources without ``in_waiting`` (BytesIO and friends)
+            fall back to direct ``read(buffer_size)``; an empty
+            return means the stream is exhausted and we surface
+            it as ``TimeoutError("closed before receiving...")``.
+            BytesIO is unambiguous about EOF, but pyserial isn't,
+            which is why the in_waiting branch exists.
         """
         if destination_stream is None:
             raise TypeError("destination_stream must not be None")
@@ -338,10 +354,14 @@ class SdCardFileReceiver:
         effective_timeout = (
             timeout_s if timeout_s is not None else self._DEFAULT_TIMEOUT_S
         )
+        if effective_timeout <= 0:
+            raise ValueError(
+                f"timeout_s must be > 0 (got {effective_timeout!r})"
+            )
 
-        marker = END_OF_FILE_MARKER
-        marker_len = len(marker)
+        marker_len = len(END_OF_FILE_MARKER)
         deadline = time.monotonic() + effective_timeout
+        has_in_waiting = hasattr(self._source, "in_waiting")
 
         # Trailing-byte window so the marker can be detected even
         # when split across chunk boundaries — matches the upstream
@@ -353,30 +373,33 @@ class SdCardFileReceiver:
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"SD card file download timed out after "
-                    f"{effective_timeout:.0f} seconds. Received "
+                    f"{effective_timeout:.3f} seconds. Received "
                     f"{total_bytes} bytes before timeout."
                 )
-            chunk = self._source.read(self._buffer_size)
-            if not chunk:
-                # Some streams return b"" briefly when empty rather than
-                # blocking. Distinguish "no bytes right now" (sleep and
-                # retry) from "stream actually closed". A reasonable
-                # heuristic: peek via in_waiting if the stream exposes
-                # it; otherwise sleep and retry until deadline.
-                if hasattr(self._source, "in_waiting"):
-                    if self._source.in_waiting > 0:
-                        time.sleep(self._IDLE_SLEEP_S)
-                        continue
-                    # No bytes pending AND empty read — treat as closed.
+
+            if has_in_waiting:
+                pending = self._source.in_waiting
+                if not pending:
+                    time.sleep(self._IDLE_SLEEP_S)
+                    continue
+                read_n = min(pending, self._buffer_size)
+                chunk = self._source.read(read_n)
+                if not chunk:
+                    # Backed-off pyserial read: in_waiting reported >0
+                    # but read returned nothing. Treat as transient and
+                    # let the deadline check decide when to give up.
+                    time.sleep(self._IDLE_SLEEP_S)
+                    continue
+            else:
+                # BytesIO/SpooledTemporaryFile/etc — empty read is
+                # unambiguous EOF (no in-band "still open but idle"
+                # state), so treat as stream-closed.
+                chunk = self._source.read(self._buffer_size)
+                if not chunk:
                     raise TimeoutError(
                         f"Transport stream closed before receiving the EOF "
                         f"marker. Received {total_bytes} bytes."
                     )
-                # No introspection — empty read = stream closed.
-                raise TimeoutError(
-                    f"Transport stream closed before receiving the EOF "
-                    f"marker. Received {total_bytes} bytes."
-                )
 
             chunk_bytes = bytes(chunk)
             found, position = _find_eof_marker(trailing, chunk_bytes)

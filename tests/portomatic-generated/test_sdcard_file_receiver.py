@@ -192,12 +192,14 @@ class TestReceiveErrorPaths:
         with pytest.raises(TimeoutError, match="closed before"):
             SdCardFileReceiver(source).receive(dest, "log.bin", timeout_s=2.0)
 
-    def test_deadline_exceeded_raises_timeout(self):
-        # Source has bytes pending but never delivers — no closure
-        # signal, in_waiting > 0, so the receiver waits until deadline.
+    def test_deadline_exceeded_raises_timeout_when_in_waiting_idle(self):
+        """A pyserial-style source that reports in_waiting==0 forever
+        (open but no bytes incoming) should hit the deadline and
+        raise TimeoutError("timed out") rather than block forever
+        or false-claim the stream is closed."""
         source = _DelayedStream(
-            chunks=[b""],  # always empty read
-            in_waiting_seq=[1] * 100,  # always claims bytes pending
+            chunks=[],  # never used — in_waiting is always 0 so read isn't called
+            in_waiting_seq=[0] * 100_000,  # always idle
         )
         dest = io.BytesIO()
 
@@ -205,8 +207,43 @@ class TestReceiveErrorPaths:
         with pytest.raises(TimeoutError, match="timed out"):
             SdCardFileReceiver(source).receive(dest, "log.bin", timeout_s=0.2)
         elapsed = time.monotonic() - start
-        # Should give up around timeout_s, not block forever.
         assert elapsed < 1.0
+
+    def test_pyserial_idle_then_data_arrives(self):
+        """Reception must not abort on transient empty reads — the
+        common pyserial 'in_waiting==0 for a few polls then bytes
+        arrive' pattern."""
+        # Simulate: 3 idle polls (in_waiting=0), then 1 chunk + marker
+        # arrives in one chunk.
+        payload = b"finally-arrived"
+
+        class _PyserialLike:
+            def __init__(self):
+                self._poll = 0
+                # in_waiting=0 for the first 3 polls, then matches the chunk size.
+                self._iw_sequence = [0, 0, 0, len(payload + END_OF_FILE_MARKER)]
+                self._chunk = payload + END_OF_FILE_MARKER
+                self._read_done = False
+
+            @property
+            def in_waiting(self) -> int:
+                if self._poll < len(self._iw_sequence):
+                    v = self._iw_sequence[self._poll]
+                    self._poll += 1
+                    return v
+                return 0
+
+            def read(self, _n: int) -> bytes:
+                if self._read_done:
+                    return b""
+                self._read_done = True
+                return self._chunk
+
+        source = _PyserialLike()
+        dest = io.BytesIO()
+        n = SdCardFileReceiver(source).receive(dest, "log.bin", timeout_s=2.0)
+        assert n == len(payload)
+        assert dest.getvalue() == payload
 
     def test_rejects_none_destination(self):
         source = _ChunkedStream([END_OF_FILE_MARKER])
@@ -231,6 +268,32 @@ class TestConstructorValidation:
     def test_rejects_negative_buffer_size(self):
         with pytest.raises(ValueError, match="greater than zero"):
             SdCardFileReceiver(io.BytesIO(b""), buffer_size=-1)
+
+
+class TestTimeoutValidation:
+    def test_rejects_zero_timeout(self):
+        source = _ChunkedStream([END_OF_FILE_MARKER])
+        with pytest.raises(ValueError, match="timeout_s must be > 0"):
+            SdCardFileReceiver(source).receive(
+                io.BytesIO(), "log.bin", timeout_s=0
+            )
+
+    def test_rejects_negative_timeout(self):
+        source = _ChunkedStream([END_OF_FILE_MARKER])
+        with pytest.raises(ValueError, match="timeout_s must be > 0"):
+            SdCardFileReceiver(source).receive(
+                io.BytesIO(), "log.bin", timeout_s=-1.0
+            )
+
+    def test_default_timeout_used_when_none(self):
+        """timeout_s=None falls back to the 30-minute default. Smoke
+        test that the default isn't accidentally 0 (which would
+        immediately raise)."""
+        source = _ChunkedStream([END_OF_FILE_MARKER])
+        n = SdCardFileReceiver(source).receive(
+            io.BytesIO(), "log.bin", timeout_s=None
+        )
+        assert n == 0
 
 
 # ---- progress callback -----------------------------------------------------
