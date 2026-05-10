@@ -2209,12 +2209,26 @@ class DaqifiDeviceFactory:
                 raise ValueError(
                     "device_info must have a port for WiFi connections."
                 )
+            # Reject floats (silent int() truncation would target a
+            # different port — e.g. 9760.9 → 9760) and non-numeric
+            # strings (which would raise a confusing int() error
+            # instead of our explicit message).
+            if isinstance(port, bool) or not isinstance(port, int):
+                if isinstance(port, str) and port.strip().lstrip("-").isdigit():
+                    port_int = int(port.strip())
+                else:
+                    raise ValueError(
+                        f"device_info.port must be an integer for WiFi "
+                        f"connections (got {type(port).__name__}={port!r})."
+                    )
+            else:
+                port_int = port
             # Strip the host before forwarding so leading/trailing
             # whitespace can't pass connect_tcp's strip-validation
             # but still reach the transport unstripped.
             return DaqifiDeviceFactory.connect_tcp(
                 host=str(ip).strip(),
-                port=int(port),
+                port=port_int,
                 device_name=resolved_name,
                 retry_options=retry_options,
                 initialize_device=initialize_device,

@@ -102,6 +102,44 @@ class TestConnectFromDeviceInfoWifiDispatch:
                 DaqifiDeviceFactory.connect_from_device_info(info)
             mock_tcp.assert_not_called()
 
+    def test_wifi_float_port_raises_valueerror(self):
+        """``int(9760.9)`` would silently truncate to 9760, targeting
+        a different port than the caller supplied. Surface as a
+        descriptive ValueError instead."""
+        info = DeviceInfo(
+            name="x",
+            connection_type=ConnectionType.WIFI,
+            ip_address="198.51.100.5",
+            port=9760.9,  # type: ignore[arg-type]
+        )
+        with patch.object(DaqifiDeviceFactory, "connect_tcp") as mock_tcp:
+            with pytest.raises(ValueError, match="port must be an integer"):
+                DaqifiDeviceFactory.connect_from_device_info(info)
+            mock_tcp.assert_not_called()
+
+    def test_wifi_string_port_accepted_when_numeric(self):
+        info = DeviceInfo(
+            name="x",
+            connection_type=ConnectionType.WIFI,
+            ip_address="198.51.100.5",
+            port="9760",  # type: ignore[arg-type]
+        )
+        with patch.object(DaqifiDeviceFactory, "connect_tcp") as mock_tcp:
+            DaqifiDeviceFactory.connect_from_device_info(info)
+        assert mock_tcp.call_args.kwargs["port"] == 9760
+
+    def test_wifi_string_port_rejected_when_garbage(self):
+        info = DeviceInfo(
+            name="x",
+            connection_type=ConnectionType.WIFI,
+            ip_address="198.51.100.5",
+            port="9760a",  # type: ignore[arg-type]
+        )
+        with patch.object(DaqifiDeviceFactory, "connect_tcp") as mock_tcp:
+            with pytest.raises(ValueError, match="port must be an integer"):
+                DaqifiDeviceFactory.connect_from_device_info(info)
+            mock_tcp.assert_not_called()
+
     def test_wifi_strips_whitespace_before_forwarding(self):
         info = DeviceInfo(
             name="x",
