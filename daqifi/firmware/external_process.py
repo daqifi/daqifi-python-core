@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -74,14 +75,17 @@ class ExternalProcessRunner(Protocol):
 def _split_arguments(arguments: Union[str, Sequence[str]]) -> List[str]:
     """Normalize the `arguments` field into a list passed to subprocess.
 
-    String inputs go through `shlex.split` for shell-style quoting.
+    String inputs go through `shlex.split`. On Windows we run with
+    ``posix=False`` so backslashes (`C:\\path\\tool.exe`) and double-
+    quoted arguments parse correctly — POSIX mode treats backslashes
+    as escape characters and corrupts Windows paths.
     Sequence inputs (list/tuple) are returned as-is — useful when an
     argument needs to contain literal spaces or quote characters.
     """
     if not arguments:
         return []
     if isinstance(arguments, str):
-        return shlex.split(arguments)
+        return shlex.split(arguments, posix=not sys.platform.startswith("win"))
     return list(arguments)
 
 

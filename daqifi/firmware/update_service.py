@@ -35,7 +35,7 @@ import asyncio
 import logging
 import os
 import re
-import sys
+import shutil
 import threading
 import time
 from typing import (
@@ -168,6 +168,14 @@ class FirmwareUpdateService(Protocol):
     ) -> None:
         """Run a PIC32 firmware update via bootloader mode.
 
+        **Caller responsibility:** this is a destructive operation
+        (flashes firmware over USB-HID). Callers driving multi-device
+        rigs MUST gate the call against ``device.metadata.serial_number``
+        per ``CLAUDE.md`` ("Identity-gating destructive operations in
+        your own code"). The library does not enforce identity itself
+        because the expected value is a property of the caller's rig
+        configuration, not of the device transport.
+
         Raises:
             FirmwareUpdateException: when any update step fails.
         """
@@ -181,6 +189,9 @@ class FirmwareUpdateService(Protocol):
         cancel_event: Optional[threading.Event] = None,
     ) -> None:
         """Run a WiFi-module update via the external flashing tool.
+
+        **Caller responsibility:** same identity-gating as
+        :meth:`update_firmware`.
 
         Raises:
             FirmwareUpdateException: when any update step fails.
@@ -337,14 +348,22 @@ class DefaultFirmwareUpdateService:
 
         Mirrors C# ``IDisposable.Dispose``. After ``close()`` no further
         update calls are accepted. Acquires the operation lock so any
-        in-flight update finishes its ``_safe_disconnect_hid()`` call
-        before this method tears down the HID transport itself.
+        in-flight update finishes before tearing down the HID transport.
+        Disconnects AND closes the transport — ``HidTransport`` exposes
+        both lifecycle methods and ``close()`` is what marks the
+        underlying handle disposed.
         """
         with self._operation_lock:
             if self._closed:
                 return
             self._closed = True
             self._safe_disconnect_hid()
+            try:
+                self._hid_transport.close()
+            except Exception as exc:
+                self._logger.warning(
+                    "Failed to close HID transport during cleanup: %s", exc
+                )
 
     # -- exclusive-access wrapper ---------------------------------------
 
@@ -353,9 +372,12 @@ class DefaultFirmwareUpdateService:
         operation: Callable[[], None],
         cancel_event: Optional[threading.Event],
     ) -> None:
+        # Early-cancel intentionally NOT raised here: the inner flows
+        # check `cancel_event.is_set()` at every loop iteration and wrap
+        # `_CancelledError` in `FirmwareUpdateException`. Raising early
+        # here would leak the internal sentinel and skip the FAILED
+        # state transition.
         self._raise_if_closed()
-        if cancel_event is not None and cancel_event.is_set():
-            raise _CancelledError()
 
         if not self._operation_lock.acquire(blocking=True):
             raise RuntimeError("Failed to acquire firmware-update lock.")
@@ -860,11 +882,16 @@ class DefaultFirmwareUpdateService:
         executable_arguments = tool_arguments
 
         extension = os.path.splitext(tool_path)[1].lower()
-        if extension in (".cmd", ".bat") and sys.platform.startswith("win"):
-            executable_path = "cmd.exe"
-            executable_arguments = (
-                f'/c "{tool_path}" {tool_arguments}'
-            )
+        if extension in (".cmd", ".bat"):
+            cmd_exe = shutil.which("cmd.exe")
+            if cmd_exe is None:
+                raise FileNotFoundError(
+                    f"WiFi flash tool {tool_path!r} is a Windows .cmd/.bat "
+                    "script but cmd.exe was not found on PATH. Run from "
+                    "Windows or WSL with Windows interop enabled."
+                )
+            executable_path = cmd_exe
+            executable_arguments = f'/c "{tool_path}" {tool_arguments}'
 
         progress_state = {"last_process_percent": 0}
         progress_lock = threading.Lock()
@@ -1175,6 +1202,10 @@ class DefaultFirmwareUpdateService:
                 state, operation, t
             ),
         )
+        # Honour cancellation set BEFORE the action starts so we never
+        # send a destructive command (force_bootloader, FWUpdate) on an
+        # already-cancelled run.
+        deadline.check()
         return action(deadline)
 
     def _build_state_timeout_message(

@@ -42,8 +42,8 @@ usbipd.exe detach --busid <BUSID>
 **Detached after `*RST`?** The `*RST` SCPI command makes the
 device drop USB and re-enumerate. On WSL2 the new connection
 may NOT auto-attach — re-run `usbipd.exe attach --wsl --busid <X-Y>`
-to bring it back. (The other agent's COM3 device staying
-attached doesn't help; each unit is its own bus ID.)
+to bring it back. (Other units already attached to WSL don't
+help; each unit is its own bus ID and re-attaches independently.)
 
 **If the device shows "Not shared"**, an admin needs to
 `usbipd.exe bind --busid <X-Y>` once from elevated PowerShell —

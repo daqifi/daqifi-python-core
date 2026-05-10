@@ -226,7 +226,7 @@ class _FakeFirmwareDownloadService:
 
 
 class _FakeStreamingDevice:
-    def __init__(self, name: str = "COM3") -> None:
+    def __init__(self, name: str = "fake-port-3") -> None:
         self.name = name
         self.is_connected = True
         self.is_streaming = False
@@ -374,7 +374,7 @@ class TestUpdateFirmwareHappyPath:
     def test_transitions_through_expected_states_and_reports_progress(
         self,
     ) -> None:
-        device = _FakeStreamingDevice("COM3")
+        device = _FakeStreamingDevice("fake-port-3")
         hid = _FakeHidTransport()
         # version → erase ack → 2x program ack → verify version
         hid.enqueue_read(bytes([0x01, 0x10]))
@@ -432,7 +432,7 @@ class TestUpdateFirmwareHappyPath:
 
 class TestUpdateFirmwareFailureModes:
     def test_when_bootloader_never_appears_throws_with_state_context(self) -> None:
-        device = _FakeStreamingDevice("COM3")
+        device = _FakeStreamingDevice("fake-port-3")
         hid = _FakeHidTransport()
         enumerator = _FakeHidEnumerator([])
         options = _fast_options()
@@ -468,7 +468,7 @@ class TestUpdateFirmwareFailureModes:
         assert "PID=0x003C" in msg
 
     def test_when_canceled_raises_and_transitions_to_failed(self) -> None:
-        device = _FakeStreamingDevice("COM3")
+        device = _FakeStreamingDevice("fake-port-3")
         hid = _FakeHidTransport()
         enumerator = _FakeHidEnumerator([])
         options = _fast_options()
@@ -503,7 +503,7 @@ class TestUpdateFirmwareFailureModes:
         assert "canceled" in str(exc_info.value).lower()
 
     def test_when_program_ack_fails_retries_and_completes(self) -> None:
-        device = _FakeStreamingDevice("COM3")
+        device = _FakeStreamingDevice("fake-port-3")
         hid = _FakeHidTransport()
         hid.enqueue_read(bytes([0x01, 0x10]))  # version
         hid.enqueue_read(bytes([0x01, 0x02]))  # erase ack
@@ -537,7 +537,7 @@ class TestUpdateFirmwareFailureModes:
     def test_when_hid_enumeration_throws_exception_has_enumeration_context(
         self,
     ) -> None:
-        device = _FakeStreamingDevice("COM3")
+        device = _FakeStreamingDevice("fake-port-3")
         hid = _FakeHidTransport()
         enumerator = _ThrowingHidEnumerator(
             RuntimeError("HID backend unavailable.")
@@ -614,7 +614,7 @@ class TestUpdateWifiModule:
     def test_happy_path_sends_expected_commands_and_reports_progress(
         self,
     ) -> None:
-        device = _FakeStreamingDevice("COM7")
+        device = _FakeStreamingDevice("fake-port-7")
         runner = _FakeExternalProcessRunner(
             ExternalProcessResult(
                 exit_code=0,
@@ -674,7 +674,7 @@ class TestUpdateWifiModule:
         assert complete and complete[-1].percent_complete == pytest.approx(100.0)
 
     def test_when_process_fails_throws_with_programming_state(self) -> None:
-        device = _FakeStreamingDevice("COM8")
+        device = _FakeStreamingDevice("fake-port-8")
         runner = _FakeExternalProcessRunner(
             ExternalProcessResult(
                 exit_code=1,
@@ -705,7 +705,7 @@ class TestUpdateWifiModule:
         assert service.current_state == FirmwareUpdateState.FAILED
 
     def test_when_process_times_out_throws(self) -> None:
-        device = _FakeStreamingDevice("COM9")
+        device = _FakeStreamingDevice("fake-port-9")
         runner = _FakeExternalProcessRunner(
             ExternalProcessResult(
                 exit_code=0,
@@ -735,7 +735,7 @@ class TestUpdateWifiModule:
         assert isinstance(exc_info.value.__cause__, TimeoutError)
 
     def test_when_programming_failure_string_in_output_throws(self) -> None:
-        device = _FakeStreamingDevice("COM10")
+        device = _FakeStreamingDevice("fake-port-10")
         runner = _FakeExternalProcessRunner(
             ExternalProcessResult(
                 exit_code=0,
@@ -774,7 +774,7 @@ class TestUpdateWifiModule:
             is_pre_release=False,
         )
         device = _FakeLanChipInfoStreamingDevice(
-            "COM9",
+            "fake-port-9",
             chip_info=LanChipInfo(
                 chip_id=1234,
                 fw_version="19.5.4",
@@ -817,7 +817,7 @@ class TestUpdateWifiModule:
             is_pre_release=False,
         )
         device = _FakeLanChipInfoStreamingDevice(
-            "COM10",
+            "fake-port-10",
             chip_info=LanChipInfo(
                 chip_id=1234,
                 fw_version="19.5.4",
@@ -852,7 +852,7 @@ class TestUpdateWifiModule:
     def test_when_device_does_not_support_lan_query_proceeds_with_flash(
         self,
     ) -> None:
-        device = _FakeStreamingDevice("COM11")  # no LanChipInfoProvider
+        device = _FakeStreamingDevice("fake-port-11")  # no LanChipInfoProvider
         runner = _FakeExternalProcessRunner()
         options = _fast_options()
         options.post_lan_firmware_mode_delay = 0.005
@@ -906,7 +906,7 @@ class TestUpdateWifiModule:
 
 class TestStateMachine:
     def test_state_changed_callback_fires(self) -> None:
-        device = _FakeStreamingDevice("COM3")
+        device = _FakeStreamingDevice("fake-port-3")
         hid = _FakeHidTransport()
         hid.enqueue_read(bytes([0x01, 0x10]))
         hid.enqueue_read(bytes([0x01, 0x02]))
@@ -935,7 +935,7 @@ class TestStateMachine:
         assert all(e.previous_state != e.current_state for e in events)
 
     def test_back_to_back_updates_reset_from_complete(self) -> None:
-        device = _FakeStreamingDevice("COM3")
+        device = _FakeStreamingDevice("fake-port-3")
         hid = _FakeHidTransport()
         for _ in range(2):
             hid.enqueue_read(bytes([0x01, 0x10]))
@@ -991,7 +991,7 @@ class TestStateMachine:
 
 class TestDisconnectedDevice:
     def test_update_firmware_when_device_disconnected_throws(self) -> None:
-        device = _FakeStreamingDevice("COM3")
+        device = _FakeStreamingDevice("fake-port-3")
         device.is_connected = False
 
         info = HidDeviceInfo(0x04D8, 0x003C, "path-1", "SN-1", "Bootloader")
@@ -1011,7 +1011,7 @@ class TestDisconnectedDevice:
         assert exc_info.value.failed_state == FirmwareUpdateState.PREPARING_DEVICE
 
     def test_update_wifi_when_device_disconnected_throws(self) -> None:
-        device = _FakeStreamingDevice("COM3")
+        device = _FakeStreamingDevice("fake-port-3")
         device.is_connected = False
 
         service = DefaultFirmwareUpdateService(
