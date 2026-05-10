@@ -997,13 +997,21 @@ class DefaultFirmwareUpdateService:
                 )
                 self._last_bootloader_enumeration_error = None
             except Exception as exc:
+                # USB enumeration is transient by nature (kernel module
+                # reloading, hidapi races, the device re-enumerating
+                # after force_bootloader). Don't hard-fail on the first
+                # error — retain it on _last_bootloader_enumeration_error
+                # so the state-timeout message can surface it later, then
+                # sleep + retry until the deadline expires.
                 self._last_bootloader_enumeration_error = exc
-                raise RuntimeError(
-                    f"HID enumeration failed while searching for bootloader "
-                    f"device VID=0x{self._options.bootloader_vendor_id:04X}, "
-                    f"PID=0x{self._options.bootloader_product_id:04X} on poll "
-                    f"attempt {self._bootloader_poll_attempts}."
-                ) from exc
+                self._logger.debug(
+                    "HID enumeration failed on poll attempt %d; will retry "
+                    "until timeout: %s",
+                    self._bootloader_poll_attempts,
+                    exc,
+                )
+                self._sleep_with_cancel(self._options.poll_interval, deadline)
+                continue
 
             for device in devices:
                 return device

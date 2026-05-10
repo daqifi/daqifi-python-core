@@ -542,7 +542,11 @@ class TestUpdateFirmwareFailureModes:
         enumerator = _ThrowingHidEnumerator(
             RuntimeError("HID backend unavailable.")
         )
+        # Tight WaitingForBootloader timeout so the retry loop exits
+        # quickly into the timeout path.
         options = _fast_options()
+        options.waiting_for_bootloader_timeout = 0.18
+        options.poll_interval = 0.025
 
         service = DefaultFirmwareUpdateService(
             hid_transport=hid,
@@ -564,10 +568,14 @@ class TestUpdateFirmwareFailureModes:
         assert exc.failed_state == FirmwareUpdateState.WAITING_FOR_BOOTLOADER
         assert service.current_state == FirmwareUpdateState.FAILED
 
+        # The transient enumeration error is retried until the deadline
+        # elapses; the timeout message surfaces it via
+        # `Last HID enumeration error:`.
         cause = exc.__cause__
-        assert isinstance(cause, RuntimeError)
+        assert isinstance(cause, TimeoutError)
         msg = str(cause)
-        assert "HID enumeration failed while searching for bootloader device" in msg
+        assert "Last HID enumeration error" in msg
+        assert "HID backend unavailable" in msg
         assert "VID=0x04D8" in msg
         assert "PID=0x003C" in msg
 
