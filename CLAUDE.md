@@ -6,6 +6,50 @@ Real serial numbers, IPs, COM ports etc. are workstation-specific
 and DO NOT belong in this tracked file — record them in a local
 gitignored file instead (see "Local rig file" below).
 
+## Attaching the device to WSL2 from inside WSL
+
+Agents running in WSL2 can call `usbipd.exe` directly through
+the Windows PATH integration — no need to ask the operator to
+hop into PowerShell. Workflow:
+
+```bash
+# 1. List all USB devices on the Windows side
+usbipd.exe list
+
+# 2. Find your DAQiFi unit by VID:PID 04d8:f794 (USB Serial Device).
+#    The "BUSID" column is what attach takes.
+#    State "Shared" = ready to attach; "Attached" = already on WSL;
+#    "Not shared" = needs `usbipd bind --busid <X-Y>` first (admin).
+
+# 3. Attach it to WSL
+usbipd.exe attach --wsl --busid <BUSID>
+
+# 4. Confirm /dev/ttyACM* appeared and identify your unit by SN
+ls /dev/ttyACM*
+for port in /dev/ttyACM*; do
+    echo "=== $port ==="
+    bash ~/.claude/skills/scpi/scpi.sh "SYST:SERialNUMber?" "$port" 1500
+done
+# The hex SN converts to decimal:
+# python3 -c "print(int('<HEX>', 16))" — match against your
+# .claude/hardware-rig.md or DAQIFI_EXPECTED_SERIAL_NUMBER.
+
+# 5. When done (e.g., before a *RST that drops USB), detach so
+#    Windows-side tools can use it again
+usbipd.exe detach --busid <BUSID>
+```
+
+**Detached after `*RST`?** The `*RST` SCPI command makes the
+device drop USB and re-enumerate. On WSL2 the new connection
+may NOT auto-attach — re-run `usbipd.exe attach --wsl --busid <X-Y>`
+to bring it back. (The other agent's COM3 device staying
+attached doesn't help; each unit is its own bus ID.)
+
+**If the device shows "Not shared"**, an admin needs to
+`usbipd.exe bind --busid <X-Y>` once from elevated PowerShell —
+the agent can't do this from WSL. After that, `attach` works
+without elevation.
+
 ## Identify your device
 
 Multiple DAQiFi units may be exposed on the same workstation

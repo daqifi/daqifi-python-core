@@ -17,7 +17,10 @@ from daqifi.firmware.intel_hex import HexFileRecord, IntelHexParser
 from daqifi.firmware.lan_chip_info import LanChipInfo
 from daqifi.firmware.lan_chip_info_provider import LanChipInfoProvider
 from daqifi.firmware.release_info import FirmwareReleaseInfo
-from daqifi.firmware.update_service import FirmwareUpdateService
+from daqifi.firmware.update_service import (
+    DefaultFirmwareUpdateService,
+    FirmwareUpdateService,
+)
 from daqifi.firmware.version import (
     FirmwareRevision,
     FirmwareVersion,
@@ -28,6 +31,7 @@ from daqifi.firmware.version import (
 __all__ = [
     "BootloaderProtocol",
     "Crc16",
+    "DefaultFirmwareUpdateService",
     "ExternalProcessRequest",
     "ExternalProcessResult",
     "ExternalProcessRunner",

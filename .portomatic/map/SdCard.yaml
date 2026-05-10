@@ -372,6 +372,14 @@ symbols:
     downstream: receive
     relation: divergent
     notes: "Async/sync collapsed per project convention. Same EOF-marker scanning across chunk boundaries; same TimeoutError on stream-close-before-marker and deadline-exceeded paths. timeout_s parameter is a plain float (seconds) replacing C#'s TimeSpan? — defaults to 30 minutes (matches upstream). progress callback failures are swallowed (matches IProgress<T> best-effort semantics)."
+  - upstream: <downstream-only:leftover>
+    downstream: leftover
+    relation: divergent
+    notes: "Python-only property — exposes any bytes that arrived past the
+      EOF marker so a shared transport (e.g. SCPI text + binary on one
+      stream) doesn't silently drop them. C# upstream's transport never
+      shares streams with text protocols so this case doesn't arise
+      there."
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.SdCard.SdCardJsonFileParser

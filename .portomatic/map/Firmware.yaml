@@ -47,9 +47,18 @@ files:
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateService.cs
-  downstream: null
-  relation: not_yet_ported
-  notes: null
+  downstream: daqifi/firmware/update_service.py
+  relation: divergent
+  notes: "C# `FirmwareUpdateService : IFirmwareUpdateService, IDisposable`
+    with async ``Task UpdateFirmwareAsync`` / ``Task UpdateWifiModuleAsync``
+    becomes the sync ``DefaultFirmwareUpdateService`` class (concrete impl
+    of the existing ``FirmwareUpdateService`` Protocol). Per-state
+    timeouts use monotonic deadline polling instead of linked
+    ``CancellationTokenSource`` pairs; cooperative cancellation is a
+    ``threading.Event``. ``IFirmwareDownloadService`` is async upstream
+    AND in this codebase, so the WiFi version-check call is bridged
+    through ``asyncio.run`` to keep the orchestrator's surface sync.
+    ``IDisposable.Dispose`` -> ``close``."
   rationale: null
   last_synced_sha: null
 - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateServiceOptions.cs
@@ -400,30 +409,40 @@ symbols:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareUpdateService
     file: src/Daqifi.Core/Firmware/FirmwareUpdateService.cs
-  downstream: null
-  relation: not_yet_ported
+  downstream:
+    kind: class
+    qualified: daqifi.firmware.update_service.DefaultFirmwareUpdateService
+    file: daqifi/firmware/update_service.py
+  relation: divergent
   last_synced_sha: null
-  notes: null
-  rationale: null
+  notes: "Sync per project convention; per-state timeouts use monotonic
+    deadline polling; cooperative cancellation is a ``threading.Event``;
+    ``IDisposable.Dispose`` -> ``close``. WiFi version-check bridges the
+    async ``IFirmwareDownloadService`` via ``asyncio.run``."
+  rationale: "Project-wide async->sync convention (Pythonic, no asyncio
+    leaking into the streaming-device API). C# ``CancellationToken`` +
+    linked CTS pair has no clean sync equivalent — replaced with a
+    ``threading.Event`` checked by the same loops. ``Async`` suffix
+    dropped to match every other ``DaqifiDevice`` method."
   members:
   - upstream: FirmwareDownloadService
-    downstream: null
-    relation: not_yet_ported
+    downstream: firmware_download_service
+    relation: one_to_one
   - upstream: CurrentState
-    downstream: null
-    relation: not_yet_ported
+    downstream: current_state
+    relation: one_to_one
   - upstream: StateChanged
-    downstream: null
-    relation: not_yet_ported
+    downstream: state_changed
+    relation: divergent
   - upstream: UpdateFirmwareAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: update_firmware
+    relation: divergent
   - upstream: UpdateWifiModuleAsync
-    downstream: null
-    relation: not_yet_ported
+    downstream: update_wifi_module
+    relation: divergent
   - upstream: Dispose
-    downstream: null
-    relation: not_yet_ported
+    downstream: close
+    relation: one_to_one
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareUpdateServiceOptions
