@@ -710,19 +710,28 @@ class DefaultFirmwareUpdateService:
             # PROGRAMMING state timeout (the deadline.check() inside
             # _execute_with_state_timeout only fires AROUND the call,
             # not during the single blocking subprocess.wait).
+            # Stash the clamped request so the TimeoutError message
+            # below reports the timeout that was actually enforced, not
+            # the unclamped request.timeout_seconds value.
+            clamped_holder: dict = {}
+
+            def _run(deadline: _Cancellation) -> ExternalProcessResult:
+                clamped = _clamp_process_timeout(request, deadline.remaining)
+                clamped_holder["request"] = clamped
+                return self._external_process_runner.run(clamped)
+
             process_result = self._execute_with_state_timeout(
                 FirmwareUpdateState.PROGRAMMING,
                 "execute WiFi flash process",
-                lambda deadline: self._external_process_runner.run(
-                    _clamp_process_timeout(request, deadline.remaining)
-                ),
+                _run,
                 cancel_event,
             )
 
+            enforced_request = clamped_holder.get("request", request)
             if process_result.timed_out:
                 raise TimeoutError(
                     f"WiFi flashing process timed out after "
-                    f"{request.timeout_seconds:.0f} seconds."
+                    f"{enforced_request.timeout_seconds:.0f} seconds."
                 )
 
             # External flashing tools commonly write failure strings to
@@ -1205,6 +1214,16 @@ class DefaultFirmwareUpdateService:
         is_transient: Callable[[BaseException], bool],
         deadline: _Cancellation,
     ) -> None:
+        if max_attempts < 1:
+            # `range(1, 1)` would silently no-op the operation entirely.
+            # FirmwareUpdateServiceOptions.validate() catches the common
+            # case (hid_connect_retry_count / flash_write_retry_count
+            # >= 1), but reject any direct miscall here too so a future
+            # caller doesn't accidentally skip a destructive write.
+            raise ValueError(
+                f"Retry policy for {operation!r} must allow at least 1 "
+                f"attempt (got {max_attempts})."
+            )
         for attempt in range(1, max_attempts + 1):
             deadline.check()
             try:
