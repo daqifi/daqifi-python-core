@@ -2141,6 +2141,134 @@ class DaqifiDeviceFactory:
         )
 
     @staticmethod
+    def connect_from_device_info(
+        device_info: Any,
+        device_name: Optional[str] = None,
+        retry_options: Optional[ConnectionRetryOptions] = None,
+        initialize_device: bool = True,
+        message_factory: Optional[Callable[[bytes], Any]] = None,
+    ) -> DaqifiStreamingDevice:
+        """Dispatch to the right connect_* based on ``device_info.connection_type``.
+
+        Ports the C# ``DaqifiDeviceFactory.ConnectFromDeviceInfo[Async]``
+        — async/sync collapsed per project convention. Routes WiFi
+        infos to :meth:`connect_tcp` and Serial infos to
+        :meth:`connect_serial`. HID infos raise ``NotImplementedError``
+        (HID is for bootloader mode only; not a regular connection
+        target — same NotSupportedException semantics as upstream).
+
+        Args:
+            device_info: A ``daqifi.device_finders.DeviceInfo`` (or
+                anything with the same shape: ``connection_type``,
+                ``ip_address``, ``port``, ``port_name``, ``name``).
+            device_name: Override for the device's display name. If
+                ``None`` and ``device_info.name`` is non-empty, uses
+                ``device_info.name``; otherwise falls back to the
+                ``"DaqifiDevice"`` default.
+            retry_options: Connection retry behavior — forwarded to
+                the underlying connect_* call.
+            initialize_device: If True, run ``device.initialize()``
+                after connect succeeds.
+            message_factory: Optional protobuf message factory to
+                inject into the streaming consumer.
+
+        Returns:
+            A connected (and optionally initialized) :class:`DaqifiStreamingDevice`.
+
+        Raises:
+            TypeError: ``device_info`` is None.
+            ValueError: WiFi info missing ``ip_address`` or ``port``;
+                Serial info missing ``port_name``.
+            NotImplementedError: ``connection_type`` is HID.
+        """
+        from .device_finders import ConnectionType
+
+        if device_info is None:
+            raise TypeError("device_info must not be None.")
+
+        connection_type = getattr(device_info, "connection_type", None)
+        # Resolve device name: explicit override beats device_info.name
+        # which beats the connect_*-default. Matches upstream's
+        # "name from discovery info if not overridden" pattern.
+        resolved_name: Optional[str] = device_name
+        if resolved_name is None or not str(resolved_name).strip():
+            info_name = getattr(device_info, "name", "")
+            if info_name and str(info_name).strip():
+                resolved_name = str(info_name).strip()
+        if resolved_name is None or not str(resolved_name).strip():
+            resolved_name = "DaqifiDevice"
+
+        if connection_type == ConnectionType.WIFI:
+            ip = getattr(device_info, "ip_address", None)
+            port = getattr(device_info, "port", None)
+            if ip is None or not str(ip).strip():
+                raise ValueError(
+                    "device_info must have an ip_address for WiFi connections."
+                )
+            if port is None:
+                raise ValueError(
+                    "device_info must have a port for WiFi connections."
+                )
+            # Reject floats (silent int() truncation would target a
+            # different port — e.g. 9760.9 → 9760) and non-numeric
+            # strings (which would raise a confusing int() error
+            # instead of our explicit message).
+            if isinstance(port, bool) or not isinstance(port, int):
+                if isinstance(port, str) and port.strip().lstrip("-").isdigit():
+                    port_int = int(port.strip())
+                else:
+                    raise ValueError(
+                        f"device_info.port must be an integer for WiFi "
+                        f"connections (got {type(port).__name__}={port!r})."
+                    )
+            else:
+                port_int = port
+            # Strip the host before forwarding so leading/trailing
+            # whitespace can't pass connect_tcp's strip-validation
+            # but still reach the transport unstripped.
+            return DaqifiDeviceFactory.connect_tcp(
+                host=str(ip).strip(),
+                port=port_int,
+                device_name=resolved_name,
+                retry_options=retry_options,
+                initialize_device=initialize_device,
+                message_factory=message_factory,
+            )
+
+        if connection_type == ConnectionType.SERIAL:
+            port_name = getattr(device_info, "port_name", None)
+            # Match connect_serial's exception contract: TypeError on
+            # ``None``, ValueError on empty/whitespace. A caller that
+            # distinguishes "wrong type" from "wrong value" gets the
+            # same surface either through the dispatcher or through
+            # connect_serial directly.
+            if port_name is None:
+                raise TypeError(
+                    "device_info.port_name must not be None for Serial connections."
+                )
+            if not str(port_name).strip():
+                raise ValueError(
+                    "device_info.port_name must not be empty for Serial connections."
+                )
+            return DaqifiDeviceFactory.connect_serial(
+                port_name=str(port_name).strip(),
+                device_name=resolved_name,
+                retry_options=retry_options,
+                initialize_device=initialize_device,
+                message_factory=message_factory,
+            )
+
+        if connection_type == ConnectionType.HID:
+            raise NotImplementedError(
+                "HID device connections are not supported by the factory. "
+                "HID is only used for bootloader mode."
+            )
+
+        raise NotImplementedError(
+            f"Connection type {connection_type!r} is not supported."
+        )
+
+    @staticmethod
     def _validate_port(port: int) -> None:
         if port < 1 or port > 65535:
             raise ValueError("Port must be between 1 and 65535.")
