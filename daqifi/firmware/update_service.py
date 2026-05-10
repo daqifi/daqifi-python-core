@@ -994,10 +994,20 @@ class DefaultFirmwareUpdateService:
         if os.path.isdir(firmware_path):
             tool_name = self._options.wifi_flash_tool_file_name
             matches: List[str] = []
+            # Short-circuit at 2 matches: we only need to distinguish
+            # "0", "exactly 1", and ">1" cases. A user accidentally
+            # pointing at a huge tree can otherwise stall this lookup
+            # for unbounded time before the PROGRAMMING state timeout
+            # even starts (the walk runs in _build_wifi_process_request
+            # which is invoked outside the state-timeout wrapper).
             for root, _dirs, files in os.walk(firmware_path):
                 for name in files:
                     if name == tool_name:
                         matches.append(os.path.join(root, name))
+                        if len(matches) >= 2:
+                            break
+                if len(matches) >= 2:
+                    break
 
             if len(matches) == 1:
                 return matches[0]
