@@ -353,7 +353,17 @@ class NyquistDevice:
                 f"Cannot refresh metadata: {e}"
             ) from e
         parser = ProtobufMessageParser(message_factory=DaqifiOutMessage.FromString)
-        messages, _consumed = parser.parse_messages(raw)
+        try:
+            messages, _consumed = parser.parse_messages(raw)
+        except Exception as e:
+            # ProtobufMessageParser is documented to be resilient
+            # (advances one byte on bad payloads), but defense-in-depth
+            # against a future schema change or a parser bug — keep the
+            # documented exception contract intact.
+            raise CommandError(
+                f"SYSInfoPB? returned unparseable bytes after {timeout}s "
+                f"(received {len(raw)} bytes): {e}"
+            ) from e
         if not messages:
             raise CommandError(
                 f"SYSInfoPB? returned no parseable protobuf message after "
