@@ -697,10 +697,17 @@ class DefaultFirmwareUpdateService:
             request = self._build_wifi_process_request(
                 device, firmware_path, progress
             )
+            # Cap the external process's own timeout to the remaining
+            # state deadline so the process can't outlive the
+            # PROGRAMMING state timeout (the deadline.check() inside
+            # _execute_with_state_timeout only fires AROUND the call,
+            # not during the single blocking subprocess.wait).
             process_result = self._execute_with_state_timeout(
                 FirmwareUpdateState.PROGRAMMING,
                 "execute WiFi flash process",
-                lambda deadline: self._external_process_runner.run(request),
+                lambda deadline: self._external_process_runner.run(
+                    _clamp_process_timeout(request, deadline.remaining)
+                ),
                 cancel_event,
             )
 
@@ -886,7 +893,7 @@ class DefaultFirmwareUpdateService:
         )
 
         executable_path = tool_path
-        executable_arguments = tool_arguments
+        executable_arguments: Any = tool_arguments
 
         extension = os.path.splitext(tool_path)[1].lower()
         if extension in (".cmd", ".bat"):
@@ -898,7 +905,15 @@ class DefaultFirmwareUpdateService:
                     "Windows or WSL with Windows interop enabled."
                 )
             executable_path = cmd_exe
-            executable_arguments = f'/c "{tool_path}" {tool_arguments}'
+            # Pre-split into a list so SubprocessRunner doesn't shlex-parse
+            # the cmd.exe command line again — Windows backslashes and
+            # quoted paths survive the round-trip cleanly via
+            # subprocess.list2cmdline.
+            import shlex as _shlex
+
+            executable_arguments = ["/c", tool_path] + _shlex.split(
+                tool_arguments, posix=False
+            )
 
         progress_state = {"last_process_percent": 0}
         progress_lock = threading.Lock()
@@ -1384,6 +1399,24 @@ class DefaultFirmwareUpdateService:
 
 
 # -- module-level helpers ------------------------------------------------
+
+
+def _clamp_process_timeout(
+    request: ExternalProcessRequest, remaining_seconds: float
+) -> ExternalProcessRequest:
+    """Return a copy of ``request`` whose timeout is min(its own, remaining)."""
+    capped = max(0.0, min(request.timeout_seconds, remaining_seconds))
+    if capped >= request.timeout_seconds:
+        return request
+    return ExternalProcessRequest(
+        file_name=request.file_name,
+        arguments=request.arguments,
+        working_directory=request.working_directory,
+        timeout_seconds=capped,
+        on_standard_output_line=request.on_standard_output_line,
+        on_standard_error_line=request.on_standard_error_line,
+        standard_input_response_factory=request.standard_input_response_factory,
+    )
 
 
 def _ensure_device_connected(device: Any) -> None:
