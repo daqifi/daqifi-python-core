@@ -646,8 +646,14 @@ class DefaultFirmwareUpdateService:
         total_bytes = 100
 
         try:
+            # Honour cancellation BEFORE the WiFi version-check makes
+            # an HTTP call to GitHub releases. Without this an already-
+            # cancelled run still incurs a network round-trip and only
+            # raises once it reaches the first state-transition point.
+            _check_cancel(cancel_event)
             if self._is_wifi_firmware_up_to_date(device, progress, cancel_event):
                 return
+            _check_cancel(cancel_event)
 
             self._transition_to_state(
                 FirmwareUpdateState.PREPARING_DEVICE,
@@ -1401,6 +1407,17 @@ class DefaultFirmwareUpdateService:
 # -- module-level helpers ------------------------------------------------
 
 
+def _check_cancel(cancel_event: Optional[threading.Event]) -> None:
+    """Raise the internal cancellation sentinel if ``cancel_event`` is set.
+
+    Used at flow-entry points that run BEFORE any state-timeout
+    deadline is established (e.g. the WiFi version-check round-trip),
+    so a pre-cancelled run aborts before incurring side effects.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        raise _CancelledError()
+
+
 def _clamp_process_timeout(
     request: ExternalProcessRequest, remaining_seconds: float
 ) -> ExternalProcessRequest:
@@ -1467,14 +1484,20 @@ def _quote_argument(value: str) -> str:
     double quotes have to be doubled (``""``). POSIX shells do the
     opposite. Pick the right rule based on ``os.name`` so the WiFi
     flash tool gets correctly-quoted paths regardless of host platform.
+
+    On Windows we **always** wrap the value in quotes (when non-empty)
+    so cmd.exe metacharacters like ``& | > < ^ ( ) % !`` cannot be
+    interpreted as command syntax. A port-override or firmware-path
+    string sourced from configuration could contain any of those, and
+    cmd.exe would otherwise treat e.g. ``foo&bar`` as ``foo`` followed
+    by command ``bar``.
     """
     if value is None or value == "":
         return '""'
 
     if os.name == "nt":
-        if any(ch in value for ch in (" ", "\t", '"')):
-            return '"' + value.replace('"', '""') + '"'
-        return value
+        # Always-quote on Windows to neutralise cmd.exe metacharacters.
+        return '"' + value.replace('"', '""') + '"'
 
     if any(ch in value for ch in (" ", "\t", '"')):
         escaped = value.replace('"', r'\"')
