@@ -14,8 +14,8 @@ machine). ALWAYS verify the SCPI `SYST:INFO?` response identifies
 **your** device before any write.
 
 Walk every exposed port and use the in-tree `daqifi` library to
-identify each device. Match the `serial_number` against the unit
-on your bench:
+identify each device. Match the `metadata.serial_number` (the
+protobuf-populated real SN) against the unit on your bench:
 
 ```bash
 # WSL2 / Linux — walk every exposed CDC-ACM port.
@@ -25,7 +25,11 @@ for port in /dev/ttyACM0 /dev/ttyACM1 /dev/ttyACM2 /dev/ttyACM3; do
     python -c "
 from daqifi.device import NyquistDevice
 dev = NyquistDevice.connect('$port')
-print(f'  SN: {dev.serial_number} | model: {dev.model} | fw: {dev.firmware_version}')
+# `metadata.serial_number` is the protobuf-populated real SN.
+# `dev.serial_number` reads the *IDN? field, which firmware
+# 3.4.6b1 reports as a literal '0' for every unit — useless for
+# identity. Use the metadata accessor to disambiguate units.
+print(f'  SN: {dev.metadata.serial_number} | model: {dev.model} | fw: {dev.firmware_version}')
 dev.disconnect()
 "
 done
@@ -34,6 +38,27 @@ done
 The matching port is your `DAQIFI_DEVICE_PORT` for the integration
 suite. If multiple ports match no SN you recognize, STOP and check
 which units the workstation owner expects to be attached.
+
+### Identity-gating destructive operations in your own code
+
+Anywhere your code is about to issue `*RST`, change WiFi
+credentials, wipe SD card files, or otherwise mutate device state,
+gate the call against `dev.metadata.serial_number`:
+
+```python
+expected = os.environ["DAQIFI_EXPECTED_SERIAL_NUMBER"]
+if dev.metadata.serial_number != expected:
+    raise RuntimeError(
+        f"Refusing destructive op: SN {dev.metadata.serial_number!r} "
+        f"≠ expected {expected!r}"
+    )
+dev.reset()
+```
+
+`dev.metadata` is auto-populated during `connect()` via a
+best-effort `SYSInfoPB?` round-trip. If you need to refresh it
+mid-session (e.g. after a `*RST` reconnect), call
+`dev.refresh_metadata()`.
 
 ## Local rig file (gitignored)
 

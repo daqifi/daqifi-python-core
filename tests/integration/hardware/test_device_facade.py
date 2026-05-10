@@ -29,6 +29,7 @@ Hardware safety: every test ends with ``power_down()`` and
 """
 from __future__ import annotations
 
+import os
 from typing import Iterator
 
 import pytest
@@ -209,22 +210,30 @@ def test_reset_returns_to_clean_baseline(
     """
     dev = device_facade
 
-    # NOTE: an SN identity gate here would require accessing the
-    # protobuf-populated `metadata.serial_number` (only available on
-    # `DaqifiStreamingDevice`, not on the `NyquistDevice` facade —
-    # `NyquistDevice.serial_number` reads the *IDN? field, which is
-    # a "0" placeholder for all units on this firmware). Doing an
-    # out-of-band probe via a second `DaqifiStreamingDevice` would
-    # conflict with the device_facade fixture's owned serial port.
-    # Mitigation in lieu of an inline gate:
-    #   - Operator-side: `DAQIFI_DEVICE_PORT` must point at the
-    #     intended unit (verified by the operator before running).
-    #   - `wait_for_device_back` below DOES verify SN before
-    #     binding to a candidate port, so the post-`*RST`
-    #     reconnect can't bind to a different attached unit even
-    #     if the kernel renames our device.
-    # See daqifi-python-core PR comment thread for the proposed
-    # follow-up (`NyquistDevice.metadata.serial_number` accessor).
+    # SN identity gate before issuing the destructive `*RST`. Closes
+    # the gap PR #71 documented: previously the facade-level
+    # `NyquistDevice.serial_number` returned the *IDN? field (a "0"
+    # placeholder on fw 3.4.6b1), which made an inline SN check
+    # vacuous. `dev.metadata.serial_number` is the protobuf-populated
+    # real SN (#74). `wait_for_device_back` already SN-verifies the
+    # post-*RST reconnect; this gate now matches it on the pre-*RST
+    # side too, so a misconfigured `DAQIFI_DEVICE_PORT` can't reach
+    # the *RST send.
+    expected_sn = os.environ.get("DAQIFI_EXPECTED_SERIAL_NUMBER")
+    if not expected_sn:
+        pytest.skip(
+            "DAQIFI_EXPECTED_SERIAL_NUMBER not set; refusing to send "
+            "*RST without verifying the device identity. Set this "
+            "to your unit's SN (see .claude/hardware-rig.md)."
+        )
+    actual_sn = dev.metadata.serial_number
+    if actual_sn != expected_sn:
+        pytest.fail(
+            f"Device SN mismatch — refusing to send *RST. "
+            f"DAQIFI_EXPECTED_SERIAL_NUMBER={expected_sn!r} but "
+            f"DAQIFI_DEVICE_PORT points at a unit with SN {actual_sn!r}. "
+            f"Detach the wrong unit or update the env var."
+        )
 
     # `dev.reset()` calls `_comm.reset()` which sends *RST then
     # immediately runs `clear_errors()`. The follow-on SYST:ERR?

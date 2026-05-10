@@ -5,7 +5,7 @@ Provides high-level API for device interaction.
 """
 
 from typing import Dict, Any, Optional, Union, List
-from ._internal.comm import SerialInterface, PowerState
+from ._internal.comm import SerialInterface, PowerState, DeviceMetadata
 from ._internal import scpi, scpi_commands
 from ._internal.scpi import check_setter_response
 from .channels import (
@@ -66,6 +66,11 @@ class NyquistDevice:
         self._variant = BoardVariant.UNKNOWN
         self._device_info: Dict[str, Any] = {}
         self._connected = False
+        # Protobuf-populated metadata (real SN, MAC, IP, SSID, ...).
+        # Populated lazily — first access via `metadata` triggers a
+        # SYSInfoPB? round-trip if not already refreshed.
+        self._metadata: DeviceMetadata = DeviceMetadata()
+        self._metadata_populated = False
 
         # Channel collections (created on connection)
         self._analog_outputs: Optional[AnalogOutputs] = None
@@ -142,6 +147,17 @@ class NyquistDevice:
             # Initialize channel collections based on variant
             self._initialize_channels()
 
+            # Best-effort populate `metadata` from SYSInfoPB? so callers
+            # can read `device.metadata.serial_number` without an extra
+            # round-trip. Failure is non-fatal — older firmware or a
+            # noisy USB enumeration may not respond in 2s, in which
+            # case `metadata` stays at its empty default and callers
+            # can call `refresh_metadata()` explicitly.
+            try:
+                self.refresh_metadata(timeout=2.0)
+            except (CommandError, RuntimeError):
+                pass
+
         except Exception as e:
             self._connected = False
             self._comm.close()
@@ -205,8 +221,74 @@ class NyquistDevice:
 
     @property
     def serial_number(self) -> str:
-        """Get device serial number"""
+        """Get device serial number from the ``*IDN?`` response.
+
+        Note:
+            Firmware 3.4.6b1 (the current release) reports the SN
+            field of ``*IDN?`` as a literal ``"0"`` placeholder for
+            every unit. Use :attr:`metadata.serial_number` instead
+            for identity verification — that field is populated from
+            the protobuf ``SYSInfoPB?`` reply and contains the real
+            decimal SN.
+        """
         return self._device_info.get("serial_number", "Unknown")
+
+    @property
+    def metadata(self) -> DeviceMetadata:
+        """Protobuf-populated device metadata (real SN, MAC, IP, ...).
+
+        Returns the cached :class:`DeviceMetadata`. Populated
+        automatically during :meth:`connect` via a best-effort
+        ``SYSTem:SYSInfoPB?`` query; if that round-trip failed at
+        connect-time the cache is left at its empty default and
+        callers can re-populate it explicitly via
+        :meth:`refresh_metadata`.
+
+        Distinct from :attr:`serial_number` (the ``*IDN?`` field,
+        which is a ``"0"`` placeholder on firmware 3.4.6b1).
+        ``metadata.serial_number`` is the canonical real SN —
+        suitable for identity verification before destructive
+        operations like :meth:`reset`.
+
+        Closes daqifi-python-core#74.
+        """
+        return self._metadata
+
+    def refresh_metadata(self, timeout: float = 2.0) -> DeviceMetadata:
+        """Re-query ``SYSInfoPB?`` and refresh the cached metadata.
+
+        Args:
+            timeout: Seconds to wait for a parseable protobuf reply.
+
+        Returns:
+            The refreshed :class:`DeviceMetadata` (also accessible
+            via :attr:`metadata`).
+
+        Raises:
+            CommandError: If no parseable protobuf message arrives
+                within ``timeout`` seconds.
+            DAQiFiConnectionError: If the device isn't connected.
+        """
+        if not self._connected:
+            raise DAQiFiConnectionError(
+                "Cannot refresh metadata: device not connected"
+            )
+        from ._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+        from .communication import ProtobufMessageParser
+
+        raw = self._comm.query_binary(
+            scpi_commands.get_device_info().data, timeout=timeout
+        )
+        parser = ProtobufMessageParser(message_factory=DaqifiOutMessage.FromString)
+        messages, _consumed = parser.parse_messages(raw)
+        if not messages:
+            raise CommandError(
+                f"SYSInfoPB? returned no parseable protobuf message after "
+                f"{timeout}s (received {len(raw)} bytes)"
+            )
+        self._metadata.update_from_protobuf(messages[0].data)
+        self._metadata_populated = True
+        return self._metadata
 
     @property
     def firmware_version(self) -> str:

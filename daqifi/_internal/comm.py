@@ -1411,6 +1411,65 @@ class SerialInterface:
         response = response.strip('"').strip("'")
         return response
 
+    def query_binary(
+        self,
+        query: str,
+        timeout: float = 2.0,
+        idle_settle: float = 0.1,
+    ) -> bytes:
+        """Send a SCPI query and return the raw response bytes.
+
+        Use this for protobuf-typed queries (e.g. ``SYSTem:SYSInfoPB?``)
+        where the device replies with binary that must NOT be ASCII-
+        decoded or whitespace-stripped. Reads until either ``timeout``
+        seconds elapse OR the device stops sending bytes for
+        ``idle_settle`` seconds (whichever comes first).
+
+        Resets the input buffer before writing so stale bytes from a
+        prior text query can't bleed into the binary response.
+
+        Args:
+            query: SCPI query string (without terminator)
+            timeout: Total deadline in seconds.
+            idle_settle: Stop early after this many seconds of no
+                inbound bytes once at least one byte has arrived.
+
+        Returns:
+            Raw response bytes (may be empty if the device didn't
+            reply within ``timeout``).
+
+        Raises:
+            RuntimeError: If serial port not open or I/O fails.
+        """
+        if not self.is_open():
+            raise RuntimeError("Serial port not open")
+
+        try:
+            self._serial.reset_input_buffer()
+            # Use \r\n to match ScpiMessage.get_bytes() — the canonical
+            # wire format. send_command() uses bare \r for legacy
+            # compatibility but binary queries expect the canonical form.
+            self._serial.write((query + "\r\n").encode("ascii"))
+            self._serial.flush()
+
+            received = bytearray()
+            deadline = time.monotonic() + timeout
+            last_byte_time = 0.0
+            while time.monotonic() < deadline:
+                pending = self._serial.in_waiting
+                if pending:
+                    chunk = self._serial.read(pending)
+                    if chunk:
+                        received.extend(chunk)
+                        last_byte_time = time.monotonic()
+                elif received and (time.monotonic() - last_byte_time) >= idle_settle:
+                    break
+                else:
+                    time.sleep(0.01)
+            return bytes(received)
+        except (serial.SerialException, OSError) as e:
+            raise RuntimeError(f"Serial communication error: {e}")
+
     def send_set(self, command: str, value, delay: float = 0.1) -> bool:
         """
         Send SCPI set command with value.
