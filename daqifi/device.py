@@ -327,11 +327,27 @@ class NyquistDevice:
                 f"SYSInfoPB? returned no parseable protobuf message after "
                 f"{timeout}s (received {len(raw)} bytes)"
             )
-        # Use the LAST parsed message — SYSInfoPB? normally returns
-        # exactly one frame, but if the buffer also contained queued
-        # streaming-status frames (a race against background streaming)
-        # the most recent frame carries the freshest state.
-        self._metadata.update_from_protobuf(messages[-1].data)
+        # Walk the parsed frames newest-to-oldest and pick the latest
+        # one that actually carries SYSInfoPB-shaped metadata
+        # (``device_pn`` or ``device_sn`` populated). If background
+        # streaming is active when this query runs, query_binary's
+        # buffer can contain stream frames AFTER the SYSInfoPB reply;
+        # ``update_from_protobuf`` would no-op on those (it only
+        # writes non-empty fields) and leave metadata stale.
+        metadata_msg = None
+        for candidate in reversed(messages):
+            data = candidate.data
+            pn = getattr(data, "device_pn", "")
+            sn = getattr(data, "device_sn", 0)
+            if (pn and pn.strip()) or sn:
+                metadata_msg = data
+                break
+        # If no frame had metadata fields, fall back to the latest —
+        # update_from_protobuf is a no-op on stream frames so this
+        # preserves the prior metadata cache rather than clobbering.
+        if metadata_msg is None:
+            metadata_msg = messages[-1].data
+        self._metadata.update_from_protobuf(metadata_msg)
         return self._metadata
 
     @property

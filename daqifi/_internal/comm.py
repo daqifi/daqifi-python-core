@@ -1463,11 +1463,17 @@ class SerialInterface:
         # ``read(pending)`` cannot exceed our wall-clock deadline by
         # falling back to the port's pre-configured ``timeout``.
         # Restored in ``finally`` so callers see no side-effect on
-        # subsequent ``send_command`` reads.
+        # subsequent ``send_command`` reads. ``None`` (blocking) is
+        # a legitimate prior value, so use a separate ``timeout_changed``
+        # flag rather than ``prev is not None`` to decide whether to
+        # restore — otherwise a port left in blocking mode by the
+        # caller would silently flip to non-blocking.
         prev_serial_timeout = getattr(ser, "timeout", None)
+        timeout_changed = False
         try:
             try:
                 ser.timeout = 0
+                timeout_changed = True
             except (serial.SerialException, OSError, ValueError, AttributeError):
                 # Some pyserial backends don't support runtime
                 # mutation; fall back to relying on `in_waiting`
@@ -1517,7 +1523,7 @@ class SerialInterface:
             except (serial.SerialException, OSError) as e:
                 raise RuntimeError(f"Serial communication error: {e}")
         finally:
-            if prev_serial_timeout is not None:
+            if timeout_changed:
                 try:
                     ser.timeout = prev_serial_timeout
                 except (serial.SerialException, OSError, ValueError, AttributeError):

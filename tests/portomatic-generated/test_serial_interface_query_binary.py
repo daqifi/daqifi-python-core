@@ -193,6 +193,20 @@ class TestQueryBinary:
         # absorb scheduling jitter on slow CI.
         assert elapsed < 1.0, f"loop overran idle-settle: {elapsed:.3f}s"
 
+    def test_restores_blocking_timeout_when_prior_was_none(self):
+        """``timeout=None`` (blocking mode) is a legitimate prior
+        setting — query_binary must restore None too, not just
+        non-None values. Regression for Qodo PR #85
+        /agentic_review pass 7 finding #1."""
+        s = _make_fake_serial([b"hi"])
+        s.timeout = None  # caller had the port in blocking mode
+        iface = _make_interface_with_serial(s)
+
+        iface.query_binary("X?", timeout=0.5, idle_settle=0.02)
+
+        # Must restore to None, not leave at 0 (non-blocking).
+        assert s.timeout is None
+
     def test_idle_settle_zero_waits_for_full_timeout(self):
         """``idle_settle=0`` disables the early-exit so the loop
         keeps polling until the deadline expires — useful when the

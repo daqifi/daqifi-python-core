@@ -197,6 +197,37 @@ class TestRefreshMetadata:
         with pytest.raises(DAQiFiConnectionError, match="Cannot refresh metadata"):
             dev.refresh_metadata()
 
+    def test_skips_trailing_streaming_frames_to_find_metadata(self):
+        """If query_binary's buffer contains a SYSInfoPB? reply
+        followed by background-streaming frames (which carry
+        sample/timestamp data but NOT device_pn/device_sn),
+        refresh_metadata must walk back to the SYSInfoPB frame
+        instead of feeding the stream frame to update_from_protobuf
+        (which would no-op and leave metadata stale).
+
+        Regression for Qodo PR #85 /agentic_review pass 7 finding #2.
+        """
+        dev = _make_device_with_mock_comm()
+        # First frame: real SYSInfoPB? metadata reply.
+        meta = DaqifiOutMessage()
+        meta.device_pn = "Nq1"
+        meta.device_sn = 1234567890123456789
+        meta.host_name = "DAQiFi-TEST"
+        # Second frame: a streaming-shaped frame (no device_pn/device_sn).
+        stream = DaqifiOutMessage()
+        stream.msg_time_stamp = 12345
+        # Concatenate length-prefixed frames in arrival order.
+        dev._comm.query_binary.return_value = (
+            _length_prefixed(meta) + _length_prefixed(stream)
+        )
+
+        dev.refresh_metadata()
+
+        # Must apply the metadata frame, NOT the trailing stream frame.
+        assert dev.metadata.serial_number == "1234567890123456789"
+        assert dev.metadata.part_number == "Nq1"
+        assert dev.metadata.host_name == "DAQiFi-TEST"
+
     def test_repeat_refresh_overlays_new_fields_without_clobbering_old(self):
         """``update_from_protobuf`` only writes non-empty fields, so a
         second protobuf reply that only carries the SN should leave a
