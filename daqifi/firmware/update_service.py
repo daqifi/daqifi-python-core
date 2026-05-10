@@ -931,19 +931,17 @@ class DefaultFirmwareUpdateService:
                     "Windows or WSL with Windows interop enabled."
                 )
             executable_path = cmd_exe
-            # Pre-split into a list so SubprocessRunner doesn't shlex-parse
-            # the cmd.exe command line again — Windows backslashes and
-            # quoted paths survive the round-trip cleanly via
-            # subprocess.list2cmdline. Quote the script path the same
-            # way as the template-substituted args so a path containing
-            # cmd.exe metacharacters (& | > < ^ ( ) % !) can't change
-            # what cmd.exe executes.
-            import shlex as _shlex
-
-            executable_arguments = [
-                "/c",
-                _quote_argument(tool_path),
-            ] + _shlex.split(tool_arguments, posix=False)
+            # cmd.exe parses ONE command-line string after /c. Build that
+            # string explicitly and pass it as a single list element so
+            # quoting is applied exactly once: subprocess.list2cmdline
+            # wraps the whole element, cmd.exe strips the outer quotes,
+            # and the inner _quote_argument-protected pieces survive
+            # untouched. Splitting tool_arguments + relying on list2cmdline
+            # to re-encode each piece risks double-quoting on Windows.
+            command = (
+                f"{_quote_argument(tool_path)} {tool_arguments}"
+            ).strip()
+            executable_arguments = ["/c", command]
 
         progress_state = {"last_process_percent": 0}
         progress_lock = threading.Lock()
