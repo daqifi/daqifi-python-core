@@ -2201,7 +2201,7 @@ class DaqifiDeviceFactory:
         if connection_type == ConnectionType.WIFI:
             ip = getattr(device_info, "ip_address", None)
             port = getattr(device_info, "port", None)
-            if not ip:
+            if ip is None or not str(ip).strip():
                 raise ValueError(
                     "device_info must have an ip_address for WiFi connections."
                 )
@@ -2209,8 +2209,11 @@ class DaqifiDeviceFactory:
                 raise ValueError(
                     "device_info must have a port for WiFi connections."
                 )
+            # Strip the host before forwarding so leading/trailing
+            # whitespace can't pass connect_tcp's strip-validation
+            # but still reach the transport unstripped.
             return DaqifiDeviceFactory.connect_tcp(
-                host=ip,
+                host=str(ip).strip(),
                 port=int(port),
                 device_name=resolved_name,
                 retry_options=retry_options,
@@ -2220,12 +2223,21 @@ class DaqifiDeviceFactory:
 
         if connection_type == ConnectionType.SERIAL:
             port_name = getattr(device_info, "port_name", None)
-            if not port_name:
+            # Match connect_serial's exception contract: TypeError on
+            # ``None``, ValueError on empty/whitespace. A caller that
+            # distinguishes "wrong type" from "wrong value" gets the
+            # same surface either through the dispatcher or through
+            # connect_serial directly.
+            if port_name is None:
+                raise TypeError(
+                    "device_info.port_name must not be None for Serial connections."
+                )
+            if not str(port_name).strip():
                 raise ValueError(
-                    "device_info must have a port_name for Serial connections."
+                    "device_info.port_name must not be empty for Serial connections."
                 )
             return DaqifiDeviceFactory.connect_serial(
-                port_name=port_name,
+                port_name=str(port_name).strip(),
                 device_name=resolved_name,
                 retry_options=retry_options,
                 initialize_device=initialize_device,

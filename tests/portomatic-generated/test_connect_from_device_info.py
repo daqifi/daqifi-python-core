@@ -90,6 +90,29 @@ class TestConnectFromDeviceInfoWifiDispatch:
                 DaqifiDeviceFactory.connect_from_device_info(info)
             mock_tcp.assert_not_called()
 
+    def test_wifi_whitespace_only_ip_raises_valueerror(self):
+        info = DeviceInfo(
+            name="x",
+            connection_type=ConnectionType.WIFI,
+            ip_address="   ",
+            port=9760,
+        )
+        with patch.object(DaqifiDeviceFactory, "connect_tcp") as mock_tcp:
+            with pytest.raises(ValueError, match="ip_address"):
+                DaqifiDeviceFactory.connect_from_device_info(info)
+            mock_tcp.assert_not_called()
+
+    def test_wifi_strips_whitespace_before_forwarding(self):
+        info = DeviceInfo(
+            name="x",
+            connection_type=ConnectionType.WIFI,
+            ip_address="  198.51.100.5  ",
+            port=9760,
+        )
+        with patch.object(DaqifiDeviceFactory, "connect_tcp") as mock_tcp:
+            DaqifiDeviceFactory.connect_from_device_info(info)
+        assert mock_tcp.call_args.kwargs["host"] == "198.51.100.5"
+
 
 class TestConnectFromDeviceInfoSerialDispatch:
     def test_serial_routes_to_connect_serial(self):
@@ -108,16 +131,40 @@ class TestConnectFromDeviceInfoSerialDispatch:
         assert kwargs["device_name"] == "DAQiFi-SERIAL"
         assert result == "fake-serial-device"
 
-    def test_serial_missing_port_name_raises_valueerror(self):
+    def test_serial_none_port_name_raises_typeerror(self):
+        """Match connect_serial's contract: ``port_name=None`` is a
+        TypeError (programmer error), distinct from empty-string
+        ValueError (configuration error)."""
         info = DeviceInfo(
             name="x",
             connection_type=ConnectionType.SERIAL,
             port_name=None,
         )
         with patch.object(DaqifiDeviceFactory, "connect_serial") as mock_serial:
-            with pytest.raises(ValueError, match="port_name"):
+            with pytest.raises(TypeError, match="must not be None"):
                 DaqifiDeviceFactory.connect_from_device_info(info)
             mock_serial.assert_not_called()
+
+    def test_serial_empty_port_name_raises_valueerror(self):
+        info = DeviceInfo(
+            name="x",
+            connection_type=ConnectionType.SERIAL,
+            port_name="   ",
+        )
+        with patch.object(DaqifiDeviceFactory, "connect_serial") as mock_serial:
+            with pytest.raises(ValueError, match="must not be empty"):
+                DaqifiDeviceFactory.connect_from_device_info(info)
+            mock_serial.assert_not_called()
+
+    def test_serial_strips_whitespace_before_forwarding(self):
+        info = DeviceInfo(
+            name="x",
+            connection_type=ConnectionType.SERIAL,
+            port_name="  /placeholder/port  ",
+        )
+        with patch.object(DaqifiDeviceFactory, "connect_serial") as mock_serial:
+            DaqifiDeviceFactory.connect_from_device_info(info)
+        assert mock_serial.call_args.kwargs["port_name"] == "/placeholder/port"
 
 
 class TestConnectFromDeviceInfoUnsupported:
