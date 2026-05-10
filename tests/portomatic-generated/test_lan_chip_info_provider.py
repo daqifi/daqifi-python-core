@@ -35,15 +35,18 @@ class TestLanChipInfoProviderProtocol:
         assert stub.get_lan_chip_info() is None
 
     def test_returns_lan_chip_info_when_known(self):
+        # ``chip_id`` is an int — see daqifi/firmware/lan_chip_info.py
+        # (the C# parser coerces non-numeric chip IDs to 0; the
+        # WINC1500's ATWINC1510 chip-id reports as 5521 / 0x1591).
         info = LanChipInfo(
-            chip_id="ATWINC1500",
+            chip_id=5521,
             fw_version="19.6.5",
             build_date="2026-01-01",
         )
         stub = _CompleteStub(info=info)
         result = stub.get_lan_chip_info()
         assert result is info
-        assert result.chip_id == "ATWINC1500"
+        assert result.chip_id == 5521
 
     def test_module_export(self):
         from daqifi import firmware as fw_module
