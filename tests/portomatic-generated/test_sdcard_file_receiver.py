@@ -350,17 +350,20 @@ class TestLeftoverBytes:
         assert receiver.leftover == post_marker
 
     def test_leftover_resets_on_subsequent_receive(self):
-        # Re-use the same receiver instance; second receive should
-        # NOT carry over the first call's leftover.
-        first_source = _ChunkedStream([b"a" + END_OF_FILE_MARKER + b"first-tail"])
-        receiver = SdCardFileReceiver(first_source)
-        receiver.receive(io.BytesIO(), "log.bin", timeout_s=2.0)
-        assert receiver.leftover == b"first-tail"
+        # Each receive() must reset leftover so a re-used receiver
+        # doesn't expose stale bytes. Swap source via a new receiver
+        # instance rather than mutating ``_source`` (private).
+        first_receiver = SdCardFileReceiver(
+            _ChunkedStream([b"a" + END_OF_FILE_MARKER + b"first-tail"])
+        )
+        first_receiver.receive(io.BytesIO(), "log.bin", timeout_s=2.0)
+        assert first_receiver.leftover == b"first-tail"
 
-        # Swap in a fresh source for the second call.
-        receiver._source = _ChunkedStream([b"b" + END_OF_FILE_MARKER])
-        receiver.receive(io.BytesIO(), "log.bin", timeout_s=2.0)
-        assert receiver.leftover == b""
+        second_receiver = SdCardFileReceiver(
+            _ChunkedStream([b"b" + END_OF_FILE_MARKER])
+        )
+        second_receiver.receive(io.BytesIO(), "log.bin", timeout_s=2.0)
+        assert second_receiver.leftover == b""
 
     def test_leftover_initially_empty(self):
         source = _ChunkedStream([END_OF_FILE_MARKER])
