@@ -1453,6 +1453,11 @@ class SerialInterface:
         # we either hold a valid reference for the whole call or we
         # already failed the is_open() guard above.
         ser = self._serial
+        if ser is None:
+            # Defensive — close() could have nulled _serial between
+            # the is_open() check above and this read. Surface the
+            # same error the guard would have.
+            raise RuntimeError("Serial port not open")
 
         # Force non-blocking reads for the duration so a single
         # ``read(pending)`` cannot exceed our wall-clock deadline by
