@@ -380,9 +380,13 @@ class DefaultFirmwareUpdateService:
         # state transition.
         self._raise_if_closed()
 
-        if not self._operation_lock.acquire(blocking=True):
-            raise RuntimeError("Failed to acquire firmware-update lock.")
-        try:
+        with self._operation_lock:
+            # Re-check after acquiring the lock: close() runs under the
+            # same lock, so without this we could race past the first
+            # _raise_if_closed() and start an update on an already-
+            # closed service.
+            self._raise_if_closed()
+
             self._reset_if_terminal_state()
             if self._current_state != FirmwareUpdateState.IDLE:
                 raise RuntimeError(
@@ -394,8 +398,6 @@ class DefaultFirmwareUpdateService:
             self._bootloader_poll_attempts = 0
             self._last_bootloader_enumeration_error = None
             operation()
-        finally:
-            self._operation_lock.release()
 
     # -- PIC32 flow ------------------------------------------------------
 
@@ -1421,8 +1423,18 @@ def _check_cancel(cancel_event: Optional[threading.Event]) -> None:
 def _clamp_process_timeout(
     request: ExternalProcessRequest, remaining_seconds: float
 ) -> ExternalProcessRequest:
-    """Return a copy of ``request`` whose timeout is min(its own, remaining)."""
-    capped = max(0.0, min(request.timeout_seconds, remaining_seconds))
+    """Return a copy of ``request`` whose timeout is min(its own, remaining).
+
+    Raises ``TimeoutError`` if the state deadline has already expired —
+    no point launching the subprocess just to have it TimeoutExpired
+    immediately, and the empty-budget case otherwise rounds to a 0s
+    timeout that some runners treat as nondeterministic.
+    """
+    if remaining_seconds <= 0:
+        raise TimeoutError(
+            "State deadline expired before launching external process."
+        )
+    capped = min(request.timeout_seconds, remaining_seconds)
     if capped >= request.timeout_seconds:
         return request
     return ExternalProcessRequest(
