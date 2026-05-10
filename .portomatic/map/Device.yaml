@@ -916,11 +916,23 @@ symbols:
   - upstream: <downstream-only:serial_number>
     downstream: serial_number
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: "Downstream-only addition; returns the *IDN? field which firmware 3.4.6b1 reports as a literal '0' placeholder — use metadata.serial_number for identity verification (#74)."
   - upstream: <downstream-only:firmware_version>
     downstream: firmware_version
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:metadata>
+    downstream: metadata
+    relation: divergent
+    notes: "Downstream-only addition (closes #74); exposes the protobuf-populated DeviceMetadata so callers can identity-gate destructive ops against metadata.serial_number (the real SN) rather than the *IDN? '0' placeholder."
+  - upstream: <downstream-only:refresh_metadata>
+    downstream: refresh_metadata
+    relation: divergent
+    notes: "Downstream-only addition (closes #74); re-issues SYSInfoPB? and refreshes the cached metadata. Auto-called best-effort during connect(); callers can re-fetch on demand (e.g. after a USB drop / reconnect)."
+  - upstream: <downstream-only:last_metadata_refresh_error>
+    downstream: last_metadata_refresh_error
+    relation: divergent
+    notes: "Downstream-only addition (closes #74); observability hook — captures the exception (if any) from the most recent best-effort metadata refresh inside connect(). Lets callers detect an otherwise-silent SYSInfoPB? failure without changing the non-fatal behavior."
   - upstream: <downstream-only:analog_outputs>
     downstream: analog_outputs
     relation: divergent
