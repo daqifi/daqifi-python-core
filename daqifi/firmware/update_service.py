@@ -91,6 +91,15 @@ _STATE_CALLBACK = Optional[
 _PERCENT_RE = re.compile(r"(?P<percent>\d{1,3})\s*%")
 
 
+# SubprocessRunner.run() can spend a few seconds AFTER its
+# request.timeout_seconds doing cleanup (proc.kill() + unbounded
+# proc.wait(), plus 2.0s join timeouts on the stdout/stderr pump
+# threads). Reserve this much in _clamp_process_timeout so a
+# timed-out subprocess still returns control inside the
+# PROGRAMMING state-timeout budget.
+_PROCESS_CLEANUP_BUFFER_S = 5.0
+
+
 # State-machine guard table (mirrors C# ``AllowedTransitions`` dict).
 _ALLOWED_TRANSITIONS: dict = {
     FirmwareUpdateState.IDLE: {
@@ -1465,12 +1474,26 @@ def _clamp_process_timeout(
     no point launching the subprocess just to have it TimeoutExpired
     immediately, and the empty-budget case otherwise rounds to a 0s
     timeout that some runners treat as nondeterministic.
+
+    Reserves a small cleanup buffer below ``remaining_seconds`` for
+    the runner's own teardown work (kill + final wait, stream-pump
+    join). Without it the runner can overrun the state deadline by
+    a few seconds doing post-timeout cleanup.
     """
     if remaining_seconds <= 0:
         raise TimeoutError(
             "State deadline expired before launching external process."
         )
-    capped = min(request.timeout_seconds, remaining_seconds)
+    # Scale the buffer so it never eats more than 10% of remaining; for
+    # 50+ seconds we get the full _PROCESS_CLEANUP_BUFFER_S, for tight
+    # test fixtures (programming_timeout=5s) we reserve only ~0.5s.
+    cleanup_buffer = min(_PROCESS_CLEANUP_BUFFER_S, remaining_seconds * 0.1)
+    effective_remaining = remaining_seconds - cleanup_buffer
+    if effective_remaining <= 0:
+        raise TimeoutError(
+            "State deadline expired before launching external process."
+        )
+    capped = min(request.timeout_seconds, effective_remaining)
     if capped >= request.timeout_seconds:
         return request
     return ExternalProcessRequest(
