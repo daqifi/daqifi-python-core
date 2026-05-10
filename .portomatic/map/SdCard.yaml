@@ -189,8 +189,9 @@ symbols:
   rationale: null
   members:
   - upstream: FromDevice
-    downstream: from_device
-    relation: not_yet_ported
+    downstream: null
+    relation: divergent
+    notes: "No downstream classmethod. C# FromDevice introspects a unified DaqifiDevice.Channels collection (filtered as IAnalogChannel + ChannelType.Digital count) — the Python port doesn't have a unified channels collection (it splits into typed AnalogInputs/DigitalIO collections), so a 1-1 port would need a translator layer. Callers populate SdCardDeviceConfiguration fields directly from device.metadata + per-collection inspection. Reintroduce as a separate port step if a unified channels API is added later."
   - upstream: <downstream-only:analog_port_count>
     downstream: analog_port_count
     relation: divergent

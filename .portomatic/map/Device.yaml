@@ -203,14 +203,17 @@ symbols:
     downstream: status
     relation: one_to_one
   - upstream: StatusChanged
-    downstream: status_changed
-    relation: not_yet_ported
+    downstream: add_status_changed
+    relation: divergent
+    notes: "C# event ported as add_status_changed(handler) / remove_status_changed(handler) callable list per project convention."
   - upstream: MessageReceived
-    downstream: message_received
-    relation: not_yet_ported
+    downstream: add_message_received
+    relation: divergent
+    notes: "C# event ported as add_message_received(handler) / remove_message_received(handler) callable list."
   - upstream: ChannelsPopulated
-    downstream: channels_populated
-    relation: not_yet_ported
+    downstream: add_channels_populated
+    relation: divergent
+    notes: "C# event ported as add_channels_populated(handler) / remove_channels_populated(handler) callable list."
   - upstream: Connect
     downstream: connect
     relation: one_to_one
@@ -218,32 +221,17 @@ symbols:
     downstream: disconnect
     relation: one_to_one
   - upstream: Dispose
-    downstream: dispose
-    relation: not_yet_ported
+    downstream: close
+    relation: one_to_one
+    notes: "C# IDisposable.Dispose → Python close() per project convention."
   - upstream: InitializeAsync
     downstream: initialize
     relation: one_to_one
   - upstream: PopulateChannelsFromStatus
     downstream: populate_channels_from_status
     relation: one_to_one
-  - upstream: <downstream-only:add_channels_populated>
-    downstream: add_channels_populated
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:add_message_received>
-    downstream: add_message_received
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:add_status_changed>
-    downstream: add_status_changed
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:channels>
     downstream: channels
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:close>
-    downstream: close
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:is_connected>
@@ -253,15 +241,15 @@ symbols:
   - upstream: <downstream-only:remove_channels_populated>
     downstream: remove_channels_populated
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_channels_populated observer (ChannelsPopulated event port).
   - upstream: <downstream-only:remove_message_received>
     downstream: remove_message_received
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_message_received observer (MessageReceived event port).
   - upstream: <downstream-only:remove_status_changed>
     downstream: remove_status_changed
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged event port).
   - upstream: <downstream-only:send>
     downstream: send
     relation: divergent
@@ -305,10 +293,12 @@ symbols:
     relation: one_to_one
   - upstream: ConnectFromDeviceInfoAsync
     downstream: connect_from_device_info
-    relation: not_yet_ported
+    relation: one_to_one
+    notes: "Async/sync collapsed per project convention — single connect_from_device_info dispatcher routes WiFi → connect_tcp, Serial → connect_serial, HID → NotImplementedError. Closes #7."
   - upstream: ConnectFromDeviceInfo
     downstream: connect_from_device_info
-    relation: not_yet_ported
+    relation: one_to_one
+    notes: "See ConnectFromDeviceInfoAsync — same dispatcher, no sync/async split in Python."
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.DaqifiStreamingDevice
@@ -330,7 +320,8 @@ symbols:
     relation: one_to_one
   - upstream: InitializeAsync
     downstream: initialize
-    relation: not_yet_ported
+    relation: divergent
+    notes: "Async/sync collapsed per project convention. Inherited from DaqifiDevice (see DaqifiDevice.InitializeAsync → initialize mapping) — IR extractor doesn't list inherited methods on subclasses, so marked divergent here to keep the audit clean while preserving the upstream-side documentation."
   - upstream: StartStreaming
     downstream: start_streaming
     relation: one_to_one
@@ -701,33 +692,27 @@ symbols:
     downstream: status
     relation: one_to_one
   - upstream: StatusChanged
-    downstream: status_changed
-    relation: not_yet_ported
+    downstream: add_status_changed
+    relation: divergent
+    notes: "C# event ported as add_status_changed(handler) / remove_status_changed(handler) callable list per project convention."
   - upstream: MessageReceived
-    downstream: message_received
-    relation: not_yet_ported
+    downstream: add_message_received
+    relation: divergent
+    notes: "C# event ported as add_message_received(handler) / remove_message_received(handler) callable list."
   - upstream: Connect
     downstream: connect
     relation: one_to_one
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
-  - upstream: <downstream-only:add_message_received>
-    downstream: add_message_received
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:add_status_changed>
-    downstream: add_status_changed
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
   - upstream: <downstream-only:remove_message_received>
     downstream: remove_message_received
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_message_received observer (MessageReceived event port).
   - upstream: <downstream-only:remove_status_changed>
     downstream: remove_status_changed
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged event port).
   - upstream: <downstream-only:send>
     downstream: send
     relation: divergent
