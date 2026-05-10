@@ -934,12 +934,16 @@ class DefaultFirmwareUpdateService:
             # Pre-split into a list so SubprocessRunner doesn't shlex-parse
             # the cmd.exe command line again — Windows backslashes and
             # quoted paths survive the round-trip cleanly via
-            # subprocess.list2cmdline.
+            # subprocess.list2cmdline. Quote the script path the same
+            # way as the template-substituted args so a path containing
+            # cmd.exe metacharacters (& | > < ^ ( ) % !) can't change
+            # what cmd.exe executes.
             import shlex as _shlex
 
-            executable_arguments = ["/c", tool_path] + _shlex.split(
-                tool_arguments, posix=False
-            )
+            executable_arguments = [
+                "/c",
+                _quote_argument(tool_path),
+            ] + _shlex.split(tool_arguments, posix=False)
 
         progress_state = {"last_process_percent": 0}
         progress_lock = threading.Lock()
@@ -991,10 +995,25 @@ class DefaultFirmwareUpdateService:
 
         if os.path.isdir(firmware_path):
             tool_name = self._options.wifi_flash_tool_file_name
+            matches: List[str] = []
             for root, _dirs, files in os.walk(firmware_path):
                 for name in files:
                     if name == tool_name:
-                        return os.path.join(root, name)
+                        matches.append(os.path.join(root, name))
+
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                # Multiple firmware versions extracted into the same
+                # tree (e.g. WiFi 19.5.4 + 19.6.1 side-by-side) — refuse
+                # to pick one implicitly so we never flash the wrong
+                # bundle. Caller should pass the explicit tool path.
+                raise FileNotFoundError(
+                    f"Multiple {tool_name!r} tools found under "
+                    f"{firmware_path!r}; please pass an explicit tool "
+                    f"path. Matches: {matches!r}"
+                )
+
             raise FileNotFoundError(
                 f"Could not locate {tool_name!r} under {firmware_path!r}."
             )
