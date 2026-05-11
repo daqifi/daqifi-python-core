@@ -66,6 +66,87 @@ class TestNQ3DerivedRange:
         assert ch.max_value == 10.0
 
 
+class TestRangeBoundsCaching:
+    """The ticket explicitly required a cached lookup. First access
+    pays the SCPI cost; subsequent accesses are O(1). Invalidation
+    happens on the range setter — caught by Qodo /agentic_review pass
+    1 on PR #106."""
+
+    def test_first_access_queries_device(self):
+        ch = _make_input("NQ3", range_response="0")
+        ch._comm.send_query.reset_mock()
+        _ = ch.min_value
+        assert ch._comm.send_query.call_count == 1
+
+    def test_second_access_uses_cache(self):
+        ch = _make_input("NQ3", range_response="0")
+        _ = ch.min_value  # populates cache
+        ch._comm.send_query.reset_mock()
+        _ = ch.min_value
+        _ = ch.max_value
+        assert ch._comm.send_query.call_count == 0
+
+    def test_min_max_consistent_snapshot(self):
+        """If the device range changes between min_value and max_value
+        accesses, both reads must reflect the same snapshot — the
+        cache guarantees this. Without the cache, min_value would see
+        range '0' and max_value range '1' and produce a (-5, 10)
+        nonsense bound."""
+        ch = _make_input("NQ3", range_response="0")
+        first_min = ch.min_value
+        # Simulate device range change between accesses.
+        ch._comm.send_query = MagicMock(return_value="1")
+        first_max = ch.max_value
+        assert (first_min, first_max) == (-5.0, 5.0), (
+            f"cache should pin the snapshot to (-5, 5), got "
+            f"({first_min}, {first_max})"
+        )
+
+    def test_query_failure_does_not_cache_fallback(self):
+        """If the SCPI query fails, fall back to ±10V but DON'T cache
+        the fallback — the next access should retry the query so the
+        channel can recover from a transient timeout."""
+        comm = MagicMock()
+        comm.send_query = MagicMock(side_effect=Exception("transient timeout"))
+        ch = AnalogInputChannel(channel_id=0, comm=comm, variant="NQ3")
+        assert ch.min_value == -10.0  # fallback
+
+        # Now the device recovers and replies "0" → ±5V.
+        comm.send_query = MagicMock(return_value="0")
+        ch._comm = comm  # ensure new mock is in place
+        # Properly re-attach
+        assert ch._comm.send_query.call_count == 0
+        assert ch.min_value == -5.0  # query happens again, returns ±5V
+        assert ch._comm.send_query.call_count == 1
+
+    def test_range_setter_invalidates_cache(self):
+        """After calling the range setter, the next min_value /
+        max_value access must re-query the device — the previous
+        bounds are stale."""
+        ch = _make_input("NQ3", range_response="0")
+        comm = ch._comm
+        comm.send_set_with_error = MagicMock(return_value=(True, '0,"No error"'))
+
+        assert ch.min_value == -5.0  # populates cache
+        comm.send_query.reset_mock()
+
+        # Set range to "1" (±10V). The setter sends a write, then
+        # the cache is invalidated.
+        ch.range = "1"
+        # Update query response so the re-read returns the new range.
+        comm.send_query = MagicMock(return_value="1")
+        assert ch.min_value == -10.0
+        assert ch.max_value == 10.0
+
+    def test_nq1_nq2_does_not_use_cache(self):
+        """Hardcoded variants don't need a cache layer (no SCPI on
+        the path), and the cache attr stays None."""
+        ch = _make_input("NQ1")
+        _ = ch.min_value
+        _ = ch.max_value
+        assert ch._cached_range_bounds is None
+
+
 class TestNoVariantSpecified:
     """When variant is None (caller didn't pass it), the channel
     behaves like NQ3 — query the configured range. Matches the

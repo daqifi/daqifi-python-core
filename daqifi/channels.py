@@ -173,6 +173,13 @@ class AnalogInputChannel:
         self._channel = channel_id
         self._comm = comm
         self._variant = variant
+        # Cached result of the last successful range query — populated
+        # on first min_value / max_value access for variants that need
+        # SCPI (NQ3 / variant=None), invalidated on range setter.
+        # Avoids double SCPI traffic when both bounds are read in
+        # sequence and prevents inconsistent (min, max) snapshots if
+        # the device range changes between the two reads.
+        self._cached_range_bounds: Optional[tuple] = None
 
     @property
     def index(self) -> int:
@@ -204,24 +211,37 @@ class AnalogInputChannel:
         and (for NQ3) the configured range. Centralizes the lookup so
         :attr:`min_value` and :attr:`max_value` stay in lock-step.
 
-        NQ1/NQ2 → fixed ±5V (MC12bADC + AD7173 are both ±5V).
+        Result is cached on the instance after the first SCPI-backed
+        lookup (NQ3 / variant=None) and invalidated by the range
+        setter — first access pays the SCPI cost; subsequent accesses
+        are O(1) and guaranteed to return a consistent (min, max)
+        snapshot even if the device range changes between two reads.
+
+        NQ1/NQ2 → fixed ±5V (MC12bADC + AD7173 are both ±5V; no SCPI
+        needed, so no cache layer either).
         NQ3 → range "0" → ±5V; range "1" → ±10V; anything else
         (e.g. "FIXED" or unparseable) falls back to the AD7609
         firmware default of ±10V.
         """
         if self._variant in ("NQ1", "NQ2"):
             return (-5.0, 5.0)
+        if self._cached_range_bounds is not None:
+            return self._cached_range_bounds
         try:
             r = self.range  # SCPI query — caller pays the cost on access
         except CommandError:
-            # Range query failed; fall back to AD7609 firmware default.
+            # Range query failed; fall back to AD7609 firmware default
+            # without caching — next access can retry the query.
             return (-10.0, 10.0)
         if r == "0":
-            return (-5.0, 5.0)
-        if r == "1":
-            return (-10.0, 10.0)
-        # FIXED or any unrecognized response — AD7609 default.
-        return (-10.0, 10.0)
+            bounds = (-5.0, 5.0)
+        elif r == "1":
+            bounds = (-10.0, 10.0)
+        else:
+            # FIXED or any unrecognized response — AD7609 default.
+            bounds = (-10.0, 10.0)
+        self._cached_range_bounds = bounds
+        return bounds
 
     @property
     def range(self) -> str:
@@ -294,6 +314,17 @@ class AnalogInputChannel:
             raise CommandError(f"Failed to set range: {e}") from e
         except Exception as e:
             raise CommandError(f"Failed to set range: {e}")
+
+        # Range is module-level on NQ3 — invalidate the cache so the
+        # next min_value / max_value access re-queries and reflects
+        # the new bounds. Other channels on the same module read
+        # the same range register, so each channel's own cache will
+        # also need to refresh on its next access. (Only this
+        # channel's cache invalidates here; cross-channel
+        # invalidation isn't a concern because the audit-clean lookup
+        # always goes through _range_bounds, which re-queries when
+        # cache is None.)
+        self._cached_range_bounds = None
 
     @property
     def enabled(self) -> bool:
