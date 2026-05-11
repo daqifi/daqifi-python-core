@@ -527,6 +527,22 @@ class TestDelimiterValidation:
 
 
 class TestDataRowEscaping:
+    def test_negative_values_not_quoted_or_apostrophe_prefixed(self):
+        # Regression: pass-7 fix applied formula-injection mitigation
+        # to data values, which incorrectly prefixed negative numbers
+        # (whose leading '-' is a sign, not a formula char) with `'`.
+        # Data fields use formula_safe=False so this no longer happens.
+        source = _InMemorySampleSource(
+            [CH1],
+            [SampleRow(T0, CH1.key, -1.5), SampleRow(T0 + 10_000_000, CH1.key, -0.001)],
+        )
+        sw = io.StringIO()
+        CsvExporter().export(source, sw, CsvExportOptions(use_relative_time=True))
+        body = sw.getvalue().splitlines()
+        # Rows must be plain floats, no quoting, no apostrophe prefix.
+        assert body[1] == "0.000,-1.5"
+        assert body[2] == "1.000,-0.001"
+
     def test_colon_delimiter_quotes_iso_timestamp(self):
         # ISO 8601 absolute timestamps inherently contain ':' — when
         # the user picks ':' as a delimiter, the timestamp field must
