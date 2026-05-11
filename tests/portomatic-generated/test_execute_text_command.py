@@ -321,6 +321,25 @@ def test_execute_text_command_serializes_concurrent_callers():
         pass
 
 
+def test_execute_text_command_rejects_disposed_or_disconnecting():
+    """The lock-protected helper checks self._disposed and
+    self._is_disconnecting before touching the consumer — catches
+    teardown-in-flight one step earlier than the existing None
+    check on _consumer / _transport. Prevents a competing thread
+    that wins the lock during disconnect from racing the actual
+    teardown into partial state."""
+    dev = _make_dev_with_consumer()
+
+    dev._is_disconnecting = True
+    with pytest.raises(RuntimeError, match="disconnecting or disposed"):
+        dev.execute_text_command(lambda: None, 100, 100)
+    dev._is_disconnecting = False
+
+    dev._disposed = True
+    with pytest.raises(RuntimeError, match="disconnecting or disposed"):
+        dev.execute_text_command(lambda: None, 100, 100)
+
+
 def test_execute_text_command_disconnect_during_lock_wait_raises_cleanly():
     """If a competing thread clears _consumer / _transport while we're
     blocked on _text_exchange_lock, the post-acquisition validation

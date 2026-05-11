@@ -608,6 +608,19 @@ class DaqifiDevice:
         response_timeout_ms: int,
         completion_timeout_ms: int,
     ) -> List[str]:
+        # Catch teardown that's in flight but hasn't yet cleared
+        # self._consumer / self._transport — same TOCTOU class as
+        # the pass-1 None-check, just one step earlier in the
+        # lifecycle. Disconnect/close set these flags before
+        # tearing the consumer down, so a competing thread that
+        # passes the lock during the disconnect window is caught
+        # here with a clear error rather than racing the actual
+        # teardown into a partial state.
+        if self._disposed or self._is_disconnecting:
+            raise RuntimeError(
+                "execute_text_command cannot run while the device is "
+                "disconnecting or disposed."
+            )
         if self._consumer is None:
             raise RuntimeError(
                 "execute_text_command requires an active consumer; "
