@@ -107,6 +107,23 @@ class TestSdCardOperationExceptionHierarchy:
         e = SdCardOperationException("x", b"binary line")
         assert e.raw_device_response == ("binary line",)
 
+    def test_last_scpi_error_normalizes_bytes(self):
+        e = SdCardOperationException(
+            "x",
+            ["line"],
+            last_scpi_error=b'**ERROR: -200, "Execution error"',
+        )
+        assert e.last_scpi_error == '**ERROR: -200, "Execution error"'
+
+    def test_last_scpi_error_normalizes_empty_to_none(self):
+        # Whitespace-only or empty string is meaningless; normalize to
+        # None so callers can rely on the Optional[str] semantics
+        # (truthy iff there's a real SCPI error captured).
+        e = SdCardOperationException("x", [], last_scpi_error="")
+        assert e.last_scpi_error is None
+        e = SdCardOperationException("x", [], last_scpi_error="   ")
+        assert e.last_scpi_error is None
+
     def test_raw_device_response_normalizes_bytes_in_list(self):
         e = SdCardOperationException("x", [b"line1", "line2", b"\xc3\x28"])
         # b"\xc3\x28" is invalid UTF-8 → decoded with replacement.

@@ -103,7 +103,17 @@ class SdCardOperationException(DAQiFiError):
             else:
                 normalized.append(str(line))
         self.raw_device_response = tuple(normalized)
-        self.last_scpi_error = last_scpi_error
+        # Match raw_device_response's coercion shape on last_scpi_error
+        # for symmetry: str/bytes both accepted, empty/None normalized
+        # to None so the Optional[str] contract is consistent.
+        if last_scpi_error is None:
+            self.last_scpi_error = None
+        elif isinstance(last_scpi_error, (bytes, bytearray)):
+            s = bytes(last_scpi_error).decode("utf-8", errors="replace").strip()
+            self.last_scpi_error = s or None
+        else:
+            s = str(last_scpi_error).strip()
+            self.last_scpi_error = s or None
 
 
 class SdCardBusyException(SdCardOperationException):
