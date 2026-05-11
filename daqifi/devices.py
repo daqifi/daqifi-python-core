@@ -814,12 +814,23 @@ class DaqifiDevice:
             popped.append(reply)
 
         if not saw_no_error:
-            # Include actual counts (not just the limits) so callers
-            # can distinguish "hit max_iterations with errors still
-            # streaming" from "bailed early on consecutive empties."
+            # Format the sentinel as a parseable SCPI error so callers
+            # who pipe popped entries through scpi.parse_system_error
+            # see a non-zero code. Without the leading numeric code,
+            # parse_system_error catches the ValueError and falls back
+            # to (0, "No error"), silently classifying the sentinel as
+            # a clean queue and defeating its purpose entirely. -100 is
+            # SCPI's "Command error" — generic enough to be the right
+            # bucket for "drain didn't converge." (Qodo /improve pass 6
+            # importance 9 caught this.)
+            #
+            # Includes actual iteration / consecutive_empty counts (not
+            # just the limits) so callers can distinguish "hit
+            # max_iterations with errors still streaming" from "bailed
+            # early on consecutive empties."
             popped.append(
-                'DRAIN_INCONCLUSIVE,"queue not confirmed clean after '
-                f'{iterations} iterations; consecutive_empty='
+                '-100,"DRAIN_INCONCLUSIVE: queue not confirmed clean '
+                f'after {iterations} iterations; consecutive_empty='
                 f'{consecutive_empty}; limits: max_iterations='
                 f'{max_iterations}, empty_budget={empty_budget}"'
             )

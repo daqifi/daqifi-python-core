@@ -1667,9 +1667,19 @@ class SerialInterface:
             consecutive_empty = 0
             popped.append(stripped)
         if not saw_no_error:
+            # Format the sentinel as a parseable SCPI error so callers
+            # who pipe popped entries through scpi.parse_system_error
+            # see a non-zero code. Without the leading numeric code,
+            # parse_system_error catches the ValueError and falls back
+            # to (0, "No error"), silently classifying the sentinel as
+            # a clean queue and defeating its purpose entirely. -100 is
+            # SCPI's "Command error" — generic enough to be the right
+            # bucket for "drain didn't converge." (Surfaced via Qodo
+            # /improve pass 6 on PR #101; same fix applied to the
+            # parallel DaqifiDevice.drain_errors there.)
             popped.append(
-                'DRAIN_INCONCLUSIVE,"did not observe 0,\\"No error\\" '
-                'before giving up"'
+                '-100,"DRAIN_INCONCLUSIVE: did not observe 0,\\"No '
+                'error\\" before giving up"'
             )
         return popped
 

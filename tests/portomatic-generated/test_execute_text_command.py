@@ -75,9 +75,12 @@ def test_drain_errors_caps_at_max_iterations():
     popped = si.drain_errors(max_iterations=5)
     # 5 real errors + the DRAIN_INCONCLUSIVE sentinel appended when
     # the loop exits without seeing 0,"No error" (added in the
-    # Qodo PR #64 review pass).
+    # Qodo PR #64 review pass). The sentinel is now formatted as a
+    # parseable SCPI error (`-100,"DRAIN_INCONCLUSIVE: ..."`) — see
+    # Qodo /improve pass 6 on PR #101.
     assert len(popped) == 6
-    assert popped[-1].startswith("DRAIN_INCONCLUSIVE,")
+    assert "DRAIN_INCONCLUSIVE" in popped[-1]
+    assert popped[-1].startswith('-100,"DRAIN_INCONCLUSIVE')
     assert popped[:-1] == ['-100,"Bad command"'] * 5
 
 
@@ -349,13 +352,17 @@ def test_drain_errors_trims_leading_and_trailing_whitespace():
 def test_drain_errors_caps_at_max_iterations_with_sentinel():
     """When the device never reports clean, cap the loop and append the
     DRAIN_INCONCLUSIVE sentinel so callers can detect 'queue not
-    confirmed clean' instead of treating empty popped as success."""
+    confirmed clean' instead of treating empty popped as success.
+    The sentinel is formatted as a parseable SCPI error
+    (`-100,"DRAIN_INCONCLUSIVE: ..."`) so callers piping it through
+    parse_system_error see a non-zero code (Qodo /improve pass 6
+    on PR #101)."""
     # 5 errors, never any "No error" terminator.
     replies = [b'-100,"Bad command"\r\n'] * 20
     dev, _ = _drain_errors_dev_with_replies(replies)
     popped = dev.drain_errors(max_iterations=5)
     assert len(popped) == 6  # 5 real + 1 sentinel
-    assert popped[-1].startswith("DRAIN_INCONCLUSIVE,")
+    assert popped[-1].startswith('-100,"DRAIN_INCONCLUSIVE')
     assert popped[:-1] == ['-100,"Bad command"'] * 5
     try:
         dev.close()
@@ -378,7 +385,41 @@ def test_drain_errors_bails_on_consecutive_empty_replies():
     )
     # Should bail after the empty_budget — no real entries, just sentinel.
     assert len(popped) == 1
-    assert popped[0].startswith("DRAIN_INCONCLUSIVE,")
+    assert popped[0].startswith('-100,"DRAIN_INCONCLUSIVE')
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
+def test_drain_errors_sentinel_parses_as_non_zero_scpi_error():
+    """Regression: the DRAIN_INCONCLUSIVE sentinel must be formatted
+    as a parseable SCPI error so callers piping popped entries
+    through scpi.parse_system_error see a non-zero code. Without the
+    leading numeric prefix, parse_system_error catches the ValueError
+    and falls back to (0, "No error"), silently classifying the
+    sentinel as a clean queue (Qodo /improve pass 6 importance 9 on
+    PR #101)."""
+    from daqifi._internal.scpi import parse_system_error
+
+    # Trigger the sentinel by exhausting empty_budget.
+    dev = _make_dev_with_consumer()
+    dev.send = lambda message: None  # no-op send → empty replies
+
+    popped = dev.drain_errors(
+        max_iterations=10,
+        empty_budget=2,
+        response_timeout_ms=50,
+        completion_timeout_ms=50,
+    )
+    assert len(popped) == 1
+    sentinel = popped[0]
+    code, desc = parse_system_error(sentinel)
+    assert code == -100, (
+        f"sentinel must parse as non-zero SCPI error so callers don't "
+        f"see it as a clean queue; got code={code}, desc={desc!r}"
+    )
+    assert "DRAIN_INCONCLUSIVE" in desc
     try:
         dev.close()
     except Exception:
