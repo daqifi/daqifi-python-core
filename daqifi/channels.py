@@ -5,8 +5,8 @@ Provides property-based access to analog and digital channels.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from ._internal.comm import SerialInterface
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from ._internal.comm import DataSample, SerialInterface
 from ._internal import scpi
 from ._internal.scpi import check_setter_response
 from .exceptions import CommandError, ConfigurationError
@@ -18,6 +18,80 @@ from .exceptions import CommandError, ConfigurationError
 # the same setter-response validation without importing across a
 # private (underscore-prefixed) boundary (Qodo PR #61 review #1).
 _check_setter_response = check_setter_response
+
+
+class _SampleReceivedMixin:
+    """Per-channel SampleReceived event + ActiveSample cache surface.
+
+    Mirrors the C# ``AnalogChannel`` / ``DigitalChannel`` events from
+    ``Daqifi.Core/Channel`` (#99 group B). Hosted as a mixin because
+    AnalogInputChannel and DigitalIOChannel both need the exact same
+    shape — both ports of the C# IChannel surface that exposes
+    ``SampleReceived`` / ``ActiveSample`` / ``SetActiveSample``.
+
+    Lifecycle:
+    - Subclass __init__ calls :meth:`_init_sample_events` to set up
+      the cache + handler list.
+    - The streaming pipeline calls :meth:`set_active_sample` whenever
+      a new sample arrives for this channel (mirrors C#
+      ``SetActiveSample``).
+    - Callers register handlers via :meth:`add_sample_received` —
+      each handler is invoked with the new :class:`DataSample` after
+      the cache is updated.
+    """
+
+    def _init_sample_events(self) -> None:
+        self._active_sample: Optional[DataSample] = None
+        self._sample_received_handlers: List[Callable[[DataSample], None]] = []
+
+    @property
+    def active_sample(self) -> Optional[DataSample]:
+        """Last :class:`DataSample` dispatched to this channel via
+        :meth:`set_active_sample`, or ``None`` if no sample has been
+        received yet. Mirrors C# ``IChannel.ActiveSample``.
+        """
+        return self._active_sample
+
+    def add_sample_received(
+        self, handler: Callable[[DataSample], None]
+    ) -> None:
+        """Register a handler called for each sample dispatched to
+        this channel. Idempotent — registering the same handler twice
+        adds it once. Mirrors C# ``SampleReceived += handler``.
+        """
+        if handler not in self._sample_received_handlers:
+            self._sample_received_handlers.append(handler)
+
+    def remove_sample_received(
+        self, handler: Callable[[DataSample], None]
+    ) -> None:
+        """Unregister a previously-added handler. No-op if the
+        handler isn't currently registered. Mirrors C#
+        ``SampleReceived -= handler``.
+        """
+        try:
+            self._sample_received_handlers.remove(handler)
+        except ValueError:
+            pass
+
+    def set_active_sample(self, sample: DataSample) -> None:
+        """Update the cached :attr:`active_sample` and invoke every
+        registered handler with the new sample. Called by the
+        streaming pipeline. Mirrors C# ``SetActiveSample(sample)``.
+
+        Each handler is wrapped so a single handler raising doesn't
+        prevent the others from running, and the handler list is
+        snapshotted so a handler that mutates the registration list
+        (add/remove from inside a callback) doesn't break iteration.
+        """
+        self._active_sample = sample
+        for handler in list(self._sample_received_handlers):
+            try:
+                handler(sample)
+            except Exception:
+                # One handler's failure must not break the others or
+                # corrupt the cache that's already been updated.
+                pass
 
 
 class AnalogOutputChannel:
@@ -154,7 +228,7 @@ class AnalogOutputChannel:
             return f"AnalogOutputChannel({self._channel})"
 
 
-class AnalogInputChannel:
+class AnalogInputChannel(_SampleReceivedMixin):
     """
     Single analog input (ADC) channel.
 
@@ -194,6 +268,7 @@ class AnalogInputChannel:
         self._range_cache: List[Optional[tuple]] = (
             range_cache if range_cache is not None else [None]
         )
+        self._init_sample_events()
 
     @property
     def index(self) -> int:
@@ -392,7 +467,7 @@ class AnalogInputChannel:
             return f"AnalogInputChannel({self._channel})"
 
 
-class DigitalIOChannel:
+class DigitalIOChannel(_SampleReceivedMixin):
     """
     Single digital I/O channel.
 
@@ -415,6 +490,7 @@ class DigitalIOChannel:
         # live pin level). Only meaningful for channels configured
         # as outputs; None until the first successful write.
         self._output_value: Optional[bool] = None
+        self._init_sample_events()
 
     @property
     def index(self) -> int:

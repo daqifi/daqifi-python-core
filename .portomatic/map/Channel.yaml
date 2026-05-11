@@ -109,12 +109,9 @@ symbols:
     downstream: direction
     relation: one_to_one
   - upstream: ActiveSample
-    downstream: null
+    downstream: active_sample
     relation: divergent
-    notes: DIV-001 — Python delegates scaling/calibration to the
-      device firmware, so the active-sample cache + event
-      mechanism that ActiveSample/SetActiveSample/SampleReceived
-      drive in C# has no Python counterpart.
+    notes: "Capability provided on daqifi.channels.AnalogInputChannel.active_sample (cached last DataSample dispatched via set_active_sample). Marked divergent for the cross-class reason documented on group-A/C rows above — symbol's downstream class is daqifi.devices.AnalogChannel (metadata-only); the cache lives on the SCPI-wrapper class where the streaming pipeline can reach it (#99 group B)."
   - upstream: MinValue
     downstream: min_value
     relation: divergent
@@ -139,20 +136,18 @@ symbols:
     downstream: port_range
     relation: one_to_one
   - upstream: SampleReceived
-    downstream: null
+    downstream: add_sample_received
     relation: divergent
-    notes: DIV-001 — Python doesn't expose a per-channel sample
-      event because there's no client-side scaling pipeline.
-      Stream consumers receive raw protobuf frames instead.
+    notes: "Capability provided through daqifi.channels.AnalogInputChannel.add_sample_received(handler) / remove_sample_received(handler) — Python's idiomatic equivalent of C# `event SampleReceived`. Cross-class shape (capability lives on the SCPI-wrapper class) (#99 group B)."
   - upstream: GetScaledValue
     downstream: null
     relation: divergent
     notes: DIV-001 (explicit) — scaling math lives in firmware on
       the Python port.
   - upstream: SetActiveSample
-    downstream: null
+    downstream: set_active_sample
     relation: divergent
-    notes: DIV-001 — see ActiveSample.
+    notes: "Capability provided on daqifi.channels.AnalogInputChannel.set_active_sample(sample) — internal hook the streaming pipeline calls to update active_sample and dispatch to subscribed handlers. Mirrors C# SetActiveSample. Cross-class shape (#99 group B)."
   - upstream: ToString
     downstream: null
     relation: divergent
@@ -257,10 +252,9 @@ symbols:
     downstream: direction
     relation: one_to_one
   - upstream: ActiveSample
-    downstream: null
+    downstream: active_sample
     relation: divergent
-    notes: DIV-001 — Python delegates state to firmware; no
-      client-side per-channel sample cache.
+    notes: "Capability provided on daqifi.channels.DigitalIOChannel.active_sample (cached last DataSample dispatched via set_active_sample). Cross-class shape — see AnalogChannel.ActiveSample row above (#99 group B)."
   - upstream: OutputValue
     downstream: output_value
     relation: divergent
@@ -270,13 +264,13 @@ symbols:
     relation: divergent
     notes: "Capability provided on daqifi.channels.DigitalIOChannel.state (queries the device's PORT_STATE register on every access — same answer as C# IsHigh, different plumbing). Marked divergent for the same cross-class reason as OutputValue above (#99 group C)."
   - upstream: SampleReceived
-    downstream: null
+    downstream: add_sample_received
     relation: divergent
-    notes: DIV-001 — no per-channel sample event in Python.
+    notes: "Capability provided through daqifi.channels.DigitalIOChannel.add_sample_received / remove_sample_received — Python's idiomatic equivalent of C# `event SampleReceived`. Cross-class shape (#99 group B)."
   - upstream: SetActiveSample
-    downstream: null
+    downstream: set_active_sample
     relation: divergent
-    notes: DIV-001 — see ActiveSample.
+    notes: "Capability provided on daqifi.channels.DigitalIOChannel.set_active_sample(sample) — internal hook the streaming pipeline calls. Cross-class shape (#99 group B)."
   - upstream: ToString
     downstream: null
     relation: divergent
@@ -376,18 +370,17 @@ symbols:
     downstream: direction
     relation: one_to_one
   - upstream: ActiveSample
-    downstream: null
+    downstream: active_sample
     relation: divergent
-    notes: DIV-001 — see AnalogChannel.ActiveSample row.
+    notes: "Capability provided on daqifi.channels.DigitalIOChannel.active_sample. Cross-class shape — see AnalogChannel.ActiveSample row above (#99 group B)."
   - upstream: SampleReceived
-    downstream: null
+    downstream: add_sample_received
     relation: divergent
-    notes: DIV-001 — Python stream consumers receive raw protobuf frames
-      instead of per-channel events.
+    notes: "Capability provided through daqifi.channels.DigitalIOChannel.add_sample_received / remove_sample_received (#99 group B)."
   - upstream: SetActiveSample
-    downstream: null
+    downstream: set_active_sample
     relation: divergent
-    notes: DIV-001 — see ActiveSample.
+    notes: "Capability provided on daqifi.channels.DigitalIOChannel.set_active_sample (#99 group B)."
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Channel.IDataSample
@@ -494,6 +487,22 @@ symbols:
     downstream: max_value
     relation: divergent
     notes: "Downstream-only entry-point row. Returns the maximum representable input voltage for this channel. See min_value note above (#99 group A)."
+  - upstream: <downstream-only:active_sample>
+    downstream: active_sample
+    relation: divergent
+    notes: "Downstream-only entry-point row. Cached last DataSample dispatched to this channel (mirrors C# IChannel.ActiveSample). The cross-class mappings from C# AnalogChannel/IAnalogChannel.ActiveSample rows above also point here (#99 group B)."
+  - upstream: <downstream-only:add_sample_received>
+    downstream: add_sample_received
+    relation: divergent
+    notes: "Downstream-only entry-point row. Register a handler for per-channel sample dispatches (Python's idiomatic equivalent of C# `event SampleReceived`) (#99 group B)."
+  - upstream: <downstream-only:remove_sample_received>
+    downstream: remove_sample_received
+    relation: divergent
+    notes: "Downstream-only addition. Unregister a previously-added sample handler. No upstream counterpart (C# uses `-=` operator on the event) (#99 group B)."
+  - upstream: <downstream-only:set_active_sample>
+    downstream: set_active_sample
+    relation: divergent
+    notes: "Downstream-only entry-point row. Internal hook the streaming pipeline calls — updates active_sample and dispatches to subscribed handlers (mirrors C# SetActiveSample) (#99 group B)."
 - upstream:
     kind: class
     qualified: <downstream-only:AnalogOutputChannel>
@@ -552,6 +561,22 @@ symbols:
     downstream: output_value
     relation: divergent
     notes: "Downstream-only entry-point row. Cached last bool successfully written via the state setter (mirrors C# DigitalChannel.OutputValue / #99 group C). The cross-class mapping from the C# DigitalChannel.OutputValue / IDigitalChannel.OutputValue rows above also points here."
+  - upstream: <downstream-only:active_sample>
+    downstream: active_sample
+    relation: divergent
+    notes: "Downstream-only entry-point row. Cached last DataSample dispatched to this channel (mirrors C# IChannel.ActiveSample). Cross-class destination for C# DigitalChannel/IDigitalChannel.ActiveSample rows (#99 group B)."
+  - upstream: <downstream-only:add_sample_received>
+    downstream: add_sample_received
+    relation: divergent
+    notes: "Downstream-only entry-point row. Register a handler for per-channel sample dispatches (#99 group B)."
+  - upstream: <downstream-only:remove_sample_received>
+    downstream: remove_sample_received
+    relation: divergent
+    notes: "Downstream-only addition. Unregister a previously-added sample handler (#99 group B)."
+  - upstream: <downstream-only:set_active_sample>
+    downstream: set_active_sample
+    relation: divergent
+    notes: "Downstream-only entry-point row. Internal hook the streaming pipeline calls (mirrors C# SetActiveSample) (#99 group B)."
 - upstream:
     kind: class
     qualified: <downstream-only:ChannelCollection>
