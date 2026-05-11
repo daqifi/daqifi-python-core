@@ -262,7 +262,7 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
         # returning [] (which looks identical to a clean queue) when
         # the device never confirmed the queue was actually drained.
         popped.append(
-            '-100,"DRAIN_INCONCLUSIVE: did not observe 0,\\"No error\\" before giving up"'
+            '99999,"DRAIN_INCONCLUSIVE: did not observe 0,\\"No error\\" before giving up"'
         )
     return popped
 

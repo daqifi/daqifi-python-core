@@ -819,17 +819,24 @@ class DaqifiDevice:
             # see a non-zero code. Without the leading numeric code,
             # parse_system_error catches the ValueError and falls back
             # to (0, "No error"), silently classifying the sentinel as
-            # a clean queue and defeating its purpose entirely. -100 is
-            # SCPI's "Command error" — generic enough to be the right
-            # bucket for "drain didn't converge." (Qodo /improve pass 6
-            # importance 9 caught this.)
+            # a clean queue and defeating its purpose entirely. (Qodo
+            # /improve pass 6 importance 9 caught the silent-miss; pass
+            # 7 /agentic_review caught the follow-up: -100 collided
+            # with the standard SCPI "Command error" code, so callers
+            # branching on the numeric code couldn't distinguish a
+            # synthetic drain-incomplete marker from a real -100.)
+            #
+            # `99999` is clearly outside the SCPI standard error range
+            # (-100 to -899 negative, 1-32767 device-specific
+            # positive); no real device should ever emit it, so callers
+            # can safely treat it as the synthetic sentinel marker.
             #
             # Includes actual iteration / consecutive_empty counts (not
             # just the limits) so callers can distinguish "hit
             # max_iterations with errors still streaming" from "bailed
             # early on consecutive empties."
             popped.append(
-                '-100,"DRAIN_INCONCLUSIVE: queue not confirmed clean '
+                '99999,"DRAIN_INCONCLUSIVE: queue not confirmed clean '
                 f'after {iterations} iterations; consecutive_empty='
                 f'{consecutive_empty}; limits: max_iterations='
                 f'{max_iterations}, empty_budget={empty_budget}"'
