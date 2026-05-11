@@ -10,7 +10,18 @@ gitignored file instead (see "Local rig file" below).
 
 Agents running in WSL2 can call `usbipd.exe` directly through
 the Windows PATH integration — no need to ask the operator to
-hop into PowerShell. Workflow:
+hop into PowerShell.
+
+**Authorization scope**: an agent may run `usbipd.exe attach`
+and `usbipd.exe detach` autonomously, **only for the BUSID that
+maps to the device assigned to this agent's session** (see
+`.claude/hardware-rig.md` for the assigned BUSID). Never attach
+or detach a different unit — another agent may be using it. If
+the assigned BUSID is missing from `usbipd.exe list`, STOP and
+ask the operator to plug it in or `bind` it; do not guess at a
+substitute.
+
+Workflow:
 
 ```bash
 # 1. List all USB devices on the Windows side
