@@ -161,7 +161,14 @@ class AnalogInputChannel:
     Provides range configuration and enable/disable functionality.
     """
 
-    def __init__(self, channel_id: int, comm: SerialInterface, variant: Optional[str] = None):
+    def __init__(
+        self,
+        channel_id: int,
+        comm: SerialInterface,
+        variant: Optional[str] = None,
+        *,
+        range_cache: Optional[List[Optional[tuple]]] = None,
+    ):
         """
         Initialize ADC channel.
 
@@ -169,17 +176,24 @@ class AnalogInputChannel:
             channel_id: Channel index
             comm: Serial communication interface
             variant: Board variant ("NQ1", "NQ2", "NQ3") - optional
+            range_cache: Single-element list serving as a shared
+                mutable cache holder for the (min, max) range bounds.
+                Range is module-level on NQ3 (AD7609 register), so
+                channels constructed by the same collection share one
+                cache so a `range = ...` write on any channel
+                invalidates the bounds for all of them. When
+                ``None`` (the default for solo construction), the
+                channel gets its own private cache.
         """
         self._channel = channel_id
         self._comm = comm
         self._variant = variant
-        # Cached result of the last successful range query — populated
-        # on first min_value / max_value access for variants that need
-        # SCPI (NQ3 / variant=None), invalidated on range setter.
-        # Avoids double SCPI traffic when both bounds are read in
-        # sequence and prevents inconsistent (min, max) snapshots if
-        # the device range changes between the two reads.
-        self._cached_range_bounds: Optional[tuple] = None
+        # See `range_cache` arg above. Stored as a 1-element list so
+        # writes from one channel are visible to siblings sharing the
+        # same list.
+        self._range_cache: List[Optional[tuple]] = (
+            range_cache if range_cache is not None else [None]
+        )
 
     @property
     def index(self) -> int:
@@ -225,8 +239,8 @@ class AnalogInputChannel:
         """
         if self._variant in ("NQ1", "NQ2"):
             return (-5.0, 5.0)
-        if self._cached_range_bounds is not None:
-            return self._cached_range_bounds
+        if self._range_cache[0] is not None:
+            return self._range_cache[0]
         try:
             r = self.range  # SCPI query — caller pays the cost on access
         except CommandError:
@@ -240,7 +254,7 @@ class AnalogInputChannel:
         else:
             # FIXED or any unrecognized response — AD7609 default.
             bounds = (-10.0, 10.0)
-        self._cached_range_bounds = bounds
+        self._range_cache[0] = bounds
         return bounds
 
     @property
@@ -315,16 +329,13 @@ class AnalogInputChannel:
         except Exception as e:
             raise CommandError(f"Failed to set range: {e}")
 
-        # Range is module-level on NQ3 — invalidate the cache so the
-        # next min_value / max_value access re-queries and reflects
-        # the new bounds. Other channels on the same module read
-        # the same range register, so each channel's own cache will
-        # also need to refresh on its next access. (Only this
-        # channel's cache invalidates here; cross-channel
-        # invalidation isn't a concern because the audit-clean lookup
-        # always goes through _range_bounds, which re-queries when
-        # cache is None.)
-        self._cached_range_bounds = None
+        # Range is module-level on NQ3 — invalidate the shared cache
+        # so every sibling channel constructed with the same
+        # range_cache list also sees the next access re-query the
+        # device. Sole-construction channels invalidate only their
+        # private cache (the default range_cache=None gives each
+        # channel its own list).
+        self._range_cache[0] = None
 
     @property
     def enabled(self) -> bool:
