@@ -503,9 +503,14 @@ def _escape_csv_field(value: str, delimiter: str) -> str:
     """
     # Neutralize spreadsheet formula injection BEFORE the quote
     # decision so the inserted leading-quote is itself eligible for
-    # quoting if needed.
-    if value and value[0] in ("=", "+", "-", "@"):
-        value = "'" + value
+    # quoting if needed. Strip leading whitespace before the formula-
+    # char check — many spreadsheets ignore leading whitespace when
+    # detecting a formula (e.g. " =SUM(A1)" still evaluates), so the
+    # check has to look past whitespace to catch the bypass.
+    if value:
+        leading = value.lstrip(" \t")
+        if leading and leading[0] in ("=", "+", "-", "@"):
+            value = "'" + value
     must_quote = any(ch in value for ch in (delimiter, '"', "\r", "\n"))
     if must_quote:
         value = value.replace('"', '""')

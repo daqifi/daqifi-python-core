@@ -471,6 +471,24 @@ class TestCsvHeaderEscaping:
         _, header = _export_to_lines(source)
         assert "'=DevA:SN001:Channel1" in header
 
+    def test_whitespace_prefixed_formula_still_neutralized(self):
+        # " =SUM(A1)" — leading space bypasses a naive value[0] check
+        # but spreadsheets still interpret it as a formula. The escape
+        # function strips leading whitespace before the formula-char
+        # check so this case is caught too.
+        ch = ChannelDescriptor(" =DevA", "SN001", "Channel1", ChannelType.Analog)
+        source = _InMemorySampleSource([ch], [SampleRow(T0, ch.key, 1.0)])
+        _, header = _export_to_lines(source)
+        # Field is prefixed with literal ' to force text mode in
+        # Excel/Sheets/LibreOffice; whitespace is preserved.
+        assert "' =DevA:SN001:Channel1" in header
+
+    def test_tab_prefixed_formula_still_neutralized(self):
+        ch = ChannelDescriptor("\t=DevA", "SN001", "Channel1", ChannelType.Analog)
+        source = _InMemorySampleSource([ch], [SampleRow(T0, ch.key, 1.0)])
+        _, header = _export_to_lines(source)
+        assert "'\t=DevA:SN001:Channel1" in header
+
     def test_no_escaping_for_normal_keys(self):
         # Normal channel keys pass through unchanged.
         source = _InMemorySampleSource([CH1], [SampleRow(T0, CH1.key, 1.0)])
