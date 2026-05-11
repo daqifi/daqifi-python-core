@@ -198,6 +198,18 @@ class DaqifiDevice:
             Callable[[ChannelsPopulatedEventArgs], None]
         ] = []
 
+        # Serializes execute_text_command calls device-wide. Plain
+        # Lock (not RLock) is intentional: re-entrant calls from
+        # inside a setup_action callback would corrupt the consumer
+        # swap. We additionally track the thread that currently holds
+        # the lock so a same-thread re-entry surfaces as an explicit
+        # RuntimeError rather than wedging the caller in a deadlock —
+        # same safety guarantee (the bug never silently corrupts
+        # state), strictly better failure mode for debugging.
+        # Mirrors the fix expected upstream in daqifi-core#186.
+        self._text_exchange_lock = threading.Lock()
+        self._text_exchange_lock_owner: Optional[int] = None
+
         if transport is not None:
             transport.add_status_changed(self._on_transport_status_changed)
 
@@ -563,6 +575,52 @@ class DaqifiDevice:
             inactivity timeout. Empty list when the device returned
             nothing within ``response_timeout_ms``.
         """
+        tid = threading.get_ident()
+        if self._text_exchange_lock_owner == tid:
+            # Re-entrant call from inside a setup_action callback.
+            # Surfacing as RuntimeError instead of letting Lock.acquire
+            # deadlock keeps the caller's process responsive while
+            # still preventing the consumer-swap corruption the lock
+            # exists to guard against.
+            raise RuntimeError(
+                "execute_text_command is not re-entrant on the same device; "
+                "do not call it from inside a setup_action callback."
+            )
+
+        with self._text_exchange_lock:
+            # All validation happens INSIDE the lock to close the
+            # TOCTOU window: a competing thread can call disconnect()
+            # (which clears self._consumer / self._transport without
+            # acquiring this lock) while we're blocked on the lock.
+            # Re-checking after acquisition guarantees the consumer,
+            # transport, and stream we operate on are still live.
+            self._text_exchange_lock_owner = tid
+            try:
+                return self._execute_text_command_locked(
+                    setup_action, response_timeout_ms, completion_timeout_ms
+                )
+            finally:
+                self._text_exchange_lock_owner = None
+
+    def _execute_text_command_locked(
+        self,
+        setup_action: Callable[[], None],
+        response_timeout_ms: int,
+        completion_timeout_ms: int,
+    ) -> List[str]:
+        # Catch teardown that's in flight but hasn't yet cleared
+        # self._consumer / self._transport — same TOCTOU class as
+        # the pass-1 None-check, just one step earlier in the
+        # lifecycle. Disconnect/close set these flags before
+        # tearing the consumer down, so a competing thread that
+        # passes the lock during the disconnect window is caught
+        # here with a clear error rather than racing the actual
+        # teardown into a partial state.
+        if self._disposed or self._is_disconnecting:
+            raise RuntimeError(
+                "execute_text_command cannot run while the device is "
+                "disconnecting or disposed."
+            )
         if self._consumer is None:
             raise RuntimeError(
                 "execute_text_command requires an active consumer; "
@@ -694,10 +752,9 @@ class DaqifiDevice:
 
         Each iteration uses :meth:`execute_text_command`, which pauses
         the protobuf consumer for the duration of the text exchange.
-        Avoid calling this during active streaming or concurrently
-        with other text commands. (See daqifi-python-core#92 — once
-        the per-device text-exchange lock lands, that constraint
-        becomes intrinsic.)
+        Avoid calling this during active streaming. Concurrent calls
+        from multiple threads are safe — :meth:`execute_text_command`
+        serializes them via a per-device lock (daqifi-python-core#92).
 
         Args:
             max_iterations: Safety cap on the number of ``SYST:ERR?``

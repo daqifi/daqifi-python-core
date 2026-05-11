@@ -257,6 +257,190 @@ def test_execute_text_command_raises_without_consumer():
 
 
 # ---------------------------------------------------------------------------
+# #92 — concurrent callers must be serialized by the per-device lock so
+# their replies don't interleave. Without the lock, two threads racing the
+# same stream would each see a random subset of the other's lines.
+# ---------------------------------------------------------------------------
+
+
+def test_execute_text_command_serializes_concurrent_callers():
+    """Five threads call execute_text_command in parallel. The
+    _text_exchange_lock makes them serialize, so each caller's returned
+    lines are exactly the ones their setup_action fed — no cross-
+    contamination from concurrent feeds."""
+    dev = _make_dev_with_consumer()
+    stream = dev._transport._stream
+
+    results: dict[int, list[str]] = {}
+    errors: list[BaseException] = []
+    start_barrier = threading.Barrier(5)
+
+    def caller(idx: int) -> None:
+        try:
+            tag = f"T{idx}".encode()
+            # The setup_action feeds a unique 2-line response keyed by
+            # the thread index. The body is fast so the inactivity
+            # phase (250 ms) is the dominant wait — comfortably under
+            # the response_timeout but enough to verify no caller's
+            # frame leaks across the lock boundary.
+            def setup() -> None:
+                stream.feed(tag + b":a\r\n" + tag + b":b\r\n")
+
+            start_barrier.wait()
+            lines = dev.execute_text_command(
+                setup, response_timeout_ms=2000, completion_timeout_ms=250
+            )
+            results[idx] = lines
+        except BaseException as exc:
+            errors.append(exc)
+
+    # daemon=True so a stuck thread can't keep the pytest process
+    # alive and hang CI — matches the convention in
+    # test_device_finders.py.
+    threads = [
+        threading.Thread(target=caller, args=(i,), daemon=True) for i in range(5)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors, f"caller threads raised: {errors!r}"
+    assert set(results) == set(range(5))
+    # Each caller sees exactly its own two lines, in order. If the
+    # lock were missing, captured lists would contain other threads'
+    # tags or be missing some of their own.
+    for idx, lines in results.items():
+        assert lines == [f"T{idx}:a", f"T{idx}:b"], (
+            f"caller {idx} got cross-contaminated lines: {lines}"
+        )
+
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
+def test_execute_text_command_rejects_disposed_or_disconnecting():
+    """The lock-protected helper checks self._disposed and
+    self._is_disconnecting before touching the consumer — catches
+    teardown-in-flight one step earlier than the existing None
+    check on _consumer / _transport. Prevents a competing thread
+    that wins the lock during disconnect from racing the actual
+    teardown into partial state."""
+    dev = _make_dev_with_consumer()
+
+    dev._is_disconnecting = True
+    with pytest.raises(RuntimeError, match="disconnecting or disposed"):
+        dev.execute_text_command(lambda: None, 100, 100)
+    dev._is_disconnecting = False
+
+    dev._disposed = True
+    with pytest.raises(RuntimeError, match="disconnecting or disposed"):
+        dev.execute_text_command(lambda: None, 100, 100)
+
+
+def test_execute_text_command_disconnect_during_lock_wait_raises_cleanly():
+    """If a competing thread clears _consumer / _transport while we're
+    blocked on _text_exchange_lock, the post-acquisition validation
+    must catch the new None state and raise RuntimeError — not
+    AttributeError on `None.is_running`. Closes the TOCTOU window
+    flagged by Qodo /agentic_review pass 1 on PR #104."""
+    dev = _make_dev_with_consumer()
+
+    holder_in = threading.Event()
+    holder_release = threading.Event()
+    waiter_done = threading.Event()
+    waiter_exc: list[BaseException] = []
+
+    def holder_setup() -> None:
+        holder_in.set()
+        # Hold the lock until the test releases us.
+        holder_release.wait(timeout=5)
+
+    def holder() -> None:
+        try:
+            dev.execute_text_command(
+                holder_setup, response_timeout_ms=200, completion_timeout_ms=100
+            )
+        except Exception:
+            pass
+
+    def waiter() -> None:
+        try:
+            dev.execute_text_command(
+                lambda: None, response_timeout_ms=200, completion_timeout_ms=100
+            )
+        except BaseException as exc:
+            waiter_exc.append(exc)
+        finally:
+            waiter_done.set()
+
+    h = threading.Thread(target=holder, daemon=True)
+    w = threading.Thread(target=waiter, daemon=True)
+    h.start()
+    assert holder_in.wait(timeout=2.0), "holder never entered setup_action"
+
+    # Now waiter is about to (or already does) block on the lock.
+    w.start()
+    # Give the waiter a moment to actually contend on the lock.
+    time.sleep(0.1)
+
+    # Tear down the consumer mid-wait to simulate a concurrent
+    # disconnect. The waiter must NOT crash on AttributeError when
+    # it eventually acquires the lock.
+    dev._consumer = None
+
+    # Release the holder so the waiter can acquire the lock.
+    holder_release.set()
+    h.join(timeout=2.0)
+
+    assert waiter_done.wait(timeout=3.0), "waiter never returned"
+    assert waiter_exc, "waiter should have raised after seeing _consumer=None"
+    exc = waiter_exc[0]
+    assert isinstance(exc, RuntimeError) and "active consumer" in str(exc), (
+        f"expected RuntimeError on cleared consumer, got {type(exc).__name__}: {exc}"
+    )
+
+
+def test_execute_text_command_reentrant_call_raises_runtime_error():
+    """Same-thread re-entry from inside a setup_action callback is
+    detected via _text_exchange_lock_owner and raises RuntimeError —
+    surfaces the bug without wedging the caller. Strictly better
+    failure mode than the previous "intentional deadlock" approach
+    while preserving the same safety guarantee (consumer-swap
+    corruption never happens silently)."""
+    dev = _make_dev_with_consumer()
+
+    inner_outcome: list[BaseException] = []
+
+    def outer_setup() -> None:
+        try:
+            dev.execute_text_command(
+                lambda: None, response_timeout_ms=200, completion_timeout_ms=100
+            )
+        except BaseException as exc:
+            inner_outcome.append(exc)
+            raise
+
+    with pytest.raises(RuntimeError, match="not re-entrant"):
+        dev.execute_text_command(
+            outer_setup, response_timeout_ms=2000, completion_timeout_ms=200
+        )
+
+    assert inner_outcome, "inner call should have raised"
+    assert isinstance(inner_outcome[0], RuntimeError)
+    assert "not re-entrant" in str(inner_outcome[0])
+
+    # Lock state should be released cleanly so subsequent calls work.
+    assert dev._text_exchange_lock_owner is None
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # DaqifiDevice.drain_errors — port of upstream DrainErrorQueueAsync (#185).
 # Uses the same _FakeTransport + _ControlledStream pattern as the
 # execute_text_command tests above; drain_errors is a thin loop on top.
