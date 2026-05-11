@@ -384,53 +384,41 @@ def test_execute_text_command_disconnect_during_lock_wait_raises_cleanly():
     )
 
 
-def test_execute_text_command_reentrant_call_deadlocks():
-    """A plain Lock (not RLock) is intentional: a setup_action that
-    re-enters execute_text_command on the same device would corrupt the
-    consumer swap, so it must deadlock rather than silently break.
-
-    Verified here by running the re-entrant call from a sacrificial
-    thread with a short timeout — the inner call never returns, so the
-    thread is still alive when we join with a 1 s budget."""
+def test_execute_text_command_reentrant_call_raises_runtime_error():
+    """Same-thread re-entry from inside a setup_action callback is
+    detected via _text_exchange_lock_owner and raises RuntimeError —
+    surfaces the bug without wedging the caller. Strictly better
+    failure mode than the previous "intentional deadlock" approach
+    while preserving the same safety guarantee (consumer-swap
+    corruption never happens silently)."""
     dev = _make_dev_with_consumer()
-    stream = dev._transport._stream
 
-    completed = threading.Event()
-
-    def inner_setup() -> None:
-        stream.feed(b"inner-line\r\n")
+    inner_outcome: list[BaseException] = []
 
     def outer_setup() -> None:
-        # Acquire the SAME lock the outer call is already holding — a
-        # plain Lock blocks forever rather than re-entering. We never
-        # set `completed` because the inner call never returns.
-        dev.execute_text_command(
-            inner_setup, response_timeout_ms=500, completion_timeout_ms=100
-        )
-        completed.set()
-
-    def runner() -> None:
         try:
             dev.execute_text_command(
-                outer_setup, response_timeout_ms=2000, completion_timeout_ms=200
+                lambda: None, response_timeout_ms=200, completion_timeout_ms=100
             )
-        except Exception:
-            # The outer call may itself time out / raise; the assertion
-            # we care about is that `completed` never fires.
-            pass
+        except BaseException as exc:
+            inner_outcome.append(exc)
+            raise
 
-    t = threading.Thread(target=runner, daemon=True)
-    t.start()
-    t.join(timeout=1.0)
+    with pytest.raises(RuntimeError, match="not re-entrant"):
+        dev.execute_text_command(
+            outer_setup, response_timeout_ms=2000, completion_timeout_ms=200
+        )
 
-    assert not completed.is_set(), (
-        "re-entrant execute_text_command unexpectedly returned — "
-        "the lock must be a Lock (not RLock) so this case deadlocks"
-    )
-    # Thread is left running (daemon=True so the test process can
-    # still exit). Don't dev.close() — the stuck thread holds the
-    # underlying lock and any teardown that touches the stream would
-    # hang waiting for it.
+    assert inner_outcome, "inner call should have raised"
+    assert isinstance(inner_outcome[0], RuntimeError)
+    assert "not re-entrant" in str(inner_outcome[0])
+
+    # Lock state should be released cleanly so subsequent calls work.
+    assert dev._text_exchange_lock_owner is None
+    try:
+        dev.close()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

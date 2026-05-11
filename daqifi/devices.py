@@ -201,9 +201,14 @@ class DaqifiDevice:
         # Serializes execute_text_command calls device-wide. Plain
         # Lock (not RLock) is intentional: re-entrant calls from
         # inside a setup_action callback would corrupt the consumer
-        # swap, so surface them as a deadlock instead. Mirrors the
-        # fix expected upstream in daqifi-core#186.
+        # swap. We additionally track the thread that currently holds
+        # the lock so a same-thread re-entry surfaces as an explicit
+        # RuntimeError rather than wedging the caller in a deadlock —
+        # same safety guarantee (the bug never silently corrupts
+        # state), strictly better failure mode for debugging.
+        # Mirrors the fix expected upstream in daqifi-core#186.
         self._text_exchange_lock = threading.Lock()
+        self._text_exchange_lock_owner: Optional[int] = None
 
         if transport is not None:
             transport.add_status_changed(self._on_transport_status_changed)
@@ -570,6 +575,18 @@ class DaqifiDevice:
             inactivity timeout. Empty list when the device returned
             nothing within ``response_timeout_ms``.
         """
+        tid = threading.get_ident()
+        if self._text_exchange_lock_owner == tid:
+            # Re-entrant call from inside a setup_action callback.
+            # Surfacing as RuntimeError instead of letting Lock.acquire
+            # deadlock keeps the caller's process responsive while
+            # still preventing the consumer-swap corruption the lock
+            # exists to guard against.
+            raise RuntimeError(
+                "execute_text_command is not re-entrant on the same device; "
+                "do not call it from inside a setup_action callback."
+            )
+
         with self._text_exchange_lock:
             # All validation happens INSIDE the lock to close the
             # TOCTOU window: a competing thread can call disconnect()
@@ -577,9 +594,13 @@ class DaqifiDevice:
             # acquiring this lock) while we're blocked on the lock.
             # Re-checking after acquisition guarantees the consumer,
             # transport, and stream we operate on are still live.
-            return self._execute_text_command_locked(
-                setup_action, response_timeout_ms, completion_timeout_ms
-            )
+            self._text_exchange_lock_owner = tid
+            try:
+                return self._execute_text_command_locked(
+                    setup_action, response_timeout_ms, completion_timeout_ms
+                )
+            finally:
+                self._text_exchange_lock_owner = None
 
     def _execute_text_command_locked(
         self,
