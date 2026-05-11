@@ -263,14 +263,13 @@ symbols:
     notes: DIV-001 — Python delegates state to firmware; no
       client-side per-channel sample cache.
   - upstream: OutputValue
-    downstream: null
+    downstream: output_value
     relation: divergent
-    notes: DIV-001 — Python's DigitalIOChannel writes are SCPI-
-      delegated; no buffered output_value field client-side.
+    notes: "Capability provided on daqifi.channels.DigitalIOChannel.output_value (cached commanded bool, mirrors C# semantics). Marked divergent rather than one_to_one because the strict map audit binds members to the symbol's downstream class (daqifi.devices.DigitalChannel — metadata-only) and the cache lives on a different host class. The downstream-only DigitalIOChannel.output_value row below carries the actual member; this row records the cross-class relationship (#99 group C)."
   - upstream: IsHigh
-    downstream: null
+    downstream: state
     relation: divergent
-    notes: DIV-001 — see OutputValue.
+    notes: "Capability provided on daqifi.channels.DigitalIOChannel.state (queries the device's PORT_STATE register on every access — same answer as C# IsHigh, different plumbing). Marked divergent for the same cross-class reason as OutputValue above (#99 group C)."
   - upstream: SampleReceived
     downstream: null
     relation: divergent
@@ -423,13 +422,13 @@ symbols:
   rationale: null
   members:
   - upstream: OutputValue
-    downstream: null
+    downstream: output_value
     relation: divergent
-    notes: "No downstream member. The Python DigitalChannel dataclass is metadata-only (index/name/direction/is_enabled); per-pin output state is set/read via the DigitalIOChannel SCPI wrapper in daqifi/channels.py rather than carried on the data model. Mirrors the device-delegated pattern documented in the IAnalogChannel rationale."
+    notes: "Capability provided on daqifi.channels.DigitalIOChannel.output_value (cached commanded bool, mirrors C# semantics). Marked divergent rather than one_to_one because the strict map audit binds members to the symbol's downstream class (daqifi.devices.DigitalChannel — metadata-only) and the cache lives on a different host class. See the downstream-only DigitalIOChannel.output_value row (#99 group C)."
   - upstream: IsHigh
-    downstream: null
+    downstream: state
     relation: divergent
-    notes: "No downstream member. Same rationale as OutputValue — current pin state is queried from the device via SCPI through the DigitalIOChannel wrapper, not cached on the data model."
+    notes: "Capability provided on daqifi.channels.DigitalIOChannel.state (queries the device's PORT_STATE register on every access — same answer as C# IsHigh, different plumbing). Marked divergent for the same cross-class reason as OutputValue above (#99 group C)."
   - upstream: <downstream-only:index>
     downstream: index
     relation: divergent
@@ -513,6 +512,10 @@ symbols:
     downstream: enabled
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:output_value>
+    downstream: output_value
+    relation: divergent
+    notes: "Downstream-only addition. Cached last voltage successfully written via the voltage setter — usability convenience that mirrors the spirit of C# DigitalChannel.OutputValue (#99 group C). C# AnalogChannel has no equivalent (C# DAC support not yet ported as a class)."
 - upstream:
     kind: class
     qualified: <downstream-only:DigitalIOChannel>
@@ -538,6 +541,10 @@ symbols:
     downstream: state
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:output_value>
+    downstream: output_value
+    relation: divergent
+    notes: "Downstream-only entry-point row. Cached last bool successfully written via the state setter (mirrors C# DigitalChannel.OutputValue / #99 group C). The cross-class mapping from the C# DigitalChannel.OutputValue / IDigitalChannel.OutputValue rows above also points here."
 - upstream:
     kind: class
     qualified: <downstream-only:ChannelCollection>

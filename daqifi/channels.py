@@ -38,11 +38,29 @@ class AnalogOutputChannel:
         """
         self._channel = channel_id
         self._comm = comm
+        # Local cache of the last value successfully written via the
+        # voltage setter — exposed as `output_value`. Mirrors the
+        # client-side cache C# AnalogChannel.OutputValue keeps so
+        # callers can ask "what did I last set?" without re-querying
+        # the device. None until the first successful write.
+        self._output_value: Optional[float] = None
 
     @property
     def index(self) -> int:
         """Get channel index"""
         return self._channel
+
+    @property
+    def output_value(self) -> Optional[float]:
+        """Last voltage successfully written via the :attr:`voltage`
+        setter, or ``None`` if no write has succeeded yet.
+
+        Mirrors C# ``AnalogChannel.OutputValue`` — a client-side
+        cache for "what did I last set?" that doesn't round-trip to
+        the device. Use :attr:`voltage` if you want the device's
+        current view.
+        """
+        return self._output_value
 
     @property
     def voltage(self) -> float:
@@ -87,6 +105,11 @@ class AnalogOutputChannel:
             ) from e
         except Exception as e:
             raise CommandError(f"Failed to set voltage on channel {self._channel}: {e}")
+
+        # Update the local cache only after the device confirms the
+        # write succeeded — `output_value` should never report a
+        # value the device rejected.
+        self._output_value = value
 
     @property
     def enabled(self) -> bool:
@@ -300,11 +323,30 @@ class DigitalIOChannel:
         """
         self._channel = channel_id
         self._comm = comm
+        # Local cache of the last state successfully written via the
+        # state setter — exposed as `output_value`. Mirrors C#
+        # DigitalChannel.OutputValue (the commanded bool, not the
+        # live pin level). Only meaningful for channels configured
+        # as outputs; None until the first successful write.
+        self._output_value: Optional[bool] = None
 
     @property
     def index(self) -> int:
         """Get channel index"""
         return self._channel
+
+    @property
+    def output_value(self) -> Optional[bool]:
+        """Last state successfully written via the :attr:`state`
+        setter, or ``None`` if no write has succeeded yet.
+
+        Mirrors C# ``DigitalChannel.OutputValue`` — a client-side
+        cache for "what did I last command?" that doesn't round-
+        trip to the device. C# ``IsHigh`` (live pin readback) maps
+        to the existing :attr:`state` getter, which queries the
+        device on every access.
+        """
+        return self._output_value
 
     @property
     def direction(self) -> str:
@@ -362,6 +404,12 @@ class DigitalIOChannel:
             ) from e
         except Exception as e:
             raise CommandError(f"Failed to set direction on channel {self._channel}: {e}")
+
+        # Switching to input invalidates the cached commanded output
+        # value — there's no commanded value on an input pin and a
+        # subsequent re-flip back to output should start fresh.
+        if value_lower == "input":
+            self._output_value = None
 
     @property
     def state(self) -> bool:
@@ -421,6 +469,11 @@ class DigitalIOChannel:
             ) from e
         except Exception as e:
             raise CommandError(f"Failed to set state on channel {self._channel}: {e}")
+
+        # Update the local cache only after the device confirms the
+        # write succeeded — `output_value` should never report a
+        # value the device rejected.
+        self._output_value = value
 
     def __repr__(self) -> str:
         try:
