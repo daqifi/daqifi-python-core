@@ -126,12 +126,26 @@ def _is_non_result_line(line: str) -> bool:
     message, including firmware text such as ``Error !! ...``.
 
     Used to recognize that the parser would yield no result, without
-    polluting ``last_scpi_error`` with non-SCPI text. Mirrors upstream
-    ``IsNonResultLine`` from PR #182.
+    polluting ``last_scpi_error`` with non-SCPI text.
+
+    Mirrors upstream ``IsNonResultLine`` from PR #182 in shape, but
+    tightens the prefix list to avoid false-positives on legitimate
+    filenames that happen to start with ``error`` (e.g.
+    ``error_log.csv`` would otherwise be misclassified as a non-result
+    line and cause SdCardOperationException to fire on a real listing).
+    The accepted prefixes cover every firmware-emitted error shape
+    we know about: SCPI standard ``**ERROR`` / ``ERROR:``, and the
+    firmware-specific status text ``Error !! ...``. Same fix should
+    land upstream — Qodo /improve pass 4 importance 9 caught the
+    false-positive on PR #102.
     """
     trimmed = line.lstrip()
     upper = trimmed.upper()
-    return upper.startswith("**ERROR") or upper.startswith("ERROR")
+    return (
+        upper.startswith("**ERROR")
+        or upper.startswith("ERROR:")
+        or upper.startswith("ERROR !!")
+    )
 
 
 def throw_if_sd_card_list_error(lines):

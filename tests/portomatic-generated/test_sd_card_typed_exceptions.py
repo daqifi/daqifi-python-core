@@ -96,6 +96,23 @@ class TestSdCardOperationExceptionHierarchy:
         assert e.device_message == ""
         assert str(e) == "The SD card filesystem reported an error."
 
+    def test_raw_device_response_normalizes_bare_string(self):
+        # Foot-gun guard: a bare string (not a list) should be treated
+        # as a single-line response, not as an iterable-of-chars.
+        # Without the type check, tuple("abc") would yield ('a','b','c').
+        e = SdCardOperationException("x", "single line")
+        assert e.raw_device_response == ("single line",)
+
+    def test_raw_device_response_normalizes_bytes(self):
+        e = SdCardOperationException("x", b"binary line")
+        assert e.raw_device_response == ("binary line",)
+
+    def test_raw_device_response_normalizes_bytes_in_list(self):
+        e = SdCardOperationException("x", [b"line1", "line2", b"\xc3\x28"])
+        # b"\xc3\x28" is invalid UTF-8 → decoded with replacement.
+        assert e.raw_device_response[:2] == ("line1", "line2")
+        assert "�" in e.raw_device_response[2] or "(" in e.raw_device_response[2]
+
     def test_get_type_hints_resolves_on_runtime(self):
         # PEP-604 `str | None` would raise on Python 3.8/3.9; we use
         # Optional[str] so introspection-based tooling works on any
@@ -200,6 +217,22 @@ class TestThrowIfSdCardListError:
                 "Error !! No SD Card Detected",
             ])
         assert ei.value.last_scpi_error == '**ERROR: -200, "Execution error"'
+
+    def test_filename_starting_with_error_not_misclassified(self):
+        """Regression: a real file in the listing whose name starts with
+        ``error`` (e.g. ``error_log.csv``) must NOT be classified as a
+        non-result error line — _is_non_result_line tightened to
+        require ``ERROR:`` / ``**ERROR`` / ``ERROR !!`` prefixes
+        specifically. (Qodo /improve pass 4 importance 9 caught the
+        original permissive ``startswith("ERROR")`` false-positive.)
+        """
+        # All-files-start-with-"error" listing — would trigger the
+        # defensive fallback under the old check (no content lines).
+        # Under the tightened check, the parser sees them as content.
+        throw_if_sd_card_list_error([
+            "error_log_2026.csv,1024",
+            "error_alarm_2026.csv,2048",
+        ])
 
     def test_picks_LAST_scpi_error_when_multiple(self):
         # Per upstream convention, last_scpi_error is the LAST matching

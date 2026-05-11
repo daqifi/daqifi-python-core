@@ -83,7 +83,26 @@ class SdCardOperationException(DAQiFiError):
         last_scpi_error=None,
     ):
         super().__init__(message)
-        self.raw_device_response = tuple(raw_device_response or ())
+        # Defend against the foot-gun of passing a bare string instead
+        # of an iterable-of-strings — `tuple("abc")` would yield
+        # `('a','b','c')`. Treat str/bytes as a single-line response.
+        if raw_device_response is None:
+            raw = ()
+        elif isinstance(raw_device_response, (str, bytes, bytearray)):
+            raw = (raw_device_response,)
+        else:
+            raw = tuple(raw_device_response)
+        # Coerce each line to str so the stored tuple matches the
+        # Tuple[str, ...] type contract regardless of caller hygiene.
+        normalized = []
+        for line in raw:
+            if line is None:
+                normalized.append("")
+            elif isinstance(line, (bytes, bytearray)):
+                normalized.append(bytes(line).decode("utf-8", errors="replace"))
+            else:
+                normalized.append(str(line))
+        self.raw_device_response = tuple(normalized)
         self.last_scpi_error = last_scpi_error
 
 
