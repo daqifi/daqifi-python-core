@@ -67,6 +67,12 @@ from .streaming import (
 # Power state enum (commonly used)
 from ._internal.comm import PowerState
 
+# DataSample is the type passed to per-channel sample handlers
+# (channel.add_sample_received). Re-exported from the public root so
+# callers don't have to reach into _internal — surfaced by Qodo
+# /agentic_review pass 1 on PR #108 (#99 group B).
+from ._internal.comm import DataSample
+
 # Exception hierarchy
 from .exceptions import (
     DAQiFiError,
@@ -91,6 +97,7 @@ __all__ = [
     'DeviceInfo',
     'BoardVariant',
     'PowerState',
+    'DataSample',
 
     # Channel classes
     'AnalogOutputChannel',
