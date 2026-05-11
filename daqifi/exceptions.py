@@ -4,6 +4,8 @@ Exception hierarchy for DAQiFi Python API.
 Provides structured error handling for device operations.
 """
 
+from typing import Optional, Tuple
+
 
 class DAQiFiError(Exception):
     """Base exception for all DAQiFi errors"""
@@ -65,12 +67,14 @@ class SdCardOperationException(DAQiFiError):
     #: The captured response lines from the device when the error was
     #: classified. Useful for diagnostics and for surfacing actionable
     #: detail in higher-level UIs.
-    raw_device_response: tuple
+    raw_device_response: Tuple[str, ...]
 
     #: The last SCPI error line observed in the response (e.g.
     #: ``**ERROR: -200, "Execution error"``), or ``None`` if none was
-    #: present.
-    last_scpi_error: "str | None"
+    #: present. Uses ``Optional[str]`` rather than the PEP-604 ``str | None``
+    #: form so ``typing.get_type_hints()`` works on Python 3.8/3.9
+    #: (the project's declared minimum is 3.8).
+    last_scpi_error: Optional[str]
 
     def __init__(
         self,
@@ -85,7 +89,15 @@ class SdCardOperationException(DAQiFiError):
 
 class SdCardBusyException(SdCardOperationException):
     """Raised when an SD card operation cannot proceed because the SD
-    card is busy (for example, the device is actively logging to it)."""
+    card is busy (for example, the device is actively logging to it).
+
+    Defined for parity with upstream ``SdCardBusyException``. Not
+    raised by :func:`daqifi.sdcard.throw_if_sd_card_list_error` (the
+    LIST? response classifier) — upstream's ``ThrowIfSdCardListError``
+    has the same shape (no busy detection on the LIST? path). Reserved
+    for callers to raise on detected client-side busy conditions and
+    for future firmware error-marker mappings.
+    """
 
     def __init__(self, raw_device_response, last_scpi_error=None):
         super().__init__(
@@ -108,10 +120,19 @@ class SdCardFilesystemException(SdCardOperationException):
     device_message: str
 
     def __init__(self, raw_device_response, last_scpi_error, device_message):
-        # Coerce to string and trim — defends against None, bytes, or
-        # accidental whitespace-only inputs and keeps the type
-        # consistent with the class-level annotation.
-        device_message = (device_message or "").strip()
+        # Actually coerce to str (not just .strip()): handles None,
+        # bytes (decoded with replacement for invalid UTF-8), and any
+        # other type a defensive caller might pass. .strip() on bytes
+        # would have returned bytes, contradicting the str contract on
+        # the class-level annotation. (Qodo /agentic_review pass 1
+        # caught the partial coercion in the prior pass.)
+        if device_message is None:
+            device_message = ""
+        elif isinstance(device_message, (bytes, bytearray)):
+            device_message = bytes(device_message).decode("utf-8", errors="replace")
+        else:
+            device_message = str(device_message)
+        device_message = device_message.strip()
         if device_message:
             msg = f"The SD card filesystem reported an error: {device_message}"
         else:

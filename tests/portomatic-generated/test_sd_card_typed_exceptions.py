@@ -77,6 +77,34 @@ class TestSdCardOperationExceptionHierarchy:
         e = SdCardFilesystemException([], None, "")
         assert str(e) == "The SD card filesystem reported an error."
 
+    def test_filesystem_coerces_bytes_device_message_to_str(self):
+        # Defensive: bytes input should be decoded to str so the stored
+        # attribute matches the str type contract. (Qodo /agentic_review
+        # pass 1 caught the prior partial coercion that left bytes
+        # in self.device_message.)
+        e = SdCardFilesystemException(
+            [],
+            None,
+            b"[Error:3]Failed to open directory /Daqifi",
+        )
+        assert isinstance(e.device_message, str)
+        assert e.device_message == "[Error:3]Failed to open directory /Daqifi"
+
+    def test_filesystem_coerces_none_device_message_to_empty(self):
+        e = SdCardFilesystemException([], None, None)
+        assert isinstance(e.device_message, str)
+        assert e.device_message == ""
+        assert str(e) == "The SD card filesystem reported an error."
+
+    def test_get_type_hints_resolves_on_runtime(self):
+        # PEP-604 `str | None` would raise on Python 3.8/3.9; we use
+        # Optional[str] so introspection-based tooling works on any
+        # supported version.
+        from typing import get_type_hints
+        hints = get_type_hints(SdCardOperationException)
+        assert "last_scpi_error" in hints
+        assert "raw_device_response" in hints
+
     def test_busy_message_is_descriptive(self):
         e = SdCardBusyException([])
         assert "busy" in str(e).lower()
