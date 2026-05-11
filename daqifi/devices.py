@@ -750,7 +750,12 @@ class DaqifiDevice:
                 candidate = raw.strip()
                 if not candidate:
                     continue
-                if candidate.startswith("DAQIFI>"):
+                # Case-insensitive prompt strip — firmware variants may
+                # emit `Daqifi>` / `daqifi>` instead of the canonical
+                # `DAQIFI>`. (Qodo /agentic_review on PR #101 caught
+                # the case-sensitive original would treat those as
+                # garbage and burn the empty_budget.)
+                if candidate.upper().startswith("DAQIFI>"):
                     candidate = candidate[len("DAQIFI>"):].strip()
                     if not candidate:
                         continue
@@ -758,23 +763,36 @@ class DaqifiDevice:
                 if not sep:
                     continue
                 try:
-                    int(code_str.strip())
+                    code = int(code_str.strip())
                 except ValueError:
                     continue
-                # SCPI SYST:ERR? format is `<int>,"<desc>"`. Require the
-                # description to be quoted so a stray multi-field
-                # telemetry line like `42,foo,bar` doesn't accidentally
-                # match. (DaqifiDevice's drain reads via the multi-line
-                # capture of execute_text_command — noisier than the
-                # single-line send_query path SerialInterface uses, so
-                # the extra strictness here is justified.)
                 rest = rest.strip()
+                # Special-case the empty-queue terminator so
+                # slightly-nonconforming firmware that returns
+                # ``0,No error`` (description unquoted) is still
+                # recognized as a clean-queue reply rather than
+                # tripping the strict quote check below and burning
+                # the empty_budget. Normalize to the canonical
+                # quoted form so the downstream parser sees a
+                # consistent shape.
+                if code == 0 and rest.replace('"', "").strip().lower() == "no error":
+                    return f'{code},"No error"'
+                # For real errors, require the description to be
+                # quoted (SCPI SYST:ERR? format is `<int>,"<desc>"`)
+                # so a stray multi-field telemetry line like
+                # `42,foo,bar` doesn't accidentally match.
+                # DaqifiDevice's drain reads via the multi-line
+                # capture of execute_text_command — noisier than the
+                # single-line send_query path SerialInterface uses,
+                # so the extra strictness here is justified.
                 if not (rest.startswith('"') and rest.count('"') >= 2):
                     continue
                 return candidate
             return None
 
+        iterations = 0
         for _ in range(max_iterations):
+            iterations += 1
             lines = self.execute_text_command(
                 setup_action=lambda: self.send(_scpi_commands.get_last_error()),
                 response_timeout_ms=response_timeout_ms,
@@ -796,9 +814,14 @@ class DaqifiDevice:
             popped.append(reply)
 
         if not saw_no_error:
+            # Include actual counts (not just the limits) so callers
+            # can distinguish "hit max_iterations with errors still
+            # streaming" from "bailed early on consecutive empties."
             popped.append(
                 'DRAIN_INCONCLUSIVE,"queue not confirmed clean after '
-                f'{max_iterations} iterations or {empty_budget} empty replies"'
+                f'{iterations} iterations; consecutive_empty='
+                f'{consecutive_empty}; limits: max_iterations='
+                f'{max_iterations}, empty_budget={empty_budget}"'
             )
 
         return popped

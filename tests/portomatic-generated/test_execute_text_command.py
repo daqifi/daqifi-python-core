@@ -458,6 +458,37 @@ def test_drain_errors_raises_when_not_connected():
         dev.drain_errors()
 
 
+def test_drain_errors_strips_lowercase_daqifi_prompt():
+    """Regression: case-insensitive prompt strip — firmware variants
+    may emit `Daqifi>` / `daqifi>` instead of canonical `DAQIFI>`."""
+    dev, _ = _drain_errors_dev_with_replies([
+        b'daqifi>\r\n-200,"Execution error"\r\n',
+        b'Daqifi> 0,"No error"\r\n',
+    ])
+    popped = dev.drain_errors()
+    assert popped == ['-200,"Execution error"']
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
+def test_drain_errors_accepts_unquoted_no_error_terminator():
+    """Slightly-nonconforming firmware that returns `0,No error`
+    (description not quoted) must still be recognized as a clean-queue
+    terminator. Real errors keep the strict-quote requirement."""
+    dev, _ = _drain_errors_dev_with_replies([
+        b'-100,"Bad"\r\n',
+        b'0,No error\r\n',  # unquoted terminator
+    ])
+    popped = dev.drain_errors()
+    assert popped == ['-100,"Bad"']
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
 def test_drain_errors_rejects_unquoted_csv_telemetry():
     """A CSV-like telemetry line that happens to start with `<int>,`
     must NOT be treated as a SCPI error reply — real SYST:ERR? replies
