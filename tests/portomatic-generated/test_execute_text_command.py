@@ -530,19 +530,23 @@ def test_drain_errors_accepts_unquoted_no_error_terminator():
         pass
 
 
-def test_drain_errors_rejects_unquoted_csv_telemetry():
-    """A CSV-like telemetry line that happens to start with `<int>,`
-    must NOT be treated as a SCPI error reply — real SYST:ERR? replies
-    are `<int>,"<desc>"` (description quoted). (Qodo /improve pass 4
-    importance 7.)"""
-    # Send a non-SCPI telemetry-shaped line followed by a real reply.
-    # The drain must skip the telemetry and find the quoted reply.
+def test_drain_errors_accepts_unquoted_error_descriptions():
+    """Regression: real firmware variants emit unquoted error
+    descriptions like `-200,Execution error`. The drain must accept
+    these — same behavior as SerialInterface.drain_errors and
+    scpi.parse_system_error. (An earlier strict-quote requirement
+    was found via Qodo /agentic_review pass 4 to silently reject
+    these, defeating the drain's purpose; corrected here.)"""
     dev, _ = _drain_errors_dev_with_replies([
-        b'42,foo,bar\r\n-200,"Execution error"\r\n',
+        b'-200,Execution error\r\n',         # unquoted
+        b'-113,"Undefined header"\r\n',      # quoted
         b'0,"No error"\r\n',
     ])
     popped = dev.drain_errors()
-    assert popped == ['-200,"Execution error"']
+    assert popped == [
+        '-200,Execution error',
+        '-113,"Undefined header"',
+    ]
     try:
         dev.close()
     except Exception:

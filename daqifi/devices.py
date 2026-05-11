@@ -767,26 +767,26 @@ class DaqifiDevice:
                 except ValueError:
                     continue
                 rest = rest.strip()
+                # The reply must have non-empty content after the
+                # comma — accept whether or not the description is
+                # quoted. SerialInterface.drain_errors and
+                # scpi.parse_system_error both accept unquoted
+                # descriptions (firmware variants exist that omit
+                # quotes), and an earlier strict-quote requirement
+                # here was found to silently reject real unquoted
+                # errors like ``-200,Execution error`` — see Qodo
+                # /agentic_review on PR #101 (the same review that
+                # earlier *suggested* the strict-quote check; this
+                # is the corrected position).
+                if not rest:
+                    continue
                 # Special-case the empty-queue terminator so
                 # slightly-nonconforming firmware that returns
                 # ``0,No error`` (description unquoted) is still
-                # recognized as a clean-queue reply rather than
-                # tripping the strict quote check below and burning
-                # the empty_budget. Normalize to the canonical
-                # quoted form so the downstream parser sees a
-                # consistent shape.
+                # normalized to the canonical quoted form so the
+                # downstream parser sees a consistent shape.
                 if code == 0 and rest.replace('"', "").strip().lower() == "no error":
                     return f'{code},"No error"'
-                # For real errors, require the description to be
-                # quoted (SCPI SYST:ERR? format is `<int>,"<desc>"`)
-                # so a stray multi-field telemetry line like
-                # `42,foo,bar` doesn't accidentally match.
-                # DaqifiDevice's drain reads via the multi-line
-                # capture of execute_text_command — noisier than the
-                # single-line send_query path SerialInterface uses,
-                # so the extra strictness here is justified.
-                if not (rest.startswith('"') and rest.count('"') >= 2):
-                    continue
                 return candidate
             return None
 
