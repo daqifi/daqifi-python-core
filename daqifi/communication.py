@@ -317,18 +317,18 @@ class ProtobufMessageParser:
                     and not _is_plausible_field_tag_byte(remaining[prefix_bytes])
                 )
 
-                # Only apply the gap-based heuristic when essentially no
-                # body has arrived yet (≤1 byte). Otherwise a legitimate
-                # multi-KB initial-status frame arriving in chunks would
-                # be misclassified on every call until nearly complete —
-                # the field-tag gate already rejects garbage once any
-                # body byte is observable, so the gap gate's job is to
-                # cover the pure-prefix-no-body case where field-tag
-                # validation can't apply. (Qodo /agentic_review on PR
-                # #100 caught this; same bug exists in upstream daqifi-
-                # core PR #173.)
+                # Apply the gap heuristic only when we have NO body bytes
+                # to validate yet. As soon as one body byte is available,
+                # the field-tag gate can decide on its own — gating on
+                # missing_payload at that point would corrupt legitimate
+                # large frames whose first chunk happens to land right
+                # at the prefix+1 boundary. (Qodo /agentic_review on PR
+                # #100 caught the original >1024 form; pass 3 /improve
+                # tightened from `<= 1` to `== 0` to handle the edge
+                # case at exactly one body byte. Same bug exists in
+                # upstream daqifi-core PR #173.)
                 gap_is_suspicious = (
-                    available_body_bytes <= 1
+                    available_body_bytes == 0
                     and missing_payload > _MAX_PARTIAL_FRAME_GAP_BYTES
                 )
 

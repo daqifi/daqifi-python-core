@@ -196,6 +196,38 @@ class TestProtobufMessageParser:
         assert msgs2[0].data == ("parsed", sentinel_payload)
         assert consumed2 == len(full_frame)
 
+    def test_one_body_byte_with_huge_gap_does_not_fire_gap_gate(self):
+        """Regression: a real >1KB partial frame whose first chunk
+        contains the prefix + exactly one body byte (a valid field
+        tag) must not be eaten by the gap gate.
+
+        From Qodo /improve pass 3 on PR #100: my pass 1 fix used
+        `available_body_bytes <= 1` which still fired the gap gate
+        when 1 body byte was available, even though the field-tag
+        gate could have decided on its own. Tightened to `== 0`.
+        """
+        # 2 KB payload, valid field tag at byte 0
+        sentinel_payload = bytes([0x08]) + b"Y" * 2047
+        full_frame = _length_prefix(len(sentinel_payload)) + sentinel_payload
+        # Slice off ALL but prefix + 1 byte to hit the edge case:
+        # prefix=2 bytes, body=1 byte, missing_payload = 2047 (> 1024)
+        first_chunk = full_frame[: 2 + 1]
+
+        parser = ProtobufMessageParser(message_factory=lambda b: ("parsed", b))
+
+        # Pass 1's `<= 1` gate would have fired here (gap > 1024,
+        # body=1) and corrupted the frame. Pass 3's `== 0` lets the
+        # field-tag check (byte 0x08 = valid VARINT tag) handle it,
+        # so parser correctly waits.
+        msgs1, consumed1 = parser.parse_messages(first_chunk)
+        assert msgs1 == []
+        assert consumed1 == 0  # nothing consumed — caller retains chunk
+
+        # Full frame arrives later — parses cleanly.
+        msgs2, consumed2 = parser.parse_messages(full_frame)
+        assert len(msgs2) == 1
+        assert msgs2[0].data == ("parsed", sentinel_payload)
+
     def test_field_tag_byte_rejects_invalid_wire_type_with_continuation(self):
         """Regression: a byte with the continuation bit set must still
         have its wire-type bits validated.
