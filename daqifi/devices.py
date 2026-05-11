@@ -570,6 +570,23 @@ class DaqifiDevice:
             inactivity timeout. Empty list when the device returned
             nothing within ``response_timeout_ms``.
         """
+        with self._text_exchange_lock:
+            # All validation happens INSIDE the lock to close the
+            # TOCTOU window: a competing thread can call disconnect()
+            # (which clears self._consumer / self._transport without
+            # acquiring this lock) while we're blocked on the lock.
+            # Re-checking after acquisition guarantees the consumer,
+            # transport, and stream we operate on are still live.
+            return self._execute_text_command_locked(
+                setup_action, response_timeout_ms, completion_timeout_ms
+            )
+
+    def _execute_text_command_locked(
+        self,
+        setup_action: Callable[[], None],
+        response_timeout_ms: int,
+        completion_timeout_ms: int,
+    ) -> List[str]:
         if self._consumer is None:
             raise RuntimeError(
                 "execute_text_command requires an active consumer; "
@@ -585,18 +602,6 @@ class DaqifiDevice:
                 "Transport reports no stream; cannot pause consumer."
             )
 
-        with self._text_exchange_lock:
-            return self._execute_text_command_locked(
-                stream, setup_action, response_timeout_ms, completion_timeout_ms
-            )
-
-    def _execute_text_command_locked(
-        self,
-        stream: Any,
-        setup_action: Callable[[], None],
-        response_timeout_ms: int,
-        completion_timeout_ms: int,
-    ) -> List[str]:
         was_running = self._consumer.is_running
         if was_running:
             try:

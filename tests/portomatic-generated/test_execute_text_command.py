@@ -294,7 +294,12 @@ def test_execute_text_command_serializes_concurrent_callers():
         except BaseException as exc:
             errors.append(exc)
 
-    threads = [threading.Thread(target=caller, args=(i,)) for i in range(5)]
+    # daemon=True so a stuck thread can't keep the pytest process
+    # alive and hang CI — matches the convention in
+    # test_device_finders.py.
+    threads = [
+        threading.Thread(target=caller, args=(i,), daemon=True) for i in range(5)
+    ]
     for t in threads:
         t.start()
     for t in threads:
@@ -314,6 +319,69 @@ def test_execute_text_command_serializes_concurrent_callers():
         dev.close()
     except Exception:
         pass
+
+
+def test_execute_text_command_disconnect_during_lock_wait_raises_cleanly():
+    """If a competing thread clears _consumer / _transport while we're
+    blocked on _text_exchange_lock, the post-acquisition validation
+    must catch the new None state and raise RuntimeError — not
+    AttributeError on `None.is_running`. Closes the TOCTOU window
+    flagged by Qodo /agentic_review pass 1 on PR #104."""
+    dev = _make_dev_with_consumer()
+
+    holder_in = threading.Event()
+    holder_release = threading.Event()
+    waiter_done = threading.Event()
+    waiter_exc: list[BaseException] = []
+
+    def holder_setup() -> None:
+        holder_in.set()
+        # Hold the lock until the test releases us.
+        holder_release.wait(timeout=5)
+
+    def holder() -> None:
+        try:
+            dev.execute_text_command(
+                holder_setup, response_timeout_ms=200, completion_timeout_ms=100
+            )
+        except Exception:
+            pass
+
+    def waiter() -> None:
+        try:
+            dev.execute_text_command(
+                lambda: None, response_timeout_ms=200, completion_timeout_ms=100
+            )
+        except BaseException as exc:
+            waiter_exc.append(exc)
+        finally:
+            waiter_done.set()
+
+    h = threading.Thread(target=holder, daemon=True)
+    w = threading.Thread(target=waiter, daemon=True)
+    h.start()
+    assert holder_in.wait(timeout=2.0), "holder never entered setup_action"
+
+    # Now waiter is about to (or already does) block on the lock.
+    w.start()
+    # Give the waiter a moment to actually contend on the lock.
+    time.sleep(0.1)
+
+    # Tear down the consumer mid-wait to simulate a concurrent
+    # disconnect. The waiter must NOT crash on AttributeError when
+    # it eventually acquires the lock.
+    dev._consumer = None
+
+    # Release the holder so the waiter can acquire the lock.
+    holder_release.set()
+    h.join(timeout=2.0)
+
+    assert waiter_done.wait(timeout=3.0), "waiter never returned"
+    assert waiter_exc, "waiter should have raised after seeing _consumer=None"
+    exc = waiter_exc[0]
+    assert isinstance(exc, RuntimeError) and "active consumer" in str(exc), (
+        f"expected RuntimeError on cleared consumer, got {type(exc).__name__}: {exc}"
+    )
 
 
 def test_execute_text_command_reentrant_call_deadlocks():
