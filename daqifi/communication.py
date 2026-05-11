@@ -157,28 +157,32 @@ def _is_plausible_field_tag_byte(b: int) -> bool:
     DaqifiOutMessage body (a protobuf field tag).
 
     Used by the partial-frame wait path to reject garbage whose varint
-    prefix happens to decode to a plausible-looking length. Multi-byte
-    tags (continuation bit set) can't be fully validated from a single
-    byte, so they pass this check.
+    prefix happens to decode to a plausible-looking length.
 
-    Mirrors upstream ``IsPlausibleFieldTagByte`` from PR #173.
+    Mirrors upstream ``IsPlausibleFieldTagByte`` from daqifi-core PR #173,
+    plus a tightening (Qodo /agentic_review on PR #100): validate the
+    wire-type bits even when the continuation bit is set, since wire_type
+    lives in the low 3 bits of the first byte regardless of whether the
+    field number spans multiple bytes.
     """
-    # Continuation bit set → multi-byte tag. We can't fully validate
-    # without more bytes (which we may not have yet); don't reject on
-    # that alone.
-    if (b & 0x80) != 0:
-        return True
-
-    # Single-byte tag: low 3 bits are wire type, next 4 bits (within
-    # the low 7) are the field number. Valid wire types are VARINT(0),
-    # I64(1), LEN(2), I32(5). Wire types 3 (SGROUP) and 4 (EGROUP) are
-    # deprecated group types that DaqifiOutMessage does not use; 6/7
-    # are undefined. Field number 0 is reserved and never appears in
-    # a real message.
+    # Wire type lives in the low 3 bits regardless of the continuation
+    # bit. Reject impossible wire types even on multi-byte tags. Valid
+    # wire types are VARINT(0), I64(1), LEN(2), I32(5); 3 (SGROUP) and
+    # 4 (EGROUP) are deprecated group types that DaqifiOutMessage does
+    # not use; 6/7 are undefined.
     wire_type = b & 0x07
     if wire_type in (3, 4, 6, 7):
         return False
 
+    # Continuation bit set → multi-byte tag. The full field number
+    # spans more bytes (which we may not have yet); we can't validate
+    # field_number from this single byte alone, so accept once wire
+    # type passed.
+    if (b & 0x80) != 0:
+        return True
+
+    # Single-byte tag: field number is bits 3-6 of the first byte.
+    # Field number 0 is reserved and never appears in a real message.
     field_number = (b >> 3) & 0x0F
     return field_number != 0
 
@@ -306,16 +310,29 @@ class ProtobufMessageParser:
                 # Neither gate advances into a real frame's prefix or
                 # payload: only into bytes already identified as
                 # implausible.
-                missing_payload = message_length - (len(remaining) - prefix_bytes)
+                available_body_bytes = len(remaining) - prefix_bytes
+                missing_payload = message_length - available_body_bytes
                 first_body_byte_is_garbage = (
-                    len(remaining) > prefix_bytes
+                    available_body_bytes > 0
                     and not _is_plausible_field_tag_byte(remaining[prefix_bytes])
                 )
 
-                if (
-                    missing_payload > _MAX_PARTIAL_FRAME_GAP_BYTES
-                    or first_body_byte_is_garbage
-                ):
+                # Only apply the gap-based heuristic when essentially no
+                # body has arrived yet (≤1 byte). Otherwise a legitimate
+                # multi-KB initial-status frame arriving in chunks would
+                # be misclassified on every call until nearly complete —
+                # the field-tag gate already rejects garbage once any
+                # body byte is observable, so the gap gate's job is to
+                # cover the pure-prefix-no-body case where field-tag
+                # validation can't apply. (Qodo /agentic_review on PR
+                # #100 caught this; same bug exists in upstream daqifi-
+                # core PR #173.)
+                gap_is_suspicious = (
+                    available_body_bytes <= 1
+                    and missing_payload > _MAX_PARTIAL_FRAME_GAP_BYTES
+                )
+
+                if gap_is_suspicious or first_body_byte_is_garbage:
                     current_index += 1
                     consumed_bytes = current_index
                     continue

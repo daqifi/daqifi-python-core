@@ -161,6 +161,68 @@ class TestProtobufMessageParser:
         assert msgs[0].data == ("parsed", sentinel_payload)
         assert consumed == len(wire)
 
+    def test_large_multi_chunk_frame_not_misclassified(self):
+        """Regression: a legitimate multi-KB frame arriving in chunks
+        must not be eaten by the gap gate.
+
+        From Qodo /agentic_review on PR #100: the original gap-gate
+        check fired whenever ``missing_payload > 1024``, which would
+        mis-classify any real frame > ~1 KB until it was nearly
+        complete — corrupting the frame because callers drop
+        ``consumed`` bytes unconditionally. Fix: only apply the gap
+        heuristic when ≤1 body byte has arrived.
+        """
+        # Build a 2 KB legitimate payload that begins with a valid
+        # protobuf field tag (0x08 = field 1, wire VARINT). The varint
+        # length-prefix for 2048 is two bytes ([0x80, 0x10]).
+        sentinel_payload = bytes([0x08]) + b"X" * 2047
+        full_frame = _length_prefix(len(sentinel_payload)) + sentinel_payload
+
+        # First chunk: just the prefix + 50 body bytes. missing_payload
+        # = 1998 (>> 1024). Without the fix, gap gate would fire and
+        # advance into the real payload.
+        first_chunk = full_frame[: 2 + 50]
+
+        parser = ProtobufMessageParser(message_factory=lambda b: ("parsed", b))
+
+        # First call: not enough data. Parser must wait, NOT advance.
+        msgs1, consumed1 = parser.parse_messages(first_chunk)
+        assert msgs1 == []
+        assert consumed1 == 0  # nothing consumed — caller retains full chunk
+
+        # Second call: full frame arrives. Should now parse cleanly.
+        msgs2, consumed2 = parser.parse_messages(full_frame)
+        assert len(msgs2) == 1
+        assert msgs2[0].data == ("parsed", sentinel_payload)
+        assert consumed2 == len(full_frame)
+
+    def test_field_tag_byte_rejects_invalid_wire_type_with_continuation(self):
+        """Regression: a byte with the continuation bit set must still
+        have its wire-type bits validated.
+
+        From Qodo /agentic_review on PR #100: previously,
+        ``_is_plausible_field_tag_byte`` early-returned True for any
+        byte with bit 0x80 set, bypassing wire-type validation. Wire
+        type lives in the low 3 bits regardless of whether the field
+        number spans multiple bytes — types 3/4/6/7 should be rejected
+        even on continuation bytes.
+        """
+        from daqifi.communication import _is_plausible_field_tag_byte
+
+        # Continuation bit set, wire type 0 (VARINT) — should pass
+        # (multi-byte field number, but valid wire type).
+        assert _is_plausible_field_tag_byte(0x80) is True
+        # Continuation bit set, wire type 2 (LEN) — should pass.
+        assert _is_plausible_field_tag_byte(0x82) is True
+        # Continuation bit set, wire type 3 (deprecated SGROUP) — must reject.
+        assert _is_plausible_field_tag_byte(0x83) is False
+        # Continuation bit set, wire type 4 (deprecated EGROUP) — must reject.
+        assert _is_plausible_field_tag_byte(0x84) is False
+        # Continuation bit set, wire type 6 (undefined) — must reject.
+        assert _is_plausible_field_tag_byte(0x86) is False
+        # Continuation bit set, wire type 7 (undefined) — must reject.
+        assert _is_plausible_field_tag_byte(0x87) is False
+
     def test_preserves_partial_frame_after_garbage(self):
         """Mirrors upstream PR #173 ProtobufMessageParser_ParseMessages_PreservesPartialFrameAfterGarbage.
 
