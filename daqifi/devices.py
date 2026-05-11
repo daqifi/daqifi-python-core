@@ -726,6 +726,10 @@ class DaqifiDevice:
             raise ValueError("response_timeout_ms must be positive")
         if completion_timeout_ms <= 0:
             raise ValueError("completion_timeout_ms must be positive")
+        # Match the precondition the docstring promises and the
+        # convention used by send() / other DaqifiDevice methods.
+        if not self.is_connected:
+            raise RuntimeError("Device is not connected.")
 
         from ._internal import scpi as _scpi
         from ._internal import scpi_commands as _scpi_commands
@@ -750,12 +754,22 @@ class DaqifiDevice:
                     candidate = candidate[len("DAQIFI>"):].strip()
                     if not candidate:
                         continue
-                code_str, sep, _rest = candidate.partition(",")
+                code_str, sep, rest = candidate.partition(",")
                 if not sep:
                     continue
                 try:
                     int(code_str.strip())
                 except ValueError:
+                    continue
+                # SCPI SYST:ERR? format is `<int>,"<desc>"`. Require the
+                # description to be quoted so a stray multi-field
+                # telemetry line like `42,foo,bar` doesn't accidentally
+                # match. (DaqifiDevice's drain reads via the multi-line
+                # capture of execute_text_command — noisier than the
+                # single-line send_query path SerialInterface uses, so
+                # the extra strictness here is justified.)
+                rest = rest.strip()
+                if not (rest.startswith('"') and rest.count('"') >= 2):
                     continue
                 return candidate
             return None

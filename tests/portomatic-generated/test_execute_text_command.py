@@ -446,6 +446,37 @@ def test_drain_errors_skips_inline_daqifi_prompt_prefix():
         pass
 
 
+def test_drain_errors_raises_when_not_connected():
+    """The docstring promises RuntimeError when the device isn't
+    connected. Verify the precondition fires before any IO is
+    attempted (Qodo /improve pass 4 importance 7)."""
+    from daqifi.devices import DaqifiStreamingDevice
+    t = _FakeTransport()
+    dev = DaqifiStreamingDevice(name="d", transport=t)
+    # NOT calling dev.connect() — should fail the is_connected check.
+    with pytest.raises(RuntimeError, match="not connected"):
+        dev.drain_errors()
+
+
+def test_drain_errors_rejects_unquoted_csv_telemetry():
+    """A CSV-like telemetry line that happens to start with `<int>,`
+    must NOT be treated as a SCPI error reply — real SYST:ERR? replies
+    are `<int>,"<desc>"` (description quoted). (Qodo /improve pass 4
+    importance 7.)"""
+    # Send a non-SCPI telemetry-shaped line followed by a real reply.
+    # The drain must skip the telemetry and find the quoted reply.
+    dev, _ = _drain_errors_dev_with_replies([
+        b'42,foo,bar\r\n-200,"Execution error"\r\n',
+        b'0,"No error"\r\n',
+    ])
+    popped = dev.drain_errors()
+    assert popped == ['-200,"Execution error"']
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
 def test_drain_errors_validates_timeouts():
     dev = _make_dev_with_consumer()
     with pytest.raises(ValueError, match="response_timeout_ms"):
