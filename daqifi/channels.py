@@ -48,11 +48,17 @@ class _SampleReceivedMixin:
     def _init_sample_events(self) -> None:
         self._active_sample: Optional[DataSample] = None
         self._sample_received_handlers: List[Callable[[DataSample], None]] = []
-        # RLock so a handler that calls add/remove_sample_received
-        # from inside its callback (we already hold the lock around
-        # dispatch) doesn't deadlock. Streaming pipeline integration
-        # (see #107) will dispatch from a background thread; user
-        # code typically registers handlers from the main thread.
+        # Plain Lock would suffice given that set_active_sample
+        # releases the lock before invoking handlers (so a handler
+        # that calls add/remove_sample_received doesn't actually
+        # contend against an already-held lock). RLock is the
+        # defensive choice anyway: it costs nothing in the
+        # uncontended case and keeps re-entrant register/dispatch
+        # patterns safe if a future change ever moves handler
+        # invocation back under the lock. Streaming pipeline
+        # integration (see #107) will dispatch from a background
+        # thread; user code typically registers handlers from the
+        # main thread.
         self._sample_received_lock = threading.RLock()
 
     @property
