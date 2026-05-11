@@ -123,7 +123,68 @@ class LineBasedMessageParser:
 
 # ---- Protobuf framing constants (mirror upstream limits) ----
 _MAX_VARINT32_BYTES = 5
-_MAX_MESSAGE_SIZE_BYTES = 1024 * 1024
+
+# Upper bound on a single DaqifiOutMessage frame. Real streaming frames
+# are well under 1 KB even at 32 channels (16 analog floats + 16 digital
+# bits + headers); initial-status frames that include channel metadata
+# and calibration are a few KB at most. 4 KB leaves generous headroom
+# for any legitimate frame while cutting off the failure mode where
+# boot-time garbage on the serial port happens to form a plausible
+# varint prefix encoding tens of KB — previously accepted under the old
+# 1 MB cap, which left the parser waiting indefinitely for data that
+# would never arrive (device LED streaming, but zero frames parsed; the
+# buffer grows unbounded). Declared lengths over this cap are rejected
+# immediately and the parser resyncs one byte at a time.
+_MAX_MESSAGE_SIZE_BYTES = 4 * 1024
+
+# Maximum gap between the declared message length and the bytes
+# currently available before we give up waiting and treat the prefix
+# as garbage. A legitimate partial frame is always small — the stream
+# consumer feeds parse_messages every few milliseconds and real frames
+# are <1 KB, so a real partial never leaves a multi-KB gap between
+# declared and available bytes. A prefix that *claims* thousands of
+# bytes and is nowhere close to being satisfied is overwhelmingly
+# likely to be boot-time garbage (USB CDC setup, DTR pulse bytes) that
+# happens to varint-encode a large value. Capping the tolerable gap
+# bounds the worst-case stall: without this, a plausible-under-the-cap
+# bogus prefix still deadlocks until the buffer reaches the declared
+# size, which at slow sample rates can be many seconds.
+_MAX_PARTIAL_FRAME_GAP_BYTES = 1024
+
+
+def _is_plausible_field_tag_byte(b: int) -> bool:
+    """Return True if ``b`` could plausibly be the first byte of a real
+    DaqifiOutMessage body (a protobuf field tag).
+
+    Used by the partial-frame wait path to reject garbage whose varint
+    prefix happens to decode to a plausible-looking length.
+
+    Mirrors upstream ``IsPlausibleFieldTagByte`` from daqifi-core PR #173,
+    plus a tightening (Qodo /agentic_review on PR #100): validate the
+    wire-type bits even when the continuation bit is set, since wire_type
+    lives in the low 3 bits of the first byte regardless of whether the
+    field number spans multiple bytes.
+    """
+    # Wire type lives in the low 3 bits regardless of the continuation
+    # bit. Reject impossible wire types even on multi-byte tags. Valid
+    # wire types are VARINT(0), I64(1), LEN(2), I32(5); 3 (SGROUP) and
+    # 4 (EGROUP) are deprecated group types that DaqifiOutMessage does
+    # not use; 6/7 are undefined.
+    wire_type = b & 0x07
+    if wire_type in (3, 4, 6, 7):
+        return False
+
+    # Continuation bit set → multi-byte tag. The full field number
+    # spans more bytes (which we may not have yet); we can't validate
+    # field_number from this single byte alone, so accept once wire
+    # type passed.
+    if (b & 0x80) != 0:
+        return True
+
+    # Single-byte tag: field number is bits 3-6 of the first byte.
+    # Field number 0 is reserved and never appears in a real message.
+    field_number = (b >> 3) & 0x0F
+    return field_number != 0
 
 
 def _try_read_length_prefix(data: bytes) -> Tuple[Optional[int], int, bool]:
@@ -182,18 +243,15 @@ class ProtobufMessageParser:
 
         current_index = 0
 
-        # NOTE: the original C# port had a `retry_count < _MAX_RETRY_ATTEMPTS`
-        # guard here to bail out after consecutive failures. That gate is
-        # actively harmful when the buffer contains SCPI text echoes
-        # (`DAQIFI> `, `**ERROR ...`, etc.) before any protobuf data:
-        # those bytes never parse, the parser bails after 3 retries with
-        # only ~3 bytes consumed, and the buffer keeps growing forever
-        # since the consumer only drops `consumed` bytes per call. The
-        # `current_index < len(data)` condition already bounds the loop —
-        # we always advance ≥1 byte on failure — so removing the retry
-        # gate keeps termination guaranteed while letting the parser
-        # scan past stale text bytes to reach valid frames behind them.
-        # Verified 2026-04-23 against NQ1 USB serial streaming.
+        # The C# upstream originally had a `retry_count < MaxRetryAttempts`
+        # guard that bailed after 3 failures (removed in upstream PR #169).
+        # That gate is actively harmful when the buffer contains SCPI text
+        # echoes (`DAQIFI> `, `**ERROR ...`, etc.) before any protobuf
+        # data: those bytes never parse, the parser bails after 3 retries
+        # with only ~3 bytes consumed, and the buffer keeps growing
+        # forever since the consumer only drops `consumed` bytes per call.
+        # The `current_index < len(data)` condition already bounds the
+        # loop — we always advance ≥1 byte on failure.
         while current_index < len(data):
             remaining = data[current_index:]
             message_length, prefix_bytes, is_malformed = _try_read_length_prefix(
@@ -202,18 +260,84 @@ class ProtobufMessageParser:
 
             if message_length is None:
                 if is_malformed:
-                    current_index += max(prefix_bytes, 1)
+                    # Advance by 1 (not by prefix_bytes) — the malformed
+                    # run may overlap a valid frame that starts mid-way
+                    # through it. Skipping the whole malformed varint
+                    # would lose that frame. Mirrors upstream PR #169.
+                    current_index += 1
                     consumed_bytes = current_index
                     continue
                 break  # need more data for length prefix
 
             if message_length <= 0 or message_length > _MAX_MESSAGE_SIZE_BYTES:
-                current_index += max(prefix_bytes, 1)
+                # Same single-byte advance: the bytes that decoded to
+                # this implausible length may include the start of a
+                # valid frame.
+                current_index += 1
                 consumed_bytes = current_index
                 continue
 
             if len(remaining) < prefix_bytes + message_length:
-                break  # wait for more data
+                # Not enough buffered data for this frame yet. For a real
+                # partial frame this just means "wait a bit" — streaming
+                # messages are well under 1 KB, so the next read or two
+                # will complete it. But a plausible-looking yet bogus
+                # prefix can claim thousands of bytes, and waiting for
+                # that much never-arriving data is exactly the stall
+                # that masquerades as "parser hung": device LED blinking,
+                # buffer growing, zero messages parsed.
+                #
+                # Two recovery gates protect the wait path from garbage
+                # while leaving real partial frames intact (mirrors
+                # upstream PR #173):
+                #
+                #  1. Gap gate: a declared length more than
+                #     `_MAX_PARTIAL_FRAME_GAP_BYTES` beyond the payload
+                #     bytes currently buffered is almost certainly
+                #     garbage. Real partials for streaming frames leave
+                #     gaps measured in hundreds of bytes, not kilobytes.
+                #
+                #  2. Field-tag gate: when at least one body byte is
+                #     available, peek at it. The first body byte of a
+                #     real DaqifiOutMessage is a protobuf field tag —
+                #     field_number >= 1 and wire_type in {0,1,2,5}. A
+                #     byte that fails both conditions is not a real
+                #     frame start; treat it as garbage. A multi-byte
+                #     tag (continuation bit set) can't be fully
+                #     validated from one byte, so we let it through and
+                #     wait.
+                #
+                # Neither gate advances into a real frame's prefix or
+                # payload: only into bytes already identified as
+                # implausible.
+                available_body_bytes = len(remaining) - prefix_bytes
+                missing_payload = message_length - available_body_bytes
+                first_body_byte_is_garbage = (
+                    available_body_bytes > 0
+                    and not _is_plausible_field_tag_byte(remaining[prefix_bytes])
+                )
+
+                # Apply the gap heuristic only when we have NO body bytes
+                # to validate yet. As soon as one body byte is available,
+                # the field-tag gate can decide on its own — gating on
+                # missing_payload at that point would corrupt legitimate
+                # large frames whose first chunk happens to land right
+                # at the prefix+1 boundary. (Qodo /agentic_review on PR
+                # #100 caught the original >1024 form; pass 3 /improve
+                # tightened from `<= 1` to `== 0` to handle the edge
+                # case at exactly one body byte. Same bug exists in
+                # upstream daqifi-core PR #173.)
+                gap_is_suspicious = (
+                    available_body_bytes == 0
+                    and missing_payload > _MAX_PARTIAL_FRAME_GAP_BYTES
+                )
+
+                if gap_is_suspicious or first_body_byte_is_garbage:
+                    current_index += 1
+                    consumed_bytes = current_index
+                    continue
+
+                break  # legitimate partial frame — wait for more data
 
             try:
                 payload = remaining[prefix_bytes : prefix_bytes + message_length]
