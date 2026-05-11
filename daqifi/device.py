@@ -639,7 +639,9 @@ class NyquistDevice:
                 max_iterations=max_iterations, empty_budget=empty_budget
             )
         except Exception as e:
-            raise CommandError(f"Failed to drain error queue: {e}")
+            # Preserve original exception context for debugging
+            # transport-level failures.
+            raise CommandError(f"Failed to drain error queue: {e}") from e
 
     # ==========================================================================
     # SD Card File Management

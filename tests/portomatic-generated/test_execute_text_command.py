@@ -409,6 +409,43 @@ def test_drain_errors_validates_empty_budget():
         pass
 
 
+def test_drain_errors_skips_daqifi_prompt_prefix():
+    """Regression: drain_errors must not be derailed by a leading
+    `DAQIFI>` prompt that prefixes (or precedes) the actual SCPI
+    reply on noisy streams. From Qodo /agentic_review on PR #101 —
+    the prior code picked only the first non-empty line and treated
+    a prompt-only line as garbage, prematurely bailing via
+    empty_budget."""
+    # Each capture has a leading "DAQIFI>" line BEFORE the real
+    # SCPI error reply. The drain must skip past the prompt and
+    # find the parseable reply.
+    dev, _ = _drain_errors_dev_with_replies([
+        b'DAQIFI>\r\n-200,"Execution error"\r\n',
+        b'DAQIFI>\r\n0,"No error"\r\n',
+    ])
+    popped = dev.drain_errors()
+    assert popped == ['-200,"Execution error"']
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
+def test_drain_errors_skips_inline_daqifi_prompt_prefix():
+    """Same regression but the prompt is inline (`DAQIFI> -200,...`
+    on the same line) instead of a separate line."""
+    dev, _ = _drain_errors_dev_with_replies([
+        b'DAQIFI> -113,"Undefined header"\r\n',
+        b'DAQIFI> 0,"No error"\r\n',
+    ])
+    popped = dev.drain_errors()
+    assert popped == ['-113,"Undefined header"']
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
 def test_drain_errors_validates_timeouts():
     dev = _make_dev_with_consumer()
     with pytest.raises(ValueError, match="response_timeout_ms"):

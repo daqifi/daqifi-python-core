@@ -734,34 +734,40 @@ class DaqifiDevice:
         consecutive_empty = 0
         saw_no_error = False
 
+        # A real SCPI error reply is ``<int>,"<msg>"``. Strip a leading
+        # ``DAQIFI>`` prompt if present so noisy streams (where the
+        # prompt prefixes the reply or arrives on its own line) don't
+        # falsely look like garbage. (Qodo /agentic_review on PR #101
+        # caught this — the prior code only inspected the first
+        # non-empty line, so a ``DAQIFI>`` prefix could push the real
+        # reply past the budget.)
+        def _find_scpi_reply(lines):
+            for raw in lines:
+                candidate = raw.strip()
+                if not candidate:
+                    continue
+                if candidate.startswith("DAQIFI>"):
+                    candidate = candidate[len("DAQIFI>"):].strip()
+                    if not candidate:
+                        continue
+                code_str, sep, _rest = candidate.partition(",")
+                if not sep:
+                    continue
+                try:
+                    int(code_str.strip())
+                except ValueError:
+                    continue
+                return candidate
+            return None
+
         for _ in range(max_iterations):
             lines = self.execute_text_command(
                 setup_action=lambda: self.send(_scpi_commands.get_last_error()),
                 response_timeout_ms=response_timeout_ms,
                 completion_timeout_ms=completion_timeout_ms,
             )
-            reply = next((line.strip() for line in lines if line.strip()), None)
-            if not reply:
-                consecutive_empty += 1
-                if consecutive_empty >= empty_budget:
-                    break
-                continue
-
-            # Strict shape check: a real SCPI error reply is
-            # ``<int>,"<msg>"`` — anything else is treated as a
-            # transport blip, not as a popped entry. parse_system_error
-            # is permissive (returns (0, "No error") on garbage), so
-            # we re-validate the raw shape before parsing — otherwise
-            # a corrupted reply could falsely terminate the loop.
-            code_str, sep, _ = reply.partition(",")
-            if not sep:
-                consecutive_empty += 1
-                if consecutive_empty >= empty_budget:
-                    break
-                continue
-            try:
-                int(code_str.strip())
-            except ValueError:
+            reply = _find_scpi_reply(lines)
+            if reply is None:
                 consecutive_empty += 1
                 if consecutive_empty >= empty_budget:
                     break
