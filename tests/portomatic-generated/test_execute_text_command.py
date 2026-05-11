@@ -257,6 +257,115 @@ def test_execute_text_command_raises_without_consumer():
 
 
 # ---------------------------------------------------------------------------
+# #92 — concurrent callers must be serialized by the per-device lock so
+# their replies don't interleave. Without the lock, two threads racing the
+# same stream would each see a random subset of the other's lines.
+# ---------------------------------------------------------------------------
+
+
+def test_execute_text_command_serializes_concurrent_callers():
+    """Five threads call execute_text_command in parallel. The
+    _text_exchange_lock makes them serialize, so each caller's returned
+    lines are exactly the ones their setup_action fed — no cross-
+    contamination from concurrent feeds."""
+    dev = _make_dev_with_consumer()
+    stream = dev._transport._stream
+
+    results: dict[int, list[str]] = {}
+    errors: list[BaseException] = []
+    start_barrier = threading.Barrier(5)
+
+    def caller(idx: int) -> None:
+        try:
+            tag = f"T{idx}".encode()
+            # The setup_action feeds a unique 2-line response keyed by
+            # the thread index. The body is fast so the inactivity
+            # phase (250 ms) is the dominant wait — comfortably under
+            # the response_timeout but enough to verify no caller's
+            # frame leaks across the lock boundary.
+            def setup() -> None:
+                stream.feed(tag + b":a\r\n" + tag + b":b\r\n")
+
+            start_barrier.wait()
+            lines = dev.execute_text_command(
+                setup, response_timeout_ms=2000, completion_timeout_ms=250
+            )
+            results[idx] = lines
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=caller, args=(i,)) for i in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors, f"caller threads raised: {errors!r}"
+    assert set(results) == set(range(5))
+    # Each caller sees exactly its own two lines, in order. If the
+    # lock were missing, captured lists would contain other threads'
+    # tags or be missing some of their own.
+    for idx, lines in results.items():
+        assert lines == [f"T{idx}:a", f"T{idx}:b"], (
+            f"caller {idx} got cross-contaminated lines: {lines}"
+        )
+
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
+def test_execute_text_command_reentrant_call_deadlocks():
+    """A plain Lock (not RLock) is intentional: a setup_action that
+    re-enters execute_text_command on the same device would corrupt the
+    consumer swap, so it must deadlock rather than silently break.
+
+    Verified here by running the re-entrant call from a sacrificial
+    thread with a short timeout — the inner call never returns, so the
+    thread is still alive when we join with a 1 s budget."""
+    dev = _make_dev_with_consumer()
+    stream = dev._transport._stream
+
+    completed = threading.Event()
+
+    def inner_setup() -> None:
+        stream.feed(b"inner-line\r\n")
+
+    def outer_setup() -> None:
+        # Acquire the SAME lock the outer call is already holding — a
+        # plain Lock blocks forever rather than re-entering. We never
+        # set `completed` because the inner call never returns.
+        dev.execute_text_command(
+            inner_setup, response_timeout_ms=500, completion_timeout_ms=100
+        )
+        completed.set()
+
+    def runner() -> None:
+        try:
+            dev.execute_text_command(
+                outer_setup, response_timeout_ms=2000, completion_timeout_ms=200
+            )
+        except Exception:
+            # The outer call may itself time out / raise; the assertion
+            # we care about is that `completed` never fires.
+            pass
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    t.join(timeout=1.0)
+
+    assert not completed.is_set(), (
+        "re-entrant execute_text_command unexpectedly returned — "
+        "the lock must be a Lock (not RLock) so this case deadlocks"
+    )
+    # Thread is left running (daemon=True so the test process can
+    # still exit). Don't dev.close() — the stuck thread holds the
+    # underlying lock and any teardown that touches the stream would
+    # hang waiting for it.
+
+
+# ---------------------------------------------------------------------------
 # DaqifiDevice.drain_errors — port of upstream DrainErrorQueueAsync (#185).
 # Uses the same _FakeTransport + _ControlledStream pattern as the
 # execute_text_command tests above; drain_errors is a thin loop on top.

@@ -198,6 +198,13 @@ class DaqifiDevice:
             Callable[[ChannelsPopulatedEventArgs], None]
         ] = []
 
+        # Serializes execute_text_command calls device-wide. Plain
+        # Lock (not RLock) is intentional: re-entrant calls from
+        # inside a setup_action callback would corrupt the consumer
+        # swap, so surface them as a deadlock instead. Mirrors the
+        # fix expected upstream in daqifi-core#186.
+        self._text_exchange_lock = threading.Lock()
+
         if transport is not None:
             transport.add_status_changed(self._on_transport_status_changed)
 
@@ -578,6 +585,18 @@ class DaqifiDevice:
                 "Transport reports no stream; cannot pause consumer."
             )
 
+        with self._text_exchange_lock:
+            return self._execute_text_command_locked(
+                stream, setup_action, response_timeout_ms, completion_timeout_ms
+            )
+
+    def _execute_text_command_locked(
+        self,
+        stream: Any,
+        setup_action: Callable[[], None],
+        response_timeout_ms: int,
+        completion_timeout_ms: int,
+    ) -> List[str]:
         was_running = self._consumer.is_running
         if was_running:
             try:
@@ -694,10 +713,9 @@ class DaqifiDevice:
 
         Each iteration uses :meth:`execute_text_command`, which pauses
         the protobuf consumer for the duration of the text exchange.
-        Avoid calling this during active streaming or concurrently
-        with other text commands. (See daqifi-python-core#92 — once
-        the per-device text-exchange lock lands, that constraint
-        becomes intrinsic.)
+        Avoid calling this during active streaming. Concurrent calls
+        from multiple threads are safe — :meth:`execute_text_command`
+        serializes them via a per-device lock (daqifi-python-core#92).
 
         Args:
             max_iterations: Safety cap on the number of ``SYST:ERR?``
