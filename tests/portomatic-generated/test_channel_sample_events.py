@@ -117,20 +117,31 @@ class TestSampleReceivedHandlers:
         """Silent swallowing made bugs in user-supplied handlers
         invisible — `set_active_sample` now logs handler failures
         at exception level via logging.getLogger(daqifi.channels)."""
+        import logging as _logging
         ch = _make_analog()
 
         def bad_handler(s):
             raise RuntimeError("simulated handler bug")
 
         ch.add_sample_received(bad_handler)
-        with caplog.at_level("ERROR", logger="daqifi.channels"):
+        with caplog.at_level(_logging.ERROR, logger="daqifi.channels"):
             ch.set_active_sample(DataSample(value=2.0))
 
-        assert any(
-            "SampleReceived handler" in rec.message
-            and "simulated handler bug" in (rec.exc_text or "")
-            for rec in caplog.records
-        ), f"expected handler exception in caplog records: {caplog.records}"
+        # Use record.getMessage() and record.exc_info — canonical
+        # accessors that work regardless of whether a formatter has
+        # rendered the record (rec.message / rec.exc_text are
+        # formatter-populated and brittle).
+        def _matches(rec) -> bool:
+            if "SampleReceived handler" not in rec.getMessage():
+                return False
+            if rec.exc_info is None:
+                return False
+            _, exc, _ = rec.exc_info
+            return isinstance(exc, RuntimeError) and "simulated handler bug" in str(exc)
+
+        assert any(_matches(r) for r in caplog.records), (
+            f"expected handler exception in caplog records: {caplog.records}"
+        )
 
     def test_handler_can_remove_self_from_inside_callback(self):
         """Common pattern: a handler unregisters itself after the
