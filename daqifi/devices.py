@@ -656,6 +656,129 @@ class DaqifiDevice:
 
         return captured
 
+    def drain_errors(
+        self,
+        max_iterations: int = 256,
+        empty_budget: int = 3,
+        response_timeout_ms: int = 500,
+        completion_timeout_ms: int = 200,
+    ) -> List[str]:
+        """Pop ``SYST:ERR?`` entries from the device until the queue
+        reports ``"No error"``, ``empty_budget`` consecutive
+        empty/unparseable replies arrive, or ``max_iterations`` is
+        hit. Returns the popped errors.
+
+        Mirrors upstream
+        ``DaqifiDevice.DrainErrorQueueAsync(int maxIterations = 256,
+        CancellationToken cancellationToken = default)`` from
+        daqifi-core PR #185, with two Python-side robustness extensions
+        carried over from :meth:`SerialInterface.drain_errors`:
+
+        - ``empty_budget`` (default 3) caps consecutive empty/
+          unparseable replies before bailing — avoids ~25 s stalls
+          when a USB CDC timeout returns nothing within the read
+          window. Upstream bails on the first empty reply (equivalent
+          to ``empty_budget=1``).
+        - A synthetic ``DRAIN_INCONCLUSIVE`` sentinel is appended when
+          the loop exits via ``empty_budget`` or ``max_iterations``
+          WITHOUT seeing ``0,"No error"`` so callers can detect "queue
+          not confirmed clean."
+
+        This is the queue-inspection counterpart to the inline last-
+        command error check used elsewhere (e.g.
+        :func:`daqifi._internal.scpi.contains_scpi_error`): that
+        helper tells you whether the captured response from a single
+        command contained an error, while this drains the whole queue
+        and returns ownership of the popped entries to the caller.
+
+        Each iteration uses :meth:`execute_text_command`, which pauses
+        the protobuf consumer for the duration of the text exchange.
+        Avoid calling this during active streaming or concurrently
+        with other text commands. (See daqifi-python-core#92 — once
+        the per-device text-exchange lock lands, that constraint
+        becomes intrinsic.)
+
+        Args:
+            max_iterations: Safety cap on the number of ``SYST:ERR?``
+                queries.
+            empty_budget: Tolerance for consecutive empty/unparseable
+                replies before bailing.
+            response_timeout_ms: Per-iteration phase-1 timeout passed
+                through to :meth:`execute_text_command`.
+            completion_timeout_ms: Per-iteration phase-2 inactivity
+                timeout passed through to :meth:`execute_text_command`.
+
+        Returns:
+            List of error strings popped from the queue. Empty when
+            the queue was already clean. May contain a trailing
+            ``DRAIN_INCONCLUSIVE`` sentinel if drain exited without
+            confirming ``0,"No error"``.
+
+        Raises:
+            ValueError: ``max_iterations`` or ``empty_budget`` ≤ 0.
+            RuntimeError: device not connected.
+        """
+        if max_iterations <= 0:
+            raise ValueError("max_iterations must be positive")
+        if empty_budget <= 0:
+            raise ValueError("empty_budget must be positive")
+
+        from ._internal import scpi as _scpi
+        from ._internal import scpi_commands as _scpi_commands
+
+        popped: List[str] = []
+        consecutive_empty = 0
+        saw_no_error = False
+
+        for _ in range(max_iterations):
+            lines = self.execute_text_command(
+                setup_action=lambda: self.send(_scpi_commands.get_last_error()),
+                response_timeout_ms=response_timeout_ms,
+                completion_timeout_ms=completion_timeout_ms,
+            )
+            reply = next((line.strip() for line in lines if line.strip()), None)
+            if not reply:
+                consecutive_empty += 1
+                if consecutive_empty >= empty_budget:
+                    break
+                continue
+
+            # Strict shape check: a real SCPI error reply is
+            # ``<int>,"<msg>"`` — anything else is treated as a
+            # transport blip, not as a popped entry. parse_system_error
+            # is permissive (returns (0, "No error") on garbage), so
+            # we re-validate the raw shape before parsing — otherwise
+            # a corrupted reply could falsely terminate the loop.
+            code_str, sep, _ = reply.partition(",")
+            if not sep:
+                consecutive_empty += 1
+                if consecutive_empty >= empty_budget:
+                    break
+                continue
+            try:
+                int(code_str.strip())
+            except ValueError:
+                consecutive_empty += 1
+                if consecutive_empty >= empty_budget:
+                    break
+                continue
+
+            code, desc = _scpi.parse_system_error(reply)
+            if code == 0 and desc.strip().lower() == "no error":
+                saw_no_error = True
+                break
+
+            consecutive_empty = 0
+            popped.append(reply)
+
+        if not saw_no_error:
+            popped.append(
+                'DRAIN_INCONCLUSIVE,"queue not confirmed clean after '
+                f'{max_iterations} iterations or {empty_budget} empty replies"'
+            )
+
+        return popped
+
     def initialize(self, response_timeout_s: Optional[float] = None) -> None:
         """Run the standard SCPI init sequence.
 
