@@ -1583,10 +1583,28 @@ class SerialInterface:
         but accepts a complete command string — lets callers pass the
         output of a ``scpi_commands`` factory directly without splitting
         the base command from the value.
+
+        ``success`` is True only when the SYST:ERR? response parses to
+        SCPI code 0. The earlier loose substring check (``"No error" in
+        error``) misclassified responses like ``120,"No error in stream"``
+        as success because the substring matched the descriptive text
+        even though the numeric code was non-zero. Surfaced by Qodo
+        /agentic_review pass 1 on PR #105.
         """
         self.send_command(command, delay)
         error = self.send_query("SYSTem:ERRor?", 0.1)
-        return ("No error" in error, error)
+        # Parse the leading numeric code; only code==0 is success. A
+        # missing / unparseable code is NOT success — the caller should
+        # see the raw response in error_response and decide.
+        success = False
+        raw = (error or "").strip()
+        if raw:
+            code_str, _, _ = raw.partition(",")
+            try:
+                success = int(code_str.strip()) == 0
+            except ValueError:
+                success = False
+        return (success, error)
 
     def drain_errors(
         self, max_iterations: int = 256, empty_budget: int = 3

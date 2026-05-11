@@ -143,6 +143,29 @@ class TestDigitalOutputValueCache:
 # ---------------------------------------------------------------------------
 
 
+def test_loose_no_error_substring_no_longer_advances_cache():
+    """Regression for the bug Qodo /agentic_review pass 1 caught:
+    pre-fix, send_command_with_error returned success=True for any
+    response containing the substring "No error" — including
+    "120,\"No error in stream\"" which is a real device error.
+    The cache update would then advance on a failed write. Post-fix,
+    success is computed from the parsed SCPI code so this case
+    correctly returns success=False, the setter raises CommandError,
+    and the cache stays put."""
+    ch = _make_analog_output()
+    ch.voltage = 3.0  # seed cache with a real successful write
+    # Now simulate the loose-substring pathological case: success=False
+    # because the new send_command_with_error parses code 120 != 0.
+    # _check_setter_response then sees success=False AND a non-zero
+    # code in the response → raises.
+    ch._comm.send_set_with_error = MagicMock(
+        return_value=(False, '120,"No error in stream"')
+    )
+    with pytest.raises(CommandError, match="120"):
+        ch.voltage = 7.5
+    assert ch.output_value == 3.0  # cache untouched
+
+
 def test_state_getter_still_queries_device_after_output_value_cache_added():
     """C# ``IsHigh`` reflects live pin level; the Python equivalent is
     the existing `state` getter (queries the device every time). Adding
