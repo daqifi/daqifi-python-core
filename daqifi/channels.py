@@ -161,7 +161,14 @@ class AnalogInputChannel:
     Provides range configuration and enable/disable functionality.
     """
 
-    def __init__(self, channel_id: int, comm: SerialInterface, variant: Optional[str] = None):
+    def __init__(
+        self,
+        channel_id: int,
+        comm: SerialInterface,
+        variant: Optional[str] = None,
+        *,
+        range_cache: Optional[List[Optional[tuple]]] = None,
+    ):
         """
         Initialize ADC channel.
 
@@ -169,15 +176,86 @@ class AnalogInputChannel:
             channel_id: Channel index
             comm: Serial communication interface
             variant: Board variant ("NQ1", "NQ2", "NQ3") - optional
+            range_cache: Single-element list serving as a shared
+                mutable cache holder for the (min, max) range bounds.
+                Range is module-level on NQ3 (AD7609 register), so
+                channels constructed by the same collection share one
+                cache so a `range = ...` write on any channel
+                invalidates the bounds for all of them. When
+                ``None`` (the default for solo construction), the
+                channel gets its own private cache.
         """
         self._channel = channel_id
         self._comm = comm
         self._variant = variant
+        # See `range_cache` arg above. Stored as a 1-element list so
+        # writes from one channel are visible to siblings sharing the
+        # same list.
+        self._range_cache: List[Optional[tuple]] = (
+            range_cache if range_cache is not None else [None]
+        )
 
     @property
     def index(self) -> int:
         """Get channel index"""
         return self._channel
+
+    @property
+    def min_value(self) -> float:
+        """Minimum representable input voltage for this channel.
+
+        Mirrors C# ``IAnalogChannel.MinValue``. For NQ1/NQ2 the
+        MC12bADC has a fixed ±5V range so the value is hardcoded;
+        for NQ3 the AD7609 range is configurable so the value is
+        derived from the current :attr:`range` setting.
+        """
+        return self._range_bounds()[0]
+
+    @property
+    def max_value(self) -> float:
+        """Maximum representable input voltage for this channel.
+
+        Mirrors C# ``IAnalogChannel.MaxValue``. See :attr:`min_value`
+        for variant-specific derivation.
+        """
+        return self._range_bounds()[1]
+
+    def _range_bounds(self) -> tuple:
+        """Return (min, max) volts for this channel based on variant
+        and (for NQ3) the configured range. Centralizes the lookup so
+        :attr:`min_value` and :attr:`max_value` stay in lock-step.
+
+        Result is cached on the instance after the first SCPI-backed
+        lookup (NQ3 / variant=None) and invalidated by the range
+        setter — first access pays the SCPI cost; subsequent accesses
+        are O(1) and guaranteed to return a consistent (min, max)
+        snapshot even if the device range changes between two reads.
+
+        NQ1/NQ2 → fixed ±5V (MC12bADC + AD7173 are both ±5V; no SCPI
+        needed, so no cache layer either).
+        NQ3 → range "0" → ±5V; range "1" → ±10V; anything else
+        (e.g. "FIXED" or unparseable) falls back to the AD7609
+        firmware default of ±10V.
+        """
+        if self._variant in ("NQ1", "NQ2"):
+            return (-5.0, 5.0)
+        if self._range_cache[0] is not None:
+            return self._range_cache[0]
+        try:
+            r = self.range  # SCPI query — caller pays the cost on access
+        except CommandError:
+            # Range query failed; fall back to AD7609 firmware default
+            # without caching — next access can retry the query.
+            return (-10.0, 10.0)
+        if r == "0":
+            bounds = (-5.0, 5.0)
+        elif r == "1":
+            bounds = (-10.0, 10.0)
+        else:
+            # FIXED or any unrecognized response — AD7609 default.
+            bounds = (-10.0, 10.0)
+        self._range_cache[0] = bounds
+        return bounds
 
     @property
     def range(self) -> str:
@@ -250,6 +328,14 @@ class AnalogInputChannel:
             raise CommandError(f"Failed to set range: {e}") from e
         except Exception as e:
             raise CommandError(f"Failed to set range: {e}")
+
+        # Range is module-level on NQ3 — invalidate the shared cache
+        # so every sibling channel constructed with the same
+        # range_cache list also sees the next access re-query the
+        # device. Sole-construction channels invalidate only their
+        # private cache (the default range_cache=None gives each
+        # channel its own list).
+        self._range_cache[0] = None
 
     @property
     def enabled(self) -> bool:

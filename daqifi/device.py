@@ -223,7 +223,17 @@ class NyquistDevice:
             num_adc = 0
 
         if num_adc > 0:
-            adc_channels = [AnalogInputChannel(i, self._comm, self._variant.value) for i in range(num_adc)]
+            # Range is module-level on NQ3 (AD7609 register), so all
+            # channels constructed here share one cache holder so a
+            # `range = ...` write on any single channel invalidates
+            # the bounds for all of its siblings (#99 group A).
+            shared_range_cache: List[Optional[tuple]] = [None]
+            adc_channels = [
+                AnalogInputChannel(
+                    i, self._comm, self._variant.value, range_cache=shared_range_cache
+                )
+                for i in range(num_adc)
+            ]
             self._analog_inputs = AnalogInputs(adc_channels)
 
         # Analog outputs (DAC) - NQ3 only
