@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime as _dt
 import threading
 from dataclasses import dataclass
-from typing import IO, Callable, Iterable, Iterator, List, Optional, Protocol, runtime_checkable
+from typing import IO, Callable, Iterator, List, Optional, Protocol, runtime_checkable
 
 from ._internal.scpi import ChannelType
 
@@ -208,10 +208,17 @@ class CsvExporter:
                 f"options.average_window must be greater than zero "
                 f"(got {options.average_window})"
             )
-        if len(options.delimiter) != 1 or options.delimiter in "\r\n":
+        if (
+            len(options.delimiter) != 1
+            or options.delimiter in "\r\n"
+            or options.delimiter == '"'
+        ):
+            # The double-quote is reserved as the RFC 4180 quoting
+            # character used by `_escape_csv_field`; using it as the
+            # delimiter would produce ambiguous, unparseable output.
             raise ValueError(
-                f"options.delimiter must be a single non-newline character "
-                f"(got {options.delimiter!r})"
+                f"options.delimiter must be a single character that is "
+                f"not a newline or double-quote (got {options.delimiter!r})"
             )
 
         _check_cancel(cancel_event)

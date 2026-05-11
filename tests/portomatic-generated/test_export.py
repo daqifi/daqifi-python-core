@@ -498,6 +498,15 @@ class TestDelimiterValidation:
         with pytest.raises(ValueError, match="delimiter"):
             CsvExporter().export(source, sw, CsvExportOptions(delimiter="\n"))
 
+    def test_double_quote_delimiter_raises(self):
+        # The " character is reserved as the RFC 4180 quoting char by
+        # _escape_csv_field; allowing it as the delimiter would produce
+        # ambiguous output.
+        source = _InMemorySampleSource([CH1], [SampleRow(T0, CH1.key, 1.0)])
+        sw = io.StringIO()
+        with pytest.raises(ValueError, match="delimiter"):
+            CsvExporter().export(source, sw, CsvExportOptions(delimiter='"'))
+
 
 class TestSampleSourceProtocol:
     def test_duck_typed_object_is_runtime_isinstance(self):
