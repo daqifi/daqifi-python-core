@@ -141,6 +141,17 @@ class TestHeader:
         CsvExporter().export(source, sw, CsvExportOptions())
         assert sw.getvalue() == ""
 
+    def test_no_channels_still_finalizes_progress(self):
+        # Regression: a no-op export with a progress callback should
+        # still finalize at 100% so UI bars don't stall.
+        source = _InMemorySampleSource([], [])
+        sw = io.StringIO()
+        reports = []
+        CsvExporter().export(
+            source, sw, CsvExportOptions(), progress=lambda p: reports.append(p)
+        )
+        assert reports == [100]
+
     def test_custom_delimiter_used_in_header(self):
         source = _InMemorySampleSource([CH1, CH2], [SampleRow(T0, CH1.key, 1.0)])
         _, header = _export_to_lines(source, CsvExportOptions(delimiter=";"))

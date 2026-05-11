@@ -209,6 +209,12 @@ class CsvExporter:
 
         channels = list(source.get_channels())
         if not channels:
+            # Always finalize progress so callers (e.g. UI progress
+            # bars) don't stall at <100% when the export is a no-op.
+            # Internal consistency with the success paths below; the
+            # same gap exists in upstream daqifi-core PR #167.
+            if progress is not None:
+                progress(100)
             return
 
         channel_keys = [c.key for c in channels]
