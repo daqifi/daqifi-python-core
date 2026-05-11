@@ -4,12 +4,16 @@ Channel classes for DAQiFi Nyquist devices.
 Provides property-based access to analog and digital channels.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ._internal.comm import DataSample, SerialInterface
 from ._internal import scpi
 from ._internal.scpi import check_setter_response
 from .exceptions import CommandError, ConfigurationError
+
+
+_log = logging.getLogger(__name__)
 
 
 # Backward-compat alias — `_check_setter_response` was the original
@@ -90,8 +94,14 @@ class _SampleReceivedMixin:
                 handler(sample)
             except Exception:
                 # One handler's failure must not break the others or
-                # corrupt the cache that's already been updated.
-                pass
+                # corrupt the cache that's already been updated. Log
+                # so the failure is observable — silent swallowing
+                # made bugs in user-supplied handlers invisible.
+                _log.exception(
+                    "SampleReceived handler %r raised on sample %r",
+                    handler,
+                    sample,
+                )
 
 
 class AnalogOutputChannel:

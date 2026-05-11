@@ -113,6 +113,25 @@ class TestSampleReceivedHandlers:
         # Cache must still update even though the bad handler raised.
         assert ch.active_sample is s
 
+    def test_handler_exception_is_logged(self, caplog):
+        """Silent swallowing made bugs in user-supplied handlers
+        invisible — `set_active_sample` now logs handler failures
+        at exception level via logging.getLogger(daqifi.channels)."""
+        ch = _make_analog()
+
+        def bad_handler(s):
+            raise RuntimeError("simulated handler bug")
+
+        ch.add_sample_received(bad_handler)
+        with caplog.at_level("ERROR", logger="daqifi.channels"):
+            ch.set_active_sample(DataSample(value=2.0))
+
+        assert any(
+            "SampleReceived handler" in rec.message
+            and "simulated handler bug" in (rec.exc_text or "")
+            for rec in caplog.records
+        ), f"expected handler exception in caplog records: {caplog.records}"
+
     def test_handler_can_remove_self_from_inside_callback(self):
         """Common pattern: a handler unregisters itself after the
         first sample. The list snapshot in set_active_sample makes
