@@ -159,6 +159,12 @@ def throw_if_sd_card_list_error(lines):
         SdCardOperationException,
     )
 
+    # Defensive: callers shouldn't pass None, but treat it the same as
+    # an empty list (no error to classify) rather than raising
+    # TypeError from list(None).
+    if not lines:
+        return
+
     lines_list = list(lines)
 
     # last_scpi_error must only carry a real SCPI-formatted error so

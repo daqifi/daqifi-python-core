@@ -108,7 +108,11 @@ class SdCardFilesystemException(SdCardOperationException):
     device_message: str
 
     def __init__(self, raw_device_response, last_scpi_error, device_message):
-        if device_message and device_message.strip():
+        # Coerce to string and trim — defends against None, bytes, or
+        # accidental whitespace-only inputs and keeps the type
+        # consistent with the class-level annotation.
+        device_message = (device_message or "").strip()
+        if device_message:
             msg = f"The SD card filesystem reported an error: {device_message}"
         else:
             msg = "The SD card filesystem reported an error."

@@ -260,30 +260,26 @@ class _FakeSerialTransport:
 
 def _make_streaming_dev_with_canned_reply(reply_bytes: bytes):
     """Build a connected DaqifiStreamingDevice whose request_sd_card_file_list
-    will see ``reply_bytes`` as the captured SD:LIST? response."""
+    will see ``reply_bytes`` as the captured SD:LIST? response.
+
+    Uses a test-specific subclass to override ``is_usb_connection``
+    (which checks isinstance against SerialStreamTransport in
+    production) so the fake transport satisfies the SD-operations
+    USB precondition. Subclassing keeps the override scoped to this
+    test's instances — patching the production class would leak
+    across tests. (Qodo /improve pass 1 importance 8 caught the
+    earlier monkey-patch approach.)
+    """
     from daqifi.devices import DaqifiStreamingDevice
 
-    t = _FakeSerialTransport()
-    dev = DaqifiStreamingDevice(name="d", transport=t)
-    dev.connect()
+    class _UsbStreamingDevice(DaqifiStreamingDevice):
+        @property
+        def is_usb_connection(self) -> bool:  # type: ignore[override]
+            return True
 
-    # is_usb_connection is a property on DaqifiStreamingDevice that
-    # calls isinstance against SerialStreamTransport. Patching the
-    # transport class globally is fragile across pytest workers; the
-    # cleanest workaround here is to override the property on the
-    # instance via __dict__ — Python looks up properties through the
-    # class's __getattribute__, so we monkey-patch the bound method
-    # equivalent on the instance via type(dev).is_usb_connection.fget.
-    # Simpler still: mark the underlying attribute and override the
-    # property by patching the class for the test's lifetime is messy.
-    # Just patch the instance __class__.is_usb_connection at the test
-    # boundary using object.__setattr__ on the type. Cleanest cross-
-    # cutting approach is to bypass the property entirely on this
-    # subclass.
-    cls = dev.__class__
-    if not hasattr(cls, "_orig_is_usb"):
-        cls._orig_is_usb = cls.is_usb_connection
-        cls.is_usb_connection = property(lambda self: True)
+    t = _FakeSerialTransport()
+    dev = _UsbStreamingDevice(name="d", transport=t)
+    dev.connect()
 
     # Patch send so each setup_action triggers feeding the canned reply.
     stream = t._stream
@@ -301,18 +297,6 @@ def _make_streaming_dev_with_canned_reply(reply_bytes: bytes):
     dev.prepare_lan_interface = lambda: None
 
     return dev
-
-
-@pytest.fixture(autouse=True)
-def _restore_is_usb_connection():
-    """Restore the original is_usb_connection property after each test
-    in this file (the helper monkey-patches the class to bypass the
-    transport-type check)."""
-    yield
-    from daqifi.devices import DaqifiStreamingDevice
-    if hasattr(DaqifiStreamingDevice, "_orig_is_usb"):
-        DaqifiStreamingDevice.is_usb_connection = DaqifiStreamingDevice._orig_is_usb
-        delattr(DaqifiStreamingDevice, "_orig_is_usb")
 
 
 def test_request_sd_card_file_list_raises_not_present():
