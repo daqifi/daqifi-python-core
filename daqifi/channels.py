@@ -405,6 +405,12 @@ class DigitalIOChannel:
         except Exception as e:
             raise CommandError(f"Failed to set direction on channel {self._channel}: {e}")
 
+        # Switching to input invalidates the cached commanded output
+        # value — there's no commanded value on an input pin and a
+        # subsequent re-flip back to output should start fresh.
+        if value_lower == "input":
+            self._output_value = None
+
     @property
     def state(self) -> bool:
         """

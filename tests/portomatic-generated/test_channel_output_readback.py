@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from daqifi._internal import scpi as _scpi
 from daqifi.channels import AnalogOutputChannel, DigitalIOChannel
 from daqifi.exceptions import CommandError, ConfigurationError
 
@@ -27,9 +28,19 @@ def _make_analog_output(channel_id: int = 0) -> AnalogOutputChannel:
 def _make_digital_io(channel_id: int = 0) -> DigitalIOChannel:
     comm = MagicMock()
     comm.send_set_with_error = MagicMock(return_value=(True, '0,"No error"'))
-    # Default queries: port direction with channel 0 as output, port
-    # state with channel 0 low.
-    comm.send_query = MagicMock(side_effect=lambda q: "1" if "DIRection" in q else "0")
+
+    # Route by exact SCPI constant rather than substring — keeps the
+    # mock robust against future renames of either query and avoids
+    # accidentally matching unrelated commands that happen to share
+    # a substring.
+    def _reply(q: str) -> str:
+        if q == _scpi.DigitalIO.PORT_DIRECTION_QUERY:
+            return "1"  # channel 0 is output
+        if q == _scpi.DigitalIO.PORT_STATE_QUERY:
+            return "0"  # channel 0 low
+        return "0"
+
+    comm.send_query = MagicMock(side_effect=_reply)
     return DigitalIOChannel(channel_id=channel_id, comm=comm)
 
 
@@ -135,6 +146,27 @@ class TestDigitalOutputValueCache:
         ch._comm.send_query.reset_mock()
         _ = ch.output_value
         assert ch._comm.send_query.call_count == 0
+
+    def test_switching_to_input_invalidates_cache(self):
+        """Switching the channel direction to 'input' clears the
+        cached commanded output value — there's nothing meaningful to
+        report for an input pin, and a subsequent re-flip back to
+        output should start fresh."""
+        ch = _make_digital_io()
+        ch.state = True
+        assert ch.output_value is True
+
+        ch.direction = "input"
+        assert ch.output_value is None
+
+    def test_switching_back_to_output_does_not_resurrect_cache(self):
+        ch = _make_digital_io()
+        ch.state = True
+        ch.direction = "input"
+        ch.direction = "output"
+        # Switching back to output is not itself a write, so the
+        # cache stays None until the next state setter call.
+        assert ch.output_value is None
 
 
 # ---------------------------------------------------------------------------
