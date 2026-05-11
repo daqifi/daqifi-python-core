@@ -175,24 +175,86 @@ class TestDigitalOutputValueCache:
 # ---------------------------------------------------------------------------
 
 
+class TestSendCommandWithErrorScpiParsing:
+    """Unit tests for the actual parsing logic in
+    SerialInterface.send_command_with_error — the previous regression
+    test mocked send_set_with_error directly and bypassed the parser
+    it was meant to cover (caught by Qodo /agentic_review pass 3 on
+    PR #105).
+
+    Use a real SerialInterface instance with send_command and
+    send_query monkey-patched so the success/error_response derivation
+    runs against the actual code under test."""
+
+    def _make_serial(self, error_reply: str):
+        from daqifi._internal.comm import SerialInterface
+        si = SerialInterface(port="/dev/null")
+        si.send_command = MagicMock()
+        si.send_query = MagicMock(return_value=error_reply)
+        return si
+
+    def test_clean_response_yields_success_true(self):
+        si = self._make_serial('0,"No error"')
+        success, raw = si.send_command_with_error("X 1")
+        assert success is True
+        assert raw == '0,"No error"'
+
+    def test_loose_no_error_substring_now_yields_success_false(self):
+        """Pre-fix: 'No error' substring matched 120,"No error in stream"
+        and returned success=True for a real device error.
+        Post-fix: the leading SCPI code is parsed and 120 != 0 yields
+        success=False so the caller's check_setter_response raises."""
+        si = self._make_serial('120,"No error in stream"')
+        success, raw = si.send_command_with_error("X 1")
+        assert success is False
+        assert raw == '120,"No error in stream"'
+
+    def test_negative_code_yields_success_false(self):
+        si = self._make_serial('-100,"Bad command"')
+        success, _ = si.send_command_with_error("X 1")
+        assert success is False
+
+    def test_empty_response_yields_success_false(self):
+        si = self._make_serial("")
+        success, _ = si.send_command_with_error("X 1")
+        assert success is False
+
+    def test_whitespace_only_response_yields_success_false(self):
+        si = self._make_serial("   \n  ")
+        success, _ = si.send_command_with_error("X 1")
+        assert success is False
+
+    def test_unparseable_code_yields_success_false(self):
+        si = self._make_serial('garbage,"weird"')
+        success, _ = si.send_command_with_error("X 1")
+        assert success is False
+
+
 def test_loose_no_error_substring_no_longer_advances_cache():
-    """Regression for the bug Qodo /agentic_review pass 1 caught:
-    pre-fix, send_command_with_error returned success=True for any
-    response containing the substring "No error" — including
-    "120,\"No error in stream\"" which is a real device error.
-    The cache update would then advance on a failed write. Post-fix,
-    success is computed from the parsed SCPI code so this case
-    correctly returns success=False, the setter raises CommandError,
-    and the cache stays put."""
-    ch = _make_analog_output()
-    ch.voltage = 3.0  # seed cache with a real successful write
-    # Now simulate the loose-substring pathological case: success=False
-    # because the new send_command_with_error parses code 120 != 0.
-    # _check_setter_response then sees success=False AND a non-zero
-    # code in the response → raises.
-    ch._comm.send_set_with_error = MagicMock(
-        return_value=(False, '120,"No error in stream"')
-    )
+    """End-to-end regression: when the device emits the pathological
+    response, the channel-level cache stays put because
+    send_command_with_error's parser now correctly returns
+    success=False and the setter raises CommandError.
+
+    The actual parsing-logic regression coverage is in
+    TestSendCommandWithErrorScpiParsing above; this test is the
+    integration view through the channel API."""
+    from daqifi._internal.comm import SerialInterface
+    si = SerialInterface(port="/dev/null")
+    si.send_command = MagicMock()
+    si.send_query = MagicMock(return_value='120,"No error in stream"')
+
+    ch = AnalogOutputChannel(channel_id=0, comm=si)
+    # Seed cache with a real successful write — temporarily swap in a
+    # clean error reply.
+    si.send_query.return_value = '0,"No error"'
+    ch.voltage = 3.0
+    assert ch.output_value == 3.0
+
+    # Now simulate the pathological case: device returns
+    # 120,"No error in stream". send_command_with_error parses the
+    # code and returns success=False, _check_setter_response raises.
+    si.send_query.return_value = '120,"No error in stream"'
     with pytest.raises(CommandError, match="120"):
         ch.voltage = 7.5
     assert ch.output_value == 3.0  # cache untouched
