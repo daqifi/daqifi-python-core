@@ -12,7 +12,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from daqifi._internal.comm import DataSample
+# Import DataSample from the public package root — proves callers
+# don't need to reach into _internal (regression for Qodo finding on
+# PR #108 / #99 group B).
+from daqifi import DataSample
 from daqifi.channels import AnalogInputChannel, DigitalIOChannel
 
 
@@ -143,6 +146,23 @@ def test_handlers_are_per_channel_not_class_level():
     a.set_active_sample(s)
     assert a_received == [s]
     assert b_received == []
+
+
+def test_datasample_re_exported_from_public_package_root():
+    """Regression for the Qodo finding on PR #108 — callers must be
+    able to import `DataSample` from the public `daqifi` package
+    root rather than reaching into `daqifi._internal.comm`. Keeps
+    the public API stable across future refactors of `_internal`."""
+    import daqifi
+    assert hasattr(daqifi, "DataSample"), (
+        "daqifi.DataSample must remain in the public surface — see "
+        "Qodo /agentic_review pass 1 on PR #108 (#99 group B)"
+    )
+    assert "DataSample" in daqifi.__all__
+    # Identity check: the public re-export IS the same class as the
+    # _internal one, not a wrapper.
+    from daqifi._internal.comm import DataSample as _internal_DataSample
+    assert daqifi.DataSample is _internal_DataSample
 
 
 def test_analog_and_digital_handlers_are_independent():
