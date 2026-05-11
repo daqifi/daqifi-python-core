@@ -321,7 +321,8 @@ class CsvExporter:
         options: CsvExportOptions,
     ) -> None:
         ticks = bucket[0].timestamp_ticks
-        parts: List[str] = [_format_timestamp(ticks, first_ticks, options.use_relative_time)]
+        timestamp = _format_timestamp(ticks, first_ticks, options.use_relative_time)
+        parts: List[str] = [_escape_csv_field(timestamp, options.delimiter)]
 
         # Last write wins for the same key within a bucket — mirrors
         # upstream's Dictionary[key] = value pattern.
@@ -329,7 +330,9 @@ class CsvExporter:
         for key in channel_keys:
             parts.append(options.delimiter)
             if key in lookup:
-                parts.append(_format_value(lookup[key]))
+                parts.append(
+                    _escape_csv_field(_format_value(lookup[key]), options.delimiter)
+                )
 
         parts.append("\n")
         writer.write("".join(parts))
@@ -408,11 +411,13 @@ class CsvExporter:
         first_ticks: int,
         options: CsvExportOptions,
     ) -> None:
-        parts: List[str] = [_format_timestamp(last_tick, first_ticks, options.use_relative_time)]
+        timestamp = _format_timestamp(last_tick, first_ticks, options.use_relative_time)
+        parts: List[str] = [_escape_csv_field(timestamp, options.delimiter)]
         for key in channel_keys:
             parts.append(options.delimiter)
             if counts[key] > 0:
-                parts.append(_format_value(totals[key] / counts[key]))
+                avg = totals[key] / counts[key]
+                parts.append(_escape_csv_field(_format_value(avg), options.delimiter))
         parts.append("\n")
         writer.write("".join(parts))
 

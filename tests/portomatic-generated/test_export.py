@@ -526,6 +526,43 @@ class TestDelimiterValidation:
             CsvExporter().export(source, sw, CsvExportOptions(delimiter='"'))
 
 
+class TestDataRowEscaping:
+    def test_colon_delimiter_quotes_iso_timestamp(self):
+        # ISO 8601 absolute timestamps inherently contain ':' — when
+        # the user picks ':' as a delimiter, the timestamp field must
+        # be RFC 4180 quoted so it stays a single CSV field.
+        source = _InMemorySampleSource([CH1], [SampleRow(T0, CH1.key, 1.0)])
+        sw = io.StringIO()
+        CsvExporter().export(source, sw, CsvExportOptions(delimiter=":"))
+        # Header has 'Time' (no quoting needed) then ':' then quoted
+        # composite key (which contains ':'). Body row's timestamp
+        # field must be quoted because it contains ':'.
+        body_lines = sw.getvalue().splitlines()
+        assert len(body_lines) == 2
+        # Body row should look like: "2026-...Z":1
+        assert body_lines[1].startswith('"')
+        assert '":' in body_lines[1]  # quoted timestamp followed by delim
+
+    def test_dot_delimiter_quotes_relative_timestamp_and_value(self):
+        # Relative timestamps and float values both contain '.'; when
+        # '.' is the delimiter both must be quoted.
+        source = _InMemorySampleSource(
+            [CH1],
+            [SampleRow(T0, CH1.key, 0.5), SampleRow(T0 + 10_000_000, CH1.key, 1.5)],
+        )
+        sw = io.StringIO()
+        CsvExporter().export(
+            source,
+            sw,
+            CsvExportOptions(delimiter=".", use_relative_time=True),
+        )
+        body = sw.getvalue().splitlines()
+        # First data row: relative time "0.000" and value "0.5" both
+        # contain '.', so both must be quoted.
+        assert body[1] == '"0.000"."0.5"'
+        assert body[2] == '"1.000"."1.5"'
+
+
 class TestSampleSourceProtocol:
     def test_duck_typed_object_is_runtime_isinstance(self):
         # SampleSource is @runtime_checkable so a duck-typed object
