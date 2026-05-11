@@ -208,6 +208,11 @@ class CsvExporter:
                 f"options.average_window must be greater than zero "
                 f"(got {options.average_window})"
             )
+        if len(options.delimiter) != 1 or options.delimiter in "\r\n":
+            raise ValueError(
+                f"options.delimiter must be a single non-newline character "
+                f"(got {options.delimiter!r})"
+            )
 
         _check_cancel(cancel_event)
 
@@ -254,10 +259,10 @@ class CsvExporter:
         options: CsvExportOptions,
     ) -> None:
         time_header = "Relative Time (s)" if options.use_relative_time else "Time"
-        writer.write(time_header)
+        writer.write(_escape_csv_field(time_header, options.delimiter))
         for key in channel_keys:
             writer.write(options.delimiter)
-            writer.write(key)
+            writer.write(_escape_csv_field(key, options.delimiter))
         writer.write("\n")
 
     def _export_all_samples(
@@ -467,6 +472,38 @@ def _format_timestamp(
         f"{base.hour:02d}:{base.minute:02d}:{base.second:02d}"
         f".{sub_ticks:07d}Z"
     )
+
+
+def _escape_csv_field(value: str, delimiter: str) -> str:
+    """RFC 4180 quoting + spreadsheet formula-injection neutralization
+    for CSV header fields. Channel keys come from device + serial +
+    name combinations and don't normally contain delimiter / quote /
+    newline characters, but defensive escaping protects against:
+
+    - Channel names containing the configured delimiter (would break
+      column alignment).
+    - Channel names containing literal ``"`` (would break quoted
+      fields).
+    - Names beginning with ``=`` / ``+`` / ``-`` / ``@`` (Excel /
+      LibreOffice / Google Sheets interpret these as formulas — a
+      published CVE class for any tool that exports user-controllable
+      strings to CSV).
+
+    The leading-quote prefix (``'``) for formula-leading characters
+    matches the standard mitigation guidance for CSV formula
+    injection. Same hardening should land upstream — see
+    daqifi-core#193.
+    """
+    # Neutralize spreadsheet formula injection BEFORE the quote
+    # decision so the inserted leading-quote is itself eligible for
+    # quoting if needed.
+    if value and value[0] in ("=", "+", "-", "@"):
+        value = "'" + value
+    must_quote = any(ch in value for ch in (delimiter, '"', "\r", "\n"))
+    if must_quote:
+        value = value.replace('"', '""')
+        return f'"{value}"'
+    return value
 
 
 def _format_value(value: float) -> str:

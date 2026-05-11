@@ -442,6 +442,63 @@ class TestCancellation:
 # ---------------------------------------------------------------------------
 
 
+class TestCsvHeaderEscaping:
+    def test_channel_name_containing_delimiter_is_quoted(self):
+        ch = ChannelDescriptor("DevA", "SN001", "name,with,commas", ChannelType.Analog)
+        source = _InMemorySampleSource([ch], [SampleRow(T0, ch.key, 1.0)])
+        _, header = _export_to_lines(source)
+        # The escaped key appears as a quoted field — original commas
+        # don't break column alignment.
+        assert '"DevA:SN001:name,with,commas"' in header
+
+    def test_channel_name_containing_quote_doubled_inside_quotes(self):
+        ch = ChannelDescriptor("DevA", "SN001", 'name"with"quote', ChannelType.Analog)
+        source = _InMemorySampleSource([ch], [SampleRow(T0, ch.key, 1.0)])
+        _, header = _export_to_lines(source)
+        # RFC 4180: literal " becomes ""; whole field is quoted.
+        assert '"DevA:SN001:name""with""quote"' in header
+
+    def test_formula_leading_character_is_neutralized(self):
+        # When the *device name* (which is the first component of the
+        # composite key, and therefore the start of the CSV field)
+        # begins with =/+/-/@, the protection prefixes a literal '.
+        # Formula chars deeper in the key (channel name) don't trigger
+        # the protection because they're already preceded by the
+        # device:serial: prefix and so cannot be interpreted as a
+        # formula by spreadsheet apps.
+        ch = ChannelDescriptor("=DevA", "SN001", "Channel1", ChannelType.Analog)
+        source = _InMemorySampleSource([ch], [SampleRow(T0, ch.key, 1.0)])
+        _, header = _export_to_lines(source)
+        assert "'=DevA:SN001:Channel1" in header
+
+    def test_no_escaping_for_normal_keys(self):
+        # Normal channel keys pass through unchanged.
+        source = _InMemorySampleSource([CH1], [SampleRow(T0, CH1.key, 1.0)])
+        _, header = _export_to_lines(source)
+        assert "DevA:SN001:Channel1" in header
+        assert '"' not in header  # no quoting needed
+
+
+class TestDelimiterValidation:
+    def test_empty_delimiter_raises(self):
+        source = _InMemorySampleSource([CH1], [SampleRow(T0, CH1.key, 1.0)])
+        sw = io.StringIO()
+        with pytest.raises(ValueError, match="delimiter"):
+            CsvExporter().export(source, sw, CsvExportOptions(delimiter=""))
+
+    def test_multi_char_delimiter_raises(self):
+        source = _InMemorySampleSource([CH1], [SampleRow(T0, CH1.key, 1.0)])
+        sw = io.StringIO()
+        with pytest.raises(ValueError, match="delimiter"):
+            CsvExporter().export(source, sw, CsvExportOptions(delimiter=";;"))
+
+    def test_newline_delimiter_raises(self):
+        source = _InMemorySampleSource([CH1], [SampleRow(T0, CH1.key, 1.0)])
+        sw = io.StringIO()
+        with pytest.raises(ValueError, match="delimiter"):
+            CsvExporter().export(source, sw, CsvExportOptions(delimiter="\n"))
+
+
 class TestSampleSourceProtocol:
     def test_duck_typed_object_is_runtime_isinstance(self):
         # SampleSource is @runtime_checkable so a duck-typed object
