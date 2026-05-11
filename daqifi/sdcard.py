@@ -108,6 +108,116 @@ def _try_parse_log_filename_date(file_name: str) -> Optional[datetime]:
         return None
 
 
+def _is_scpi_error_line(line: str) -> bool:
+    """Strict SCPI error format: ``**ERROR...`` or ``ERROR: ...``.
+
+    The colon (or ``**`` prefix) distinguishes a true SCPI error from
+    firmware status text like ``Error !! No SD Card Detected``, which
+    should not be surfaced as ``SdCardOperationException.last_scpi_error``.
+    Mirrors upstream ``IsScpiErrorLine`` from PR #182.
+    """
+    trimmed = line.lstrip()
+    upper = trimmed.upper()
+    return upper.startswith("**ERROR") or upper.startswith("ERROR:")
+
+
+def _is_non_result_line(line: str) -> bool:
+    """Permissive: any line that looks like a device error or status
+    message, including firmware text such as ``Error !! ...``.
+
+    Used to recognize that the parser would yield no result, without
+    polluting ``last_scpi_error`` with non-SCPI text. Mirrors upstream
+    ``IsNonResultLine`` from PR #182.
+    """
+    trimmed = line.lstrip()
+    upper = trimmed.upper()
+    return upper.startswith("**ERROR") or upper.startswith("ERROR")
+
+
+def throw_if_sd_card_list_error(lines):
+    """Inspect the final response from a ``SYSTem:STORage:SD:LISt?``
+    exchange and raise a typed exception when the device reported a real
+    failure (no SD card, filesystem error, generic SCPI error).
+
+    If any non-error/non-empty line is present, callers proceed to
+    parse — even if SCPI error lines are interleaved — so a successful
+    directory listing is never masked by stray transient errors.
+
+    Mirrors upstream ``ThrowIfSdCardListError`` from
+    ``Daqifi.Core.Device.DaqifiStreamingDevice`` (daqifi-core PR #182).
+
+    Raises:
+        SdCardNotPresentException: device emitted ``"No SD Card Detected"``.
+        SdCardFilesystemException: device emitted
+            ``"Failed to open directory ..."``.
+        SdCardOperationException: any other classification fallback
+            (SCPI error with no content, non-result line with no SCPI error).
+    """
+    from .exceptions import (
+        SdCardFilesystemException,
+        SdCardNotPresentException,
+        SdCardOperationException,
+    )
+
+    lines_list = list(lines)
+
+    # last_scpi_error must only carry a real SCPI-formatted error so
+    # callers can rely on its shape. Firmware status text
+    # (``Error !! ...``) is surfaced via the exception's message and
+    # raw_device_response instead.
+    last_scpi_error = None
+    for line in reversed(lines_list):
+        if _is_scpi_error_line(line):
+            last_scpi_error = line.strip()
+            break
+
+    # Specific firmware-emitted error markers take precedence over
+    # generic content/error checks. They're plain text (not SCPI-shaped),
+    # so a simple "is there any content line?" check would otherwise
+    # miss them and pass garbage to the parser.
+    for line in lines_list:
+        if "no sd card detected" in line.lower():
+            raise SdCardNotPresentException(lines_list, last_scpi_error)
+
+    for line in lines_list:
+        if "failed to open directory" in line.lower():
+            raise SdCardFilesystemException(
+                lines_list, last_scpi_error, line.strip()
+            )
+
+    # If any line looks like a real result (non-empty, not an error or
+    # firmware status line), hand off to the parser. Stray interleaved
+    # error lines are still parsed away by parse_sd_card_file_list.
+    has_content_line = any(
+        line and line.strip() and not _is_non_result_line(line)
+        for line in lines_list
+    )
+    if has_content_line:
+        return
+
+    if last_scpi_error is not None:
+        raise SdCardOperationException(
+            f"The SD card list operation failed: {last_scpi_error}",
+            lines_list,
+            last_scpi_error,
+        )
+
+    # Defensive fallback: firmware status text (``Error !! ...``) with
+    # no SCPI error and no recognized marker. Shouldn't happen for known
+    # firmware paths, but surfacing it as a typed exception is far
+    # better than silently returning an empty list.
+    for line in lines_list:
+        if line and line.strip() and _is_non_result_line(line):
+            raise SdCardOperationException(
+                f"The SD card list operation failed: {line.strip()}",
+                lines_list,
+                last_scpi_error=None,
+            )
+
+    # No error lines and no content lines — empty directory. Caller
+    # continues.
+
+
 def parse_sd_card_file_list(lines: Iterable[str]) -> List["SdCardFileInfo"]:
     """Parse text lines from the device's SD-card LIST? response.
 

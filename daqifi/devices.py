@@ -53,6 +53,7 @@ from .sdcard import (
     SdCardFileInfo,
     SdCardTransferProgress,
     parse_sd_card_file_list,
+    throw_if_sd_card_list_error,
 )
 from .transport import (
     HidLibraryTransport,
@@ -1464,6 +1465,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
                         "Failed to restore LAN interface after SD list"
                     )
 
+        # Classify firmware error states (no card / filesystem failure /
+        # generic SCPI error) BEFORE handing to the parser, so callers
+        # get a typed exception instead of an empty list. Mirrors
+        # upstream daqifi-core PR #182.
+        throw_if_sd_card_list_error(lines)
         self._sd_card_files = parse_sd_card_file_list(lines)
 
     def get_sd_logging_state(self) -> bool:
@@ -1691,6 +1697,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 except Exception:
                     pass
 
+        throw_if_sd_card_list_error(lines)
         self._sd_card_files = parse_sd_card_file_list(lines)
 
     def format_sd_card(self) -> None:
@@ -1758,6 +1765,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 except Exception:
                     pass
 
+        throw_if_sd_card_list_error(lines)
         files = parse_sd_card_file_list(lines)
         self._sd_card_files = files
         return tuple(files)
