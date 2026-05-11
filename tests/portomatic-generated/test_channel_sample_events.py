@@ -178,6 +178,50 @@ def test_handlers_are_per_channel_not_class_level():
     assert b_received == []
 
 
+def test_concurrent_register_and_dispatch_does_not_crash():
+    """Streaming pipeline integration (#107) will dispatch samples
+    from a background thread while user code registers handlers
+    from the main thread. Stress the lock with overlapping
+    add_sample_received / set_active_sample / remove_sample_received
+    from multiple threads — the RLock means none of them deadlock
+    or raise."""
+    import threading
+    ch = _make_analog()
+    received = []
+    received_lock = threading.Lock()
+    stop = threading.Event()
+
+    def registrar():
+        i = 0
+        while not stop.is_set():
+            handler = lambda s, i=i: received.append((i, s.value))
+            ch.add_sample_received(handler)
+            ch.remove_sample_received(handler)
+            i += 1
+
+    def dispatcher():
+        i = 0
+        while not stop.is_set():
+            ch.set_active_sample(DataSample(value=float(i)))
+            i += 1
+
+    threads = [
+        threading.Thread(target=registrar, daemon=True),
+        threading.Thread(target=registrar, daemon=True),
+        threading.Thread(target=dispatcher, daemon=True),
+        threading.Thread(target=dispatcher, daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    # Run for a short window and stop. The fact that we exit cleanly
+    # is the assertion — no deadlocks, no corrupted-list exceptions.
+    threading.Event().wait(0.1)
+    stop.set()
+    for t in threads:
+        t.join(timeout=2.0)
+        assert not t.is_alive(), "thread failed to stop — possible deadlock"
+
+
 def test_datasample_re_exported_from_public_package_root():
     """Regression for the Qodo finding on PR #108 — callers must be
     able to import `DataSample` from the public `daqifi` package

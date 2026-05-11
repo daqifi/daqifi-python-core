@@ -5,6 +5,7 @@ Provides property-based access to analog and digital channels.
 """
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ._internal.comm import DataSample, SerialInterface
@@ -47,6 +48,12 @@ class _SampleReceivedMixin:
     def _init_sample_events(self) -> None:
         self._active_sample: Optional[DataSample] = None
         self._sample_received_handlers: List[Callable[[DataSample], None]] = []
+        # RLock so a handler that calls add/remove_sample_received
+        # from inside its callback (we already hold the lock around
+        # dispatch) doesn't deadlock. Streaming pipeline integration
+        # (see #107) will dispatch from a background thread; user
+        # code typically registers handlers from the main thread.
+        self._sample_received_lock = threading.RLock()
 
     @property
     def active_sample(self) -> Optional[DataSample]:
@@ -63,8 +70,9 @@ class _SampleReceivedMixin:
         this channel. Idempotent — registering the same handler twice
         adds it once. Mirrors C# ``SampleReceived += handler``.
         """
-        if handler not in self._sample_received_handlers:
-            self._sample_received_handlers.append(handler)
+        with self._sample_received_lock:
+            if handler not in self._sample_received_handlers:
+                self._sample_received_handlers.append(handler)
 
     def remove_sample_received(
         self, handler: Callable[[DataSample], None]
@@ -73,23 +81,29 @@ class _SampleReceivedMixin:
         handler isn't currently registered. Mirrors C#
         ``SampleReceived -= handler``.
         """
-        try:
-            self._sample_received_handlers.remove(handler)
-        except ValueError:
-            pass
+        with self._sample_received_lock:
+            try:
+                self._sample_received_handlers.remove(handler)
+            except ValueError:
+                pass
 
     def set_active_sample(self, sample: DataSample) -> None:
         """Update the cached :attr:`active_sample` and invoke every
         registered handler with the new sample. Called by the
         streaming pipeline. Mirrors C# ``SetActiveSample(sample)``.
 
-        Each handler is wrapped so a single handler raising doesn't
-        prevent the others from running, and the handler list is
-        snapshotted so a handler that mutates the registration list
-        (add/remove from inside a callback) doesn't break iteration.
+        Lock is held only over the cache update + handler-list
+        snapshot — handler invocation runs OUTSIDE the lock so a
+        slow handler can't block other threads from registering /
+        unregistering handlers. Snapshot is a defensive copy so a
+        handler that adds/removes from inside the callback doesn't
+        break iteration (and the RLock allows the re-entrant
+        add/remove from the same thread).
         """
-        self._active_sample = sample
-        for handler in list(self._sample_received_handlers):
+        with self._sample_received_lock:
+            self._active_sample = sample
+            handlers = list(self._sample_received_handlers)
+        for handler in handlers:
             try:
                 handler(sample)
             except Exception:
