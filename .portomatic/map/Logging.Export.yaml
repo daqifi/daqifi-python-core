@@ -1,0 +1,154 @@
+schema_version: 1
+shard: Logging.Export
+upstream_root: src/Daqifi.Core/Logging/Export
+downstream_root: daqifi
+last_synced_upstream_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+files:
+- upstream: src/Daqifi.Core/Logging/Export/ChannelDescriptor.cs
+  downstream: daqifi/export.py
+  relation: divergent
+  notes: "Namespace flattened: upstream `Daqifi.Core.Logging.Export` becomes Python `daqifi.export` rather than `daqifi.logging.export` because the latter would shadow the stdlib `logging` module — a sharp foot-gun for callers."
+  rationale: null
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+- upstream: src/Daqifi.Core/Logging/Export/CsvExportOptions.cs
+  downstream: daqifi/export.py
+  relation: divergent
+  notes: "Namespace flatten — see ChannelDescriptor row."
+  rationale: null
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+- upstream: src/Daqifi.Core/Logging/Export/CsvExporter.cs
+  downstream: daqifi/export.py
+  relation: divergent
+  notes: "Namespace flatten — see ChannelDescriptor row. Also async→sync per project convention (`async Task ExportAsync` becomes `def export`; `IAsyncEnumerable<SampleRow>` becomes `Iterator[SampleRow]`); `IProgress<int>` becomes `Optional[Callable[[int], None]]`; `CancellationToken` becomes `Optional[threading.Event]` matching the FirmwareUpdateService port pattern."
+  rationale: null
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+- upstream: src/Daqifi.Core/Logging/Export/ISampleSource.cs
+  downstream: daqifi/export.py
+  relation: divergent
+  notes: "Namespace flatten — see ChannelDescriptor row. Also Python uses duck typing rather than an explicit ABC; `SampleSource` exists as a documentation/typing intent class, not a runtime-enforced Protocol."
+  rationale: null
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+- upstream: src/Daqifi.Core/Logging/Export/SampleRow.cs
+  downstream: daqifi/export.py
+  relation: divergent
+  notes: "Namespace flatten — see ChannelDescriptor row."
+  rationale: null
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+symbols:
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Logging.Export.ChannelDescriptor
+    file: src/Daqifi.Core/Logging/Export/ChannelDescriptor.cs
+  downstream:
+    kind: class
+    qualified: daqifi.export.ChannelDescriptor
+    file: daqifi/export.py
+  relation: one_to_one
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  notes: "C# `record` becomes Python `@dataclass(frozen=True)`. PascalCase fields become snake_case (`DeviceName` → `device_name`, etc.). The `Key` property port preserves the same composite-key shape `{device_name}:{device_serial_no}:{channel_name}`."
+  rationale: null
+  members:
+  - upstream: DeviceName
+    downstream: device_name
+    relation: one_to_one
+  - upstream: DeviceSerialNo
+    downstream: device_serial_no
+    relation: one_to_one
+  - upstream: ChannelName
+    downstream: channel_name
+    relation: one_to_one
+  - upstream: ChannelType
+    downstream: channel_type
+    relation: one_to_one
+  - upstream: Key
+    downstream: key
+    relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Logging.Export.CsvExportOptions
+    file: src/Daqifi.Core/Logging/Export/CsvExportOptions.cs
+  downstream:
+    kind: class
+    qualified: daqifi.export.CsvExportOptions
+    file: daqifi/export.py
+  relation: one_to_one
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  notes: "C# class with `init` setters becomes Python `@dataclass(frozen=True)`. Same field shape: `delimiter` (default `,`), `use_relative_time` (default False), `average_window` (default None)."
+  rationale: null
+  members:
+  - upstream: Delimiter
+    downstream: delimiter
+    relation: one_to_one
+  - upstream: UseRelativeTime
+    downstream: use_relative_time
+    relation: one_to_one
+  - upstream: AverageWindow
+    downstream: average_window
+    relation: one_to_one
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Logging.Export.CsvExporter
+    file: src/Daqifi.Core/Logging/Export/CsvExporter.cs
+  downstream:
+    kind: class
+    qualified: daqifi.export.CsvExporter
+    file: daqifi/export.py
+  relation: one_to_one
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  notes: "Sync per project convention. Same row-formatting and timestamp logic as upstream — including the .NET tick conversion (preserved as int and rendered to ISO 8601 7-digit fractional seconds for parity with `DateTime.ToString(\"O\")`), the `INVALID(ticks)` defensive marker for out-of-range values, the per-tick bucket grouping, and the rolling-window average mode. Progress callback fires every 5000 samples capped at 99 (matches upstream)."
+  rationale: null
+  members:
+  - upstream: ExportAsync
+    downstream: export
+    relation: one_to_one
+    notes: "Async/sync collapsed per project convention."
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Logging.Export.ISampleSource
+    file: src/Daqifi.Core/Logging/Export/ISampleSource.cs
+  downstream:
+    kind: class
+    qualified: daqifi.export.SampleSource
+    file: daqifi/export.py
+  relation: divergent
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  notes: "C# interface → Python documentation/typing-intent class. Python callers don't subclass; any duck-typed object that exposes `get_channels()` / `get_sample_count()` / `stream_samples()` works."
+  rationale: "Python uses duck typing — explicit interfaces aren't idiomatic. The class exists so the docstring + method signatures document the expected shape, but `CsvExporter.export` accepts any object satisfying the protocol structurally without requiring inheritance. Same capability as the C# interface (a contract for sample-source backends), just expressed via the type's structural shape rather than via nominal inheritance."
+  members:
+  - upstream: GetChannels
+    downstream: get_channels
+    relation: one_to_one
+  - upstream: GetSampleCountAsync
+    downstream: get_sample_count
+    relation: one_to_one
+    notes: "Async/sync collapsed per project convention."
+  - upstream: StreamSamples
+    downstream: stream_samples
+    relation: divergent
+    notes: "C# `IAsyncEnumerable<SampleRow>` becomes Python `Iterator[SampleRow]` (sync per project convention). Same ordered-by-timestamp-ascending contract."
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Logging.Export.SampleRow
+    file: src/Daqifi.Core/Logging/Export/SampleRow.cs
+  downstream:
+    kind: class
+    qualified: daqifi.export.SampleRow
+    file: daqifi/export.py
+  relation: one_to_one
+  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  notes: "C# `record` becomes Python `@dataclass(frozen=True)`. Same three fields: `timestamp_ticks` (int, .NET DateTime.Ticks), `channel_key` (composite str), `value` (float)."
+  rationale: null
+  members:
+  - upstream: TimestampTicks
+    downstream: timestamp_ticks
+    relation: one_to_one
+  - upstream: ChannelKey
+    downstream: channel_key
+    relation: one_to_one
+  - upstream: Value
+    downstream: value
+    relation: one_to_one
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: '2026-05-11T19:30:00.000000+00:00'
