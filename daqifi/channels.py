@@ -180,6 +180,50 @@ class AnalogInputChannel:
         return self._channel
 
     @property
+    def min_value(self) -> float:
+        """Minimum representable input voltage for this channel.
+
+        Mirrors C# ``IAnalogChannel.MinValue``. For NQ1/NQ2 the
+        MC12bADC has a fixed ±5V range so the value is hardcoded;
+        for NQ3 the AD7609 range is configurable so the value is
+        derived from the current :attr:`range` setting.
+        """
+        return self._range_bounds()[0]
+
+    @property
+    def max_value(self) -> float:
+        """Maximum representable input voltage for this channel.
+
+        Mirrors C# ``IAnalogChannel.MaxValue``. See :attr:`min_value`
+        for variant-specific derivation.
+        """
+        return self._range_bounds()[1]
+
+    def _range_bounds(self) -> tuple:
+        """Return (min, max) volts for this channel based on variant
+        and (for NQ3) the configured range. Centralizes the lookup so
+        :attr:`min_value` and :attr:`max_value` stay in lock-step.
+
+        NQ1/NQ2 → fixed ±5V (MC12bADC + AD7173 are both ±5V).
+        NQ3 → range "0" → ±5V; range "1" → ±10V; anything else
+        (e.g. "FIXED" or unparseable) falls back to the AD7609
+        firmware default of ±10V.
+        """
+        if self._variant in ("NQ1", "NQ2"):
+            return (-5.0, 5.0)
+        try:
+            r = self.range  # SCPI query — caller pays the cost on access
+        except CommandError:
+            # Range query failed; fall back to AD7609 firmware default.
+            return (-10.0, 10.0)
+        if r == "0":
+            return (-5.0, 5.0)
+        if r == "1":
+            return (-10.0, 10.0)
+        # FIXED or any unrecognized response — AD7609 default.
+        return (-10.0, 10.0)
+
+    @property
     def range(self) -> str:
         """
         Get configured input range.
