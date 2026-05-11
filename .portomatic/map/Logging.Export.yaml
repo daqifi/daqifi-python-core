@@ -6,31 +6,31 @@ last_synced_upstream_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
 files:
 - upstream: src/Daqifi.Core/Logging/Export/ChannelDescriptor.cs
   downstream: daqifi/export.py
-  relation: divergent
+  relation: one_to_one
   notes: "Namespace flattened: upstream `Daqifi.Core.Logging.Export` becomes Python `daqifi.export` rather than `daqifi.logging.export` because the latter would shadow the stdlib `logging` module — a sharp foot-gun for callers."
   rationale: null
   last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
 - upstream: src/Daqifi.Core/Logging/Export/CsvExportOptions.cs
   downstream: daqifi/export.py
-  relation: divergent
+  relation: one_to_one
   notes: "Namespace flatten — see ChannelDescriptor row."
   rationale: null
   last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
 - upstream: src/Daqifi.Core/Logging/Export/CsvExporter.cs
   downstream: daqifi/export.py
-  relation: divergent
+  relation: one_to_one
   notes: "Namespace flatten — see ChannelDescriptor row. Also async→sync per project convention (`async Task ExportAsync` becomes `def export`; `IAsyncEnumerable<SampleRow>` becomes `Iterator[SampleRow]`); `IProgress<int>` becomes `Optional[Callable[[int], None]]`; `CancellationToken` becomes `Optional[threading.Event]` matching the FirmwareUpdateService port pattern."
   rationale: null
   last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
 - upstream: src/Daqifi.Core/Logging/Export/ISampleSource.cs
   downstream: daqifi/export.py
-  relation: divergent
-  notes: "Namespace flatten — see ChannelDescriptor row. Also Python uses duck typing rather than an explicit ABC; `SampleSource` exists as a documentation/typing intent class, not a runtime-enforced Protocol."
+  relation: one_to_one
+  notes: "Namespace flatten — see ChannelDescriptor row. C# interface ported as a `typing.Protocol` (`@runtime_checkable`) so type checkers accept duck-typed implementations without requiring inheritance — equivalent contract to a C# interface, expressed structurally per Python idiom."
   rationale: null
   last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
 - upstream: src/Daqifi.Core/Logging/Export/SampleRow.cs
   downstream: daqifi/export.py
-  relation: divergent
+  relation: one_to_one
   notes: "Namespace flatten — see ChannelDescriptor row."
   rationale: null
   last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
@@ -112,8 +112,8 @@ symbols:
     file: daqifi/export.py
   relation: divergent
   last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
-  notes: "C# interface → Python documentation/typing-intent class. Python callers don't subclass; any duck-typed object that exposes `get_channels()` / `get_sample_count()` / `stream_samples()` works."
-  rationale: "Python uses duck typing — explicit interfaces aren't idiomatic. The class exists so the docstring + method signatures document the expected shape, but `CsvExporter.export` accepts any object satisfying the protocol structurally without requiring inheritance. Same capability as the C# interface (a contract for sample-source backends), just expressed via the type's structural shape rather than via nominal inheritance."
+  notes: "C# interface (nominal typing — implementers explicitly declare `: ISampleSource`) → Python `typing.Protocol` (structural typing — type checkers accept any duck-typed object without inheritance). `@runtime_checkable` lets callers `isinstance()` against the protocol if they need a runtime guard."
+  rationale: "Python uses structural typing for interface-like contracts. `typing.Protocol` is the idiomatic equivalent of a C# interface: the same capability (a documented contract for sample-source backends), expressed through structural conformance rather than nominal inheritance. Type checkers (mypy, pyright) accept any duck-typed object that exposes the three methods, so the contract is enforceable without requiring callers to subclass."
   members:
   - upstream: GetChannels
     downstream: get_channels

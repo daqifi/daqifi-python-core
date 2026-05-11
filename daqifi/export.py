@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime as _dt
 import threading
 from dataclasses import dataclass
-from typing import IO, Callable, Iterable, Iterator, List, Optional
+from typing import IO, Callable, Iterable, Iterator, List, Optional, Protocol, runtime_checkable
 
 from ._internal.scpi import ChannelType
 
@@ -92,7 +92,8 @@ class SampleRow:
     value: float
 
 
-class SampleSource:
+@runtime_checkable
+class SampleSource(Protocol):
     """Protocol for the data source feeding a CSV export.
 
     Mirrors upstream ``ISampleSource``. Hides storage details (SQL
@@ -101,10 +102,13 @@ class SampleSource:
     sample count for progress reporting, and an ordered stream of
     samples.
 
-    Python uses duck typing rather than an explicit ABC: any class
-    that provides the three methods below works with
-    :class:`CsvExporter`. This class exists for documentation /
-    typing intent.
+    Defined as a :class:`typing.Protocol` so type checkers (mypy,
+    pyright) accept any duck-typed object that exposes the three
+    methods, with no inheritance required. The ``@runtime_checkable``
+    decorator also lets callers use ``isinstance`` checks if they
+    need a runtime guard. Mirrors C# ``interface ISampleSource`` in
+    spirit (a structural contract) without C#'s nominal-typing
+    requirement that implementers explicitly declare conformance.
     """
 
     def get_channels(self) -> List[ChannelDescriptor]:
@@ -112,7 +116,7 @@ class SampleSource:
 
         The order determines column order in the exported CSV.
         """
-        raise NotImplementedError
+        ...
 
     def get_sample_count(self) -> int:
         """Return the total number of sample rows, used for progress
@@ -122,7 +126,7 @@ class SampleSource:
         backends may need a round-trip; sync callers can offload to a
         thread if needed).
         """
-        raise NotImplementedError
+        ...
 
     def stream_samples(
         self, cancel_event: Optional[threading.Event] = None
@@ -133,7 +137,7 @@ class SampleSource:
         ``cancel_event`` lets a caller signal mid-stream
         cancellation cooperatively (mirrors C# ``CancellationToken``).
         """
-        raise NotImplementedError
+        ...
 
 
 @dataclass(frozen=True)
@@ -438,7 +442,12 @@ def _format_timestamp(
     ``DateTime`` valid range render as ``INVALID({ticks})`` in both
     modes — same defensive shape as upstream.
     """
-    if ticks <= 0 or ticks > _DOTNET_MAX_TICKS:
+    # Treat negative ticks as invalid; ticks==0 is .NET DateTime.MinValue
+    # (0001-01-01 00:00:00 UTC) — a legal value the formatter handles
+    # below. Upstream daqifi-core PR #167 has a `ticks <= 0` check that
+    # incorrectly classifies MinValue as invalid; filed as
+    # daqifi-core#192.
+    if ticks < 0 or ticks > _DOTNET_MAX_TICKS:
         return f"INVALID({ticks})"
 
     if use_relative_time:
@@ -461,13 +470,17 @@ def _format_timestamp(
 
 
 def _format_value(value: float) -> str:
-    """Format a float using C# ``"G"`` (general) culture-invariant
-    semantics. Python's ``repr(float)`` is close to ``G17`` and
-    matches ``G`` for most real-world sample values; for tighter
-    parity in tests we use ``%g`` which gives ``G6``-equivalent
-    formatting.
+    """Format a float matching C# ``"G"`` (general) culture-invariant
+    semantics for ``double``: at least 15 significant digits, dropping
+    trailing zeros. Python's ``repr(float)`` already emits the shortest
+    round-trippable representation under IEEE-754, which matches C#
+    ``G17`` round-trip semantics; ``"G"`` defaults to 15 digits for
+    ``double``. We use ``f"{value:.15g}"`` for the closest tested
+    parity. Notable difference vs the prior ``f"{value:g}"`` (which
+    defaulted to 6 digits and would silently round high-precision
+    samples).
     """
-    return f"{value:g}"
+    return f"{value:.15g}"
 
 
 __all__ = [

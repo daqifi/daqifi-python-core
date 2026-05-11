@@ -195,6 +195,24 @@ class TestTimestampFormats:
         lines, _ = _export_to_lines(source, CsvExportOptions(use_relative_time=True))
         assert lines[1].startswith("INVALID(-5),")
 
+    def test_zero_ticks_is_valid_datetime_min_value(self):
+        # ticks==0 is .NET DateTime.MinValue (0001-01-01 00:00:00 UTC),
+        # NOT INVALID. Upstream daqifi-core PR #167 has the same off-by-
+        # one bug (`<= 0` instead of `< 0`); filed as daqifi-core#192.
+        source = _InMemorySampleSource([CH1], [SampleRow(0, CH1.key, 1.0)])
+        lines, _ = _export_to_lines(source)
+        assert lines[1].startswith("0001-01-01T00:00:00.0000000Z,")
+
+    def test_high_precision_value_round_trips(self):
+        # Regression: prior `f"{value:g}"` rounded to 6 sig digits,
+        # losing precision on real-world high-precision samples.
+        # Now uses `:.15g` to match C# "G" default for double.
+        precise = 3.141592653589793
+        source = _InMemorySampleSource([CH1], [SampleRow(T0, CH1.key, precise)])
+        lines, _ = _export_to_lines(source)
+        # Last column = the value; full 15 sig digits preserved.
+        assert lines[1].endswith(",3.14159265358979")
+
 
 # ---------------------------------------------------------------------------
 # Multi-tick grouping (one row per distinct timestamp)
@@ -422,6 +440,49 @@ class TestCancellation:
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
+
+
+class TestSampleSourceProtocol:
+    def test_duck_typed_object_is_runtime_isinstance(self):
+        # SampleSource is @runtime_checkable so a duck-typed object
+        # passes isinstance() without subclassing.
+        class _Quack:
+            def get_channels(self):
+                return [CH1]
+
+            def get_sample_count(self):
+                return 0
+
+            def stream_samples(self, cancel_event=None):
+                return iter([])
+
+        assert isinstance(_Quack(), SampleSource)
+
+    def test_missing_method_fails_isinstance(self):
+        class _Incomplete:
+            def get_channels(self):
+                return []
+
+        assert not isinstance(_Incomplete(), SampleSource)
+
+    def test_duck_typed_source_works_with_exporter(self):
+        # No inheritance from SampleSource — pure duck typing.
+        class _Quack:
+            def get_channels(self):
+                return [CH1]
+
+            def get_sample_count(self):
+                return 1
+
+            def stream_samples(self, cancel_event=None):
+                yield SampleRow(T0, CH1.key, 5.0)
+
+        sw = io.StringIO()
+        CsvExporter().export(_Quack(), sw, CsvExportOptions())
+        # Header + one data row.
+        lines = [ln for ln in sw.getvalue().split("\n") if ln]
+        assert len(lines) == 2
+        assert lines[1].endswith(",5")
 
 
 class TestEdgeCases:
