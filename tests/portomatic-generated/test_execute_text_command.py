@@ -409,6 +409,22 @@ def test_drain_errors_validates_empty_budget():
         pass
 
 
+def test_drain_errors_validates_timeouts():
+    dev = _make_dev_with_consumer()
+    with pytest.raises(ValueError, match="response_timeout_ms"):
+        dev.drain_errors(response_timeout_ms=0)
+    with pytest.raises(ValueError, match="response_timeout_ms"):
+        dev.drain_errors(response_timeout_ms=-100)
+    with pytest.raises(ValueError, match="completion_timeout_ms"):
+        dev.drain_errors(completion_timeout_ms=0)
+    with pytest.raises(ValueError, match="completion_timeout_ms"):
+        dev.drain_errors(completion_timeout_ms=-50)
+    try:
+        dev.close()
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # NyquistDevice.drain_errors — facade delegates to SerialInterface.drain_errors.
 # ---------------------------------------------------------------------------

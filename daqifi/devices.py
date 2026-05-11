@@ -722,6 +722,10 @@ class DaqifiDevice:
             raise ValueError("max_iterations must be positive")
         if empty_budget <= 0:
             raise ValueError("empty_budget must be positive")
+        if response_timeout_ms <= 0:
+            raise ValueError("response_timeout_ms must be positive")
+        if completion_timeout_ms <= 0:
+            raise ValueError("completion_timeout_ms must be positive")
 
         from ._internal import scpi as _scpi
         from ._internal import scpi_commands as _scpi_commands
