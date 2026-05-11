@@ -448,3 +448,18 @@ def test_nyquistdevice_drain_errors_delegates_to_serial_interface():
     dev._comm.drain_errors.assert_called_once_with(
         max_iterations=42, empty_budget=7
     )
+
+
+def test_nyquistdevice_drain_errors_wraps_transport_error_as_command_error():
+    """When the underlying SerialInterface.drain_errors raises (e.g. a
+    transport-level failure), NyquistDevice.drain_errors must surface
+    it as a CommandError — matches the get_last_error facade pattern."""
+    from daqifi.device import NyquistDevice
+    from daqifi.exceptions import CommandError
+
+    dev = NyquistDevice.__new__(NyquistDevice)  # bypass __init__
+    dev._comm = MagicMock()
+    dev._comm.drain_errors.side_effect = OSError("serial port closed")
+
+    with pytest.raises(CommandError, match="Failed to drain error queue"):
+        dev.drain_errors()

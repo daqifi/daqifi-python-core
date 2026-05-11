@@ -622,10 +622,17 @@ class NyquistDevice:
             ``DRAIN_INCONCLUSIVE`` sentinel if drain exited without
             seeing ``0,"No error"`` — caller can detect "queue not
             confirmed clean."
+
+        Raises:
+            CommandError: transport-level failure during the drain
+                (matches the pattern used by :meth:`get_last_error`).
         """
-        return self._comm.drain_errors(
-            max_iterations=max_iterations, empty_budget=empty_budget
-        )
+        try:
+            return self._comm.drain_errors(
+                max_iterations=max_iterations, empty_budget=empty_budget
+            )
+        except Exception as e:
+            raise CommandError(f"Failed to drain error queue: {e}")
 
     # ==========================================================================
     # SD Card File Management
