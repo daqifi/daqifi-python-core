@@ -463,3 +463,18 @@ def test_nyquistdevice_drain_errors_wraps_transport_error_as_command_error():
 
     with pytest.raises(CommandError, match="Failed to drain error queue"):
         dev.drain_errors()
+
+
+def test_nyquistdevice_drain_errors_validates_args_before_try_except():
+    """ValueError from invalid args must propagate as ValueError, NOT
+    wrapped into CommandError — Qodo /improve pass 3 importance 7."""
+    from daqifi.device import NyquistDevice
+
+    dev = NyquistDevice.__new__(NyquistDevice)
+    dev._comm = MagicMock()
+    with pytest.raises(ValueError, match="max_iterations"):
+        dev.drain_errors(max_iterations=0)
+    with pytest.raises(ValueError, match="empty_budget"):
+        dev.drain_errors(empty_budget=0)
+    # Underlying _comm should never be called when validation fails.
+    dev._comm.drain_errors.assert_not_called()

@@ -624,9 +624,16 @@ class NyquistDevice:
             confirmed clean."
 
         Raises:
+            ValueError: ``max_iterations`` or ``empty_budget`` ≤ 0.
             CommandError: transport-level failure during the drain
                 (matches the pattern used by :meth:`get_last_error`).
         """
+        # Validate before the try/except so ValueError propagates
+        # cleanly instead of getting wrapped into CommandError.
+        if max_iterations <= 0:
+            raise ValueError("max_iterations must be positive")
+        if empty_budget <= 0:
+            raise ValueError("empty_budget must be positive")
         try:
             return self._comm.drain_errors(
                 max_iterations=max_iterations, empty_budget=empty_budget
