@@ -110,6 +110,30 @@ files:
   notes: null
   rationale: null
   last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardOperationException.cs
+  downstream: daqifi/exceptions.py
+  relation: divergent
+  notes: "Exception classes live in the centralized daqifi.exceptions module per project convention rather than in their domain submodule."
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardBusyException.cs
+  downstream: daqifi/exceptions.py
+  relation: divergent
+  notes: "Exception classes live in the centralized daqifi.exceptions module."
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardFilesystemException.cs
+  downstream: daqifi/exceptions.py
+  relation: divergent
+  notes: "Exception classes live in the centralized daqifi.exceptions module."
+  rationale: null
+  last_synced_sha: null
+- upstream: src/Daqifi.Core/Device/SdCard/SdCardNotPresentException.cs
+  downstream: daqifi/exceptions.py
+  relation: divergent
+  notes: "Exception classes live in the centralized daqifi.exceptions module."
+  rationale: null
+  last_synced_sha: null
 symbols:
 - upstream:
     kind: interface
@@ -549,6 +573,54 @@ symbols:
     downstream: file_name
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardOperationException
+    file: src/Daqifi.Core/Device/SdCard/SdCardOperationException.cs
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.SdCardOperationException
+    file: daqifi/exceptions.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: "Exception classes live in the centralized daqifi.exceptions module per project convention. Same field shape: message + raw_device_response (tuple of strings) + last_scpi_error (Optional[str]). Field-level pairing (RawDeviceResponse → raw_device_response, LastScpiError → last_scpi_error) is implicit in the class-level mapping; not enumerated as member rows because the Python IR extractor doesn't surface __init__-set instance attributes (vs C# properties), so explicit member rows would always look like drift."
+  rationale: null
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardBusyException
+    file: src/Daqifi.Core/Device/SdCard/SdCardBusyException.cs
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.SdCardBusyException
+    file: daqifi/exceptions.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: "Subclass of SdCardOperationException; same constructor shape (raw_device_response, optional last_scpi_error)."
+  rationale: null
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardFilesystemException
+    file: src/Daqifi.Core/Device/SdCard/SdCardFilesystemException.cs
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.SdCardFilesystemException
+    file: daqifi/exceptions.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: "Subclass of SdCardOperationException; carries the raw filesystem error line via the device_message instance attribute (DeviceMessage upstream, device_message downstream — same caveat about IR extractor visibility as the base class)."
+  rationale: null
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.SdCard.SdCardNotPresentException
+    file: src/Daqifi.Core/Device/SdCard/SdCardNotPresentException.cs
+  downstream:
+    kind: class
+    qualified: daqifi.exceptions.SdCardNotPresentException
+    file: daqifi/exceptions.py
+  relation: one_to_one
+  last_synced_sha: null
+  notes: "Subclass of SdCardOperationException."
+  rationale: null
 divergences: []
 backlog: []
 hal_pairs: []
