@@ -1667,9 +1667,22 @@ class SerialInterface:
             consecutive_empty = 0
             popped.append(stripped)
         if not saw_no_error:
+            # Format the sentinel as a parseable SCPI error so callers
+            # who pipe popped entries through scpi.parse_system_error
+            # see a non-zero code. `99999` is clearly outside SCPI's
+            # standard error range (-100 to -899 negative, 1-32767
+            # positive device-specific) so it can't collide with any
+            # real device error code — callers branching on numeric
+            # code can safely treat it as the synthetic sentinel.
+            # (Surfaced via Qodo /improve pass 6 on PR #101 (silent-
+            # miss when the sentinel was unparseable as int); the
+            # follow-up Qodo /agentic_review pass 7 caught a -100
+            # collision with the standard "Command error" code, hence
+            # the move to 99999. Same fix applied to the parallel
+            # DaqifiDevice.drain_errors there.)
             popped.append(
-                'DRAIN_INCONCLUSIVE,"did not observe 0,\\"No error\\" '
-                'before giving up"'
+                '99999,"DRAIN_INCONCLUSIVE: did not observe 0,\\"No '
+                'error\\" before giving up"'
             )
         return popped
 

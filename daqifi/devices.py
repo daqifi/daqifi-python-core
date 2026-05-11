@@ -656,6 +656,194 @@ class DaqifiDevice:
 
         return captured
 
+    def drain_errors(
+        self,
+        max_iterations: int = 256,
+        empty_budget: int = 3,
+        response_timeout_ms: int = 500,
+        completion_timeout_ms: int = 200,
+    ) -> List[str]:
+        """Pop ``SYST:ERR?`` entries from the device until the queue
+        reports ``"No error"``, ``empty_budget`` consecutive
+        empty/unparseable replies arrive, or ``max_iterations`` is
+        hit. Returns the popped errors.
+
+        Mirrors upstream
+        ``DaqifiDevice.DrainErrorQueueAsync(int maxIterations = 256,
+        CancellationToken cancellationToken = default)`` from
+        daqifi-core PR #185, with two Python-side robustness extensions
+        carried over from :meth:`SerialInterface.drain_errors`:
+
+        - ``empty_budget`` (default 3) caps consecutive empty/
+          unparseable replies before bailing — avoids ~25 s stalls
+          when a USB CDC timeout returns nothing within the read
+          window. Upstream bails on the first empty reply (equivalent
+          to ``empty_budget=1``).
+        - A synthetic ``DRAIN_INCONCLUSIVE`` sentinel is appended when
+          the loop exits via ``empty_budget`` or ``max_iterations``
+          WITHOUT seeing ``0,"No error"`` so callers can detect "queue
+          not confirmed clean."
+
+        This is the queue-inspection counterpart to the inline last-
+        command error check used elsewhere (e.g.
+        :func:`daqifi._internal.scpi.contains_scpi_error`): that
+        helper tells you whether the captured response from a single
+        command contained an error, while this drains the whole queue
+        and returns ownership of the popped entries to the caller.
+
+        Each iteration uses :meth:`execute_text_command`, which pauses
+        the protobuf consumer for the duration of the text exchange.
+        Avoid calling this during active streaming or concurrently
+        with other text commands. (See daqifi-python-core#92 — once
+        the per-device text-exchange lock lands, that constraint
+        becomes intrinsic.)
+
+        Args:
+            max_iterations: Safety cap on the number of ``SYST:ERR?``
+                queries.
+            empty_budget: Tolerance for consecutive empty/unparseable
+                replies before bailing.
+            response_timeout_ms: Per-iteration phase-1 timeout passed
+                through to :meth:`execute_text_command`.
+            completion_timeout_ms: Per-iteration phase-2 inactivity
+                timeout passed through to :meth:`execute_text_command`.
+
+        Returns:
+            List of error strings popped from the queue. Empty when
+            the queue was already clean. May contain a trailing
+            ``DRAIN_INCONCLUSIVE`` sentinel if drain exited without
+            confirming ``0,"No error"``.
+
+        Raises:
+            ValueError: ``max_iterations`` or ``empty_budget`` ≤ 0.
+            RuntimeError: device not connected.
+        """
+        if max_iterations <= 0:
+            raise ValueError("max_iterations must be positive")
+        if empty_budget <= 0:
+            raise ValueError("empty_budget must be positive")
+        if response_timeout_ms <= 0:
+            raise ValueError("response_timeout_ms must be positive")
+        if completion_timeout_ms <= 0:
+            raise ValueError("completion_timeout_ms must be positive")
+        # Match the precondition the docstring promises and the
+        # convention used by send() / other DaqifiDevice methods.
+        if not self.is_connected:
+            raise RuntimeError("Device is not connected.")
+
+        from ._internal import scpi as _scpi
+        from ._internal import scpi_commands as _scpi_commands
+
+        popped: List[str] = []
+        consecutive_empty = 0
+        saw_no_error = False
+
+        # A real SCPI error reply is ``<int>,"<msg>"``. Strip a leading
+        # ``DAQIFI>`` prompt if present so noisy streams (where the
+        # prompt prefixes the reply or arrives on its own line) don't
+        # falsely look like garbage. (Qodo /agentic_review on PR #101
+        # caught this — the prior code only inspected the first
+        # non-empty line, so a ``DAQIFI>`` prefix could push the real
+        # reply past the budget.)
+        def _find_scpi_reply(lines):
+            for raw in lines:
+                candidate = raw.strip()
+                if not candidate:
+                    continue
+                # Case-insensitive prompt strip — firmware variants may
+                # emit `Daqifi>` / `daqifi>` instead of the canonical
+                # `DAQIFI>`. (Qodo /agentic_review on PR #101 caught
+                # the case-sensitive original would treat those as
+                # garbage and burn the empty_budget.)
+                if candidate.upper().startswith("DAQIFI>"):
+                    candidate = candidate[len("DAQIFI>"):].strip()
+                    if not candidate:
+                        continue
+                code_str, sep, rest = candidate.partition(",")
+                if not sep:
+                    continue
+                try:
+                    code = int(code_str.strip())
+                except ValueError:
+                    continue
+                rest = rest.strip()
+                # The reply must have non-empty content after the
+                # comma — accept whether or not the description is
+                # quoted. SerialInterface.drain_errors and
+                # scpi.parse_system_error both accept unquoted
+                # descriptions (firmware variants exist that omit
+                # quotes), and an earlier strict-quote requirement
+                # here was found to silently reject real unquoted
+                # errors like ``-200,Execution error`` — see Qodo
+                # /agentic_review on PR #101 (the same review that
+                # earlier *suggested* the strict-quote check; this
+                # is the corrected position).
+                if not rest:
+                    continue
+                # Special-case the empty-queue terminator so
+                # slightly-nonconforming firmware that returns
+                # ``0,No error`` (description unquoted) is still
+                # normalized to the canonical quoted form so the
+                # downstream parser sees a consistent shape.
+                if code == 0 and rest.replace('"', "").strip().lower() == "no error":
+                    return f'{code},"No error"'
+                return candidate
+            return None
+
+        iterations = 0
+        for _ in range(max_iterations):
+            iterations += 1
+            lines = self.execute_text_command(
+                setup_action=lambda: self.send(_scpi_commands.get_last_error()),
+                response_timeout_ms=response_timeout_ms,
+                completion_timeout_ms=completion_timeout_ms,
+            )
+            reply = _find_scpi_reply(lines)
+            if reply is None:
+                consecutive_empty += 1
+                if consecutive_empty >= empty_budget:
+                    break
+                continue
+
+            code, desc = _scpi.parse_system_error(reply)
+            if code == 0 and desc.strip().lower() == "no error":
+                saw_no_error = True
+                break
+
+            consecutive_empty = 0
+            popped.append(reply)
+
+        if not saw_no_error:
+            # Format the sentinel as a parseable SCPI error so callers
+            # who pipe popped entries through scpi.parse_system_error
+            # see a non-zero code. Without the leading numeric code,
+            # parse_system_error catches the ValueError and falls back
+            # to (0, "No error"), silently classifying the sentinel as
+            # a clean queue and defeating its purpose entirely. (Qodo
+            # /improve pass 6 importance 9 caught the silent-miss; pass
+            # 7 /agentic_review caught the follow-up: -100 collided
+            # with the standard SCPI "Command error" code, so callers
+            # branching on the numeric code couldn't distinguish a
+            # synthetic drain-incomplete marker from a real -100.)
+            #
+            # `99999` is clearly outside the SCPI standard error range
+            # (-100 to -899 negative, 1-32767 device-specific
+            # positive); no real device should ever emit it, so callers
+            # can safely treat it as the synthetic sentinel marker.
+            #
+            # Includes actual iteration / consecutive_empty counts (not
+            # just the limits) so callers can distinguish "hit
+            # max_iterations with errors still streaming" from "bailed
+            # early on consecutive empties."
+            popped.append(
+                '99999,"DRAIN_INCONCLUSIVE: queue not confirmed clean '
+                f'after {iterations} iterations; consecutive_empty='
+                f'{consecutive_empty}; limits: max_iterations='
+                f'{max_iterations}, empty_budget={empty_budget}"'
+            )
+
+        return popped
+
     def initialize(self, response_timeout_s: Optional[float] = None) -> None:
         """Run the standard SCPI init sequence.
 

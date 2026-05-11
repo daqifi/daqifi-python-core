@@ -262,7 +262,7 @@ def _drain_scpi_errors(serial_obj, max_iterations: int = 256) -> List[str]:
         # returning [] (which looks identical to a clean queue) when
         # the device never confirmed the queue was actually drained.
         popped.append(
-            'DRAIN_INCONCLUSIVE,"did not observe 0,\\"No error\\" before giving up"'
+            '99999,"DRAIN_INCONCLUSIVE: did not observe 0,\\"No error\\" before giving up"'
         )
     return popped
 
@@ -283,7 +283,7 @@ def error_drainer(serial_transport: SerialStreamTransport):
         # synthetic DRAIN_INCONCLUSIVE sentinel), the device is in an
         # unknown state and downstream test assertions would be unsafe
         # to trust — fail the setup loudly instead.
-        if any(e.startswith("DRAIN_INCONCLUSIVE,") for e in pre):
+        if any("DRAIN_INCONCLUSIVE" in e for e in pre):
             pytest.fail(
                 "unable to confirm clean SCPI error queue before test:\n  "
                 + "\n  ".join(pre)
@@ -304,7 +304,7 @@ def error_drainer(serial_transport: SerialStreamTransport):
         # Differentiate the inconclusive case (device unresponsive)
         # from real test-introduced errors so the failure report
         # points at the right culprit.
-        if any(e.startswith("DRAIN_INCONCLUSIVE,") for e in post):
+        if any("DRAIN_INCONCLUSIVE" in e for e in post):
             pytest.fail(
                 "unable to confirm SCPI error queue drained after test:\n  "
                 + "\n  ".join(post)
@@ -340,7 +340,7 @@ def clean_device(serial_transport: SerialStreamTransport):
     _drain(serial_obj, timeout=0.2)
 
     pre = _drain_scpi_errors(serial_obj)
-    if any(e.startswith("DRAIN_INCONCLUSIVE,") for e in pre):
+    if any("DRAIN_INCONCLUSIVE" in e for e in pre):
         pytest.fail(
             "clean_device: unable to confirm SCPI error queue cleared "
             "during pre-init drain:\n  " + "\n  ".join(pre)
@@ -356,7 +356,7 @@ def clean_device(serial_transport: SerialStreamTransport):
     _send_scpi(serial_obj, "SYSTem:STReam:INTerface 0", delay=0.2)
     _drain(serial_obj, timeout=0.2)
     post = _drain_scpi_errors(serial_obj)
-    if any(e.startswith("DRAIN_INCONCLUSIVE,") for e in post):
+    if any("DRAIN_INCONCLUSIVE" in e for e in post):
         pytest.fail(
             "clean_device: unable to confirm SCPI error queue cleared "
             "after init sequence:\n  " + "\n  ".join(post)

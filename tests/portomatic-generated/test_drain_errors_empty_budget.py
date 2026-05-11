@@ -23,7 +23,13 @@ from daqifi._internal.comm import SerialInterface
 
 
 def _has_inconclusive(popped: list[str]) -> bool:
-    return any(p.startswith("DRAIN_INCONCLUSIVE,") for p in popped)
+    # Sentinel format is now `99999,"DRAIN_INCONCLUSIVE: ..."` so it
+    # parses as a non-zero SCPI error (Qodo /improve pass 6 on PR #101
+    # — without the leading numeric code, parse_system_error catches
+    # the ValueError and falls back to (0, "No error"), defeating the
+    # sentinel's purpose). Keep the check substring-based so it
+    # tolerates any future format tweaks that preserve the marker.
+    return any("DRAIN_INCONCLUSIVE" in p for p in popped)
 
 
 def test_empty_responses_trigger_fail_fast() -> None:
@@ -129,5 +135,5 @@ def test_max_iterations_caps_and_marks_inconclusive() -> None:
     popped = si.drain_errors(max_iterations=5)
     # 5 real errors plus the inconclusive sentinel.
     assert len(popped) == 6
-    assert popped[-1].startswith("DRAIN_INCONCLUSIVE,")
+    assert popped[-1].startswith('99999,"DRAIN_INCONCLUSIVE')
     assert popped[:-1] == ['-100,"Bad command"'] * 5

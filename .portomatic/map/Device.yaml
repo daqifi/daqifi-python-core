@@ -262,10 +262,14 @@ symbols:
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
-  - upstream: <downstream-only:execute_text_command>
+  - upstream: ExecuteTextCommandAsync
     downstream: execute_text_command
-    relation: divergent
-    notes: Downstream-only addition; no upstream counterpart.
+    relation: one_to_one
+    notes: "Async/sync collapsed per project convention. Method is `protected virtual` upstream; Python exposes it as a public instance method (callers need it for SD/network text queries). Two-phase inactivity timeout matches upstream."
+  - upstream: DrainErrorQueueAsync
+    downstream: drain_errors
+    relation: superset
+    notes: "Async/sync collapsed per project convention. Python adds two robustness extensions over upstream: empty_budget tolerance for consecutive empty replies (avoids ~25 s stalls on USB CDC timeouts), and a synthetic DRAIN_INCONCLUSIVE sentinel appended when the loop exits without confirming `0,\"No error\"`. Same loop + parse + bail semantics otherwise. Mirrors upstream daqifi-core PR #185."
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.DaqifiDeviceFactory
@@ -958,6 +962,10 @@ symbols:
     downstream: clear_errors
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+  - upstream: <downstream-only:drain_errors>
+    downstream: drain_errors
+    relation: divergent
+    notes: "Downstream-only facade addition on the user-facing NyquistDevice surface — thin shim that delegates to SerialInterface.drain_errors. Pairs the new DaqifiDevice.drain_errors method (which is the actual port of upstream DrainErrorQueueAsync); having it on both classes mirrors the upstream pattern of exposing the helper at the device facade level."
   - upstream: <downstream-only:sd_enable>
     downstream: sd_enable
     relation: divergent

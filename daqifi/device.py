@@ -594,6 +594,55 @@ class NyquistDevice:
         """
         self._comm.clear_errors()
 
+    def drain_errors(
+        self, max_iterations: int = 256, empty_budget: int = 3
+    ) -> List[str]:
+        """Pop ``SYST:ERR?`` entries from the device until the queue
+        reports ``"No error"`` and return the popped entries.
+
+        Counterpart to :meth:`get_last_error` (which pops one entry):
+        this drains the whole queue and returns ownership of the
+        popped entries to the caller — log them, surface them in a
+        health-check report, throw on hardware faults, or discard if
+        known-stale. Mirrors upstream
+        ``DaqifiDevice.DrainErrorQueueAsync`` (daqifi-core PR #185).
+
+        Args:
+            max_iterations: Safety cap on the number of ``SYST:ERR?``
+                queries. Defaults to 256 — large enough to drain a
+                deeply queued device, small enough that a runaway loop
+                is bounded.
+            empty_budget: Number of consecutive empty/unparseable
+                replies tolerated before bailing. Defaults to 3 (~0.3 s
+                worst-case stall vs ~25 s with the unconditional cap).
+
+        Returns:
+            The list of error strings popped from the queue. Empty
+            when the queue was already clean. May contain a synthetic
+            ``DRAIN_INCONCLUSIVE`` sentinel if drain exited without
+            seeing ``0,"No error"`` — caller can detect "queue not
+            confirmed clean."
+
+        Raises:
+            ValueError: ``max_iterations`` or ``empty_budget`` ≤ 0.
+            CommandError: transport-level failure during the drain
+                (matches the pattern used by :meth:`get_last_error`).
+        """
+        # Validate before the try/except so ValueError propagates
+        # cleanly instead of getting wrapped into CommandError.
+        if max_iterations <= 0:
+            raise ValueError("max_iterations must be positive")
+        if empty_budget <= 0:
+            raise ValueError("empty_budget must be positive")
+        try:
+            return self._comm.drain_errors(
+                max_iterations=max_iterations, empty_budget=empty_budget
+            )
+        except Exception as e:
+            # Preserve original exception context for debugging
+            # transport-level failures.
+            raise CommandError(f"Failed to drain error queue: {e}") from e
+
     # ==========================================================================
     # SD Card File Management
     # ==========================================================================
