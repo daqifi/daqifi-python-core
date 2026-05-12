@@ -173,3 +173,26 @@ class TestEnumerateRealNics:
         with patch.dict("sys.modules", {"ifaddr": None}):
             nics = enumerate_real_nics()
         assert nics == []
+
+    @pytest.mark.parametrize("bad_prefix", ["abc", None, object()])
+    def test_unparseable_prefix_skipped(self, bad_prefix):
+        """Future ifaddr versions or weird platforms could surface a
+        non-int network_prefix — skip the adapter rather than crash
+        downstream when broadcast computation tries to format it."""
+        adapters = [
+            _FakeAdapter("eth0", "eth0", [_FakeIP("192.168.1.42", bad_prefix)]),
+            _FakeAdapter("eth1", "eth1", [_FakeIP("10.0.0.5", 24)]),
+        ]
+        with self._patch_adapters(adapters):
+            nics = enumerate_real_nics()
+        assert [n.ip for n in nics] == ["10.0.0.5"]
+
+    @pytest.mark.parametrize("bad_prefix", [-1, 33, 99])
+    def test_out_of_range_prefix_skipped(self, bad_prefix):
+        """Prefixes outside the IPv4 0-32 range are bogus — skip."""
+        adapters = [
+            _FakeAdapter("eth0", "eth0", [_FakeIP("192.168.1.42", bad_prefix)]),
+        ]
+        with self._patch_adapters(adapters):
+            nics = enumerate_real_nics()
+        assert nics == []

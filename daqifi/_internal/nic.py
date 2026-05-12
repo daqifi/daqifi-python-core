@@ -112,11 +112,22 @@ def enumerate_real_nics() -> List[NicInfo]:
                 continue
             if _is_skippable_ip(ip_value):
                 continue
+            # Defensively parse the prefix — ifaddr normally returns
+            # an int, but a future version / unusual platform could
+            # surface a string or out-of-range value. Skip the
+            # adapter rather than carry an invalid NicInfo into the
+            # broadcast computation.
+            try:
+                prefix = int(ip_obj.network_prefix)
+            except (TypeError, ValueError):
+                continue
+            if prefix < 0 or prefix > 32:
+                continue
             out.append(
                 NicInfo(
                     name=adapter.name,
                     ip=ip_value,
-                    network_prefix=int(ip_obj.network_prefix),
+                    network_prefix=prefix,
                 )
             )
     return out

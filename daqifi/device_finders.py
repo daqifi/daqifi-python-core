@@ -617,11 +617,15 @@ class WiFiDeviceFinder:
             # as the HID/Serial finders (Qodo PR 17 pass 25 #2). Run
             # in finally so subscribers waiting on _fire_completed
             # still hear it even if the discovery loop itself raised
-            # (Qodo PR 17 pass 46 #2).
-            for info in discovered:
+            # (Qodo PR 17 pass 46 #2). Snapshot under dedup_lock so
+            # a still-running per-NIC daemon thread (one that didn't
+            # quite hit the join timeout) can't append mid-iteration.
+            with dedup_lock:
+                discovered_snapshot = list(discovered)
+            for info in discovered_snapshot:
                 self._fire_discovered(info)
             self._fire_completed()
-        return discovered
+        return discovered_snapshot
 
     def _discover_per_nic(
         self,
@@ -668,13 +672,16 @@ class WiFiDeviceFinder:
             t.start()
             threads.append(t)
 
-        # Bound the join on the deadline + a small grace so a
-        # misbehaving thread can't pin the discover() call past its
-        # nominal timeout. Daemon threads will be torn down when
-        # the interpreter exits if they outlive this join.
-        join_budget = max(deadline - time.monotonic(), 0.0) + 1.0
+        # Bound the TOTAL join wait on a single absolute deadline +
+        # a small grace, so a misbehaving thread can't pin the
+        # discover() call past its nominal timeout — and 4 NICs
+        # don't take 4 × budget when each thread runs to its own
+        # full timeout. Daemon threads will be torn down when the
+        # interpreter exits if they outlive this join.
+        join_deadline = deadline + 1.0
         for t in threads:
-            t.join(timeout=join_budget)
+            remaining = max(join_deadline - time.monotonic(), 0.0)
+            t.join(timeout=remaining)
 
     def _discover_on_one_nic(
         self,
