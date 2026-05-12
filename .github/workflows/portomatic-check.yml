@@ -52,10 +52,15 @@ jobs:
           python-version: "3.12"
 
       - name: Install portomatic
-        # If portomatic is published to PyPI, switch to: pip install portomatic
+        # portomatic lives in the daqifi org as a private repo. The workflow's
+        # GITHUB_TOKEN can read it as long as portomatic's repo Settings →
+        # Actions → Access policy allows daqifi-python-core (or all daqifi
+        # repos). If pip clone returns 403, that's the access policy missing.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pip install -U pip
-          pip install "git+https://github.com/cptkoolbeenz/portomatic@main"
+          pip install "git+https://x-access-token:${GH_TOKEN}@github.com/daqifi/portomatic@main"
 
       - name: Resolve baseline
         id: resolve
