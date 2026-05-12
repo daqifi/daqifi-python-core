@@ -549,8 +549,16 @@ class UdpTransport:
     value after :meth:`open`.
     """
 
-    def __init__(self, local_port: int = 0) -> None:
+    def __init__(
+        self, local_port: int = 0, local_ip: Optional[str] = None
+    ) -> None:
         self._configured_port = local_port
+        # Optional local IP to bind to. When set, the socket's
+        # outgoing interface is pinned to this NIC and incoming
+        # broadcast traffic is filtered to this NIC's subnet
+        # (port-of-#179/#180 multi-NIC discovery shape).
+        # ``None`` (default) keeps the legacy wildcard bind.
+        self._configured_ip = local_ip or ""
         self._socket: Optional[socket.socket] = None
         self._disposed = False
         self._status_handlers: List[Callable[[TransportStatusEventArgs], None]] = []
@@ -606,7 +614,7 @@ class UdpTransport:
             except OSError:
                 # Some platforms don't allow this; not fatal.
                 pass
-            sock.bind(("", self._configured_port))
+            sock.bind((self._configured_ip, self._configured_port))
             self._socket = sock
             sock = None
             self._notify_status(True, None)

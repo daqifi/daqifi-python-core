@@ -569,18 +569,15 @@ class WiFiDeviceFinder:
         """Send broadcast query, collect responses for ``timeout``.
 
         ``udp_transport`` lets callers inject an opened transport
-        (useful for tests). When ``None`` a fresh :class:`UdpTransport`
-        is opened on an ephemeral port and closed at exit.
+        (useful for tests). When ``None`` the finder enumerates real
+        NICs (port of daqifi-core PR #179/#180) and binds one
+        :class:`UdpTransport` per NIC so discovery reaches devices on
+        any LAN-attached interface, not just the default route. If
+        no real NICs are detected (e.g. ``ifaddr`` unavailable), it
+        falls back to a single wildcard-bound transport.
         """
         if self._disposed:
             raise RuntimeError("WiFiDeviceFinder has been closed.")
-
-        owns_transport = udp_transport is None
-        # Track whether we actually opened the transport in THIS call,
-        # so a failure during open() doesn't try to close an unopened
-        # transport in finally — and so _fire_completed() always runs
-        # (Qodo PR 17 pass 2 #3).
-        opened_here = False
 
         # `time.monotonic()` is immune to wall-clock jumps — without
         # this a NTP step or DST transition mid-discover would either
@@ -593,62 +590,28 @@ class WiFiDeviceFinder:
         # prefix keeps the two namespaces from colliding.
         seen_keys: set = set()
         discovered: List[DeviceInfo] = []
+        dedup_lock = threading.Lock()
         try:
             with self._lock:
-                try:
-                    if owns_transport:
-                        udp_transport = UdpTransport(local_port=0)
-                        # Mark opened_here BEFORE open() so the finally
-                        # block still closes the transport if open()
-                        # itself raises after partial socket creation
-                        # (Qodo PR 17 pass 39 #3).
-                        opened_here = True
-                        udp_transport.open()
-
-                    # Broadcast both queries so devices on either firmware
-                    # variant respond.
-                    udp_transport.send_broadcast(self.DAQIFI_FINDER_QUERY, self._discovery_port)
-                    udp_transport.send_broadcast(self.NATIVE_FINDER_QUERY, self._discovery_port)
-
-                    while time.monotonic() < deadline:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            break
-                        result = udp_transport.receive(timeout=timedelta(seconds=min(0.5, remaining)))
-                        if result is None:
-                            continue
-                        data, (ip, port) = result
-                        text = data.decode("utf-8", errors="replace")
-                        if _POWER_EVENT_MARKER in text:
-                            # Discovery requests echo a power-event line; skip.
-                            continue
-                        # Skip our own broadcast echoes — some networks
-                        # loop them back, and parsing them as a device
-                        # would yield a self-referential phantom hit.
-                        if (
-                            self.DAQIFI_FINDER_QUERY in data
-                            or self.NATIVE_FINDER_QUERY in data
-                        ):
-                            continue
-
-                        info = self._build_device_info(data, text, ip)
-                        # Dedupe key: prefer MAC (matches C#
-                        # IsDuplicateDevice), else IP.
-                        key = (
-                            f"mac:{info.mac_address}"
-                            if info.mac_address
-                            else f"ip:{ip}"
-                        )
-                        if key in seen_keys:
-                            continue
-                        seen_keys.add(key)
-                        discovered.append(info)
-                finally:
-                    if opened_here:
-                        try:
-                            udp_transport.close()
-                        except Exception:
-                            pass
+                if udp_transport is not None:
+                    # Caller-provided transport (test injection or
+                    # legacy single-socket override) — preserve the
+                    # existing single-socket path so existing tests
+                    # and callers see no change.
+                    self._collect_on_transport(
+                        udp_transport,
+                        deadline,
+                        seen_keys,
+                        discovered,
+                        dedup_lock,
+                        broadcast_addr=None,
+                    )
+                else:
+                    # Multi-NIC path — enumerate real interfaces and
+                    # broadcast on each in parallel.
+                    self._discover_per_nic(
+                        deadline, seen_keys, discovered, dedup_lock
+                    )
         finally:
             # Fire callbacks OUTSIDE the lock — same deadlock concern
             # as the HID/Serial finders (Qodo PR 17 pass 25 #2). Run
@@ -659,6 +622,159 @@ class WiFiDeviceFinder:
                 self._fire_discovered(info)
             self._fire_completed()
         return discovered
+
+    def _discover_per_nic(
+        self,
+        deadline: float,
+        seen_keys: set,
+        discovered: List[DeviceInfo],
+        dedup_lock: threading.Lock,
+    ) -> None:
+        """Open one UdpTransport per real NIC, broadcast on each, and
+        run their receive loops concurrently until ``deadline``.
+        Falls back to a single wildcard-bound transport if no real
+        NICs are discoverable (e.g. ``ifaddr`` not installed).
+        """
+        from ._internal.nic import enumerate_real_nics
+        nics = enumerate_real_nics()
+        if not nics:
+            # Graceful degradation: behave as before so single-NIC /
+            # ifaddr-missing hosts still discover.
+            transport = UdpTransport(local_port=0)
+            try:
+                transport.open()
+                self._collect_on_transport(
+                    transport, deadline, seen_keys, discovered,
+                    dedup_lock, broadcast_addr=None,
+                )
+            finally:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+            return
+
+        # One transport + one thread per NIC. Each thread owns its
+        # transport's lifecycle so a slow / failing NIC can't leak
+        # the others' sockets.
+        threads: List[threading.Thread] = []
+        for nic in nics:
+            t = threading.Thread(
+                target=self._discover_on_one_nic,
+                args=(nic, deadline, seen_keys, discovered, dedup_lock),
+                daemon=True,
+                name=f"WiFiDiscover-{nic.name}",
+            )
+            t.start()
+            threads.append(t)
+
+        # Bound the join on the deadline + a small grace so a
+        # misbehaving thread can't pin the discover() call past its
+        # nominal timeout. Daemon threads will be torn down when
+        # the interpreter exits if they outlive this join.
+        join_budget = max(deadline - time.monotonic(), 0.0) + 1.0
+        for t in threads:
+            t.join(timeout=join_budget)
+
+    def _discover_on_one_nic(
+        self,
+        nic,
+        deadline: float,
+        seen_keys: set,
+        discovered: List[DeviceInfo],
+        dedup_lock: threading.Lock,
+    ) -> None:
+        """Per-NIC worker: open a transport bound to the NIC's IP,
+        broadcast, drain the receive loop until ``deadline``, close.
+        Any exception is swallowed locally — one bad NIC must not
+        kill discovery on the rest.
+        """
+        transport = UdpTransport(local_port=0, local_ip=nic.ip)
+        try:
+            try:
+                transport.open()
+            except Exception:
+                # Bind failure (e.g. NIC went away between
+                # enumeration and open) — skip silently.
+                return
+            try:
+                self._collect_on_transport(
+                    transport,
+                    deadline,
+                    seen_keys,
+                    discovered,
+                    dedup_lock,
+                    broadcast_addr=nic.broadcast,
+                )
+            except Exception:
+                # Receive-loop crash on one NIC is non-fatal for the
+                # others. Logging would require a logger import
+                # higher in the file; intentionally silent for now.
+                pass
+        finally:
+            try:
+                transport.close()
+            except Exception:
+                pass
+
+    def _collect_on_transport(
+        self,
+        transport: UdpTransport,
+        deadline: float,
+        seen_keys: set,
+        discovered: List[DeviceInfo],
+        dedup_lock: threading.Lock,
+        broadcast_addr: Optional[str],
+    ) -> None:
+        """Send the two finder queries and drain the receive loop on
+        a single transport until ``deadline``. Shared seen_keys /
+        discovered list let multiple per-NIC callers cooperate on
+        de-duplication. ``broadcast_addr=None`` falls back to
+        255.255.255.255 (legacy single-socket behavior).
+        """
+        if broadcast_addr is None:
+            transport.send_broadcast(self.DAQIFI_FINDER_QUERY, self._discovery_port)
+            transport.send_broadcast(self.NATIVE_FINDER_QUERY, self._discovery_port)
+        else:
+            transport.send_broadcast_to(
+                self.DAQIFI_FINDER_QUERY, (broadcast_addr, self._discovery_port)
+            )
+            transport.send_broadcast_to(
+                self.NATIVE_FINDER_QUERY, (broadcast_addr, self._discovery_port)
+            )
+
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            result = transport.receive(
+                timeout=timedelta(seconds=min(0.5, remaining))
+            )
+            if result is None:
+                continue
+            data, (ip, port) = result
+            text = data.decode("utf-8", errors="replace")
+            if _POWER_EVENT_MARKER in text:
+                continue
+            if (
+                self.DAQIFI_FINDER_QUERY in data
+                or self.NATIVE_FINDER_QUERY in data
+            ):
+                continue
+
+            info = self._build_device_info(data, text, ip)
+            key = (
+                f"mac:{info.mac_address}"
+                if info.mac_address
+                else f"ip:{ip}"
+            )
+            # Lock the seen_keys check + append so concurrent NIC
+            # workers don't both record the same device.
+            with dedup_lock:
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                discovered.append(info)
 
     @staticmethod
     def _build_device_info(data: bytes, text: str, ip: str) -> DeviceInfo:
