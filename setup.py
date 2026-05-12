@@ -52,6 +52,15 @@ setup(
         # frames. The runtime version validation baked into the
         # generated module requires protobuf 5.28+ (protoc 6.31.x output).
         "protobuf>=5.28,<7.0",
+        # ifaddr is a small pure-Python NIC enumerator used by
+        # WiFiDeviceFinder (port of daqifi-core PR #179/#180): the
+        # finder needs to broadcast on every real LAN interface so
+        # discovery works on multi-NIC hosts (Wi-Fi + Ethernet, hosts
+        # with VPN/virtual adapters that mask the real LAN). Falls
+        # back to single-socket discovery when ifaddr is missing,
+        # but having it as a hard dep keeps the multi-NIC path
+        # unconditionally available out of the box.
+        "ifaddr>=0.2",
     ],
     extras_require={
         "dev": [

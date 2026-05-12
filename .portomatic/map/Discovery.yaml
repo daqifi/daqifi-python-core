@@ -43,7 +43,7 @@ files:
 - upstream: src/Daqifi.Core/Device/Discovery/WiFiDeviceFinder.cs
   downstream: daqifi/device_finders.py
   relation: one_to_one
-  notes: null
+  notes: "Multi-NIC discovery ported per daqifi-core PR #179/#180 — WiFiDeviceFinder.discover() enumerates real NICs (via daqifi._internal.nic.enumerate_real_nics, backed by the ifaddr dep) and binds one UdpTransport per NIC, broadcasting on each NIC's directed broadcast address. Falls back to single-socket wildcard discovery when ifaddr is unavailable or returns no real NICs (#95)."
   rationale: null
   last_synced_sha: null
 symbols:
