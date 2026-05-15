@@ -1326,7 +1326,8 @@ class DefaultFirmwareUpdateService:
         while True:
             outer_deadline.check()
 
-            if time.monotonic() >= readiness_deadline_at:
+            readiness_remaining = readiness_deadline_at - time.monotonic()
+            if readiness_remaining <= 0:
                 msg = (
                     f"Device did not become application-ready within "
                     f"{total_timeout:.3f}s (probes executed: "
@@ -1337,9 +1338,29 @@ class DefaultFirmwareUpdateService:
                 )
                 raise TimeoutError(msg) from last_probe_exception
 
+            # Build a readiness-scoped deadline for the probe whose budget
+            # is the AND of the outer cancel and the readiness budget —
+            # whichever fires first ends the wait. Without this, a
+            # well-behaved probe that uses ``deadline.remaining`` to bound
+            # its I/O would honor the outer JUMPING_TO_APP timeout (often
+            # 45s) instead of the readiness budget (default 30s), masking
+            # the readiness-specific timeout entirely. Mirrors upstream
+            # PR #200's ``CreateLinkedTokenSource(cancel, timeoutCts)``
+            # pattern. (Qodo /agentic_review pass on PR #139 caught this.)
+            probe_budget = min(outer_deadline.remaining, readiness_remaining)
+            probe_deadline = _Cancellation(
+                state=outer_deadline.state,
+                operation="post-reconnect readiness probe",
+                timeout_seconds=probe_budget,
+                cancel_event=outer_deadline._cancel_event,
+                timeout_message_builder=lambda secs: (
+                    f"post-reconnect readiness probe deadline {secs:.3f}s elapsed"
+                ),
+            )
+
             try:
                 probes_executed += 1
-                is_ready = probe(device, outer_deadline)
+                is_ready = probe(device, probe_deadline)
 
                 # Successful probe invocation (True OR False) means the
                 # most recent attempt completed normally. Clear
@@ -1367,11 +1388,18 @@ class DefaultFirmwareUpdateService:
                 # Outer cancellation propagated through the probe — bail
                 # immediately, do NOT swallow as a probe failure.
                 raise
-            except BaseException as exc:  # noqa: BLE001
+            except Exception as exc:
                 # Any other exception from the probe is treated as
                 # "not ready, retry" so the update loop survives
                 # transient probe failures (e.g. probe queries time out
                 # because the firmware hasn't booted yet).
+                # Catching ``Exception`` (not ``BaseException``) lets
+                # ``KeyboardInterrupt`` / ``SystemExit`` / ``GeneratorExit``
+                # propagate normally so the process can terminate.
+                # ``_CancelledError`` is ``Exception``-derived but is
+                # caught above this clause, so the ordering preserves
+                # cooperative-cancel semantics. (Qodo /agentic_review on
+                # PR #139 caught the original ``BaseException`` form.)
                 last_probe_exception = exc
                 self._logger.debug(
                     "Application-ready probe threw on attempt %d "

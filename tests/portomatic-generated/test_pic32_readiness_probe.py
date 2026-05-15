@@ -216,6 +216,60 @@ class TestWaitForApplicationReady:
         # subsequent successful (False) attempts cleared it.
         assert excinfo.value.__cause__ is None
 
+    def test_probe_receives_readiness_scoped_deadline(self):
+        # Bug 1 from Qodo /agentic_review pass on PR #139: the probe was
+        # given the outer JUMPING_TO_APP deadline instead of a deadline
+        # scoped to ``post_reconnect_readiness_timeout``, so a probe that
+        # used ``deadline.remaining`` to bound its I/O could run far past
+        # the readiness budget and mask the readiness-specific timeout.
+        # The fix builds a per-iteration probe deadline whose timeout is
+        # ``min(outer_remaining, readiness_remaining)``.
+        opts = self._opts(post_reconnect_readiness_timeout=0.3)
+        opts.jumping_to_application_timeout = 60.0  # outer is much larger
+        svc = _service(opts)
+        outer = _deadline(timeout_seconds=60.0)
+
+        captured: List[float] = []
+
+        def probe(dev, dl):
+            # Capture the probe's deadline budget; it should be bounded
+            # by the readiness budget (0.3s), NOT the outer (60s).
+            captured.append(dl.timeout_seconds)
+            return True
+
+        svc._wait_for_application_ready("dev", probe, outer)
+        assert len(captured) == 1
+        assert captured[0] <= 0.3, (
+            f"probe deadline budget {captured[0]} exceeded readiness budget 0.3"
+        )
+
+    def test_keyboard_interrupt_from_probe_propagates(self):
+        # Bug 2 from Qodo /agentic_review pass on PR #139: the original
+        # ``except BaseException`` swallowed KeyboardInterrupt / SystemExit
+        # / GeneratorExit during the polling loop, delaying or disabling
+        # normal process termination. The fix narrows to ``except
+        # Exception`` so BaseException-only signals propagate.
+        opts = self._opts()
+        svc = _service(opts)
+        deadline = _deadline()
+
+        def probe(dev, dl):
+            raise KeyboardInterrupt("user pressed ctrl-c during probe")
+
+        with pytest.raises(KeyboardInterrupt):
+            svc._wait_for_application_ready("dev", probe, deadline)
+
+    def test_system_exit_from_probe_propagates(self):
+        opts = self._opts()
+        svc = _service(opts)
+        deadline = _deadline()
+
+        def probe(dev, dl):
+            raise SystemExit(1)
+
+        with pytest.raises(SystemExit):
+            svc._wait_for_application_ready("dev", probe, deadline)
+
     def test_outer_cancellation_propagates_as_cancelled_error(self):
         # _CancelledError from the outer deadline must NOT be swallowed
         # as "probe failure, retry" — it indicates the user / outer state
