@@ -2,14 +2,14 @@ schema_version: 1
 shard: Communication
 upstream_root: src/Daqifi.Core/Communication
 downstream_root: daqifi
-last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+last_synced_upstream_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 files:
 - upstream: src/Daqifi.Core/Communication/StreamInterface.cs
   downstream: daqifi/_internal/scpi.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 symbols:
 - upstream:
     kind: enum
@@ -20,32 +20,44 @@ symbols:
     qualified: daqifi._internal.scpi.StreamInterface
     file: daqifi/_internal/scpi.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Usb
     downstream: Usb
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WiFi
     downstream: WiFi
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SdCard
     downstream: SdCard
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:All>
     downstream: All
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: enum
     qualified: <downstream-only:StreamState>
+    file: null
   downstream:
     kind: enum
     qualified: daqifi.streaming.StreamState
     file: daqifi/streaming.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: Python-only enum exposing high-level streaming lifecycle state (Idle/Streaming/Paused/Stopped).
     C# tracks this via DeviceState; Python factors it out for the streaming layer.
@@ -54,27 +66,36 @@ symbols:
     downstream: STOPPED
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:RUNNING>
     downstream: RUNNING
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:PAUSED>
     downstream: PAUSED
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:ERROR>
     downstream: ERROR
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: <downstream-only:Sample>
+    file: null
   downstream:
     kind: class
     qualified: daqifi.streaming.Sample
     file: daqifi/streaming.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: "Python-only sample dataclass \u2014 combines timestamp + per-channel\
     \ readings into a single value object the streaming layer hands callers. C# emits\
@@ -84,19 +105,24 @@ symbols:
     downstream: timestamp
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:channels>
     downstream: channels
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: <downstream-only:SampleBuffer>
+    file: null
   downstream:
     kind: class
     qualified: daqifi.streaming.SampleBuffer
     file: daqifi/streaming.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: Python-only ring buffer accumulating Sample records for batched callbacks.
     C# uses the consumer's MessageReceived event directly.
@@ -105,59 +131,84 @@ symbols:
     downstream: samples
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:channels>
     downstream: channels
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:sample_rate>
     downstream: sample_rate
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:start_time>
     downstream: start_time
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:add_sample>
     downstream: add_sample
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:clear>
     downstream: clear
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:get_channel_data>
     downstream: get_channel_data
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:get_timestamps>
     downstream: get_timestamps
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:to_dict>
     downstream: to_dict
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:to_csv>
     downstream: to_csv
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:to_json>
     downstream: to_json
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:to_dataframe>
     downstream: to_dataframe
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: <downstream-only:StreamManager>
+    file: null
   downstream:
     kind: class
     qualified: daqifi.streaming.StreamManager
     file: daqifi/streaming.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: Python-only synchronous streaming-session manager built on top of DaqifiStreamingDevice.
     Owns lifecycle + buffer + callback dispatch.
@@ -166,43 +217,60 @@ symbols:
     downstream: state
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:channels>
     downstream: channels
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:sample_rate>
     downstream: sample_rate
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:buffer>
     downstream: buffer
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:start>
     downstream: start
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:stop>
     downstream: stop
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:read>
     downstream: read
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:read_all>
     downstream: read_all
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: <downstream-only:AsyncStreamManager>
+    file: null
   downstream:
     kind: class
     qualified: daqifi.streaming.AsyncStreamManager
     file: daqifi/streaming.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: Python-only asyncio-friendly variant of StreamManager. C# uses Task-based
     async natively.
@@ -211,14 +279,20 @@ symbols:
     downstream: start
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:stop>
     downstream: stop
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:read>
     downstream: read
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 divergences:
 - id: DIV-002
   upstream_path: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
@@ -230,7 +304,7 @@ divergences:
     \ fields). Python represents them as bare strings on grouped helper classes. /portomatic-check\
     \ should NOT propose adding ProducerMessage to Python \u2014 this is intentional\
     \ Pythonic flattening. "
-  accepted_at: 2026-04-18
+  accepted_at: '2026-04-18'
 - id: DIV-003
   upstream_path: src/Daqifi.Core/Communication/Producers/ScpiMessageProducer.cs
   downstream_path: daqifi/_internal/scpi.py
@@ -239,7 +313,7 @@ divergences:
   kind: behavioral
   rationale: 'C# uses SCPI long form ("SYSTem:STORage:..."); Python uses short form
     ("SYST:STOR:..."). Both compliant; do not normalize either way. '
-  accepted_at: 2026-04-18
+  accepted_at: '2026-04-18'
 backlog:
 - id: PORT-002
   upstream_symbol: Daqifi.Core.Communication.Producers.ScpiMessageProducer.RebootDevice
@@ -253,4 +327,4 @@ backlog:
   discovered_at_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
   priority: med
 hal_pairs: []
-updated_at: '2026-04-26T08:44:22.203189+00:00'
+updated_at: '2026-04-26T08:44:22.203189Z'

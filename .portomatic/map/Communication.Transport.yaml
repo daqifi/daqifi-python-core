@@ -2,95 +2,93 @@ schema_version: 1
 shard: Communication.Transport
 upstream_root: src/Daqifi.Core/Communication/Transport
 downstream_root: daqifi
-last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+last_synced_upstream_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 files:
 - upstream: src/Daqifi.Core/Communication/Transport/ConnectionRetryOptions.cs
   downstream: daqifi/_internal/comm.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/HidDeviceInfo.cs
   downstream: daqifi/_internal/comm.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/HidLibraryDeviceEnumerator.cs
   downstream: daqifi/_internal/hid_enumerator.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/HidLibraryPlatform.cs
   downstream: daqifi/_internal/hid_enumerator.py
   relation: divergent
-  notes: "C# file declares 4 internal types: `IHidPlatform` (interface),
-    `IHidTransportDevice` (interface), `HidTransportReadStatus` /
-    `HidTransportReadResult` (value types), and `HidLibraryPlatform`
-    (the concrete HidSharp-backed impl). Python collapses these into
-    `daqifi/_internal/hid_enumerator.py`: `HidPlatform` (Protocol)
-    plus `HidApiPlatform` (concrete, backed by the Python `hid`
-    library — the moral equivalent of HidSharp). The transport-device
-    abstraction is currently inlined into `HidApiPlatform.read` /
-    `.write` rather than exposed as a separate Protocol; revisit if a
-    second platform implementation lands."
+  notes: "C# file declares 4 internal types: `IHidPlatform` (interface), `IHidTransportDevice`\
+    \ (interface), `HidTransportReadStatus` / `HidTransportReadResult` (value types),\
+    \ and `HidLibraryPlatform` (the concrete HidSharp-backed impl). Python collapses\
+    \ these into `daqifi/_internal/hid_enumerator.py`: `HidPlatform` (Protocol) plus\
+    \ `HidApiPlatform` (concrete, backed by the Python `hid` library \u2014 the moral\
+    \ equivalent of HidSharp). The transport-device abstraction is currently inlined\
+    \ into `HidApiPlatform.read` / `.write` rather than exposed as a separate Protocol;\
+    \ revisit if a second platform implementation lands."
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/HidLibraryTransport.cs
   downstream: daqifi/transport.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/IHidDeviceEnumerator.cs
   downstream: daqifi/_internal/comm.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/IHidTransport.cs
   downstream: daqifi/_internal/comm.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/IStreamTransport.cs
   downstream: daqifi/_internal/comm.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/IUdpTransport.cs
   downstream: daqifi/_internal/comm.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/SerialStreamTransport.cs
   downstream: daqifi/transport.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/TcpStreamTransport.cs
   downstream: daqifi/transport.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/TransportStatusEventArgs.cs
   downstream: daqifi/_internal/comm.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Communication/Transport/UdpTransport.cs
   downstream: daqifi/_internal/comm.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 symbols:
 - upstream:
     kind: class
@@ -101,43 +99,70 @@ symbols:
     qualified: daqifi._internal.comm.ConnectionRetryOptions
     file: daqifi/_internal/comm.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: MaxAttempts
     downstream: max_attempts
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: InitialDelay
     downstream: initial_delay
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: MaxDelay
     downstream: max_delay
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: BackoffMultiplier
     downstream: backoff_multiplier
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectionTimeout
     downstream: connection_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Enabled
     downstream: enabled
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CalculateDelay
     downstream: calculate_delay
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:fast>
     downstream: fast
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:no_retry>
     downstream: no_retry
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:resilient>
     downstream: resilient
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.HidDeviceInfo
@@ -147,29 +172,48 @@ symbols:
     qualified: daqifi._internal.comm.HidDeviceInfo
     file: daqifi/_internal/comm.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: VendorId
     downstream: vendor_id
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ProductId
     downstream: product_id
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DevicePath
     downstream: device_path
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SerialNumber
     downstream: serial_number
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ProductName
     downstream: product_name
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ToString
     downstream: __str__
     relation: divergent
-    notes: "C# ToString() override → Python __str__ dunder per convention (idiomatic for str(x) / f-string formatting). Marked divergent rather than one_to_one because the audit's public-member set excludes dunders by design."
+    notes: "C# ToString() override \u2192 Python __str__ dunder per convention (idiomatic\
+      \ for str(x) / f-string formatting). Marked divergent rather than one_to_one\
+      \ because the audit's public-member set excludes dunders by design."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.HidLibraryDeviceEnumerator
@@ -179,17 +223,22 @@ symbols:
     qualified: daqifi._internal.hid_enumerator.HidLibraryDeviceEnumerator
     file: daqifi/_internal/hid_enumerator.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: EnumerateAsync
     downstream: enumerate
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.HidLibraryTransport
@@ -199,64 +248,112 @@ symbols:
     qualified: daqifi.transport.HidLibraryTransport
     file: daqifi/transport.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: VendorId
     downstream: vendor_id
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ProductId
     downstream: product_id
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SerialNumber
     downstream: serial_number
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DevicePath
     downstream: device_path
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ReadTimeout
     downstream: read_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WriteTimeout
     downstream: write_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectAsync
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Connect
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WriteAsync
     downstream: write
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Write
     downstream: write
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ReadAsync
     downstream: read
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Read
     downstream: read
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DisconnectAsync
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Dispose
     downstream: close
     relation: one_to_one
-    notes: "C# IDisposable.Dispose → Python close() per project convention."
+    notes: "C# IDisposable.Dispose \u2192 Python close() per project convention."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:is_connected>
     downstream: is_connected
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Communication.Transport.IHidDeviceEnumerator
@@ -266,13 +363,16 @@ symbols:
     qualified: daqifi._internal.comm.HidDeviceEnumerator
     file: daqifi/_internal/comm.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: EnumerateAsync
     downstream: enumerate
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Communication.Transport.IHidTransport
@@ -282,59 +382,106 @@ symbols:
     qualified: daqifi._internal.comm.HidTransport
     file: daqifi/_internal/comm.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: IsConnected
     downstream: is_connected
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: VendorId
     downstream: vendor_id
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ProductId
     downstream: product_id
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SerialNumber
     downstream: serial_number
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DevicePath
     downstream: device_path
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ReadTimeout
     downstream: read_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WriteTimeout
     downstream: write_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectAsync
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Connect
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WriteAsync
     downstream: write
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Write
     downstream: write
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ReadAsync
     downstream: read
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Read
     downstream: read
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DisconnectAsync
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:close>
     downstream: close
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Communication.Transport.IStreamTransport
@@ -344,43 +491,72 @@ symbols:
     qualified: daqifi._internal.comm.StreamTransport
     file: daqifi/_internal/comm.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Stream
     downstream: stream
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: IsConnected
     downstream: is_connected
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectionInfo
     downstream: connection_info
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: StatusChanged
     downstream: add_status_changed
     relation: divergent
-    notes: "C# event ported as add_status_changed(handler) / remove_status_changed(handler) callable list per project convention."
+    notes: C# event ported as add_status_changed(handler) / remove_status_changed(handler)
+      callable list per project convention.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectAsync
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DisconnectAsync
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Connect
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:close>
     downstream: close
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_status_changed>
     downstream: remove_status_changed
     relation: divergent
-    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged event port).
+    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged
+      event port).
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.SerialStreamTransport
@@ -390,59 +566,96 @@ symbols:
     qualified: daqifi.transport.SerialStreamTransport
     file: daqifi/transport.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Stream
     downstream: stream
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectionInfo
     downstream: connection_info
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: StatusChanged
     downstream: add_status_changed
     relation: divergent
-    notes: "C# event ported as add_status_changed(handler) / remove_status_changed(handler) callable list per project convention."
+    notes: C# event ported as add_status_changed(handler) / remove_status_changed(handler)
+      callable list per project convention.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectAsync
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DisconnectAsync
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Connect
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetAvailablePortNames
     downstream: get_available_port_names
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Dispose
     downstream: close
     relation: one_to_one
-    notes: "C# IDisposable.Dispose → Python close() per project convention."
+    notes: "C# IDisposable.Dispose \u2192 Python close() per project convention."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:DEFAULT_OS_RX_BUFFER_BYTES>
     downstream: DEFAULT_OS_RX_BUFFER_BYTES
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:DEFAULT_OS_TX_BUFFER_BYTES>
     downstream: DEFAULT_OS_TX_BUFFER_BYTES
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:is_connected>
     downstream: is_connected
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_status_changed>
     downstream: remove_status_changed
     relation: divergent
-    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged event port).
+    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged
+      event port).
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.TcpStreamTransport
@@ -452,51 +665,84 @@ symbols:
     qualified: daqifi.transport.TcpStreamTransport
     file: daqifi/transport.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Hostname
     downstream: hostname
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Stream
     downstream: stream
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectionInfo
     downstream: connection_info
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: StatusChanged
     downstream: add_status_changed
     relation: divergent
-    notes: "C# event ported as add_status_changed(handler) / remove_status_changed(handler) callable list per project convention."
+    notes: C# event ported as add_status_changed(handler) / remove_status_changed(handler)
+      callable list per project convention.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectAsync
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DisconnectAsync
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Connect
     downstream: connect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Disconnect
     downstream: disconnect
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Dispose
     downstream: close
     relation: one_to_one
-    notes: "C# IDisposable.Dispose → Python close() per project convention."
+    notes: "C# IDisposable.Dispose \u2192 Python close() per project convention."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:is_connected>
     downstream: is_connected
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_status_changed>
     downstream: remove_status_changed
     relation: divergent
-    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged event port).
+    notes: Downstream-only paired remover for the add_status_changed observer (StatusChanged
+      event port).
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.TransportStatusEventArgs
@@ -506,26 +752,35 @@ symbols:
     qualified: daqifi._internal.comm.TransportStatusEventArgs
     file: daqifi/_internal/comm.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: IsConnected
     downstream: is_connected
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectionInfo
     downstream: connection_info
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Error
     downstream: error
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Communication.Transport.UdpTransport
     file: src/Daqifi.Core/Communication/Transport/UdpTransport.cs
   downstream: null
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: Python collapses the C# class UdpTransport + its sibling IUdpTransport
     interface into a single daqifi._internal.comm.UdpTransport Protocol. No concrete
@@ -540,49 +795,77 @@ symbols:
     qualified: daqifi.transport.UdpTransport
     file: daqifi/transport.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: Python class implements the upstream IUdpTransport interface contract.
   members:
   - upstream: IsOpen
     downstream: is_open
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:local_port>
     downstream: local_port
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectionInfo
     downstream: connection_info
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:add_status_changed>
     downstream: add_status_changed
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_status_changed>
     downstream: remove_status_changed
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: OpenAsync
     downstream: open
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CloseAsync
     downstream: close
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SendBroadcastAsync
     downstream: send_broadcast
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:send_broadcast_to>
     downstream: send_broadcast_to
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SendUnicastAsync
     downstream: send_unicast
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:receive>
     downstream: receive
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: '2026-04-26T08:44:22.339206+00:00'
+updated_at: '2026-04-26T08:44:22.339206Z'

@@ -2,42 +2,41 @@ schema_version: 1
 shard: Network
 upstream_root: src/Daqifi.Core/Device/Network
 downstream_root: daqifi
-last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+last_synced_upstream_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 files:
 - upstream: src/Daqifi.Core/Device/Network/INetworkConfigurable.cs
   downstream: daqifi/network.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Network/NetworkAddressHelper.cs
   downstream: daqifi/network.py
   relation: divergent
-  notes: "Static C# class collapses to module-level free functions in
-    `daqifi/network.py` per project port convention (matches
-    ScpiMessageProducer / Pic32BootloaderMessageProducer / etc.).
-    Each `Get*String` decode helper is exposed as a `get_*_string`
-    free function operating on any DaqifiOutMessage-shaped object."
+  notes: Static C# class collapses to module-level free functions in `daqifi/network.py`
+    per project port convention (matches ScpiMessageProducer / Pic32BootloaderMessageProducer
+    / etc.). Each `Get*String` decode helper is exposed as a `get_*_string` free function
+    operating on any DaqifiOutMessage-shaped object.
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Network/NetworkConfiguration.cs
   downstream: daqifi/network.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Network/WifiMode.cs
   downstream: daqifi/enums.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Network/WifiSecurityType.cs
   downstream: daqifi/enums.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 symbols:
 - upstream:
     kind: interface
@@ -48,22 +47,34 @@ symbols:
     qualified: daqifi.network.NetworkConfigurable
     file: daqifi/network.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: NetworkConfiguration
     downstream: network_configuration
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: UpdateNetworkConfigurationAsync
     downstream: update_network_configuration
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PrepareSdInterface
     downstream: prepare_sd_interface
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PrepareLanInterface
     downstream: prepare_lan_interface
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Network.NetworkAddressHelper
@@ -73,30 +84,48 @@ symbols:
     qualified: daqifi.network
     file: daqifi/network.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
-  rationale: "Static C# class becomes module-level free functions in
-    `daqifi/network.py` (project port convention). Each helper's
-    `Get*String` member maps to a snake_case `get_*_string` function."
+  rationale: Static C# class becomes module-level free functions in `daqifi/network.py`
+    (project port convention). Each helper's `Get*String` member maps to a snake_case
+    `get_*_string` function.
   members:
   - upstream: GetIpAddressString
     downstream: get_ip_address_string
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetMacAddressString
     downstream: get_mac_address_string
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetSubnetMaskString
     downstream: get_subnet_mask_string
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetGatewayString
     downstream: get_gateway_string
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetPrimaryDnsString
     downstream: get_primary_dns_string
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetSecondaryDnsString
     downstream: get_secondary_dns_string
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Network.NetworkConfiguration
@@ -106,25 +135,40 @@ symbols:
     qualified: daqifi.network.NetworkConfiguration
     file: daqifi/network.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Mode
     downstream: mode
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SecurityType
     downstream: security_type
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Ssid
     downstream: ssid
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Password
     downstream: password
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Clone
     downstream: clone
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Device.Network.WifiMode
@@ -134,7 +178,7 @@ symbols:
     qualified: daqifi.enums.WifiMode
     file: daqifi/enums.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
@@ -142,10 +186,14 @@ symbols:
     downstream: EXISTING_NETWORK
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:SELF_HOSTED>
     downstream: SELF_HOSTED
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Device.Network.WifiSecurityType
@@ -155,7 +203,7 @@ symbols:
     qualified: daqifi.enums.WifiSecurityType
     file: daqifi/enums.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
@@ -163,11 +211,15 @@ symbols:
     downstream: NONE
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:WPA_PSK_PHRASE>
     downstream: WPA_PSK_PHRASE
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: '2026-04-26T08:44:22.510657+00:00'
+updated_at: '2026-04-26T08:44:22.510657Z'
