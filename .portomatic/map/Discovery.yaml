@@ -2,50 +2,54 @@ schema_version: 1
 shard: Discovery
 upstream_root: src/Daqifi.Core/Device/Discovery
 downstream_root: daqifi
-last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+last_synced_upstream_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 files:
 - upstream: src/Daqifi.Core/Device/Discovery/DeviceDiscoveredEventArgs.cs
   downstream: daqifi/device_finders.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Discovery/DeviceInfo.cs
   downstream: daqifi/device_finders.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Discovery/HidDeviceFinder.cs
   downstream: daqifi/device_finders.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Discovery/IDeviceFinder.cs
   downstream: daqifi/discovery.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Discovery/IDeviceInfo.cs
   downstream: daqifi/_internal/comm.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Discovery/SerialDeviceFinder.cs
   downstream: daqifi/device_finders.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Device/Discovery/WiFiDeviceFinder.cs
   downstream: daqifi/device_finders.py
   relation: one_to_one
-  notes: "Multi-NIC discovery ported per daqifi-core PR #179/#180 — WiFiDeviceFinder.discover() enumerates real NICs (via daqifi._internal.nic.enumerate_real_nics, backed by the ifaddr dep) and binds one UdpTransport per NIC, broadcasting on each NIC's directed broadcast address. Falls back to single-socket wildcard discovery when ifaddr is unavailable or returns no real NICs (#95)."
+  notes: "Multi-NIC discovery ported per daqifi-core PR #179/#180 \u2014 WiFiDeviceFinder.discover()\
+    \ enumerates real NICs (via daqifi._internal.nic.enumerate_real_nics, backed by\
+    \ the ifaddr dep) and binds one UdpTransport per NIC, broadcasting on each NIC's\
+    \ directed broadcast address. Falls back to single-socket wildcard discovery when\
+    \ ifaddr is unavailable or returns no real NICs (#95)."
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 symbols:
 - upstream:
     kind: class
@@ -56,53 +60,84 @@ symbols:
     qualified: daqifi.device_finders.HidDeviceFinder
     file: daqifi/device_finders.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: VendorIdFilter
     downstream: vendor_id_filter
     relation: divergent
-    notes: "Same semantics as the C# property (Optional[int] filter for HID device enumeration); ported as a plain mutable instance attribute set in __init__ rather than @property/setter — extractor doesn't surface raw self.x assignments to the IR, so the audit can't see it as a public member."
+    notes: "Same semantics as the C# property (Optional[int] filter for HID device\
+      \ enumeration); ported as a plain mutable instance attribute set in __init__\
+      \ rather than @property/setter \u2014 extractor doesn't surface raw self.x assignments\
+      \ to the IR, so the audit can't see it as a public member."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ProductIdFilter
     downstream: product_id_filter
     relation: divergent
-    notes: "Same as VendorIdFilter above — plain instance attribute mirroring the C# property semantics."
+    notes: "Same as VendorIdFilter above \u2014 plain instance attribute mirroring\
+      \ the C# property semantics."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DeviceDiscovered
     downstream: add_device_discovered
     relation: divergent
-    notes: "C# event ported as a callable-list observer pattern: add_device_discovered(handler) / remove_device_discovered(handler) per project convention."
+    notes: 'C# event ported as a callable-list observer pattern: add_device_discovered(handler)
+      / remove_device_discovered(handler) per project convention.'
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DiscoveryCompleted
     downstream: add_discovery_completed
     relation: divergent
-    notes: "C# event ported as add_discovery_completed(handler) / remove_discovery_completed(handler) callable list."
+    notes: C# event ported as add_discovery_completed(handler) / remove_discovery_completed(handler)
+      callable list.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Dispose
     downstream: close
     relation: one_to_one
-    notes: "C# IDisposable.Dispose → Python close() per project convention."
+    notes: "C# IDisposable.Dispose \u2192 Python close() per project convention."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:DEFAULT_PRODUCT_ID>
     downstream: DEFAULT_PRODUCT_ID
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:DEFAULT_VENDOR_ID>
     downstream: DEFAULT_VENDOR_ID
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_device_discovered>
     downstream: remove_device_discovered
     relation: divergent
-    notes: Downstream-only paired remover for the add_device_discovered observer (DeviceDiscovered event port).
+    notes: Downstream-only paired remover for the add_device_discovered observer (DeviceDiscovered
+      event port).
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_discovery_completed>
     downstream: remove_discovery_completed
     relation: divergent
-    notes: Downstream-only paired remover for the add_discovery_completed observer (DiscoveryCompleted event port).
+    notes: Downstream-only paired remover for the add_discovery_completed observer
+      (DiscoveryCompleted event port).
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Device.Discovery.IDeviceFinder
@@ -112,29 +147,44 @@ symbols:
     qualified: daqifi.discovery.DeviceFinder
     file: daqifi/discovery.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: DeviceDiscovered
     downstream: null
     relation: divergent
-    notes: "No downstream member. daqifi.discovery.DeviceFinder is the simple NyquistDevice-flavoured finder that returns a list synchronously from discover(); it doesn't expose an event/observer surface. The Pythonic event-style port lives on the daqifi.device_finders.* finders (see HidDeviceFinder.add_device_discovered)."
+    notes: No downstream member. daqifi.discovery.DeviceFinder is the simple NyquistDevice-flavoured
+      finder that returns a list synchronously from discover(); it doesn't expose
+      an event/observer surface. The Pythonic event-style port lives on the daqifi.device_finders.*
+      finders (see HidDeviceFinder.add_device_discovered).
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DiscoveryCompleted
     downstream: null
     relation: divergent
-    notes: "No downstream member. Same rationale as DeviceDiscovered: not exposed on the simple synchronous DeviceFinder facade."
+    notes: 'No downstream member. Same rationale as DeviceDiscovered: not exposed
+      on the simple synchronous DeviceFinder facade.'
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:discover_first>
     downstream: discover_first
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:get_serial_ports>
     downstream: get_serial_ports
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Device.Discovery.IDeviceInfo
@@ -144,48 +194,89 @@ symbols:
     qualified: daqifi.device_finders.DeviceInfo
     file: daqifi/device_finders.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Name
     downstream: name
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SerialNumber
     downstream: serial_number
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: FirmwareVersion
     downstream: firmware_version
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: IPAddress
     downstream: ip_address
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: MacAddress
     downstream: mac_address
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Port
     downstream: port
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: LocalInterfaceAddress
     downstream: local_interface_address
     relation: divergent
-    notes: "Field exists on the DeviceInfo dataclass (added 2026-05-10 closing #7 batch) but the current discover() uses a single-socket UDP broadcast model and doesn't track per-NIC origin. DeviceInfo is frozen, so callers wanting to set this on a discovered instance must construct a new one via dataclasses.replace(info, local_interface_address=...). A future per-NIC broadcasting refactor in WiFiDeviceFinder would auto-populate at construction time."
+    notes: 'Field exists on the DeviceInfo dataclass (added 2026-05-10 closing #7
+      batch) but the current discover() uses a single-socket UDP broadcast model and
+      doesn''t track per-NIC origin. DeviceInfo is frozen, so callers wanting to set
+      this on a discovered instance must construct a new one via dataclasses.replace(info,
+      local_interface_address=...). A future per-NIC broadcasting refactor in WiFiDeviceFinder
+      would auto-populate at construction time.'
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Type
     downstream: device_type
     relation: one_to_one
-    notes: "Renamed from Type→device_type to avoid collision with Python's built-in type() and the conventional `type` field name pattern. Same DeviceType enum semantics."
+    notes: "Renamed from Type\u2192device_type to avoid collision with Python's built-in\
+      \ type() and the conventional `type` field name pattern. Same DeviceType enum\
+      \ semantics."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: IsPowerOn
     downstream: is_power_on
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectionType
     downstream: connection_type
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PortName
     downstream: port_name
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DevicePath
     downstream: device_path
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Discovery.SerialDeviceFinder
@@ -195,37 +286,56 @@ symbols:
     qualified: daqifi.device_finders.SerialDeviceFinder
     file: daqifi/device_finders.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: DeviceDiscovered
     downstream: add_device_discovered
     relation: divergent
-    notes: "C# event ported as add_device_discovered(handler) / remove_device_discovered(handler) callable list per project convention."
+    notes: C# event ported as add_device_discovered(handler) / remove_device_discovered(handler)
+      callable list per project convention.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DiscoveryCompleted
     downstream: add_discovery_completed
     relation: divergent
-    notes: "C# event ported as add_discovery_completed(handler) / remove_discovery_completed(handler) callable list."
+    notes: C# event ported as add_discovery_completed(handler) / remove_discovery_completed(handler)
+      callable list.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Dispose
     downstream: close
     relation: one_to_one
-    notes: "C# IDisposable.Dispose → Python close() per project convention."
+    notes: "C# IDisposable.Dispose \u2192 Python close() per project convention."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_device_discovered>
     downstream: remove_device_discovered
     relation: divergent
-    notes: Downstream-only paired remover for the add_device_discovered observer (DeviceDiscovered event port).
+    notes: Downstream-only paired remover for the add_device_discovered observer (DeviceDiscovered
+      event port).
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_discovery_completed>
     downstream: remove_discovery_completed
     relation: divergent
-    notes: Downstream-only paired remover for the add_discovery_completed observer (DiscoveryCompleted event port).
+    notes: Downstream-only paired remover for the add_discovery_completed observer
+      (DiscoveryCompleted event port).
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Discovery.WiFiDeviceFinder
@@ -235,63 +345,100 @@ symbols:
     qualified: daqifi.device_finders.WiFiDeviceFinder
     file: daqifi/device_finders.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: BroadcastEndpoint
     downstream: null
     relation: divergent
-    notes: "No downstream member. C# WiFiDeviceFinder.NetworkInterfaceInfo.BroadcastEndpoint is a member of a PRIVATE readonly struct nested inside WiFiDeviceFinder, not exposed as a public WiFiDeviceFinder property — the extractor surfaced it incorrectly. The Python finder uses a single-socket UDP broadcast model rather than the C# per-NIC model, so no equivalent surface is needed."
+    notes: "No downstream member. C# WiFiDeviceFinder.NetworkInterfaceInfo.BroadcastEndpoint\
+      \ is a member of a PRIVATE readonly struct nested inside WiFiDeviceFinder, not\
+      \ exposed as a public WiFiDeviceFinder property \u2014 the extractor surfaced\
+      \ it incorrectly. The Python finder uses a single-socket UDP broadcast model\
+      \ rather than the C# per-NIC model, so no equivalent surface is needed."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: LocalAddress
     downstream: null
     relation: divergent
-    notes: "No downstream member. Same as BroadcastEndpoint: member of the PRIVATE NetworkInterfaceInfo struct nested in WiFiDeviceFinder, not a public property."
+    notes: 'No downstream member. Same as BroadcastEndpoint: member of the PRIVATE
+      NetworkInterfaceInfo struct nested in WiFiDeviceFinder, not a public property.'
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SubnetMask
     downstream: null
     relation: divergent
-    notes: "No downstream member. No SubnetMask member exists in the current upstream WiFiDeviceFinder.cs (verified at last_synced_upstream_sha). Map row appears to be a stale extractor artifact; left as divergent rather than deleted so a future schema change doesn't silently re-introduce it."
+    notes: No downstream member. No SubnetMask member exists in the current upstream
+      WiFiDeviceFinder.cs (verified at last_synced_upstream_sha). Map row appears
+      to be a stale extractor artifact; left as divergent rather than deleted so a
+      future schema change doesn't silently re-introduce it.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DeviceDiscovered
     downstream: add_device_discovered
     relation: divergent
-    notes: "C# event ported as add_device_discovered(handler) / remove_device_discovered(handler) callable list per project convention."
+    notes: C# event ported as add_device_discovered(handler) / remove_device_discovered(handler)
+      callable list per project convention.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DiscoveryCompleted
     downstream: add_discovery_completed
     relation: divergent
-    notes: "C# event ported as add_discovery_completed(handler) / remove_discovery_completed(handler) callable list."
+    notes: C# event ported as add_discovery_completed(handler) / remove_discovery_completed(handler)
+      callable list.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DiscoverAsync
     downstream: discover
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Dispose
     downstream: close
     relation: one_to_one
-    notes: "C# IDisposable.Dispose → Python close() per project convention."
+    notes: "C# IDisposable.Dispose \u2192 Python close() per project convention."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:DAQIFI_FINDER_QUERY>
     downstream: DAQIFI_FINDER_QUERY
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:NATIVE_FINDER_QUERY>
     downstream: NATIVE_FINDER_QUERY
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:probe_ip>
     downstream: probe_ip
     relation: divergent
-    notes: Downstream-only addition; no upstream counterpart. Synchronous
-      TCP unicast reachability probe used as a WSL2 bypass when UDP
-      broadcast doesn't reach back (#72).
+    notes: Downstream-only addition; no upstream counterpart. Synchronous TCP unicast
+      reachability probe used as a WSL2 bypass when UDP broadcast doesn't reach back
+      (#72).
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_device_discovered>
     downstream: remove_device_discovered
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:remove_discovery_completed>
     downstream: remove_discovery_completed
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Device.Discovery.ConnectionType
@@ -301,7 +448,7 @@ symbols:
     qualified: daqifi.device_finders.ConnectionType
     file: daqifi/device_finders.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
@@ -309,14 +456,20 @@ symbols:
     downstream: SERIAL
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:WIFI>
     downstream: WIFI
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:HID>
     downstream: HID
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Device.Discovery.DeviceType
@@ -326,7 +479,7 @@ symbols:
     qualified: daqifi.device_finders.DeviceType
     file: daqifi/device_finders.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
@@ -334,19 +487,24 @@ symbols:
     downstream: UNKNOWN
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:NYQUIST>
     downstream: NYQUIST
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: enum
     qualified: <downstream-only:BoardVariant>
+    file: null
   downstream:
     kind: enum
     qualified: daqifi.discovery.BoardVariant
     file: daqifi/discovery.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: Python-only enum naming the supported Nyquist hardware variants (NQ1/NQ2/NQ3).
     C# port doesn't currently surface variants as an enum.
@@ -355,18 +513,26 @@ symbols:
     downstream: UNKNOWN
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:NQ1>
     downstream: NQ1
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:NQ2>
     downstream: NQ2
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:NQ3>
     downstream: NQ3
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Discovery.DeviceInfo
@@ -376,31 +542,46 @@ symbols:
     qualified: daqifi.discovery.DeviceInfo
     file: daqifi/discovery.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Port
     downstream: port
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:variant>
     downstream: variant
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:manufacturer>
     downstream: manufacturer
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:model>
     downstream: model
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: SerialNumber
     downstream: serial_number
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: FirmwareVersion
     downstream: firmware_version
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Discovery.DeviceDiscoveredEventArgs
@@ -410,13 +591,16 @@ symbols:
     qualified: daqifi.discovery.DeviceDiscoveredEventArgs
     file: daqifi/discovery.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: DeviceInfo
     downstream: device_info
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Device.Discovery.DeviceDiscoveredEventArgs
@@ -426,7 +610,7 @@ symbols:
     qualified: daqifi.device_finders.DeviceDiscoveredEventArgs
     file: daqifi/device_finders.py
   relation: split
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: "Python defines DeviceDiscoveredEventArgs in two modules \u2014 discovery.py\
     \ (canonical, cataloged separately) and device_finders.py (legacy alias used by\
@@ -436,7 +620,10 @@ symbols:
   - upstream: DeviceInfo
     downstream: device_info
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: '2026-04-26T08:44:22.467247+00:00'
+updated_at: '2026-04-26T08:44:22.467247Z'

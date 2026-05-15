@@ -2,38 +2,47 @@ schema_version: 1
 shard: Logging.Export
 upstream_root: src/Daqifi.Core/Logging/Export
 downstream_root: daqifi
-last_synced_upstream_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+last_synced_upstream_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 files:
 - upstream: src/Daqifi.Core/Logging/Export/ChannelDescriptor.cs
   downstream: daqifi/export.py
   relation: one_to_one
-  notes: "Namespace flattened: upstream `Daqifi.Core.Logging.Export` becomes Python `daqifi.export` rather than `daqifi.logging.export` because the latter would shadow the stdlib `logging` module — a sharp foot-gun for callers."
+  notes: "Namespace flattened: upstream `Daqifi.Core.Logging.Export` becomes Python\
+    \ `daqifi.export` rather than `daqifi.logging.export` because the latter would\
+    \ shadow the stdlib `logging` module \u2014 a sharp foot-gun for callers."
   rationale: null
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Logging/Export/CsvExportOptions.cs
   downstream: daqifi/export.py
   relation: one_to_one
-  notes: "Namespace flatten — see ChannelDescriptor row."
+  notes: "Namespace flatten \u2014 see ChannelDescriptor row."
   rationale: null
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Logging/Export/CsvExporter.cs
   downstream: daqifi/export.py
   relation: one_to_one
-  notes: "Namespace flatten — see ChannelDescriptor row. Also async→sync per project convention (`async Task ExportAsync` becomes `def export`; `IAsyncEnumerable<SampleRow>` becomes `Iterator[SampleRow]`); `IProgress<int>` becomes `Optional[Callable[[int], None]]`; `CancellationToken` becomes `Optional[threading.Event]` matching the FirmwareUpdateService port pattern."
+  notes: "Namespace flatten \u2014 see ChannelDescriptor row. Also async\u2192sync\
+    \ per project convention (`async Task ExportAsync` becomes `def export`; `IAsyncEnumerable<SampleRow>`\
+    \ becomes `Iterator[SampleRow]`); `IProgress<int>` becomes `Optional[Callable[[int],\
+    \ None]]`; `CancellationToken` becomes `Optional[threading.Event]` matching the\
+    \ FirmwareUpdateService port pattern."
   rationale: null
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Logging/Export/ISampleSource.cs
   downstream: daqifi/export.py
   relation: one_to_one
-  notes: "Namespace flatten — see ChannelDescriptor row. C# interface ported as a `typing.Protocol` (`@runtime_checkable`) so type checkers accept duck-typed implementations without requiring inheritance — equivalent contract to a C# interface, expressed structurally per Python idiom."
+  notes: "Namespace flatten \u2014 see ChannelDescriptor row. C# interface ported\
+    \ as a `typing.Protocol` (`@runtime_checkable`) so type checkers accept duck-typed\
+    \ implementations without requiring inheritance \u2014 equivalent contract to\
+    \ a C# interface, expressed structurally per Python idiom."
   rationale: null
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Logging/Export/SampleRow.cs
   downstream: daqifi/export.py
   relation: one_to_one
-  notes: "Namespace flatten — see ChannelDescriptor row."
+  notes: "Namespace flatten \u2014 see ChannelDescriptor row."
   rationale: null
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 symbols:
 - upstream:
     kind: class
@@ -44,25 +53,42 @@ symbols:
     qualified: daqifi.export.ChannelDescriptor
     file: daqifi/export.py
   relation: one_to_one
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
-  notes: "C# `record` becomes Python `@dataclass(frozen=True)`. PascalCase fields become snake_case (`DeviceName` → `device_name`, etc.). The `Key` property port preserves the same composite-key shape `{device_name}:{device_serial_no}:{channel_name}`."
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: "C# `record` becomes Python `@dataclass(frozen=True)`. PascalCase fields\
+    \ become snake_case (`DeviceName` \u2192 `device_name`, etc.). The `Key` property\
+    \ port preserves the same composite-key shape `{device_name}:{device_serial_no}:{channel_name}`."
   rationale: null
   members:
   - upstream: DeviceName
     downstream: device_name
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DeviceSerialNo
     downstream: device_serial_no
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ChannelName
     downstream: channel_name
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ChannelType
     downstream: channel_type
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Key
     downstream: key
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Logging.Export.CsvExportOptions
@@ -72,19 +98,30 @@ symbols:
     qualified: daqifi.export.CsvExportOptions
     file: daqifi/export.py
   relation: one_to_one
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
-  notes: "C# class with `init` setters becomes Python `@dataclass(frozen=True)`. Same field shape: `delimiter` (default `,`), `use_relative_time` (default False), `average_window` (default None)."
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: 'C# class with `init` setters becomes Python `@dataclass(frozen=True)`. Same
+    field shape: `delimiter` (default `,`), `use_relative_time` (default False), `average_window`
+    (default None).'
   rationale: null
   members:
   - upstream: Delimiter
     downstream: delimiter
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: UseRelativeTime
     downstream: use_relative_time
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: AverageWindow
     downstream: average_window
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Logging.Export.CsvExporter
@@ -94,14 +131,21 @@ symbols:
     qualified: daqifi.export.CsvExporter
     file: daqifi/export.py
   relation: one_to_one
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
-  notes: "Sync per project convention. Same row-formatting and timestamp logic as upstream — including the .NET tick conversion (preserved as int and rendered to ISO 8601 7-digit fractional seconds for parity with `DateTime.ToString(\"O\")`), the `INVALID(ticks)` defensive marker for out-of-range values, the per-tick bucket grouping, and the rolling-window average mode. Progress callback fires every 5000 samples capped at 99 (matches upstream)."
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: "Sync per project convention. Same row-formatting and timestamp logic as\
+    \ upstream \u2014 including the .NET tick conversion (preserved as int and rendered\
+    \ to ISO 8601 7-digit fractional seconds for parity with `DateTime.ToString(\"\
+    O\")`), the `INVALID(ticks)` defensive marker for out-of-range values, the per-tick\
+    \ bucket grouping, and the rolling-window average mode. Progress callback fires\
+    \ every 5000 samples capped at 99 (matches upstream)."
   rationale: null
   members:
   - upstream: ExportAsync
     downstream: export
     relation: one_to_one
-    notes: "Async/sync collapsed per project convention."
+    notes: Async/sync collapsed per project convention.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Logging.Export.ISampleSource
@@ -111,21 +155,37 @@ symbols:
     qualified: daqifi.export.SampleSource
     file: daqifi/export.py
   relation: divergent
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
-  notes: "C# interface (nominal typing — implementers explicitly declare `: ISampleSource`) → Python `typing.Protocol` (structural typing — type checkers accept any duck-typed object without inheritance). `@runtime_checkable` lets callers `isinstance()` against the protocol if they need a runtime guard."
-  rationale: "Python uses structural typing for interface-like contracts. `typing.Protocol` is the idiomatic equivalent of a C# interface: the same capability (a documented contract for sample-source backends), expressed through structural conformance rather than nominal inheritance. Type checkers (mypy, pyright) accept any duck-typed object that exposes the three methods, so the contract is enforceable without requiring callers to subclass."
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: "C# interface (nominal typing \u2014 implementers explicitly declare `: ISampleSource`)\
+    \ \u2192 Python `typing.Protocol` (structural typing \u2014 type checkers accept\
+    \ any duck-typed object without inheritance). `@runtime_checkable` lets callers\
+    \ `isinstance()` against the protocol if they need a runtime guard."
+  rationale: 'Python uses structural typing for interface-like contracts. `typing.Protocol`
+    is the idiomatic equivalent of a C# interface: the same capability (a documented
+    contract for sample-source backends), expressed through structural conformance
+    rather than nominal inheritance. Type checkers (mypy, pyright) accept any duck-typed
+    object that exposes the three methods, so the contract is enforceable without
+    requiring callers to subclass.'
   members:
   - upstream: GetChannels
     downstream: get_channels
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetSampleCountAsync
     downstream: get_sample_count
     relation: one_to_one
-    notes: "Async/sync collapsed per project convention."
+    notes: Async/sync collapsed per project convention.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: StreamSamples
     downstream: stream_samples
     relation: divergent
-    notes: "C# `IAsyncEnumerable<SampleRow>` becomes Python `Iterator[SampleRow]` (sync per project convention). Same ordered-by-timestamp-ascending contract."
+    notes: C# `IAsyncEnumerable<SampleRow>` becomes Python `Iterator[SampleRow]` (sync
+      per project convention). Same ordered-by-timestamp-ascending contract.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Logging.Export.SampleRow
@@ -135,20 +195,31 @@ symbols:
     qualified: daqifi.export.SampleRow
     file: daqifi/export.py
   relation: one_to_one
-  last_synced_sha: b7b0735ab795e05b3be8e5ab5d58a9897f03fc33
-  notes: "C# `record` becomes Python `@dataclass(frozen=True)`. Same three fields: `timestamp_ticks` (int, .NET DateTime.Ticks), `channel_key` (composite str), `value` (float)."
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: 'C# `record` becomes Python `@dataclass(frozen=True)`. Same three fields:
+    `timestamp_ticks` (int, .NET DateTime.Ticks), `channel_key` (composite str), `value`
+    (float).'
   rationale: null
   members:
   - upstream: TimestampTicks
     downstream: timestamp_ticks
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ChannelKey
     downstream: channel_key
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Value
     downstream: value
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: '2026-05-11T19:30:00.000000+00:00'
+updated_at: '2026-05-11T19:30:00Z'

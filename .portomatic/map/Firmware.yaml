@@ -2,197 +2,191 @@ schema_version: 1
 shard: Firmware
 upstream_root: src/Daqifi.Core/Firmware
 downstream_root: daqifi
-last_synced_upstream_sha: e8d84af01032ac21602d7ef51d51485ff0c043c0
+last_synced_upstream_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 files:
 - upstream: src/Daqifi.Core/Firmware/Crc16.cs
   downstream: daqifi/firmware/crc16.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/ExternalProcessRequest.cs
   downstream: daqifi/firmware/external_process.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/ExternalProcessResult.cs
   downstream: daqifi/firmware/external_process.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/FirmwareReleaseInfo.cs
   downstream: daqifi/firmware/release_info.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateCheckResult.cs
   downstream: daqifi/firmware/download_service.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateException.cs
   downstream: daqifi/firmware/update_events.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateProgress.cs
   downstream: daqifi/firmware/update_events.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateService.cs
   downstream: daqifi/firmware/update_service.py
   relation: divergent
-  notes: "C# `FirmwareUpdateService : IFirmwareUpdateService, IDisposable`
-    with async ``Task UpdateFirmwareAsync`` / ``Task UpdateWifiModuleAsync``
-    becomes the sync ``DefaultFirmwareUpdateService`` class (concrete impl
-    of the existing ``FirmwareUpdateService`` Protocol). Per-state
-    timeouts use monotonic deadline polling instead of linked
-    ``CancellationTokenSource`` pairs; cooperative cancellation is a
-    ``threading.Event``. ``IFirmwareDownloadService`` is async upstream
-    AND in this codebase, so the WiFi version-check call is bridged
-    through ``asyncio.run`` to keep the orchestrator's surface sync.
-    ``IDisposable.Dispose`` -> ``close``."
+  notes: 'C# `FirmwareUpdateService : IFirmwareUpdateService, IDisposable` with async
+    ``Task UpdateFirmwareAsync`` / ``Task UpdateWifiModuleAsync`` becomes the sync
+    ``DefaultFirmwareUpdateService`` class (concrete impl of the existing ``FirmwareUpdateService``
+    Protocol). Per-state timeouts use monotonic deadline polling instead of linked
+    ``CancellationTokenSource`` pairs; cooperative cancellation is a ``threading.Event``.
+    ``IFirmwareDownloadService`` is async upstream AND in this codebase, so the WiFi
+    version-check call is bridged through ``asyncio.run`` to keep the orchestrator''s
+    surface sync. ``IDisposable.Dispose`` -> ``close``.'
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateServiceOptions.cs
   downstream: daqifi/firmware/update_options.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateState.cs
   downstream: daqifi/enums.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/FirmwareUpdateStateChangedEventArgs.cs
   downstream: daqifi/firmware/update_events.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/FirmwareVersion.cs
   downstream: daqifi/firmware/version.py
   relation: divergent
-  notes: "C# `readonly record struct` with static `TryParse` / `Compare`
-    becomes a frozen `@dataclass` plus module-level `parse_firmware_string`
-    and `compare` helpers — Python idiom replaces the static-method
-    container with free functions. Operator overloads (`<`, `==`, etc.)
-    are provided via `@total_ordering` rather than explicit `__lt__`."
+  notes: "C# `readonly record struct` with static `TryParse` / `Compare` becomes a\
+    \ frozen `@dataclass` plus module-level `parse_firmware_string` and `compare`\
+    \ helpers \u2014 Python idiom replaces the static-method container with free functions.\
+    \ Operator overloads (`<`, `==`, etc.) are provided via `@total_ordering` rather\
+    \ than explicit `__lt__`."
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/GitHubFirmwareDownloadService.cs
   downstream: daqifi/firmware/github_download_service.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/HexFileRecord.cs
   downstream: daqifi/firmware/intel_hex.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/IBootloaderProtocol.cs
   downstream: daqifi/firmware/bootloader.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/IExternalProcessRunner.cs
   downstream: daqifi/firmware/external_process.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/IFirmwareDownloadService.cs
   downstream: daqifi/firmware/download_service.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/IFirmwareUpdateService.cs
   downstream: daqifi/firmware/update_service.py
   relation: divergent
-  notes: "Sync `runtime_checkable` Protocol; `UpdateFirmwareAsync` /
-    `UpdateWifiModuleAsync` → `update_firmware` / `update_wifi_module`
-    (no `Async` suffix). `event StateChanged` becomes a `state_changed`
-    callable attribute, idiomatic Python observer pattern. Concrete
-    implementation (FirmwareUpdateService.cs, 1156 lines) is deferred
-    to a follow-up PR."
+  notes: "Sync `runtime_checkable` Protocol; `UpdateFirmwareAsync` / `UpdateWifiModuleAsync`\
+    \ \u2192 `update_firmware` / `update_wifi_module` (no `Async` suffix). `event\
+    \ StateChanged` becomes a `state_changed` callable attribute, idiomatic Python\
+    \ observer pattern. Concrete implementation (FirmwareUpdateService.cs, 1156 lines)\
+    \ is deferred to a follow-up PR."
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/ILanChipInfoProvider.cs
   downstream: daqifi/firmware/lan_chip_info_provider.py
   relation: divergent
-  notes: "Sync `runtime_checkable` Protocol; `GetLanChipInfoAsync` →
-    `get_lan_chip_info` (no `Async` suffix). Returns
-    `Optional[LanChipInfo]` directly instead of wrapping in `Task<>`."
+  notes: "Sync `runtime_checkable` Protocol; `GetLanChipInfoAsync` \u2192 `get_lan_chip_info`\
+    \ (no `Async` suffix). Returns `Optional[LanChipInfo]` directly instead of wrapping\
+    \ in `Task<>`."
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/IntelHexParser.cs
   downstream: daqifi/firmware/intel_hex.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/LanChipInfo.cs
   downstream: daqifi/firmware/lan_chip_info.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/LanChipInfoParser.cs
   downstream: daqifi/firmware/lan_chip_info.py
   relation: divergent
-  notes: "Static C# class collapses to module-level free functions
-    `try_parse` / `try_parse_lines` per project port convention.
-    Both return `Optional[LanChipInfo]` rather than the C#
-    `bool TryParse(out)` pattern."
+  notes: Static C# class collapses to module-level free functions `try_parse` / `try_parse_lines`
+    per project port convention. Both return `Optional[LanChipInfo]` rather than the
+    C# `bool TryParse(out)` pattern.
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/Pic32BootloaderMessageConsumer.cs
   downstream: daqifi/firmware/bootloader.py
   relation: divergent
-  notes: "Static C# class becomes module-level free functions
-    `decode_version_response` / `decode_program_flash_response` /
-    `decode_erase_flash_response`, colocated with the Producer free
-    functions and the `Pic32BootloaderProtocol` concrete class in
-    `bootloader.py`."
+  notes: Static C# class becomes module-level free functions `decode_version_response`
+    / `decode_program_flash_response` / `decode_erase_flash_response`, colocated with
+    the Producer free functions and the `Pic32BootloaderProtocol` concrete class in
+    `bootloader.py`.
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/Pic32BootloaderMessageProducer.cs
   downstream: daqifi/firmware/bootloader.py
   relation: divergent
-  notes: "Static C# class becomes module-level free functions
-    `create_request_version_message` / `create_erase_flash_message` /
-    `create_program_flash_message` / `create_jump_to_application_message`,
-    colocated with the Consumer free functions in `bootloader.py`."
+  notes: Static C# class becomes module-level free functions `create_request_version_message`
+    / `create_erase_flash_message` / `create_program_flash_message` / `create_jump_to_application_message`,
+    colocated with the Consumer free functions in `bootloader.py`.
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/Pic32BootloaderProtocol.cs
   downstream: daqifi/firmware/bootloader.py
   relation: one_to_one
   notes: null
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream: src/Daqifi.Core/Firmware/ProcessExternalProcessRunner.cs
   downstream: daqifi/firmware/external_process.py
   relation: divergent
-  notes: "Renamed to `SubprocessRunner` (Pythonic — `Subprocess` is
-    what callers actually search for, mirrors `subprocess` stdlib).
-    `RunAsync` → `run` (sync, project convention). Implements the
-    `ExternalProcessRunner` Protocol (port of `IExternalProcessRunner`)."
+  notes: "Renamed to `SubprocessRunner` (Pythonic \u2014 `Subprocess` is what callers\
+    \ actually search for, mirrors `subprocess` stdlib). `RunAsync` \u2192 `run` (sync,\
+    \ project convention). Implements the `ExternalProcessRunner` Protocol (port of\
+    \ `IExternalProcessRunner`)."
   rationale: null
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 symbols:
 - upstream:
     kind: class
@@ -203,25 +197,34 @@ symbols:
     qualified: daqifi.firmware.crc16.Crc16
     file: daqifi/firmware/crc16.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Crc
     downstream: crc
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:high>
     downstream: high
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:low>
     downstream: low
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.ExternalProcessRequest
@@ -231,32 +234,53 @@ symbols:
     qualified: daqifi.firmware.external_process.ExternalProcessRequest
     file: daqifi/firmware/external_process.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: FileName
     downstream: file_name
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Arguments
     downstream: arguments
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WorkingDirectory
     downstream: working_directory
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Timeout
     downstream: timeout_seconds
     relation: one_to_one
-    notes: "C# uses TimeSpan; Python port uses a plain float (seconds) named timeout_seconds for clarity. Same semantics — wall-clock cap on the spawned process."
+    notes: "C# uses TimeSpan; Python port uses a plain float (seconds) named timeout_seconds\
+      \ for clarity. Same semantics \u2014 wall-clock cap on the spawned process."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: OnStandardOutputLine
     downstream: on_standard_output_line
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: OnStandardErrorLine
     downstream: on_standard_error_line
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: StandardInputResponseFactory
     downstream: standard_input_response_factory
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.ExternalProcessResult
@@ -266,26 +290,41 @@ symbols:
     qualified: daqifi.firmware.external_process.ExternalProcessResult
     file: daqifi/firmware/external_process.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: ExitCode
     downstream: exit_code
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: TimedOut
     downstream: timed_out
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Duration
     downstream: duration_seconds
     relation: one_to_one
-    notes: "C# uses TimeSpan; Python port uses a plain float (seconds) named duration_seconds for clarity. Same semantics — elapsed wall-clock for the process run."
+    notes: "C# uses TimeSpan; Python port uses a plain float (seconds) named duration_seconds\
+      \ for clarity. Same semantics \u2014 elapsed wall-clock for the process run."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: StandardOutputLines
     downstream: standard_output_lines
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: StandardErrorLines
     downstream: standard_error_lines
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareReleaseInfo
@@ -295,37 +334,64 @@ symbols:
     qualified: daqifi.firmware.release_info.FirmwareReleaseInfo
     file: daqifi/firmware/release_info.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Version
     downstream: version
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: TagName
     downstream: tag_name
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: IsPreRelease
     downstream: is_pre_release
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ReleaseNotes
     downstream: release_notes
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DownloadUrl
     downstream: download_url
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: AssetFileName
     downstream: asset_file_name
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: AssetSize
     downstream: asset_size
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PublishedAt
     downstream: published_at
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ZipballUrl
     downstream: zipball_url
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareUpdateCheckResult
@@ -335,19 +401,28 @@ symbols:
     qualified: daqifi.firmware.download_service.FirmwareUpdateCheckResult
     file: daqifi/firmware/download_service.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: UpdateAvailable
     downstream: update_available
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DeviceVersion
     downstream: device_version
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: LatestRelease
     downstream: latest_release
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareUpdateException
@@ -357,26 +432,39 @@ symbols:
     qualified: daqifi.firmware.update_events.FirmwareUpdateException
     file: daqifi/firmware/update_events.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: FailedState
     downstream: failed_state
     relation: divergent
-    notes: "Same FirmwareUpdateState semantics as the C# property; ported as a plain instance attribute set in __init__ (see FirmwareUpdateException.__init__) rather than @property — extractor doesn't surface raw self.x assignments to the public-member set."
+    notes: "Same FirmwareUpdateState semantics as the C# property; ported as a plain\
+      \ instance attribute set in __init__ (see FirmwareUpdateException.__init__)\
+      \ rather than @property \u2014 extractor doesn't surface raw self.x assignments\
+      \ to the public-member set."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Operation
     downstream: operation
     relation: divergent
-    notes: "Same str semantics as the C# property; ported as a plain instance attribute set in __init__."
+    notes: Same str semantics as the C# property; ported as a plain instance attribute
+      set in __init__.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: RecoveryGuidance
     downstream: recovery_guidance
     relation: divergent
-    notes: "Same Optional[str] semantics as the C# property; ported as a plain instance attribute set in __init__."
+    notes: Same Optional[str] semantics as the C# property; ported as a plain instance
+      attribute set in __init__.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareUpdateProgress
@@ -386,25 +474,40 @@ symbols:
     qualified: daqifi.firmware.update_events.FirmwareUpdateProgress
     file: daqifi/firmware/update_events.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: State
     downstream: state
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PercentComplete
     downstream: percent_complete
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CurrentOperation
     downstream: current_operation
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: BytesWritten
     downstream: bytes_written
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: TotalBytes
     downstream: total_bytes
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareUpdateService
@@ -414,35 +517,53 @@ symbols:
     qualified: daqifi.firmware.update_service.DefaultFirmwareUpdateService
     file: daqifi/firmware/update_service.py
   relation: divergent
-  last_synced_sha: null
-  notes: "Sync per project convention; per-state timeouts use monotonic
-    deadline polling; cooperative cancellation is a ``threading.Event``;
-    ``IDisposable.Dispose`` -> ``close``. WiFi version-check bridges the
-    async ``IFirmwareDownloadService`` via ``asyncio.run``."
-  rationale: "Project-wide async->sync convention (Pythonic, no asyncio
-    leaking into the streaming-device API). C# ``CancellationToken`` +
-    linked CTS pair has no clean sync equivalent — replaced with a
-    ``threading.Event`` checked by the same loops. ``Async`` suffix
-    dropped to match every other ``DaqifiDevice`` method."
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: Sync per project convention; per-state timeouts use monotonic deadline polling;
+    cooperative cancellation is a ``threading.Event``; ``IDisposable.Dispose`` ->
+    ``close``. WiFi version-check bridges the async ``IFirmwareDownloadService`` via
+    ``asyncio.run``.
+  rationale: "Project-wide async->sync convention (Pythonic, no asyncio leaking into\
+    \ the streaming-device API). C# ``CancellationToken`` + linked CTS pair has no\
+    \ clean sync equivalent \u2014 replaced with a ``threading.Event`` checked by\
+    \ the same loops. ``Async`` suffix dropped to match every other ``DaqifiDevice``\
+    \ method."
   members:
   - upstream: FirmwareDownloadService
     downstream: firmware_download_service
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CurrentState
     downstream: current_state
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: StateChanged
     downstream: state_changed
     relation: divergent
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: UpdateFirmwareAsync
     downstream: update_firmware
     relation: divergent
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: UpdateWifiModuleAsync
     downstream: update_wifi_module
     relation: divergent
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Dispose
     downstream: close
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareUpdateServiceOptions
@@ -452,82 +573,154 @@ symbols:
     qualified: daqifi.firmware.update_options.FirmwareUpdateServiceOptions
     file: daqifi/firmware/update_options.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: BootloaderVendorId
     downstream: bootloader_vendor_id
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: BootloaderProductId
     downstream: bootloader_product_id
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PollInterval
     downstream: poll_interval
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PreparingDeviceTimeout
     downstream: preparing_device_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WaitingForBootloaderTimeout
     downstream: waiting_for_bootloader_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ConnectingTimeout
     downstream: connecting_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ErasingFlashTimeout
     downstream: erasing_flash_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ProgrammingTimeout
     downstream: programming_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: VerifyingTimeout
     downstream: verifying_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: JumpingToApplicationTimeout
     downstream: jumping_to_application_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: BootloaderResponseTimeout
     downstream: bootloader_response_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PostForceBootDelay
     downstream: post_force_boot_delay
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PostLanFirmwareModeDelay
     downstream: post_lan_firmware_mode_delay
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PostWifiReconnectDelay
     downstream: post_wifi_reconnect_delay
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: HidConnectRetryCount
     downstream: hid_connect_retry_count
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: HidConnectRetryDelay
     downstream: hid_connect_retry_delay
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: FlashWriteRetryCount
     downstream: flash_write_retry_count
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: FlashWriteRetryDelay
     downstream: flash_write_retry_delay
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WifiProcessTimeout
     downstream: wifi_process_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WifiFlashToolFileName
     downstream: wifi_flash_tool_file_name
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WifiFlashToolArgumentsTemplate
     downstream: wifi_flash_tool_arguments_template
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WifiPortOverride
     downstream: wifi_port_override
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetStateTimeout
     downstream: get_state_timeout
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Validate
     downstream: validate
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: enum
     qualified: Daqifi.Core.Firmware.FirmwareUpdateState
@@ -537,41 +730,70 @@ symbols:
     qualified: daqifi.enums.FirmwareUpdateState
     file: daqifi/enums.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Idle
     downstream: IDLE
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PreparingDevice
     downstream: PREPARING_DEVICE
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: WaitingForBootloader
     downstream: WAITING_FOR_BOOTLOADER
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Connecting
     downstream: CONNECTING
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ErasingFlash
     downstream: ERASING_FLASH
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Programming
     downstream: PROGRAMMING
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Verifying
     downstream: VERIFYING
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: JumpingToApp
     downstream: JUMPING_TO_APP
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Complete
     downstream: COMPLETE
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:FAILED>
     downstream: FAILED
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareUpdateStateChangedEventArgs
@@ -581,22 +803,34 @@ symbols:
     qualified: daqifi.firmware.update_events.FirmwareUpdateStateChangedEventArgs
     file: daqifi/firmware/update_events.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: PreviousState
     downstream: previous_state
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CurrentState
     downstream: current_state
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Operation
     downstream: operation
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ChangedAtUtc
     downstream: changed_at_utc
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.GitHubFirmwareDownloadService
@@ -606,36 +840,58 @@ symbols:
     qualified: daqifi.firmware.github_download_service.GitHubFirmwareDownloadService
     file: daqifi/firmware/github_download_service.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: GetLatestReleaseAsync
     downstream: get_latest_release
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CheckForUpdateAsync
     downstream: check_for_update
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DownloadLatestFirmwareAsync
     downstream: download_latest_firmware
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DownloadFirmwareByTagAsync
     downstream: download_firmware_by_tag
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetLatestWifiReleaseAsync
     downstream: get_latest_wifi_release
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: InvalidateCache
     downstream: invalidate_cache
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:download_wifi_firmware>
     downstream: download_wifi_firmware
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.HexFileRecord
@@ -645,19 +901,28 @@ symbols:
     qualified: daqifi.firmware.intel_hex.HexFileRecord
     file: daqifi/firmware/intel_hex.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: Address
     downstream: address
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Data
     downstream: data
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: RecordType
     downstream: record_type
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Firmware.IBootloaderProtocol
@@ -667,34 +932,58 @@ symbols:
     qualified: daqifi.firmware.bootloader.BootloaderProtocol
     file: daqifi/firmware/bootloader.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: CreateRequestVersionMessage
     downstream: create_request_version_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CreateEraseFlashMessage
     downstream: create_erase_flash_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CreateProgramFlashMessage
     downstream: create_program_flash_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CreateJumpToApplicationMessage
     downstream: create_jump_to_application_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DecodeVersionResponse
     downstream: decode_version_response
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DecodeProgramFlashResponse
     downstream: decode_program_flash_response
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DecodeEraseFlashResponse
     downstream: decode_erase_flash_response
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ParseHexFile
     downstream: parse_hex_file
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Firmware.IExternalProcessRunner
@@ -704,13 +993,16 @@ symbols:
     qualified: daqifi.firmware.external_process.ExternalProcessRunner
     file: daqifi/firmware/external_process.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: RunAsync
     downstream: run
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Firmware.IFirmwareDownloadService
@@ -720,32 +1012,52 @@ symbols:
     qualified: daqifi.firmware.download_service.FirmwareDownloadService
     file: daqifi/firmware/download_service.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: GetLatestReleaseAsync
     downstream: get_latest_release
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CheckForUpdateAsync
     downstream: check_for_update
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DownloadLatestFirmwareAsync
     downstream: download_latest_firmware
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DownloadFirmwareByTagAsync
     downstream: download_firmware_by_tag
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: GetLatestWifiReleaseAsync
     downstream: get_latest_wifi_release
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: InvalidateCache
     downstream: invalidate_cache
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:download_wifi_firmware>
     downstream: download_wifi_firmware
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Firmware.IFirmwareUpdateService
@@ -755,29 +1067,37 @@ symbols:
     qualified: daqifi.firmware.update_service.FirmwareUpdateService
     file: daqifi/firmware/update_service.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
-  rationale: "Sync `runtime_checkable` Protocol; no `Async` suffix on
-    methods (project sync convention). The C# `event StateChanged`
-    becomes a callable attribute `state_changed` (idiomatic Python
-    observer pattern)."
+  rationale: Sync `runtime_checkable` Protocol; no `Async` suffix on methods (project
+    sync convention). The C# `event StateChanged` becomes a callable attribute `state_changed`
+    (idiomatic Python observer pattern).
   members:
   - upstream: CurrentState
     downstream: current_state
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: StateChanged
     downstream: state_changed
     relation: divergent
-    notes: C# `event` → Python callable attribute (set to a callable to
-      observe transitions). One handler at a time; wrap to multiplex.
+    notes: "C# `event` \u2192 Python callable attribute (set to a callable to observe\
+      \ transitions). One handler at a time; wrap to multiplex."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: UpdateFirmwareAsync
     downstream: update_firmware
     relation: divergent
     notes: Renamed (no `Async` suffix); sync.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: UpdateWifiModuleAsync
     downstream: update_wifi_module
     relation: divergent
     notes: Renamed (no `Async` suffix); sync.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: interface
     qualified: Daqifi.Core.Firmware.ILanChipInfoProvider
@@ -787,16 +1107,18 @@ symbols:
     qualified: daqifi.firmware.lan_chip_info_provider.LanChipInfoProvider
     file: daqifi/firmware/lan_chip_info_provider.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
-  rationale: "Sync `runtime_checkable` Protocol — drops the C# `I`
-    prefix per project convention. `GetLanChipInfoAsync` → sync
-    `get_lan_chip_info` returning `Optional[LanChipInfo]`."
+  rationale: "Sync `runtime_checkable` Protocol \u2014 drops the C# `I` prefix per\
+    \ project convention. `GetLanChipInfoAsync` \u2192 sync `get_lan_chip_info` returning\
+    \ `Optional[LanChipInfo]`."
   members:
   - upstream: GetLanChipInfoAsync
     downstream: get_lan_chip_info
     relation: divergent
     notes: Renamed (no `Async` suffix); sync.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.IntelHexParser
@@ -806,28 +1128,40 @@ symbols:
     qualified: daqifi.firmware.intel_hex.IntelHexParser
     file: daqifi/firmware/intel_hex.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: ParseHexRecords
     downstream: parse_hex_records
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ParseRecords
     downstream: parse_records
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:DEFAULT_BEGIN_PROTECTED_ADDRESS>
     downstream: DEFAULT_BEGIN_PROTECTED_ADDRESS
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:DEFAULT_END_PROTECTED_ADDRESS>
     downstream: DEFAULT_END_PROTECTED_ADDRESS
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.LanChipInfo
@@ -837,19 +1171,28 @@ symbols:
     qualified: daqifi.firmware.lan_chip_info.LanChipInfo
     file: daqifi/firmware/lan_chip_info.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: ChipId
     downstream: chip_id
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: FwVersion
     downstream: fw_version
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: BuildDate
     downstream: build_date
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.LanChipInfoParser
@@ -859,22 +1202,25 @@ symbols:
     qualified: daqifi.firmware.lan_chip_info
     file: daqifi/firmware/lan_chip_info.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
-  rationale: "Static C# class of parsing helpers becomes a Python
-    module of free functions (project port convention; matches
-    ScpiMessageProducer / Pic32BootloaderMessageProducer / Consumer).
-    Both members switch from `bool TryParse(out)` to
-    `Optional[LanChipInfo]` — Pythonic, no out-params."
+  rationale: "Static C# class of parsing helpers becomes a Python module of free functions\
+    \ (project port convention; matches ScpiMessageProducer / Pic32BootloaderMessageProducer\
+    \ / Consumer). Both members switch from `bool TryParse(out)` to `Optional[LanChipInfo]`\
+    \ \u2014 Pythonic, no out-params."
   members:
   - upstream: TryParse
     downstream: try_parse
     relation: divergent
     notes: Returns Optional[LanChipInfo] instead of bool + out-param.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: TryParseLines
     downstream: try_parse_lines
     relation: divergent
     notes: Returns Optional[LanChipInfo] instead of bool + out-param.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.Pic32BootloaderMessageConsumer
@@ -884,22 +1230,30 @@ symbols:
     qualified: daqifi.firmware.bootloader
     file: daqifi/firmware/bootloader.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
-  rationale: "Static C# class becomes module-level free functions in
-    `bootloader.py`, colocated with the Producer free functions and
-    the `Pic32BootloaderProtocol` concrete class (project port
-    convention)."
+  rationale: Static C# class becomes module-level free functions in `bootloader.py`,
+    colocated with the Producer free functions and the `Pic32BootloaderProtocol` concrete
+    class (project port convention).
   members:
   - upstream: DecodeVersionResponse
     downstream: decode_version_response
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DecodeProgramFlashResponse
     downstream: decode_program_flash_response
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DecodeEraseFlashResponse
     downstream: decode_erase_flash_response
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.Pic32BootloaderMessageProducer
@@ -909,25 +1263,36 @@ symbols:
     qualified: daqifi.firmware.bootloader
     file: daqifi/firmware/bootloader.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
-  rationale: "Static C# class becomes module-level free functions in
-    `bootloader.py`, colocated with the Consumer free functions and
-    the `Pic32BootloaderProtocol` concrete class (project port
-    convention)."
+  rationale: Static C# class becomes module-level free functions in `bootloader.py`,
+    colocated with the Consumer free functions and the `Pic32BootloaderProtocol` concrete
+    class (project port convention).
   members:
   - upstream: CreateRequestVersionMessage
     downstream: create_request_version_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CreateEraseFlashMessage
     downstream: create_erase_flash_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CreateProgramFlashMessage
     downstream: create_program_flash_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CreateJumpToApplicationMessage
     downstream: create_jump_to_application_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.Pic32BootloaderProtocol
@@ -937,38 +1302,64 @@ symbols:
     qualified: daqifi.firmware.bootloader.Pic32BootloaderProtocol
     file: daqifi/firmware/bootloader.py
   relation: one_to_one
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
   rationale: null
   members:
   - upstream: CreateRequestVersionMessage
     downstream: create_request_version_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CreateEraseFlashMessage
     downstream: create_erase_flash_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CreateProgramFlashMessage
     downstream: create_program_flash_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CreateJumpToApplicationMessage
     downstream: create_jump_to_application_message
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DecodeVersionResponse
     downstream: decode_version_response
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DecodeProgramFlashResponse
     downstream: decode_program_flash_response
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: DecodeEraseFlashResponse
     downstream: decode_erase_flash_response
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ParseHexFile
     downstream: parse_hex_file
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:__init__>
     downstream: __init__
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.ProcessExternalProcessRunner
@@ -978,18 +1369,19 @@ symbols:
     qualified: daqifi.firmware.external_process.SubprocessRunner
     file: daqifi/firmware/external_process.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
-  rationale: "Renamed to `SubprocessRunner` — `Subprocess` is what
-    Python callers actually search for (mirrors the stdlib
-    `subprocess` module name). `RunAsync` → `run` (sync, project
-    convention). Implements the `ExternalProcessRunner` Protocol
-    (port of `IExternalProcessRunner`)."
+  rationale: "Renamed to `SubprocessRunner` \u2014 `Subprocess` is what Python callers\
+    \ actually search for (mirrors the stdlib `subprocess` module name). `RunAsync`\
+    \ \u2192 `run` (sync, project convention). Implements the `ExternalProcessRunner`\
+    \ Protocol (port of `IExternalProcessRunner`)."
   members:
   - upstream: RunAsync
     downstream: run
     relation: divergent
     notes: Renamed (no `Async` suffix); sync.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: Daqifi.Core.Firmware.FirmwareVersion
@@ -999,81 +1391,111 @@ symbols:
     qualified: daqifi.firmware.version.FirmwareVersion
     file: daqifi/firmware/version.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
-  rationale: "C# `readonly record struct` with positional-record fields
-    becomes a `@dataclass(frozen=True)`. C# static `TryParse(string,
-    out)` / `Compare(string, string)` collapse to `FirmwareVersion.parse`
-    classmethod plus module-level `compare` helper. Operator overloads
-    (`<`, `>`, `<=`, `>=`) come from `@total_ordering` rather than
-    explicit operator overloads."
+  rationale: C# `readonly record struct` with positional-record fields becomes a `@dataclass(frozen=True)`.
+    C# static `TryParse(string, out)` / `Compare(string, string)` collapse to `FirmwareVersion.parse`
+    classmethod plus module-level `compare` helper. Operator overloads (`<`, `>`,
+    `<=`, `>=`) come from `@total_ordering` rather than explicit operator overloads.
   members:
   - upstream: Major
     downstream: major
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Minor
     downstream: minor
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Patch
     downstream: patch
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PreLabel
     downstream: pre_label
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: PreNumber
     downstream: pre_number
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: IsPreRelease
     downstream: is_pre_release
     relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: TryParse
     downstream: parse
     relation: divergent
-    notes: "Returns Optional[FirmwareVersion] from a classmethod
-      instead of bool + out-param."
+    notes: Returns Optional[FirmwareVersion] from a classmethod instead of bool +
+      out-param.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: Compare
     downstream: null
     relation: divergent
-    notes: "Surfaced as module-level free function `compare(left, right)`
-      rather than a static class method."
+    notes: Surfaced as module-level free function `compare(left, right)` rather than
+      a static class method.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: CompareTo
     downstream: null
     relation: divergent
-    notes: "Replaced by `@total_ordering`-generated `__lt__` / `__eq__`
-      / etc. — the comparison contract is the same; the dispatch shape
-      is Pythonic."
+    notes: "Replaced by `@total_ordering`-generated `__lt__` / `__eq__` / etc. \u2014\
+      \ the comparison contract is the same; the dispatch shape is Pythonic."
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: ToString
     downstream: null
     relation: divergent
-    notes: "Surfaced as `__str__`. IR extractor doesn't track dunders,
-      hence downstream null."
+    notes: Surfaced as `__str__`. IR extractor doesn't track dunders, hence downstream
+      null.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 - upstream:
     kind: class
     qualified: <downstream-only:FirmwareRevision>
+    file: null
   downstream:
     kind: class
     qualified: daqifi.firmware.version.FirmwareRevision
     file: daqifi/firmware/version.py
   relation: divergent
-  last_synced_sha: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   notes: null
-  rationale: "Python-only — wrapper around the hyphenated firmware
-    revision string the NQ1 reports (e.g. '01-02'). C# upstream
-    handles this via raw FirmwareVersion fields. Landed in #65."
+  rationale: "Python-only \u2014 wrapper around the hyphenated firmware revision string\
+    \ the NQ1 reports (e.g. '01-02'). C# upstream handles this via raw FirmwareVersion\
+    \ fields. Landed in #65."
   members:
   - upstream: <downstream-only:group>
     downstream: group
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:revision>
     downstream: revision
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
   - upstream: <downstream-only:parse>
     downstream: parse
     relation: divergent
     notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
 divergences: []
 backlog: []
 hal_pairs: []
-updated_at: '2026-04-26T08:44:22.634611+00:00'
+updated_at: '2026-04-26T08:44:22.634611Z'
