@@ -14,9 +14,14 @@ Conventions applied:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from daqifi.enums import FirmwareUpdateState
+
+# Probe signature: (device, deadline) -> bool. ``deadline`` is the internal
+# ``_Cancellation`` from update_service.py; typing it loosely keeps the
+# options module independent of the service module.
+ReadinessProbe = Callable[[Any, Any], bool]
 
 
 # Default fall-through timeout used by ``get_state_timeout`` when the supplied
@@ -70,6 +75,24 @@ class FirmwareUpdateServiceOptions:
         "/p {port} /d WINC1500 /k /e /i aio /w"
     )
     wifi_port_override: Optional[str] = None
+
+    # Post-reconnect application-readiness probe (port of daqifi-core PR
+    # #200, closes #145 upstream). Serial transport re-enumeration succeeds
+    # well before the PIC32 application firmware is actually ready to
+    # answer protobuf status queries; if a downstream flow (LAN chip info,
+    # WiFi prep) starts before the app is up, those queries fail and
+    # callers reimplement their own retry. The probe is opt-in — when
+    # ``post_reconnect_readiness_probe`` is None, the legacy "serial
+    # reopened == done" semantics apply.
+    #
+    # Probe signature: ``probe(device, deadline) -> bool``. Return True
+    # once the device answers status queries; return False to retry after
+    # ``post_reconnect_readiness_retry_delay``. A raised exception is
+    # treated as "not ready, retry" so the update loop survives transient
+    # probe failures.
+    post_reconnect_readiness_probe: Optional[ReadinessProbe] = None
+    post_reconnect_readiness_timeout: float = 30.0
+    post_reconnect_readiness_retry_delay: float = 0.5  # 500 ms
 
     # ------------------------------------------------------------------
     # Lookup helpers
@@ -144,6 +167,41 @@ class FirmwareUpdateServiceOptions:
         if not name or not name.strip():
             raise ValueError("wifi_flash_tool_file_name cannot be empty.")
 
+        # Readiness-probe options are only meaningful when a probe is
+        # configured. Gate validation on the probe being set so callers
+        # who don't use the feature don't have to set timeout/retry fields
+        # at all (and mirrors upstream PR #200's same-shape gate).
+        if self.post_reconnect_readiness_probe is not None:
+            _validate_positive(
+                self.post_reconnect_readiness_timeout,
+                "post_reconnect_readiness_timeout",
+            )
+            _validate_positive(
+                self.post_reconnect_readiness_retry_delay,
+                "post_reconnect_readiness_retry_delay",
+            )
+
+            # JUMPING_TO_APP wraps the entire reconnect-and-probe step
+            # with ``jumping_to_application_timeout``. A readiness budget
+            # >= that outer budget can never trigger first — the outer
+            # timeout fires and callers see the generic state-timeout
+            # message instead of the readiness-specific one. Reject the
+            # configuration up-front rather than silently swallowing the
+            # readiness diagnostics. (Mirrors upstream PR #200.)
+            if (
+                self.post_reconnect_readiness_timeout
+                >= self.jumping_to_application_timeout
+            ):
+                raise ValueError(
+                    "post_reconnect_readiness_timeout "
+                    f"(got {self.post_reconnect_readiness_timeout}) must be "
+                    "strictly less than jumping_to_application_timeout "
+                    f"(got {self.jumping_to_application_timeout}) when a "
+                    "post_reconnect_readiness_probe is set, otherwise the "
+                    "outer state-timeout fires first and masks the "
+                    "readiness-specific timeout."
+                )
+
 
 def _validate_positive(value: float, parameter_name: str) -> None:
     """Raise :class:`ValueError` when ``value`` is not strictly greater than zero."""
@@ -153,4 +211,4 @@ def _validate_positive(value: float, parameter_name: str) -> None:
         )
 
 
-__all__ = ["FirmwareUpdateServiceOptions"]
+__all__ = ["FirmwareUpdateServiceOptions", "ReadinessProbe"]
