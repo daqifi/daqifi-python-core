@@ -184,7 +184,14 @@ class StreamManager:
     sample rates and channel selection.
     """
 
-    def __init__(self, comm: SerialInterface, channels: List[int], sample_rate: int = 1000, format: int = 1):
+    def __init__(
+        self,
+        comm: SerialInterface,
+        channels: List[int],
+        sample_rate: int = 1000,
+        format: int = 1,
+        per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+    ):
         """
         Initialize stream manager.
 
@@ -193,6 +200,13 @@ class StreamManager:
             channels: List of channel indices to stream
             sample_rate: Sample rate in Hz (default 1000)
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
+            per_channel_dispatch: Optional callback invoked once per
+                channel value in every produced :class:`Sample`. Signature:
+                ``(channel_index, value, timestamp_seconds) -> None``.
+                When set (typically by :meth:`NyquistDevice.create_stream`),
+                the streaming thread fans the sample out to per-channel
+                ``SampleReceived`` handlers without callers having to wire
+                dispatch themselves. Closes daqifi-python-core#107.
         """
         self._comm = comm
         self._channels = channels
@@ -201,6 +215,7 @@ class StreamManager:
         self._state = StreamState.STOPPED
         self._buffer = SampleBuffer(channels=channels, sample_rate=sample_rate)
         self._callback: Optional[Callable[[Sample], None]] = None
+        self._per_channel_dispatch = per_channel_dispatch
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._read_buffer = ""  # Buffer for partial data (JSON/CSV)
@@ -655,6 +670,7 @@ class StreamManager:
                 sample = self._read_sample()
                 if sample is not None:
                     self._buffer.add_sample(sample)
+                    self._dispatch_per_channel(sample)
                     if self._callback is not None:
                         self._callback(sample)
 
@@ -664,6 +680,24 @@ class StreamManager:
                 print(f"Streaming error: {e}")
                 self._state = StreamState.ERROR
                 break
+
+    def _dispatch_per_channel(self, sample: Sample) -> None:
+        """Fan a multi-channel :class:`Sample` out to per-channel handlers
+        when ``per_channel_dispatch`` is wired (closes #107).
+
+        A misbehaving handler must not poison the streaming thread or
+        starve other channels — log and continue per channel.
+        """
+        if self._per_channel_dispatch is None:
+            return
+        for channel_index, value in sample.channels.items():
+            try:
+                self._per_channel_dispatch(channel_index, value, sample.timestamp)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "per-channel dispatch raised on channel %d", channel_index
+                )
 
     def __enter__(self):
         """Context manager entry"""
@@ -687,7 +721,14 @@ class AsyncStreamManager:
     Requires Python 3.7+ with asyncio.
     """
 
-    def __init__(self, comm: SerialInterface, channels: List[int], sample_rate: int = 1000, format: int = 1):
+    def __init__(
+        self,
+        comm: SerialInterface,
+        channels: List[int],
+        sample_rate: int = 1000,
+        format: int = 1,
+        per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+    ):
         """
         Initialize async stream manager.
 
@@ -696,8 +737,16 @@ class AsyncStreamManager:
             channels: List of channel indices to stream
             sample_rate: Sample rate in Hz
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
+            per_channel_dispatch: See :class:`StreamManager`. Forwarded
+                to the wrapped synchronous manager.
         """
-        self._stream = StreamManager(comm, channels, sample_rate, format)
+        self._stream = StreamManager(
+            comm,
+            channels,
+            sample_rate,
+            format,
+            per_channel_dispatch=per_channel_dispatch,
+        )
 
     async def start(self):
         """Start streaming (async)"""

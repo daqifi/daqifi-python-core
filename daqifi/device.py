@@ -5,7 +5,7 @@ Provides high-level API for device interaction.
 """
 
 from typing import Dict, Any, Optional, Union, List
-from ._internal.comm import SerialInterface, PowerState, DeviceMetadata
+from ._internal.comm import DataSample, SerialInterface, PowerState, DeviceMetadata
 from ._internal import scpi, scpi_commands
 from ._internal.scpi import check_setter_response
 from .channels import (
@@ -993,11 +993,44 @@ class NyquistDevice:
                     f"Invalid channel {ch}. Valid range: 0-{max_channels-1}"
                 )
 
+        dispatch = self._build_per_channel_dispatch()
+
         # Create appropriate stream manager
         if async_mode:
-            return AsyncStreamManager(self._comm, channels, sample_rate, format)
+            return AsyncStreamManager(
+                self._comm, channels, sample_rate, format,
+                per_channel_dispatch=dispatch,
+            )
         else:
-            return StreamManager(self._comm, channels, sample_rate, format)
+            return StreamManager(
+                self._comm, channels, sample_rate, format,
+                per_channel_dispatch=dispatch,
+            )
+
+    def _build_per_channel_dispatch(self):
+        """Return a callable the StreamManager will invoke per channel
+        per produced :class:`Sample` so per-channel ``SampleReceived``
+        handlers fire automatically (closes #107).
+
+        The returned closure is intentionally tolerant: indices outside
+        the analog-input range are skipped silently (StreamManager
+        already validated channel indices at start_streaming time, but
+        the dispatch path runs in the streaming thread where partially-
+        formed samples shouldn't crash the loop).
+        """
+        from datetime import datetime, timezone
+
+        def _dispatch(channel_index: int, value: float, timestamp_seconds: float) -> None:
+            if self._analog_inputs is None:
+                return
+            if not (0 <= channel_index < len(self._analog_inputs)):
+                return
+            ts = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
+            self._analog_inputs[channel_index].set_active_sample(
+                DataSample(timestamp=ts, value=value)
+            )
+
+        return _dispatch
 
     def __enter__(self):
         """
