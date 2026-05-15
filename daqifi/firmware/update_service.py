@@ -1263,6 +1263,131 @@ class DefaultFirmwareUpdateService:
         self._safe_disconnect_hid()
         self._wait_for_serial_reconnect(device, deadline)
 
+        # Application-readiness probe (port of daqifi-core PR #200,
+        # closes #145 upstream). Serial transport re-enumeration succeeds
+        # well before the PIC32 application firmware can answer protobuf
+        # status queries — the probe gives downstream flows (LAN chip
+        # info, WiFi prep) a chance to wait for true application
+        # readiness instead of reimplementing their own retry. Opt-in via
+        # ``options.post_reconnect_readiness_probe``; when None, legacy
+        # "serial reopened == done" semantics apply.
+        probe = self._options.post_reconnect_readiness_probe
+        if probe is not None:
+            self._wait_for_application_ready(device, probe, deadline)
+
+    def _wait_for_application_ready(
+        self,
+        device: "DaqifiStreamingDevice",
+        probe: Callable[["DaqifiStreamingDevice", _Cancellation], bool],
+        outer_deadline: _Cancellation,
+    ) -> None:
+        """Block until ``probe`` returns True or the readiness budget elapses.
+
+        Mirrors upstream ``WaitForApplicationReadyAsync`` from
+        ``Daqifi.Core/Firmware/FirmwareUpdateService.cs`` (PR #200).
+        Probe exceptions are treated as "not ready, retry" so the
+        update loop survives transient probe failures; the most recent
+        exception is re-raised as the cause when the budget elapses
+        without success.
+        """
+        total_timeout = self._options.post_reconnect_readiness_timeout
+        retry_delay = self._options.post_reconnect_readiness_retry_delay
+
+        # Surface the wait at INFO so observers tailing the log can
+        # distinguish "stuck" from "deliberately polling". The wait can
+        # take up to ``post_reconnect_readiness_timeout`` (default 30s);
+        # without this, the JUMPING_TO_APP state appears hung beyond
+        # the initial transport reopen.
+        self._logger.info(
+            "Waiting up to %.3fs for device to become application-ready "
+            "(post-reconnect readiness probe).",
+            total_timeout,
+        )
+        wait_start = time.monotonic()
+
+        # Track the readiness budget locally; the outer deadline is checked
+        # via ``outer_deadline.check()`` each iteration so both gates fire.
+        readiness_deadline_at = wait_start + total_timeout
+
+        # Capture the most recent probe-thrown exception so the eventual
+        # TimeoutError can carry the underlying cause as ``__cause__``.
+        # Without this, deterministic probe failures (e.g. transport
+        # says it's open but the device never responds to status
+        # queries) report only as "timed out" — losing the actual error
+        # context unless DEBUG logs are on.
+        last_probe_exception: Optional[BaseException] = None
+
+        # Tracks how many probe invocations have actually run. Distinct
+        # from any loop iteration counter so the timeout messages don't
+        # claim "attempt N" when the budget fired before a probe ever
+        # executed.
+        probes_executed = 0
+
+        while True:
+            outer_deadline.check()
+
+            if time.monotonic() >= readiness_deadline_at:
+                msg = (
+                    f"Device did not become application-ready within "
+                    f"{total_timeout:.3f}s (probes executed: "
+                    f"{probes_executed}). The transport reconnected but "
+                    "the readiness probe never returned true; the device "
+                    "may still be initializing or the firmware may have "
+                    "failed to start."
+                )
+                raise TimeoutError(msg) from last_probe_exception
+
+            try:
+                probes_executed += 1
+                is_ready = probe(device, outer_deadline)
+
+                # Successful probe invocation (True OR False) means the
+                # most recent attempt completed normally. Clear
+                # last_probe_exception so a later timeout doesn't carry
+                # forward a stale exception from an earlier failed
+                # attempt.
+                last_probe_exception = None
+
+                if is_ready:
+                    elapsed = time.monotonic() - wait_start
+                    self._logger.info(
+                        "Device became application-ready after %.3fs on "
+                        "probe attempt %d.",
+                        elapsed,
+                        probes_executed,
+                    )
+                    return
+
+                self._logger.debug(
+                    "Application-ready probe returned false on attempt %d; "
+                    "will retry.",
+                    probes_executed,
+                )
+            except _CancelledError:
+                # Outer cancellation propagated through the probe — bail
+                # immediately, do NOT swallow as a probe failure.
+                raise
+            except BaseException as exc:  # noqa: BLE001
+                # Any other exception from the probe is treated as
+                # "not ready, retry" so the update loop survives
+                # transient probe failures (e.g. probe queries time out
+                # because the firmware hasn't booted yet).
+                last_probe_exception = exc
+                self._logger.debug(
+                    "Application-ready probe threw on attempt %d "
+                    "(%s); treating as not-ready and retrying.",
+                    probes_executed,
+                    exc,
+                )
+
+            # Sleep until the next attempt, but never beyond the
+            # readiness deadline. Partial-sleep keeps the timeout
+            # message's "probes executed: N" count honest.
+            remaining = readiness_deadline_at - time.monotonic()
+            if remaining <= 0:
+                continue  # next loop iteration raises the TimeoutError
+            self._sleep_with_cancel(min(retry_delay, remaining), outer_deadline)
+
     def _wait_for_serial_reconnect(
         self,
         device: "DaqifiStreamingDevice",
