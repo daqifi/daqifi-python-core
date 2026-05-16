@@ -378,6 +378,10 @@ class StreamManager:
             if sample is not None:
                 samples.append(sample)
                 self._buffer.add_sample(sample)
+                # Per-channel dispatch must fire from blocking reads too
+                # — silently skipping it left polling-mode callers' channel
+                # handlers stuck on stale samples (Qodo PR #142 pass 3 #1).
+                self._dispatch_per_channel(sample)
 
             time.sleep(0.001)  # Small delay to avoid busy loop
 
@@ -714,12 +718,19 @@ class StreamManager:
         """
         if self._per_channel_dispatch is None:
             return
-        if self._dispatch_sample_base is None:
+        if self._dispatch_sample_base is None or self._dispatch_epoch_base is None:
             self._dispatch_sample_base = sample.timestamp
             self._dispatch_epoch_base = time.time()
-        epoch_seconds = self._dispatch_epoch_base + (
-            sample.timestamp - self._dispatch_sample_base
-        )
+        delta = sample.timestamp - self._dispatch_sample_base
+        # Re-anchor on backwards or unreasonably large jumps (device
+        # tick wrap, mid-stream reset, parser reseating after a recovery
+        # window). Without this guard a wrap would emit epoch values
+        # decades in the past or future. (Qodo PR #142 pass 3 #2.)
+        if delta < 0.0 or delta > 60.0:
+            self._dispatch_sample_base = sample.timestamp
+            self._dispatch_epoch_base = time.time()
+            delta = 0.0
+        epoch_seconds = self._dispatch_epoch_base + delta
         for channel_index, value in sample.channels.items():
             try:
                 self._per_channel_dispatch(channel_index, value, epoch_seconds)

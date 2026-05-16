@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 from daqifi import DataSample
 from daqifi.channels import AnalogInputChannel, AnalogInputs
-from daqifi.streaming import Sample, StreamManager
+from daqifi.streaming import Sample, StreamManager, StreamState
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +80,76 @@ class TestStreamManagerPerChannelDispatch:
         sample = Sample(timestamp=0.0, channels={0: 1.0, 1: 2.0})
         # Should not raise / should not require any external state.
         sm._dispatch_per_channel(sample)
+
+    def test_re_anchors_on_backwards_jump(self):
+        """A backwards device-time jump (counter wrap or mid-stream
+        reset) must re-anchor to current wall-clock so emitted epoch
+        values stay sane. (Qodo PR #142 pass 3 #2.)"""
+        import time
+
+        comm = MagicMock()
+        calls = []
+        sm = StreamManager(
+            comm, [0], per_channel_dispatch=lambda i, v, t: calls.append(t)
+        )
+
+        sm._dispatch_per_channel(Sample(timestamp=100.0, channels={0: 1.0}))
+        time.sleep(0.01)
+        # Now jump device-time backwards by 50s.
+        before = time.time()
+        sm._dispatch_per_channel(Sample(timestamp=50.0, channels={0: 2.0}))
+        after = time.time()
+
+        # Second emission must be near current wall-clock, not in the past.
+        assert before <= calls[1] <= after
+        # And it must NOT be 50s before the first (the naive path
+        # would yield calls[0] - 50 which is ~50s in the past).
+        assert calls[1] >= calls[0]
+
+    def test_re_anchors_on_unreasonable_forward_jump(self):
+        """A leap of >60s in device-relative time triggers re-anchor;
+        protects against tick counter glitches."""
+        import time
+
+        comm = MagicMock()
+        calls = []
+        sm = StreamManager(
+            comm, [0], per_channel_dispatch=lambda i, v, t: calls.append(t)
+        )
+
+        sm._dispatch_per_channel(Sample(timestamp=10.0, channels={0: 1.0}))
+        # 5min jump forward — beyond the 60s threshold.
+        before = time.time()
+        sm._dispatch_per_channel(Sample(timestamp=310.0, channels={0: 2.0}))
+        after = time.time()
+
+        # Re-anchored — second emission ≈ current wall-clock, not
+        # 5 minutes after first.
+        assert before <= calls[1] <= after
+        assert calls[1] - calls[0] < 5.0  # would be 300 without re-anchor
+
+    def test_dispatch_fires_from_blocking_read(self):
+        """`stream.read()` (polling/blocking mode) must also fan out to
+        per-channel handlers — not just callback mode. Otherwise users
+        who poll with `.read()` get silent SampleReceived handlers.
+        (Qodo PR #142 pass 3 #1.)"""
+        comm = MagicMock()
+        calls = []
+        sm = StreamManager(
+            comm, [0], per_channel_dispatch=lambda i, v, t: calls.append((i, v))
+        )
+        sm._state = StreamState.RUNNING
+        # Stub _read_sample to return one sample then None forever.
+        produced = [Sample(timestamp=1.0, channels={0: 7.0})]
+
+        def fake_read():
+            return produced.pop(0) if produced else None
+
+        sm._read_sample = fake_read
+        result = sm.read(num_samples=1, timeout=1.0)
+
+        assert len(result) == 1
+        assert calls == [(0, 7.0)]
 
     def test_misbehaving_handler_is_swallowed_per_channel(self):
         """A handler that raises must not poison the streaming thread
