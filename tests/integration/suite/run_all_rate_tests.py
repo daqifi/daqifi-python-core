@@ -143,6 +143,16 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
             # cleanup failure in the diagnostic — silent suppression
             # hides further trouble. (Qodo PR 144 pass 3 #3.)
             cleanup_errors = []
+            # Drain leftover binary residue from the aborted SD
+            # download before issuing SCPI cleanup commands —
+            # otherwise send_command() will read partial binary as
+            # its SCPI response and misparse. (Qodo PR 144 pass 5
+            # importance 8.)
+            try:
+                device._comm._serial.reset_input_buffer()
+            except Exception as e:
+                print(f"  WARNING: cleanup pre-drain failed: {e}")
+                cleanup_errors.append(f"pre-drain: {e}")
             for cmd in (
                 'SYST:STOR:SD:FILE ""',
                 'SYST:STOR:SD:ENAble 0',
