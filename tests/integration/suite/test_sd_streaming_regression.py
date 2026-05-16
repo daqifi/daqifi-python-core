@@ -16,10 +16,10 @@ Tests:
 Hardware requirements:
   - NQ1 board (MC12bADC, 16 public channels 0-15)
   - SD card inserted (tested with SanDisk Extreme PRO A2 256GB)
-  - USB serial connection (/dev/ttyACM0)
+  - USB serial connection (<port>)
 
 Usage:
-  python3 -u test_sd_streaming_regression.py [--device /dev/ttyACM0] [--duration 300] [--pattern 1]
+  python3 -u test_sd_streaming_regression.py [--device <port>] [--duration 300] [--pattern 1]
 
 Pass criteria:
   - QueueDroppedSamples == 0
@@ -43,6 +43,7 @@ NQ1 channel types (for reference):
 """
 import serial
 import time
+import os
 import sys
 import argparse
 
@@ -182,7 +183,7 @@ def run_test(ser, label, channels, freq, duration_sec, pattern=0):
 
 def main():
     parser = argparse.ArgumentParser(description='SD Card Streaming Regression Test')
-    parser.add_argument('--device', default='/dev/ttyACM0', help='Serial device path')
+    parser.add_argument('--device', default=os.environ.get('DAQIFI_DEVICE_PORT'), help='Serial device path')
     parser.add_argument('--duration', type=int, default=300, help='Test duration in seconds (default: 300)')
     parser.add_argument('--pattern', type=int, default=0, choices=[0,1,2,3,4,5,6],
                         help='Test pattern: 0=real ADC (default), 1=counter, 2=midscale, 3=fullscale, 4=walking, 5=triangle, 6=sine')

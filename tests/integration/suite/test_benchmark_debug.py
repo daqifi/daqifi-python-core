@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
+import os
 import sys
 
 from daqifi import NyquistDevice
 
+# Per CLAUDE.md: resolve serial port from CLI arg or env var, never
+# from a hardcoded workstation-specific identifier.
+port = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('DAQIFI_DEVICE_PORT')
+if not port:
+    sys.exit("usage: test_benchmark_debug.py <port>  (or set DAQIFI_DEVICE_PORT)")
+
 # Connect
-print("Connecting to COM3...")
-device = NyquistDevice.connect("COM3")
+print(f"Connecting to {port}...")
+device = NyquistDevice.connect(port)
 print(f"Connected to {device.variant.value}\n")
 
 # Enable SD

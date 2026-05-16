@@ -17,14 +17,16 @@ Generates comprehensive text report with:
 - Bottleneck identification
 
 Usage:
-    python run_all_rate_tests.py COM3 [duration] [--single|--dual|--all]
+    python run_all_rate_tests.py <port> [duration] [--single|--dual|--all]
+    # Or rely on env var: DAQIFI_DEVICE_PORT
 
 Examples:
-    python run_all_rate_tests.py COM3 10          # Single-channel tests only
-    python run_all_rate_tests.py COM3 10 --dual   # Dual-channel tests only
-    python run_all_rate_tests.py COM3 10 --all    # Both single and dual
+    python run_all_rate_tests.py <port> 10          # Single-channel tests only
+    python run_all_rate_tests.py <port> 10 --dual   # Dual-channel tests only
+    python run_all_rate_tests.py <port> 10 --all    # Both single and dual
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -352,11 +354,12 @@ def generate_text_report(results, output_file="adc_test_report.txt"):
 
 
 def main():
-    if len(sys.argv) < 2:
+    import os
+    # Resolve port from CLI arg or env (CLAUDE.md identity rule).
+    port = sys.argv[1] if len(sys.argv) >= 2 else os.environ.get('DAQIFI_DEVICE_PORT')
+    if not port:
         print(__doc__)
         sys.exit(1)
-
-    port = sys.argv[1]
 
     # Determine test mode first
     test_mode = '--single'  # default

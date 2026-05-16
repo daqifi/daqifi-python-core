@@ -296,7 +296,7 @@ def main():
     parser.add_argument('--duration', type=float, default=5.0, help='Streaming duration per test (seconds)')
     args = parser.parse_args()
 
-    port = args.port or '/dev/ttyACM0'
+    port = args.port or os.environ.get('DAQIFI_DEVICE_PORT')
     if not os.path.exists(port):
         print(f"ERROR: Device not found at {port}. Connect device and try again.")
         sys.exit(1)

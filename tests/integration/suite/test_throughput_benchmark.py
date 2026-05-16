@@ -8,8 +8,8 @@ Reports samples/sec, bytes/sec, and loss percentage.
 Requires firmware with SYST:STR:BENCHmark support (PR #234+).
 
 Usage:
-    python test_throughput_benchmark.py /dev/ttyACM0
-    python test_throughput_benchmark.py COM3 15
+    python test_throughput_benchmark.py <port>
+    python test_throughput_benchmark.py <port> 15
 """
 
 import sys

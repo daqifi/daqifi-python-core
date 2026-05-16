@@ -1,18 +1,24 @@
 # DAQiFi Nyquist Test Suite Configuration Template
 # ================================================
-# Copy this file to test_config.yaml and fill in your credentials
+# Copy this file to test_config.yaml (gitignored) and fill in your
+# rig-specific values. NEVER commit a populated test_config.yaml —
+# the suite's loader supports ${ENV_VAR} interpolation, so values
+# can also be sourced from environment variables (preferred for
+# CI / shared rigs). See CLAUDE.md "Local rig file" and
+# "Identity-gating destructive operations" for the policy.
 
 # Device Configuration
 device:
-  port: "/dev/ttyACM0"
+  port: "${DAQIFI_DEVICE_PORT}"   # e.g. /dev/ttyACM<N> or COM<N>
   baudrate: 115200
   variant: "NQ1"  # NQ1, NQ2, or NQ3
 
 # WiFi Configuration
 wifi:
-  # Network credentials - REPLACE WITH YOUR VALUES
-  ssid: "YourNetworkSSID"
-  password: "YourNetworkPassword"
+  # Credentials MUST come from environment (.env / shell exports),
+  # never from a committed value. See README.md for the env var list.
+  ssid: "${WIFI_SSID}"
+  password: "${WIFI_PASSWORD}"
   security: 3  # 0=Open, 3=WPA
   nettype: 1   # 1=STA (client), 4=AP (access point)
 
@@ -22,7 +28,7 @@ wifi:
 
   # Restore to AP mode after testing?
   restore_ap_mode: true
-  restore_ssid: "DAQiFi"
+  restore_ssid: "${DAQIFI_DEVICE_AP_SSID}"  # the device's AP-mode SSID
 
 # Test Configuration
 tests:
@@ -76,22 +82,22 @@ output:
 
 # Example 1: Device AP Mode (no internet required)
 # wifi:
-#   ssid: "DAQiFi"
+#   ssid: "${DAQIFI_DEVICE_AP_SSID}"
 #   password: ""
 #   security: 0
 #   nettype: 4
 
 # Example 2: Open Network
 # wifi:
-#   ssid: "xfinitywifi"
+#   ssid: "${WIFI_SSID}"
 #   password: ""
 #   security: 0
 #   nettype: 1
 
 # Example 3: WPA Network
 # wifi:
-#   ssid: "YourNetwork"
-#   password: "YourPassword"
+#   ssid: "${WIFI_SSID}"
+#   password: "${WIFI_PASSWORD}"
 #   security: 3
 #   nettype: 1
 

@@ -26,29 +26,54 @@ copies use to find the core in a sibling directory have been stripped.
 ## Why these aren't pytest-collected
 
 Several scripts open the serial port at module top level (e.g.
-`device = NyquistDevice.connect('/dev/ttyACM0')`), so pytest's
-collection phase would attempt the connection and either hang or
-fail every collection on a machine without hardware. A `conftest.py`
-in this directory tells pytest to skip the whole tree.
+`device = NyquistDevice.connect(<port>)`), so pytest's collection
+phase would attempt the connection and either hang or fail every
+collection on a machine without hardware. A `conftest.py` in this
+directory tells pytest to skip the whole tree.
+
+## Required environment
+
+Per the repo's [CLAUDE.md](../../../CLAUDE.md) "Identify your device"
++ "Local rig file" sections, the suite refuses to use hardcoded
+workstation-specific identifiers. Set these before running any
+script:
+
+| Env var                           | Purpose                                          |
+|-----------------------------------|--------------------------------------------------|
+| `DAQIFI_DEVICE_PORT`              | Serial port (e.g. `/dev/ttyACM<N>` or `COM<N>`)  |
+| `DAQIFI_EXPECTED_SERIAL_NUMBER`   | Your device's protobuf SN — gates `device_reset` |
+| `DAQIFI_DEVICE_HOST`              | LAN IP (only for WiFi-mode scripts)              |
+| `WIFI_SSID` / `WIFI_PASSWORD`     | For YAML config interpolation                    |
+| `DAQIFI_DEVICE_AP_SSID`           | Device's AP-mode SSID (for restore_ssid)         |
+
+The harness's `device_reset()` will refuse to issue state-changing
+SCPI commands unless `DAQIFI_EXPECTED_SERIAL_NUMBER` matches the
+connected device's protobuf serial number, or you set
+`DAQIFI_ALLOW_UNGATED_RESET=1` to opt out (only safe on a solo
+single-device rig).
 
 ## Running a script
 
 ```bash
-# From repo root, with the device on /dev/ttyACM0 (Linux/WSL) or COM9 (Windows):
+# Identify your device (see CLAUDE.md "Identify your device"), then:
+export DAQIFI_DEVICE_PORT=<your-port>
+export DAQIFI_EXPECTED_SERIAL_NUMBER=<your-sn>
 cd tests/integration/suite
 python3 test_max_throughput.py
 ```
 
-Most scripts accept config flags or read `test_config.yaml`. Inspect
-each file's top-of-module argparse / config section before invoking.
+Most scripts accept config flags or read `test_config.yaml` (copied
+from `test_config.yaml.template`). Inspect each file's top-of-module
+argparse / config section before invoking.
 
 ## Canonical streaming pattern
 
 ```python
+import os
 from daqifi import NyquistDevice
 from test_harness import ReliableSCPI, StreamingMeasurement
 
-device = NyquistDevice.connect("/dev/ttyACM0")
+device = NyquistDevice.connect(os.environ["DAQIFI_DEVICE_PORT"])
 scpi = ReliableSCPI(device)
 m = StreamingMeasurement(scpi, scpi._serial)
 m.start(freq=5000, duration=10, is_csv=True)

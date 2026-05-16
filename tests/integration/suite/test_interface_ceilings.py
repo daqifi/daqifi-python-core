@@ -10,8 +10,9 @@ Runs FOUR tiers:
 Uses FastReader (1ms thread). Saves results to benchmarks/ as CSV.
 
 Usage:
-    python3 test_interface_ceilings.py /dev/ttyACM0
-    python3 test_interface_ceilings.py /dev/ttyACM0 10 --wifi 192.168.1.160
+    python3 test_interface_ceilings.py <port>
+    python3 test_interface_ceilings.py <port> 10 --wifi <device_ip>
+    # Or rely on env vars: DAQIFI_DEVICE_PORT / DAQIFI_DEVICE_HOST
 """
 
 import sys, time, threading, csv as csvmod, os, socket, argparse
@@ -203,11 +204,14 @@ def find_ceiling(scpi, ser, iface, fmt, channels, rates, label, benchmark_mode, 
 
 
 def main():
+    # Resolve rig-specific identifiers from CLI → env (see CLAUDE.md).
     parser = argparse.ArgumentParser(description='4-tier ceiling test for all interfaces')
-    parser.add_argument('port', nargs='?', default='/dev/ttyACM0')
+    parser.add_argument('port', nargs='?', default=os.environ.get('DAQIFI_DEVICE_PORT'), help='USB serial port (or env DAQIFI_DEVICE_PORT)')
     parser.add_argument('duration', nargs='?', type=int, default=10)
-    parser.add_argument('--wifi', type=str, default=None, help='Device WiFi IP for WiFi tests')
+    parser.add_argument('--wifi', type=str, default=os.environ.get('DAQIFI_DEVICE_HOST'), help='Device WiFi IP (or env DAQIFI_DEVICE_HOST)')
     args = parser.parse_args()
+    if not args.port:
+        parser.error('port is required (CLI arg or DAQIFI_DEVICE_PORT env)')
     dur = args.duration
 
     device = NyquistDevice.connect(args.port)

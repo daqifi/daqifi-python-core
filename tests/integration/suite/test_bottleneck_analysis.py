@@ -9,6 +9,7 @@ For each interface×format×channels:
   3. Log the buffer sizes at failure point
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -158,7 +159,7 @@ def find_ceiling(scpi, interface, fmt, channels, label, duration=10):
 
 
 def main():
-    port = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyACM0'
+    port = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('DAQIFI_DEVICE_PORT')
     duration = int(sys.argv[2]) if len(sys.argv) > 2 else 10
 
     print("=" * 80)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """USB stress test — push beyond baseline limits with 16KB DMA write buffer."""
 
+import os
 import sys
 import time
 import csv as csvmod
@@ -61,7 +62,7 @@ def run_usb_test(scpi, fmt, channels, freq, duration_sec):
 
 
 def main():
-    port = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyACM0'
+    port = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('DAQIFI_DEVICE_PORT')
     duration = int(sys.argv[2]) if len(sys.argv) > 2 else 10
 
     print("=" * 70)

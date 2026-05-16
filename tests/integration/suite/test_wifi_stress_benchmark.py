@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """WiFi throughput stress test — streams over WiFi TCP, commands over USB."""
 
+import os
 import sys
 import time
 import socket
@@ -124,8 +125,26 @@ def run_wifi_test(scpi, tcp, fmt, channels, freq, duration_sec):
 
 
 def main():
-    port = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyACM0'
-    host = sys.argv[2] if len(sys.argv) > 2 else '192.168.1.160'
+    # Rig-specific identifiers MUST NOT be hardcoded — see CLAUDE.md
+    # "Identify your device" + "Local rig file" sections. Resolve from
+    # CLI arg → env var; refuse to run silently against an unknown
+    # device or workstation-shared IP.
+    import os
+    port = (
+        sys.argv[1] if len(sys.argv) > 1
+        else os.environ.get('DAQIFI_DEVICE_PORT')
+    )
+    host = (
+        sys.argv[2] if len(sys.argv) > 2
+        else os.environ.get('DAQIFI_DEVICE_HOST')
+    )
+    if not port or not host:
+        sys.exit(
+            "usage: test_wifi_stress_benchmark.py <port> <host> [duration]\n"
+            "  or set DAQIFI_DEVICE_PORT and DAQIFI_DEVICE_HOST. "
+            "Default values were removed to avoid writing to a "
+            "neighbour's rig — see CLAUDE.md."
+        )
     duration = int(sys.argv[3]) if len(sys.argv) > 3 else 10
 
     print("=" * 70)

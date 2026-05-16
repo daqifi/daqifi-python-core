@@ -351,6 +351,49 @@ class StreamingMeasurement:
         self.leaked = qd > 0 or ud > 0 or sd_d > 0 or wd > 0
 
 
+def _assert_expected_device(scpi):
+    """Gate destructive harness ops behind a serial-number identity
+    check, per the daqifi-python-core CLAUDE.md "Identity-gating
+    destructive operations" rule.
+
+    Refuses to mutate device state when:
+      - ``DAQIFI_EXPECTED_SERIAL_NUMBER`` is set and does NOT match
+        the connected device's ``metadata.serial_number``, OR
+      - The env var is unset AND ``DAQIFI_ALLOW_UNGATED_RESET`` is
+        not set to ``"1"`` (the explicit opt-out for solo rigs that
+        accept the risk).
+
+    Multiple agent sessions frequently share a workstation with
+    multiple DAQiFi units attached. Mass-resetting the wrong unit
+    can wipe another agent's in-flight test state.
+    """
+    import os
+    expected = os.environ.get("DAQIFI_EXPECTED_SERIAL_NUMBER")
+    if expected:
+        try:
+            actual = scpi._device.metadata.serial_number
+        except AttributeError as e:
+            raise RuntimeError(
+                f"Refusing destructive harness op: couldn't read "
+                f"metadata.serial_number to verify identity ({e})."
+            )
+        if str(actual) != str(expected):
+            raise RuntimeError(
+                f"Refusing destructive harness op: connected device SN "
+                f"{actual!r} != expected {expected!r}. Set "
+                f"DAQIFI_EXPECTED_SERIAL_NUMBER to the right unit or "
+                f"detach the other(s)."
+            )
+        return
+    if os.environ.get("DAQIFI_ALLOW_UNGATED_RESET") != "1":
+        raise RuntimeError(
+            "Refusing destructive harness op: neither "
+            "DAQIFI_EXPECTED_SERIAL_NUMBER (the gate) nor "
+            "DAQIFI_ALLOW_UNGATED_RESET=1 (the opt-out) is set. See "
+            "CLAUDE.md 'Identity-gating destructive operations'."
+        )
+
+
 def device_reset(scpi):
     """Reset device to a clean, known state between tests.
 
@@ -365,6 +408,9 @@ def device_reset(scpi):
     - MemoryConfig zeroed (auto mode for next StartStreamData)
     - Serial buffer drained
     """
+    # Verify identity before issuing any state-changing SCPI command —
+    # see CLAUDE.md "Identity-gating destructive operations".
+    _assert_expected_device(scpi)
     # Stop any active streaming
     scpi.command("SYST:StopStreamData", delay=1.0)
     scpi.drain(1.0)

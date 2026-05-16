@@ -251,7 +251,7 @@ def main():
         print("Usage: python test_usb_transfer_integrity.py <port> <filename> [reference_file]")
         print()
         print("Example:")
-        print("  python test_usb_transfer_integrity.py /dev/ttyACM0 5kHz.csv sd_download/5kHz_copy.csv")
+        print("  python test_usb_transfer_integrity.py <port> 5kHz.csv sd_download/5kHz_copy.csv")
         sys.exit(1)
 
     port = sys.argv[1]

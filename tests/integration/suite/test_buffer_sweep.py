@@ -7,8 +7,8 @@ Uses the StreamingBufferPool partition (SYST:MEM:AUTO or explicit sizing)
 to vary buffer sizes between test runs. Sample pool gets remaining space.
 
 Usage:
-    python test_buffer_sweep.py /dev/ttyACM0
-    python test_buffer_sweep.py /dev/ttyACM0 10  # 10s per test
+    python test_buffer_sweep.py <port>
+    python test_buffer_sweep.py <port> 10  # 10s per test
 """
 
 import sys

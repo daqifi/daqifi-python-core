@@ -4,6 +4,7 @@
 Uses StreamingMeasurement from test_harness for accurate PC-controlled
 rate measurement.
 """
+import os
 import sys, time
 from pathlib import Path
 
@@ -38,7 +39,7 @@ def test(scpi, ser, iface, fmt, channels, freq, dur=10):
     return m.pc_sps, m.pc_kbps, m.leaked, qd, ud, sd
 
 
-port = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyACM0'
+port = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('DAQIFI_DEVICE_PORT')
 device = NyquistDevice.connect(port)
 scpi = ReliableSCPI(device)
 ser = device._comm._serial

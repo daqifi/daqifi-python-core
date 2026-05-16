@@ -17,7 +17,7 @@ Total: ~40 configs × ~8 rate steps × 10s = ~53 min ceiling sweep
 
 Usage:
     python3 test_overnight_characterization.py [port] [--duration N] [--endurance N]
-    python3 test_overnight_characterization.py /dev/ttyACM0 --duration 10 --endurance 60
+    python3 test_overnight_characterization.py <port> --duration 10 --endurance 60
 
 Requires: daqifi-python-core (pip install -e ../daqifi-python-core)
 """
@@ -244,7 +244,7 @@ def run_endurance(scpi, ser, iface, fmt, channels, freq, label, dur=60, obdiag=N
 
 def main():
     parser = argparse.ArgumentParser(description='Overnight streaming characterization')
-    parser.add_argument('port', nargs='?', default='/dev/ttyACM0')
+    parser.add_argument('port', nargs='?', default=os.environ.get('DAQIFI_DEVICE_PORT'))
     parser.add_argument('--duration', type=int, default=10,
                         help='Seconds per rate step in ceiling sweep (default: 10)')
     parser.add_argument('--endurance', type=int, default=60,

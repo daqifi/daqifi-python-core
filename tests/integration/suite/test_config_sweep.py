@@ -7,10 +7,12 @@ to account for run-to-run variance.
 Allowed combos: USB, SD, WiFi (each solo). WiFi+SD blocked (shared SPI bus).
 
 Usage:
-    python3 test_config_sweep.py /dev/ttyACM0
-    python3 test_config_sweep.py /dev/ttyACM0 --wifi 192.168.1.160
+    python3 test_config_sweep.py <port>
+    python3 test_config_sweep.py <port> --wifi <device_ip>
+    # Or rely on env vars: DAQIFI_DEVICE_PORT / DAQIFI_DEVICE_HOST
 """
 
+import os
 import sys
 import time
 import socket
@@ -213,11 +215,15 @@ def run_test(scpi, interface, fmt, channels, freq, duration, label, tcp=None):
 
 
 def main():
+    # Resolve rig-specific identifiers from CLI → env (see CLAUDE.md).
+    import os
     parser = argparse.ArgumentParser(description='Config sweep: max throughput on every allowed path')
-    parser.add_argument('port', nargs='?', default='/dev/ttyACM0', help='USB serial port')
-    parser.add_argument('--wifi', type=str, default=None, help='Device WiFi IP for WiFi tests')
+    parser.add_argument('port', nargs='?', default=os.environ.get('DAQIFI_DEVICE_PORT'), help='USB serial port (or env DAQIFI_DEVICE_PORT)')
+    parser.add_argument('--wifi', type=str, default=os.environ.get('DAQIFI_DEVICE_HOST'), help='Device WiFi IP (or env DAQIFI_DEVICE_HOST)')
     parser.add_argument('--duration', type=int, default=10, help='Seconds per test (default 10)')
     args = parser.parse_args()
+    if not args.port:
+        parser.error('port is required (CLI arg or DAQIFI_DEVICE_PORT env)')
 
     duration = args.duration
     print("=" * 70)

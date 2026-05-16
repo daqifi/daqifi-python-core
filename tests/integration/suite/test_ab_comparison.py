@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-"""A/B branch comparison: fast reader, push to max, check for any leaks."""
+"""A/B branch comparison: fast reader, push to max, check for any leaks.
+
+Usage:
+    python3 test_ab_comparison.py <port>
+    # Or rely on env: DAQIFI_DEVICE_PORT
+"""
+import os
 import sys, time, threading
 from daqifi import NyquistDevice
 from test_harness import ReliableSCPI, StreamingMeasurement
 
-device = NyquistDevice.connect('/dev/ttyACM0')
+# Per CLAUDE.md: rig-specific identifiers come from CLI arg or env,
+# never from a tracked literal.
+_port = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('DAQIFI_DEVICE_PORT')
+if not _port:
+    sys.exit("usage: test_ab_comparison.py <port>  (or set DAQIFI_DEVICE_PORT)")
+device = NyquistDevice.connect(_port)
 scpi = ReliableSCPI(device)
 ser = device._comm._serial
 
