@@ -1,0 +1,109 @@
+# DAQiFi Nyquist Test Suite Configuration Template
+# ================================================
+# Copy this file to test_config.yaml (gitignored) and fill in your
+# rig-specific values. NEVER commit a populated test_config.yaml —
+# the suite's loader supports ${ENV_VAR} interpolation, so values
+# can also be sourced from environment variables (preferred for
+# CI / shared rigs). See CLAUDE.md "Local rig file" and
+# "Identity-gating destructive operations" for the policy.
+
+# Device Configuration
+device:
+  port: "${DAQIFI_DEVICE_PORT}"   # e.g. /dev/ttyACM<N> or COM<N>
+  baudrate: 115200
+  variant: "NQ1"  # NQ1, NQ2, or NQ3
+
+# WiFi Configuration
+wifi:
+  # Credentials MUST come from environment (.env / shell exports),
+  # never from a committed value. See README.md for the env var list.
+  ssid: "${WIFI_SSID}"
+  password: "${WIFI_PASSWORD}"
+  security: 3  # 0=Open, 3=WPA
+  nettype: 1   # 1=STA (client), 4=AP (access point)
+
+  # Connection settings
+  connection_timeout: 20  # seconds to wait for WiFi connection
+  tcp_port: 9760
+
+  # Restore to AP mode after testing?
+  restore_ap_mode: true
+  restore_ssid: "${DAQIFI_DEVICE_AP_SSID}"  # the device's AP-mode SSID
+
+# Test Configuration
+tests:
+  # Which test sections to run
+  usb_cdc:
+    enabled: true
+    commands: true      # Test SCPI commands
+    streaming: true     # Test USB streaming
+
+  wifi:
+    enabled: true
+    configuration: true  # Test WiFi config commands
+    tcp_streaming: true  # Test WiFi TCP streaming
+
+  # Streaming test parameters
+  streaming:
+    sample_rate: 10     # Hz
+    num_samples: 5      # Number of samples per test
+    timeout: 3.0        # Timeout per sample (seconds)
+
+    # Which formats to test
+    formats:
+      json: true
+      csv: true
+      protobuf: true
+
+# ADC Configuration for tests
+adc:
+  # List of channels to enable, or "all" for all channels
+  # NQ1/NQ2: 16 channels (0-15), NQ3: 8 channels (0-7)
+  channels_to_enable: "all"  # Use "all" to test all channels, or list like [0, 1, 2]
+  test_range: true           # Test range configuration (NQ3 only)
+
+# DIO Configuration for tests
+dio:
+  # List of DIO channels to test (all boards have 16 channels: 0-15)
+  test_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # Test all DIO channels
+  # Or test just a few: test_channels: [0, 1, 2]
+  test_direction: true     # Test direction control
+  test_state: true         # Test state control
+
+# Output Configuration
+output:
+  verbosity: "normal"  # quiet, normal, verbose
+  show_samples: true   # Show sample data in output
+  show_hex_dumps: true # Show hex dumps for ProtoBuf
+
+# ============================================================================
+# Example Configurations
+# ============================================================================
+
+# Example 1: Device AP Mode (no internet required)
+# wifi:
+#   ssid: "${DAQIFI_DEVICE_AP_SSID}"
+#   password: ""
+#   security: 0
+#   nettype: 4
+
+# Example 2: Open Network
+# wifi:
+#   ssid: "${WIFI_SSID}"
+#   password: ""
+#   security: 0
+#   nettype: 1
+
+# Example 3: WPA Network
+# wifi:
+#   ssid: "${WIFI_SSID}"
+#   password: "${WIFI_PASSWORD}"
+#   security: 3
+#   nettype: 1
+
+# Example 4: Quick USB-only test (no WiFi)
+# tests:
+#   usb_cdc:
+#     enabled: true
+#   wifi:
+#     enabled: false
