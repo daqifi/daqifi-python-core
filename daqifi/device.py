@@ -1025,7 +1025,13 @@ class NyquistDevice:
                 return
             if not (0 <= channel_index < len(self._analog_inputs)):
                 return
-            ts = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
+            try:
+                ts = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                # A malformed timestamp (e.g. a JSON/CSV decode glitch
+                # producing an out-of-range float) must not poison the
+                # streaming thread. Skip this dispatch.
+                return
             self._analog_inputs[channel_index].set_active_sample(
                 DataSample(timestamp=ts, value=value)
             )

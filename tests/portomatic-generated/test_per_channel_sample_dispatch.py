@@ -135,6 +135,21 @@ class TestDeviceWiring:
         for i in range(2):
             assert dev._analog_inputs[i].active_sample is None
 
+    def test_dispatch_tolerates_malformed_timestamp(self):
+        """A garbage timestamp (out-of-range float from a decode glitch)
+        must not poison the streaming thread. (Qodo PR 142 pass 1
+        importance 5.)"""
+        from daqifi.device import NyquistDevice
+
+        dev = NyquistDevice.__new__(NyquistDevice)
+        dev._analog_inputs = _make_analog_inputs(n=2)
+        dispatch = dev._build_per_channel_dispatch()
+
+        # Out-of-range float — datetime.fromtimestamp raises OverflowError
+        dispatch(0, 1.0, 1e20)
+        # Channel was skipped (no sample reached the cache).
+        assert dev._analog_inputs[0].active_sample is None
+
     def test_dispatch_no_op_when_inputs_uninitialized(self):
         """Pre-connect (or non-NQ3) state where _analog_inputs is None
         must not crash dispatch."""
