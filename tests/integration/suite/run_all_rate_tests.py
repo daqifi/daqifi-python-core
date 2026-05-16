@@ -33,6 +33,7 @@ from pathlib import Path
 from datetime import datetime
 
 from daqifi import NyquistDevice
+from test_harness import ReliableSCPI, _assert_expected_device
 
 
 def enable_channels(device, channels):
@@ -71,11 +72,12 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
 
         # Enable channels based on mode
         if dual_channel:
-            # Use channels 4 and 6 (both Type 1)
-            print("2. Enabling channels 4 and 6 (both Type 1)...")
-            enable_channels(device, [4, 6])
+            # Use channels 4 (Type 1) and 5 (Type 2) — the test name
+            # promises a mixed-type pair, not two T1 channels.
+            print("2. Enabling channels 4 (Type 1) and 5 (Type 2)...")
+            enable_channels(device, [4, 5])
         else:
-            print("2. Enabling channel 4 only (Type1)...")
+            print("2. Enabling channel 4 only (Type 1)...")
             enable_channels(device, [4])
 
         # Start streaming
@@ -101,17 +103,117 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
         device._comm._serial.flush()
 
         end_marker = b"__END_OF_FILE__"
-        start_time = time.time()
-        data = b""
+        start_time = time.monotonic()
+        chunks = []
+        # Rolling tail buffer: scan only the last (marker_len + 64) bytes
+        # for the marker, not the whole growing data. A plain
+        # `end_marker in data` scan grows O(n²) across multi-MB
+        # downloads, and join-of-last-N-chunks misses the 15-byte
+        # marker when it splits across many small reads.
+        tail = bytearray()
+        tail_keep = len(end_marker) + 64
+        eof_found = False
 
-        while (time.time() - start_time) < 60:
+        # Scale the download timeout with test duration; long high-rate
+        # tests can produce large SD files that need more than 60s.
+        # DAQIFI_SD_GET_TIMEOUT_SEC overrides the baseline. (Qodo PR
+        # 144 pass 6 importance 7.) Validate the env-var: garbage
+        # would raise from float(); a <=0 value would make the loop
+        # exit instantly and report a bogus timeout. (Qodo PR 144 pass
+        # 7 ⭐ New finding.)
+        _env_timeout = os.environ.get("DAQIFI_SD_GET_TIMEOUT_SEC", "60")
+        try:
+            base_timeout = float(_env_timeout)
+        except ValueError:
+            print(
+                f"  WARNING: DAQIFI_SD_GET_TIMEOUT_SEC={_env_timeout!r} "
+                "is not a valid number; falling back to 60s."
+            )
+            base_timeout = 60.0
+        if base_timeout < 1.0:
+            print(
+                f"  WARNING: DAQIFI_SD_GET_TIMEOUT_SEC={_env_timeout!r} "
+                "must be >= 1.0; clamping."
+            )
+            base_timeout = 1.0
+        download_timeout = max(base_timeout, 3.0 * float(duration_sec))
+
+        while (time.monotonic() - start_time) < download_timeout:
             if device._comm._serial.in_waiting > 0:
-                data += device._comm._serial.read(device._comm._serial.in_waiting)
-                if end_marker in data:
-                    if b'#' in data:
-                        data = data[data.find(b'#'):data.find(end_marker)]
-                    break
+                chunk = device._comm._serial.read(device._comm._serial.in_waiting)
+                if chunk:
+                    chunks.append(chunk)
+                    tail.extend(chunk)
+                    if len(tail) > tail_keep:
+                        del tail[:-tail_keep]
+                    if end_marker in tail:
+                        eof_found = True
+                        break
             time.sleep(0.01)
+
+        data = b"".join(chunks)
+        if eof_found:
+            # Drain any trailing prompt/CRLF the firmware emits after
+            # the EOF marker so it doesn't contaminate the next SCPI
+            # exchange. (Qodo PR 144 pass 4 importance 6.)
+            try:
+                device._comm._serial.reset_input_buffer()
+            except Exception:
+                pass
+        if not eof_found:
+            # Best-effort: tear down SD logging + reset the streaming
+            # interface so the next test isn't poisoned by a half-open
+            # SD session. (Qodo PR 144 #2 importance 5.) Surface any
+            # cleanup failure in the diagnostic — silent suppression
+            # hides further trouble. (Qodo PR 144 pass 3 #3.)
+            cleanup_errors = []
+            # Drain leftover binary residue from the aborted SD
+            # download before issuing SCPI cleanup commands —
+            # otherwise send_command() will read partial binary as
+            # its SCPI response and misparse. (Qodo PR 144 pass 5
+            # importance 8.)
+            try:
+                device._comm._serial.reset_input_buffer()
+            except Exception as e:
+                print(f"  WARNING: cleanup pre-drain failed: {e}")
+                cleanup_errors.append(f"pre-drain: {e}")
+            for cmd in (
+                'SYST:STOR:SD:FILE ""',
+                'SYST:STOR:SD:ENAble 0',
+                'SYST:STReam:INTerface 0',
+            ):
+                try:
+                    device._comm.send_command(cmd)
+                except Exception as e:
+                    print(f"  WARNING: cleanup '{cmd}' failed: {e}")
+                    cleanup_errors.append(f"{cmd}: {e}")
+            err = (
+                f"SD download timed out (no EOF marker in {len(data)} bytes "
+                f"after {download_timeout:.0f}s)"
+            )
+            if cleanup_errors:
+                err += f' [cleanup failures: {"; ".join(cleanup_errors)}]'
+            return {
+                'rate': sample_rate,
+                'success': False,
+                'error': err,
+            }
+
+        # Trim trailing EOF and the leading CSV comment header (#).
+        # rfind() guards against a stray __END_OF_FILE__-shaped match
+        # inside the payload (unlikely on CSV, cheap to defend).
+        eof_idx = data.rfind(end_marker)
+        if eof_idx == -1:
+            return {
+                'rate': sample_rate,
+                'success': False,
+                'error': f"EOF marker not found after detection (received {len(data)} bytes)",
+            }
+        hash_idx = data.find(b'#')
+        if 0 <= hash_idx < eof_idx:
+            data = data[hash_idx:eof_idx]
+        else:
+            data = data[:eof_idx]
 
         # Save
         output_file = Path("sd_download") / filename
@@ -400,6 +502,12 @@ def main():
         print(f"\nConnecting to {port}...")
         device = NyquistDevice.connect(port, baudrate=115200)
         print(f"[OK] Connected to {device.variant.value}")
+
+        # Per CLAUDE.md "Identity-gating destructive operations": verify
+        # the connected unit's SN against DAQIFI_EXPECTED_SERIAL_NUMBER
+        # BEFORE any write (power_up, ENABLE:VOLT:DC, etc.). Refuses
+        # to run when the env var is unset unless DAQIFI_ALLOW_UNGATED_RESET=1.
+        _assert_expected_device(ReliableSCPI(device))
 
         # Power up
         device._comm.send_command("SYST:POW:STAT 1")

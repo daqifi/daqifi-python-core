@@ -103,44 +103,97 @@ def test_raw_serial_capture(port, filename, output_dir='./test_output'):
     print("="*80)
 
     try:
-        # Open serial port
+        # Open serial port via context manager so it's released even
+        # if the read loop raises mid-transfer. (Qodo PR 144 #1
+        # importance 8.)
         print(f"\nOpening {port}...")
-        ser = serial.Serial(port, 115200, timeout=1)
-        time.sleep(0.5)
+        with serial.Serial(port, 115200, timeout=1) as ser:
+            time.sleep(0.5)
 
-        # Clear any pending data
-        ser.reset_input_buffer()
+            # Clear any pending data
+            ser.reset_input_buffer()
 
-        # Send command
-        cmd = f'SYST:STOR:SD:GET "{filename}"\r'
-        print(f"Sending command: {cmd.strip()}")
-        ser.write(cmd.encode('ascii'))
-        ser.flush()
+            # Send command
+            cmd = f'SYST:STOR:SD:GET "{filename}"\r'
+            print(f"Sending command: {cmd.strip()}")
+            ser.write(cmd.encode('ascii'))
+            ser.flush()
 
-        # Read response
-        print("Reading response...")
-        response = b""
-        end_marker = b"__END_OF_FILE__"
-        start_time = time.time()
-        timeout = 300.0
+            # Read response.
+            # NB: bytearray + extend (not `response += chunk` on bytes)
+            # — bytes concatenation is O(n) per chunk, O(n²) over the
+            # whole transfer. Marker check uses a rolling tail buffer
+            # so the scan stays constant-time per chunk.
+            print("Reading response...")
+            response = bytearray()
+            end_marker = b"__END_OF_FILE__"
+            tail = bytearray()
+            tail_keep = len(end_marker) + 64
+            # Absolute deadline + inactivity timeout, with DIFFERENT
+            # thresholds. Sharing one 300s value defeats the purpose
+            # of the inactivity timer — a hung transfer would wait
+            # the full 5 minutes without data before failing. A 10s
+            # idle window fails fast on dead links while the 300s
+            # absolute bound still caps slow-but-active transfers.
+            # (Qodo PR 144 pass 4 importance 7.)
+            overall_timeout = 300.0
+            inactivity_timeout = 10.0
+            deadline = time.monotonic() + overall_timeout
+            last_rx = time.monotonic()
+            last_progress_mb = 0
+            eof_found = False
 
-        while (time.time() - start_time) < timeout:
-            if ser.in_waiting > 0:
-                chunk = ser.read(ser.in_waiting)
-                response += chunk
+            while time.monotonic() < deadline and (time.monotonic() - last_rx) < inactivity_timeout:
+                if ser.in_waiting > 0:
+                    chunk = ser.read(ser.in_waiting)
+                    # pyserial can return empty bytes even when
+                    # in_waiting>0 (port flakiness on Windows). Don't
+                    # let an empty read reset the inactivity timer —
+                    # that turns into a busy loop. (Qodo PR 144 pass 3
+                    # /improve importance 5.)
+                    if not chunk:
+                        time.sleep(0.01)
+                        continue
+                    response.extend(chunk)
+                    tail.extend(chunk)
+                    if len(tail) > tail_keep:
+                        del tail[:-tail_keep]
 
-                if end_marker in response:
-                    break
+                    if end_marker in tail:
+                        # rfind() so a stray __END_OF_FILE__-shaped
+                        # match in the payload doesn't truncate early.
+                        # (Qodo PR 144 pass 6 importance 7.)
+                        marker_idx = response.rfind(end_marker)
+                        if marker_idx != -1:
+                            # Truncate AT the marker (exclude it). The
+                            # marker is a protocol terminator, not part
+                            # of the payload — keeping it corrupts the
+                            # saved binary and mismatches
+                            # sd_get_file()'s output.
+                            del response[marker_idx:]
+                        eof_found = True
+                        break
 
-                # Print progress
-                if len(response) % (1024*1024) == 0:  # Every 1MB
-                    print(f"  Received: {len(response):,} bytes...")
+                    mb = len(response) // (1024 * 1024)
+                    if mb > last_progress_mb:
+                        print(f"  Received: {len(response):,} bytes...")
+                        last_progress_mb = mb
 
-                start_time = time.time()  # Reset timeout
-            else:
-                time.sleep(0.01)
+                    last_rx = time.monotonic()  # Reset inactivity timer
+                else:
+                    time.sleep(0.01)
+        # ser closed automatically by the with-block.
 
-        ser.close()
+        if not eof_found:
+            # Don't write partial data and pretend it succeeded — the
+            # checksum/line-count analysis below would silently report
+            # a corrupted download as a real result. (Qodo PR 144 pass
+            # 3 /agentic_review #2: 'No EOF verification'.)
+            print(
+                f"\nERROR: Timed out after {len(response):,} bytes without "
+                "seeing __END_OF_FILE__ marker."
+            )
+            return None
 
         # Save raw response
         output_file_raw = output_path / f"{filename}.raw_binary"
