@@ -21,7 +21,7 @@ from pathlib import Path
 from datetime import datetime
 
 from daqifi import NyquistDevice
-from test_harness import ReliableSCPI, StreamingMeasurement
+from test_harness import ReliableSCPI, StreamingMeasurement, _assert_expected_device
 
 
 def _fmt_bytes(n):
@@ -188,6 +188,12 @@ def main():
     device = NyquistDevice.connect(port)
     try:
         scpi = ReliableSCPI(device)
+
+        # Per CLAUDE.md "Identity-gating destructive operations": verify
+        # the connected unit's SN before any write. Refuses to run when
+        # DAQIFI_EXPECTED_SERIAL_NUMBER is unset (unless
+        # DAQIFI_ALLOW_UNGATED_RESET=1 is set as the explicit opt-out).
+        _assert_expected_device(scpi)
 
         # Power up (ignore errors if already on)
         try:

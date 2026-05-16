@@ -33,6 +33,7 @@ from pathlib import Path
 from datetime import datetime
 
 from daqifi import NyquistDevice
+from test_harness import ReliableSCPI, _assert_expected_device
 
 
 def enable_channels(device, channels):
@@ -441,6 +442,12 @@ def main():
         print(f"\nConnecting to {port}...")
         device = NyquistDevice.connect(port, baudrate=115200)
         print(f"[OK] Connected to {device.variant.value}")
+
+        # Per CLAUDE.md "Identity-gating destructive operations": verify
+        # the connected unit's SN against DAQIFI_EXPECTED_SERIAL_NUMBER
+        # BEFORE any write (power_up, ENABLE:VOLT:DC, etc.). Refuses
+        # to run when the env var is unset unless DAQIFI_ALLOW_UNGATED_RESET=1.
+        _assert_expected_device(ReliableSCPI(device))
 
         # Power up
         device._comm.send_command("SYST:POW:STAT 1")
