@@ -107,8 +107,10 @@ class TestStreamManagerPerChannelDispatch:
         assert calls[1] >= calls[0]
 
     def test_re_anchors_on_unreasonable_forward_jump(self):
-        """A leap of >60s in device-relative time triggers re-anchor;
-        protects against tick counter glitches."""
+        """A per-sample step of >60s triggers re-anchor; protects
+        against tick counter glitches and device resets. The threshold
+        is per-sample step, not cumulative elapsed time (Qodo PR #142
+        pass 5 #4)."""
         import time
 
         comm = MagicMock()
@@ -118,7 +120,8 @@ class TestStreamManagerPerChannelDispatch:
         )
 
         sm._dispatch_per_channel(Sample(timestamp=10.0, channels={0: 1.0}))
-        # 5min jump forward — beyond the 60s threshold.
+        # 5min jump forward in ONE step — beyond the 60s per-sample
+        # threshold.
         before = time.time()
         sm._dispatch_per_channel(Sample(timestamp=310.0, channels={0: 2.0}))
         after = time.time()
@@ -127,6 +130,35 @@ class TestStreamManagerPerChannelDispatch:
         # 5 minutes after first.
         assert before <= calls[1] <= after
         assert calls[1] - calls[0] < 5.0  # would be 300 without re-anchor
+
+    def test_no_spurious_reanchor_on_long_healthy_stream(self):
+        """A stream that runs longer than 60 device-relative seconds
+        with healthy per-sample steps must NOT re-anchor — the guard
+        is per-sample, not cumulative. (Qodo PR #142 pass 5 #4: the
+        prior cumulative-delta version forced a re-anchor every
+        ~60s on a healthy stream, introducing jitter in the dispatched
+        epoch_seconds.)"""
+        import time
+
+        comm = MagicMock()
+        calls = []
+        sm = StreamManager(
+            comm, [0], per_channel_dispatch=lambda i, v, t: calls.append(t)
+        )
+
+        # First sample anchors.
+        sm._dispatch_per_channel(Sample(timestamp=0.0, channels={0: 1.0}))
+        # 700 samples, 0.1s apart → 70s of relative time, all healthy.
+        for i in range(1, 701):
+            sm._dispatch_per_channel(
+                Sample(timestamp=i * 0.1, channels={0: float(i)})
+            )
+
+        # The last call's epoch should be ~70s after the first call's
+        # epoch — proving the anchor was kept and only delta accumulated.
+        assert abs((calls[-1] - calls[0]) - 70.0) < 1e-3, (
+            f"expected ~70.0s gap, got {calls[-1] - calls[0]}"
+        )
 
     def test_anchor_resets_on_stop_start_reuse(self):
         """Reusing a StreamManager across sessions (start → stop →

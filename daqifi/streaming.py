@@ -27,8 +27,20 @@ class StreamState(Enum):
 
 @dataclass
 class Sample:
-    """Single sample across all enabled channels"""
-    timestamp: float  # Seconds since epoch
+    """Single sample across all enabled channels.
+
+    ``timestamp`` is **device-relative seconds** in the common decode
+    paths — the JSON / CSV parsers compute it as ``ts / tick_hz`` from
+    the firmware's tick counter. It is NOT UNIX epoch seconds; feeding
+    it directly to ``datetime.fromtimestamp`` yields 1970-era values.
+    Only the fallback paths (no ``tick_hz`` known yet, or the protobuf
+    decoder) populate it with ``time.time()``. The per-channel dispatch
+    pipeline anchors it against wall-clock at first sample to recover a
+    real epoch — see :meth:`StreamManager._dispatch_per_channel`. If
+    you need a wall-clock time from a Sample directly, use the per-
+    channel ``DataSample.timestamp`` instead.
+    """
+    timestamp: float
     channels: Dict[int, float]  # Channel ID -> voltage
 
     def __getitem__(self, channel: int) -> float:
@@ -224,9 +236,16 @@ class StreamManager:
         # sample. Sample.timestamp is device-relative seconds in the
         # common path (ts/tick_hz) and only falls back to time.time()
         # when the firmware tick rate hasn't arrived yet — anchoring at
-        # first dispatch handles both.
+        # first dispatch handles both. _dispatch_last_sample_ts tracks
+        # the previous sample's relative timestamp so the re-anchor
+        # guard fires on per-sample anomalies (a single backwards step
+        # or a >60s jump from one sample to the next), not on
+        # cumulative elapsed time — Qodo PR #142 pass 5 #4 caught the
+        # cumulative-delta version which would re-anchor every 60s on a
+        # healthy stream.
         self._dispatch_sample_base: Optional[float] = None
         self._dispatch_epoch_base: Optional[float] = None
+        self._dispatch_last_sample_ts: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._read_buffer = ""  # Buffer for partial data (JSON/CSV)
@@ -288,6 +307,7 @@ class StreamManager:
         # pass 4 inline finding).
         self._dispatch_sample_base = None
         self._dispatch_epoch_base = None
+        self._dispatch_last_sample_ts = None
 
         try:
             # Verify at least one channel is enabled (firmware bug workaround)
@@ -728,16 +748,21 @@ class StreamManager:
         if self._dispatch_sample_base is None or self._dispatch_epoch_base is None:
             self._dispatch_sample_base = sample.timestamp
             self._dispatch_epoch_base = time.time()
-        delta = sample.timestamp - self._dispatch_sample_base
-        # Re-anchor on backwards or unreasonably large jumps (device
-        # tick wrap, mid-stream reset, parser reseating after a recovery
-        # window). Without this guard a wrap would emit epoch values
-        # decades in the past or future. (Qodo PR #142 pass 3 #2.)
-        if delta < 0.0 or delta > 60.0:
+            self._dispatch_last_sample_ts = sample.timestamp
+        # Per-sample step (NOT cumulative delta). Re-anchor on
+        # backwards or >60s jumps from the previous sample — those
+        # signal device tick wrap, mid-stream reset, or parser
+        # reseating after a recovery window. The earlier cumulative-
+        # delta guard incorrectly fired ~every 60s on a healthy stream
+        # (Qodo PR #142 pass 5 #4).
+        step = sample.timestamp - self._dispatch_last_sample_ts
+        if step < 0.0 or step > 60.0:
             self._dispatch_sample_base = sample.timestamp
             self._dispatch_epoch_base = time.time()
-            delta = 0.0
-        epoch_seconds = self._dispatch_epoch_base + delta
+        epoch_seconds = self._dispatch_epoch_base + (
+            sample.timestamp - self._dispatch_sample_base
+        )
+        self._dispatch_last_sample_ts = sample.timestamp
         for channel_index, value in sample.channels.items():
             try:
                 self._per_channel_dispatch(channel_index, value, epoch_seconds)
