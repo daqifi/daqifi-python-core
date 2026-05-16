@@ -129,15 +129,21 @@ def test_raw_serial_capture(port, filename, output_dir='./test_output'):
             end_marker = b"__END_OF_FILE__"
             tail = bytearray()
             tail_keep = len(end_marker) + 64
-            # Absolute deadline + inactivity timeout: an inactivity-
-            # only timer would never exit on a trickling stream.
-            timeout = 300.0
-            deadline = time.monotonic() + timeout
+            # Absolute deadline + inactivity timeout, with DIFFERENT
+            # thresholds. Sharing one 300s value defeats the purpose
+            # of the inactivity timer — a hung transfer would wait
+            # the full 5 minutes without data before failing. A 10s
+            # idle window fails fast on dead links while the 300s
+            # absolute bound still caps slow-but-active transfers.
+            # (Qodo PR 144 pass 4 importance 7.)
+            overall_timeout = 300.0
+            inactivity_timeout = 10.0
+            deadline = time.monotonic() + overall_timeout
             last_rx = time.monotonic()
             last_progress_mb = 0
             eof_found = False
 
-            while time.monotonic() < deadline and (time.monotonic() - last_rx) < timeout:
+            while time.monotonic() < deadline and (time.monotonic() - last_rx) < inactivity_timeout:
                 if ser.in_waiting > 0:
                     chunk = ser.read(ser.in_waiting)
                     # pyserial can return empty bytes even when

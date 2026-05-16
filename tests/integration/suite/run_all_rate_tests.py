@@ -128,6 +128,14 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
             time.sleep(0.01)
 
         data = b"".join(chunks)
+        if eof_found:
+            # Drain any trailing prompt/CRLF the firmware emits after
+            # the EOF marker so it doesn't contaminate the next SCPI
+            # exchange. (Qodo PR 144 pass 4 importance 6.)
+            try:
+                device._comm._serial.reset_input_buffer()
+            except Exception:
+                pass
         if not eof_found:
             # Best-effort: tear down SD logging + reset the streaming
             # interface so the next test isn't poisoned by a half-open
