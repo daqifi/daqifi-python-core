@@ -114,7 +114,14 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
         tail_keep = len(end_marker) + 64
         eof_found = False
 
-        while (time.monotonic() - start_time) < 60:
+        # Scale the download timeout with test duration; long high-rate
+        # tests can produce large SD files that need more than 60s.
+        # DAQIFI_SD_GET_TIMEOUT_SEC overrides the baseline. (Qodo PR
+        # 144 pass 6 importance 7.)
+        base_timeout = float(os.environ.get("DAQIFI_SD_GET_TIMEOUT_SEC", "60"))
+        download_timeout = max(base_timeout, 3.0 * float(duration_sec))
+
+        while (time.monotonic() - start_time) < download_timeout:
             if device._comm._serial.in_waiting > 0:
                 chunk = device._comm._serial.read(device._comm._serial.in_waiting)
                 if chunk:
@@ -163,7 +170,10 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
                 except Exception as e:
                     print(f"  WARNING: cleanup '{cmd}' failed: {e}")
                     cleanup_errors.append(f"{cmd}: {e}")
-            err = f'SD download timed out (no EOF marker in {len(data)} bytes)'
+            err = (
+                f"SD download timed out (no EOF marker in {len(data)} bytes "
+                f"after {download_timeout:.0f}s)"
+            )
             if cleanup_errors:
                 err += f' [cleanup failures: {"; ".join(cleanup_errors)}]'
             return {
@@ -173,7 +183,15 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
             }
 
         # Trim trailing EOF and the leading CSV comment header (#).
-        eof_idx = data.find(end_marker)
+        # rfind() guards against a stray __END_OF_FILE__-shaped match
+        # inside the payload (unlikely on CSV, cheap to defend).
+        eof_idx = data.rfind(end_marker)
+        if eof_idx == -1:
+            return {
+                'rate': sample_rate,
+                'success': False,
+                'error': f"EOF marker not found after detection (received {len(data)} bytes)",
+            }
         hash_idx = data.find(b'#')
         if 0 <= hash_idx < eof_idx:
             data = data[hash_idx:eof_idx]

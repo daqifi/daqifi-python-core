@@ -160,7 +160,10 @@ def test_raw_serial_capture(port, filename, output_dir='./test_output'):
                         del tail[:-tail_keep]
 
                     if end_marker in tail:
-                        marker_idx = response.find(end_marker)
+                        # rfind() so a stray __END_OF_FILE__-shaped
+                        # match in the payload doesn't truncate early.
+                        # (Qodo PR 144 pass 6 importance 7.)
+                        marker_idx = response.rfind(end_marker)
                         if marker_idx != -1:
                             # Truncate AT the marker (exclude it). The
                             # marker is a protocol terminator, not part
