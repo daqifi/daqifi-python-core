@@ -355,8 +355,12 @@ def generate_text_report(results, output_file="adc_test_report.txt"):
 
 def main():
     import os
-    # Resolve port from CLI arg or env (CLAUDE.md identity rule).
-    port = sys.argv[1] if len(sys.argv) >= 2 else os.environ.get('DAQIFI_DEVICE_PORT')
+    # Take the first NON-flag argv token as the port. The old form
+    # (sys.argv[1] unconditionally) misclassified `--dual` etc. as the
+    # port whenever the user relied on DAQIFI_DEVICE_PORT for the
+    # serial port. (Qodo PR 143 pass 2 finding 1.)
+    non_flag_args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    port = non_flag_args[0] if non_flag_args else os.environ.get('DAQIFI_DEVICE_PORT')
     if not port:
         print(__doc__)
         sys.exit(1)
@@ -368,15 +372,14 @@ def main():
     elif '--all' in sys.argv:
         test_mode = '--all'
 
-    # Parse duration (skip flags)
+    # Parse duration (skip flags, skip the port we already consumed)
     duration = 2  # default
-    for arg in sys.argv[2:]:
-        if not arg.startswith('--'):
-            try:
-                duration = int(arg)
-                break
-            except ValueError:
-                pass
+    for arg in non_flag_args[1:]:
+        try:
+            duration = int(arg)
+            break
+        except ValueError:
+            pass
 
     # Test rate configurations
     single_rates = [5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000, 14000, 15000]  # 1 kHz increments to 15kHz max

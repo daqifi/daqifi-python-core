@@ -297,12 +297,17 @@ def main():
     args = parser.parse_args()
 
     port = args.port or os.environ.get('DAQIFI_DEVICE_PORT')
-    if not os.path.exists(port):
-        print(f"ERROR: Device not found at {port}. Connect device and try again.")
-        sys.exit(1)
+    if not port:
+        parser.error("port is required (CLI arg or DAQIFI_DEVICE_PORT env)")
+    # No os.path.exists() preflight — Windows COM ports aren't fs
+    # paths, and the connect call below produces a clearer error
+    # than a generic "not found" message. (Qodo PR 143 pass 2 #2.)
 
     print(f"Using port: {port}")
-    device = NyquistDevice.connect(port)
+    try:
+        device = NyquistDevice.connect(port)
+    except Exception as e:
+        sys.exit(f"ERROR: failed to open {port}: {e}")
     scpi = ReliableSCPI(device)
 
     # Verify device identity
