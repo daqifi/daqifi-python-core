@@ -281,6 +281,13 @@ class StreamManager:
         self._stop_event.clear()
         self._buffer.clear()
         self._read_buffer = ""  # Clear read buffer
+        # Reset the per-channel dispatch anchor so a stop/start of the
+        # same StreamManager instance starts a fresh epoch base. Without
+        # this, the previous session's anchor gets reused and downstream
+        # epoch_seconds drift by the gap between sessions (Qodo PR #142
+        # pass 4 inline finding).
+        self._dispatch_sample_base = None
+        self._dispatch_epoch_base = None
 
         try:
             # Verify at least one channel is enabled (firmware bug workaround)

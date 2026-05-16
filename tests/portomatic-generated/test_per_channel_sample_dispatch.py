@@ -128,6 +128,42 @@ class TestStreamManagerPerChannelDispatch:
         assert before <= calls[1] <= after
         assert calls[1] - calls[0] < 5.0  # would be 300 without re-anchor
 
+    def test_anchor_resets_on_stop_start_reuse(self):
+        """Reusing a StreamManager across sessions (start → stop →
+        start) must reset the dispatch anchor. Without the reset, the
+        second session's first sample would compute epoch_seconds as
+        (prev_session_epoch_base + (new_relative - prev_relative))
+        instead of anchoring fresh against current wall-clock.
+        (Qodo PR #142 pass 4 inline finding.)"""
+        import time
+
+        comm = MagicMock()
+        sm = StreamManager(
+            comm, [0], per_channel_dispatch=lambda i, v, t: None
+        )
+
+        # Session 1: prime the anchor.
+        sm._dispatch_per_channel(Sample(timestamp=100.0, channels={0: 1.0}))
+        assert sm._dispatch_sample_base == 100.0
+        assert sm._dispatch_epoch_base is not None
+
+        # Simulate stop → start by calling start (which resets state).
+        # Stub _comm.send_query because start does a SCPI probe.
+        comm.send_query = MagicMock(return_value="1")
+        # Avoid actually launching the streaming thread / sending SCPI.
+        sm._stop_event.set()
+        # We only care that the *reset path* runs — wrap try/except.
+        try:
+            sm.start()
+        except Exception:
+            pass
+
+        assert sm._dispatch_sample_base is None, (
+            "anchor must reset on start() so reused StreamManager "
+            "doesn't drag a stale epoch base into the next session"
+        )
+        assert sm._dispatch_epoch_base is None
+
     def test_dispatch_fires_from_blocking_read(self):
         """`stream.read()` (polling/blocking mode) must also fan out to
         per-channel handlers — not just callback mode. Otherwise users
