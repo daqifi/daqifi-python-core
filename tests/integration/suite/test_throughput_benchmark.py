@@ -186,121 +186,130 @@ def main():
     print("=" * 70)
 
     device = NyquistDevice.connect(port)
-    scpi = ReliableSCPI(device)
-
-    # Power up (ignore errors if already on)
     try:
-        device.power_up()
-    except:
-        scpi.command("SYST:POW:STAT 1", delay=3.0)
-    time.sleep(2)
+        scpi = ReliableSCPI(device)
 
-    print(f"\n  Device: {device}")
-    print(f"  Firmware: {device.firmware_version}")
-    mem = scpi.query_kv("SYST:MEM:FREE?")
-    print(f"  Heap: {mem.get('HeapFree', '?')} free, Pool: {mem.get('SamplePoolCount', '?')}")
-
-    all_ch = list(range(16))
-
-    tests = [
-        # (interface, format, channels, freq)
-        # USB PB sweep
-        (0, 0, [0],     1000),
-        (0, 0, [0],     5000),
-        (0, 0, [0],     11000),
-        (0, 0, all_ch,  1000),
-        (0, 0, all_ch,  3000),
-        (0, 0, all_ch,  5000),
-        # USB CSV sweep
-        (0, 2, [0],     5000),
-        (0, 2, [0],     11000),
-        (0, 2, [0],     15000),
-        (0, 2, all_ch,  1000),
-        (0, 2, all_ch,  3000),
-        # SD PB sweep
-        (2, 0, [0],     5000),
-        (2, 0, all_ch,  1000),
-        (2, 0, all_ch,  3000),
-        # SD CSV sweep
-        (2, 2, [0],     5000),
-        (2, 2, all_ch,  1000),
-    ]
-
-    results = []
-    for interface, fmt, channels, freq in tests:
+        # Power up (ignore errors if already on)
         try:
-            r = run_benchmark(scpi, interface, fmt, channels, freq, duration)
-            results.append(r)
-        except Exception as e:
-            print(f" ERROR: {e}")
+            device.power_up()
+        except:
+            scpi.command("SYST:POW:STAT 1", delay=3.0)
+        time.sleep(2)
 
-    # Summary
-    print("\n" + "=" * 85)
-    print("  RESULTS")
-    print("=" * 85)
-    print(f"\n  {'Config':<30s} {'Freq':>6s} {'SPS':>7s} {'Ratio':>6s} {'KB/s':>6s} "
-          f"{'Samp%':>6s} {'Byte%':>6s} {'USB Drop':>9s} {'SD Drop':>8s} {'Bottleneck'}")
-    print("  " + "-" * 105)
-    for r in results:
-        label = f"{r['interface']} {r['format']} {r['channels']}ch"
-        freq_s = f"{r['freq_hz']}"
-        ratio = r['sps_ratio']
-        ratio_s = f"{ratio:.0%}" if r['sps_flag'] == 'OK' else f"{ratio:.0%}!"
-        s_loss = f"{r['sample_loss_pct']}%" if r['sample_loss_pct'] > 0 else "-"
-        b_loss = f"{r['byte_loss_pct']}%" if r['byte_loss_pct'] > 0 else "-"
-        usb_dr = _fmt_bytes(r['usb_drops']) if r['usb_drops'] > 0 else "-"
-        sd_dr = _fmt_bytes(r['sd_drops']) if r['sd_drops'] > 0 else "-"
-        bn = r['bottleneck'] if r['bottleneck'] != 'none' else "-"
-        valid_mark = "" if r['valid'] else " [!]"
-        print(f"  {label:<30s} {freq_s:>6s} {r['samples_per_sec']:>7d} {ratio_s:>6s} "
-              f"{r['kb_per_sec']:>5.1f} {s_loss:>6s} {b_loss:>6s} {usb_dr:>9s} {sd_dr:>8s}  "
-              f"{bn}{valid_mark}")
+        print(f"\n  Device: {device}")
+        print(f"  Firmware: {device.firmware_version}")
+        mem = scpi.query_kv("SYST:MEM:FREE?")
+        print(f"  Heap: {mem.get('HeapFree', '?')} free, Pool: {mem.get('SamplePoolCount', '?')}")
 
-    # Legend
-    print()
-    print("  Pipeline: ISR -> [Sample Queue] -> Encoder -> [USB/WiFi/SD buf] -> Host")
-    print("  Ratio = SPS/Freq (100%=matched, <85%=capped/dropping, >115%=overshoot)")
-    print("  Samp% = queue overflow | Byte% = output overflow | Bottleneck = limiting stage")
+        all_ch = list(range(16))
 
-    # Flag issues
-    invalid = [r for r in results if not r['valid']]
-    if invalid:
-        print(f"\n  WARNING: {len(invalid)} tests returned invalid data (0 samples)")
-        for r in invalid:
-            print(f"    {r['interface']} {r['format']} {r['channels']}ch@{r['freq_hz']}Hz")
+        tests = [
+            # (interface, format, channels, freq)
+            # USB PB sweep
+            (0, 0, [0],     1000),
+            (0, 0, [0],     5000),
+            (0, 0, [0],     11000),
+            (0, 0, all_ch,  1000),
+            (0, 0, all_ch,  3000),
+            (0, 0, all_ch,  5000),
+            # USB CSV sweep
+            (0, 2, [0],     5000),
+            (0, 2, [0],     11000),
+            (0, 2, [0],     15000),
+            (0, 2, all_ch,  1000),
+            (0, 2, all_ch,  3000),
+            # SD PB sweep
+            (2, 0, [0],     5000),
+            (2, 0, all_ch,  1000),
+            (2, 0, all_ch,  3000),
+            # SD CSV sweep
+            (2, 2, [0],     5000),
+            (2, 2, all_ch,  1000),
+        ]
 
-    byte_loss_tests = [r for r in results if r['byte_loss_pct'] > 0]
-    if byte_loss_tests:
-        print(f"\n  NOTE: {len(byte_loss_tests)} tests had output byte loss (data produced faster "
-              f"than host could drain):"  )
-        for r in byte_loss_tests:
-            label = f"{r['interface']} {r['format']} {r['channels']}ch@{r['freq_hz']}Hz"
-            total_produced = r['total_bytes'] + r['usb_drops'] + r['sd_drops']
-            print(f"    {label}: {r['byte_loss_pct']}% byte loss "
-                  f"({_fmt_bytes(r['usb_drops'] + r['sd_drops'])} of "
-                  f"{_fmt_bytes(total_produced)} dropped)")
+        results = []
+        for interface, fmt, channels, freq in tests:
+            try:
+                r = run_benchmark(scpi, interface, fmt, channels, freq, duration)
+                results.append(r)
+            except Exception as e:
+                print(f" ERROR: {e}")
 
-    sps_issues = [r for r in results if r.get('sps_flag') not in ('OK', None)]
-    if sps_issues:
-        print(f"\n  SPS SANITY: {len(sps_issues)} tests where SPS didn't match requested freq:")
-        for r in sps_issues:
-            label = f"{r['interface']} {r['format']} {r['channels']}ch@{r['freq_hz']}Hz"
-            print(f"    {label}: {r['sps_flag']} — got {r['samples_per_sec']} sps "
-                  f"({r['sps_ratio']:.0%} of {r['freq_hz']}Hz)")
+        # Summary
+        print("\n" + "=" * 85)
+        print("  RESULTS")
+        print("=" * 85)
+        print(f"\n  {'Config':<30s} {'Freq':>6s} {'SPS':>7s} {'Ratio':>6s} {'KB/s':>6s} "
+              f"{'Samp%':>6s} {'Byte%':>6s} {'USB Drop':>9s} {'SD Drop':>8s} {'Bottleneck'}")
+        print("  " + "-" * 105)
+        for r in results:
+            label = f"{r['interface']} {r['format']} {r['channels']}ch"
+            freq_s = f"{r['freq_hz']}"
+            ratio = r['sps_ratio']
+            ratio_s = f"{ratio:.0%}" if r['sps_flag'] == 'OK' else f"{ratio:.0%}!"
+            s_loss = f"{r['sample_loss_pct']}%" if r['sample_loss_pct'] > 0 else "-"
+            b_loss = f"{r['byte_loss_pct']}%" if r['byte_loss_pct'] > 0 else "-"
+            usb_dr = _fmt_bytes(r['usb_drops']) if r['usb_drops'] > 0 else "-"
+            sd_dr = _fmt_bytes(r['sd_drops']) if r['sd_drops'] > 0 else "-"
+            bn = r['bottleneck'] if r['bottleneck'] != 'none' else "-"
+            valid_mark = "" if r['valid'] else " [!]"
+            print(f"  {label:<30s} {freq_s:>6s} {r['samples_per_sec']:>7d} {ratio_s:>6s} "
+                  f"{r['kb_per_sec']:>5.1f} {s_loss:>6s} {b_loss:>6s} {usb_dr:>9s} {sd_dr:>8s}  "
+                  f"{bn}{valid_mark}")
 
-    # Save
-    csv_file = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-    valid_results = [r for r in results if r['valid']]
-    if valid_results:
-        keys = [k for k in valid_results[0].keys()]
-        with open(csv_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
-            writer.writeheader()
-            writer.writerows(valid_results)
-        print(f"\n  Saved to {csv_file}")
+        # Legend
+        print()
+        print("  Pipeline: ISR -> [Sample Queue] -> Encoder -> [USB/WiFi/SD buf] -> Host")
+        print("  Ratio = SPS/Freq (100%=matched, <85%=capped/dropping, >115%=overshoot)")
+        print("  Samp% = queue overflow | Byte% = output overflow | Bottleneck = limiting stage")
 
-    device.disconnect()
-    print("\n  Done!")
+        # Flag issues
+        invalid = [r for r in results if not r['valid']]
+        if invalid:
+            print(f"\n  WARNING: {len(invalid)} tests returned invalid data (0 samples)")
+            for r in invalid:
+                print(f"    {r['interface']} {r['format']} {r['channels']}ch@{r['freq_hz']}Hz")
+
+        byte_loss_tests = [r for r in results if r['byte_loss_pct'] > 0]
+        if byte_loss_tests:
+            print(f"\n  NOTE: {len(byte_loss_tests)} tests had output byte loss (data produced faster "
+                  f"than host could drain):"  )
+            for r in byte_loss_tests:
+                label = f"{r['interface']} {r['format']} {r['channels']}ch@{r['freq_hz']}Hz"
+                total_produced = r['total_bytes'] + r['usb_drops'] + r['sd_drops']
+                print(f"    {label}: {r['byte_loss_pct']}% byte loss "
+                      f"({_fmt_bytes(r['usb_drops'] + r['sd_drops'])} of "
+                      f"{_fmt_bytes(total_produced)} dropped)")
+
+        sps_issues = [r for r in results if r.get('sps_flag') not in ('OK', None)]
+        if sps_issues:
+            print(f"\n  SPS SANITY: {len(sps_issues)} tests where SPS didn't match requested freq:")
+            for r in sps_issues:
+                label = f"{r['interface']} {r['format']} {r['channels']}ch@{r['freq_hz']}Hz"
+                print(f"    {label}: {r['sps_flag']} — got {r['samples_per_sec']} sps "
+                      f"({r['sps_ratio']:.0%} of {r['freq_hz']}Hz)")
+
+        # Save
+        csv_file = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        valid_results = [r for r in results if r['valid']]
+        if valid_results:
+            keys = [k for k in valid_results[0].keys()]
+            with open(csv_file, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=keys)
+                writer.writeheader()
+                writer.writerows(valid_results)
+            print(f"\n  Saved to {csv_file}")
+
+        print("\n  Done!")
+    finally:
+        # Always release the serial port — without this, an
+        # exception in the test loop leaves the port held open
+        # until the process exits, which on Windows can block
+        # the next run for ~30s.
+        try:
+            device.disconnect()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

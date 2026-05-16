@@ -18,14 +18,16 @@ class ReliableSCPI:
         self._serial = device._comm._serial
 
     def drain(self, timeout=1.0):
-        quiet_start = time.time()
+        # Use monotonic for interval timing — wall-clock is subject to
+        # NTP step / DST adjustments and isn't safe for deadlines.
+        quiet_start = time.monotonic()
         total = 0
-        while time.time() - quiet_start < timeout:
+        while time.monotonic() - quiet_start < timeout:
             n = self._serial.in_waiting
             if n > 0:
                 self._serial.read(n)
                 total += n
-                quiet_start = time.time()
+                quiet_start = time.monotonic()
             else:
                 time.sleep(0.05)
         return total
@@ -43,8 +45,8 @@ class ReliableSCPI:
         self._serial.flush()
         time.sleep(delay)
         chunks = []
-        deadline = time.time() + 2.0
-        while time.time() < deadline:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
             n = self._serial.in_waiting
             if n > 0:
                 chunks.append(self._serial.read(n))

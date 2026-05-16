@@ -71,11 +71,12 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
 
         # Enable channels based on mode
         if dual_channel:
-            # Use channels 4 and 6 (both Type 1)
-            print("2. Enabling channels 4 and 6 (both Type 1)...")
-            enable_channels(device, [4, 6])
+            # Use channels 4 (Type 1) and 5 (Type 2) — the test name
+            # promises a mixed-type pair, not two T1 channels.
+            print("2. Enabling channels 4 (Type 1) and 5 (Type 2)...")
+            enable_channels(device, [4, 5])
         else:
-            print("2. Enabling channel 4 only (Type1)...")
+            print("2. Enabling channel 4 only (Type 1)...")
             enable_channels(device, [4])
 
         # Start streaming
@@ -101,17 +102,45 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
         device._comm._serial.flush()
 
         end_marker = b"__END_OF_FILE__"
-        start_time = time.time()
-        data = b""
+        start_time = time.monotonic()
+        chunks = []
+        # Rolling tail buffer: scan only the last (marker_len + 64) bytes
+        # for the marker, not the whole growing data. A plain
+        # `end_marker in data` scan grows O(n²) across multi-MB
+        # downloads, and join-of-last-N-chunks misses the 15-byte
+        # marker when it splits across many small reads.
+        tail = bytearray()
+        tail_keep = len(end_marker) + 64
+        eof_found = False
 
-        while (time.time() - start_time) < 60:
+        while (time.monotonic() - start_time) < 60:
             if device._comm._serial.in_waiting > 0:
-                data += device._comm._serial.read(device._comm._serial.in_waiting)
-                if end_marker in data:
-                    if b'#' in data:
-                        data = data[data.find(b'#'):data.find(end_marker)]
-                    break
+                chunk = device._comm._serial.read(device._comm._serial.in_waiting)
+                if chunk:
+                    chunks.append(chunk)
+                    tail.extend(chunk)
+                    if len(tail) > tail_keep:
+                        del tail[:-tail_keep]
+                    if end_marker in tail:
+                        eof_found = True
+                        break
             time.sleep(0.01)
+
+        data = b"".join(chunks)
+        if not eof_found:
+            return {
+                'rate': sample_rate,
+                'success': False,
+                'error': f'SD download timed out (no EOF marker in {len(data)} bytes)',
+            }
+
+        # Trim trailing EOF and the leading CSV comment header (#).
+        eof_idx = data.find(end_marker)
+        hash_idx = data.find(b'#')
+        if 0 <= hash_idx < eof_idx:
+            data = data[hash_idx:eof_idx]
+        else:
+            data = data[:eof_idx]
 
         # Save
         output_file = Path("sd_download") / filename

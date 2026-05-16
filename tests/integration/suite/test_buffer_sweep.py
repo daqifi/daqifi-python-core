@@ -17,7 +17,8 @@ import csv
 from pathlib import Path
 from datetime import datetime
 
-from test_throughput_benchmark import ReliableSCPI, run_benchmark
+from test_harness import ReliableSCPI
+from test_throughput_benchmark import run_benchmark
 from daqifi import NyquistDevice
 
 
@@ -196,7 +197,10 @@ def main():
         print(f"  {'-'*70}")
         for r in group_results:
             label = f"{r['interface']} {r['format']} {r['channels']}ch@{r['freq_hz']}Hz"
-            loss = f"{r['loss_percent']}%" if r['loss_percent'] > 0 else "0%"
+            # run_benchmark() returns sample_loss_pct + byte_loss_pct;
+            # there's no `loss_percent` key. Take the worse of the two.
+            loss_pct = max(r.get('sample_loss_pct', 0), r.get('byte_loss_pct', 0))
+            loss = f"{loss_pct}%" if loss_pct > 0 else "0%"
             drops = r['queue_drops'] + r['usb_drops'] + r['sd_drops']
             usb_s = f"{r['usb_buf_size']//1024}K"
             wifi_s = f"{r['wifi_buf_size']//1024}K" if r['wifi_buf_size'] >= 1024 else f"{r['wifi_buf_size']}"

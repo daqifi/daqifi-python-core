@@ -117,26 +117,49 @@ def test_raw_serial_capture(port, filename, output_dir='./test_output'):
         ser.write(cmd.encode('ascii'))
         ser.flush()
 
-        # Read response
+        # Read response.
+        # NB: bytearray + extend (not `response += chunk` on bytes) —
+        # bytes concatenation is O(n) per chunk, O(n²) over the whole
+        # transfer, which is painful at multi-MB SD downloads.
+        # Marker check uses a rolling tail buffer so the scan stays
+        # constant-time per chunk instead of growing O(n²) across the
+        # download.
         print("Reading response...")
-        response = b""
+        response = bytearray()
         end_marker = b"__END_OF_FILE__"
-        start_time = time.time()
+        tail = bytearray()
+        tail_keep = len(end_marker) + 64
+        # Absolute deadline + inactivity timeout: an inactivity-only
+        # timer would never exit on a trickling stream.
         timeout = 300.0
+        deadline = time.monotonic() + timeout
+        last_rx = time.monotonic()
+        last_progress_mb = 0
 
-        while (time.time() - start_time) < timeout:
+        while time.monotonic() < deadline and (time.monotonic() - last_rx) < timeout:
             if ser.in_waiting > 0:
                 chunk = ser.read(ser.in_waiting)
-                response += chunk
+                response.extend(chunk)
+                tail.extend(chunk)
+                if len(tail) > tail_keep:
+                    del tail[:-tail_keep]
 
-                if end_marker in response:
+                if end_marker in tail:
+                    marker_idx = response.find(end_marker)
+                    if marker_idx != -1:
+                        # Truncate AT the marker (exclude it). The
+                        # marker is a protocol terminator, not part of
+                        # the payload — keeping it corrupts the saved
+                        # binary and mismatches sd_get_file()'s output.
+                        del response[marker_idx:]
                     break
 
-                # Print progress
-                if len(response) % (1024*1024) == 0:  # Every 1MB
+                mb = len(response) // (1024 * 1024)
+                if mb > last_progress_mb:
                     print(f"  Received: {len(response):,} bytes...")
+                    last_progress_mb = mb
 
-                start_time = time.time()  # Reset timeout
+                last_rx = time.monotonic()  # Reset inactivity timer
             else:
                 time.sleep(0.01)
 
