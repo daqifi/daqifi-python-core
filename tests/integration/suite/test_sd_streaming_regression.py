@@ -189,6 +189,9 @@ def main():
                         help='Test pattern: 0=real ADC (default), 1=counter, 2=midscale, 3=fullscale, 4=walking, 5=triangle, 6=sine')
     args = parser.parse_args()
 
+    if not args.device:
+        parser.error("missing serial device: pass --device or set DAQIFI_DEVICE_PORT")
+
     ser = serial.Serial(args.device, 115200, timeout=1)
     time.sleep(0.5)
     ser.reset_input_buffer()

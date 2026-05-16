@@ -22,7 +22,7 @@ from pathlib import Path
 from datetime import datetime
 
 from daqifi import NyquistDevice
-from test_harness import StreamingMeasurement
+from test_harness import StreamingMeasurement, _assert_expected_device
 
 
 class ReliableSCPI:
@@ -133,7 +133,14 @@ class TcpDrainClient:
 
 
 def device_reset(scpi):
-    """Reset device to clean state between tests. Waits for SD idle."""
+    """Reset device to clean state between tests. Waits for SD idle.
+
+    Identity-gated against DAQIFI_EXPECTED_SERIAL_NUMBER per CLAUDE.md.
+    Local override of test_harness.device_reset because this script's
+    SD interface needs an extra second after the disable for the file
+    to close cleanly. (Qodo PR 143 pass 3 #6.)
+    """
+    _assert_expected_device(scpi)
     scpi.command("SYST:StopStreamData", delay=1.0)
     scpi.drain(1.0)
     scpi.command("SYST:STR:BENCHmark 0", delay=0.2)
