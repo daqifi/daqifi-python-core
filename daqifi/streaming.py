@@ -5,6 +5,7 @@ Provides real-time data acquisition with support for multiple channels,
 configurable sample rates, and data export.
 """
 
+import math
 import time
 import threading
 from typing import List, Dict, Optional, Callable, Any
@@ -744,6 +745,14 @@ class StreamManager:
         starve other channels — log and continue per channel.
         """
         if self._per_channel_dispatch is None:
+            return
+        # NaN/inf in sample.timestamp would poison _dispatch_last_sample_ts
+        # because NaN comparisons (NaN < 0, NaN > 60) all evaluate False,
+        # so the re-anchor guard never triggers; subsequent epoch_seconds
+        # become NaN and never recover. Drop the sample without touching
+        # any state — preserves the prior good anchor for the next valid
+        # sample. (Qodo PR #142 pass 6 importance 9.)
+        if not math.isfinite(sample.timestamp):
             return
         if self._dispatch_sample_base is None or self._dispatch_epoch_base is None:
             self._dispatch_sample_base = sample.timestamp

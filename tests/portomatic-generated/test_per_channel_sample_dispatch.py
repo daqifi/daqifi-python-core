@@ -160,6 +160,43 @@ class TestStreamManagerPerChannelDispatch:
             f"expected ~70.0s gap, got {calls[-1] - calls[0]}"
         )
 
+    def test_drops_non_finite_timestamps_without_poisoning_anchor(self):
+        """NaN / inf in Sample.timestamp must be dropped silently and
+        must NOT poison _dispatch_last_sample_ts. NaN comparisons all
+        evaluate False, so without an isfinite check the re-anchor
+        guard never fires and every subsequent dispatch produces NaN
+        epoch_seconds. (Qodo PR #142 pass 6 importance 9.)"""
+        import math
+
+        comm = MagicMock()
+        calls = []
+        sm = StreamManager(
+            comm, [0], per_channel_dispatch=lambda i, v, t: calls.append(t)
+        )
+
+        # Prime with a healthy sample.
+        sm._dispatch_per_channel(Sample(timestamp=10.0, channels={0: 1.0}))
+        good_ts = sm._dispatch_last_sample_ts
+
+        # NaN must not be remembered as the new anchor.
+        sm._dispatch_per_channel(
+            Sample(timestamp=float("nan"), channels={0: 2.0})
+        )
+        assert sm._dispatch_last_sample_ts == good_ts
+        assert len(calls) == 1  # NaN sample skipped entirely
+
+        # +inf same treatment.
+        sm._dispatch_per_channel(
+            Sample(timestamp=float("inf"), channels={0: 3.0})
+        )
+        assert sm._dispatch_last_sample_ts == good_ts
+        assert len(calls) == 1
+
+        # Pipeline still works after the bad samples.
+        sm._dispatch_per_channel(Sample(timestamp=10.5, channels={0: 4.0}))
+        assert len(calls) == 2
+        assert math.isfinite(calls[1])
+
     def test_anchor_resets_on_stop_start_reuse(self):
         """Reusing a StreamManager across sessions (start → stop →
         start) must reset the dispatch anchor. Without the reset, the
