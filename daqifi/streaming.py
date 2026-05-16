@@ -202,11 +202,14 @@ class StreamManager:
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
             per_channel_dispatch: Optional callback invoked once per
                 channel value in every produced :class:`Sample`. Signature:
-                ``(channel_index, value, timestamp_seconds) -> None``.
-                When set (typically by :meth:`NyquistDevice.create_stream`),
-                the streaming thread fans the sample out to per-channel
-                ``SampleReceived`` handlers without callers having to wire
-                dispatch themselves. Closes daqifi-python-core#107.
+                ``(channel_index, value, epoch_seconds) -> None`` where
+                ``epoch_seconds`` is wall-clock time anchored against the
+                first sample's relative timestamp (see
+                :meth:`_dispatch_per_channel`). When set (typically by
+                :meth:`NyquistDevice.create_stream`), the streaming thread
+                fans the sample out to per-channel ``SampleReceived``
+                handlers without callers having to wire dispatch
+                themselves. Closes daqifi-python-core#107.
         """
         self._comm = comm
         self._channels = channels
@@ -216,6 +219,14 @@ class StreamManager:
         self._buffer = SampleBuffer(channels=channels, sample_rate=sample_rate)
         self._callback: Optional[Callable[[Sample], None]] = None
         self._per_channel_dispatch = per_channel_dispatch
+        # Anchor for relative-device-time → wall-clock conversion in
+        # _dispatch_per_channel. Lazily set on the first dispatched
+        # sample. Sample.timestamp is device-relative seconds in the
+        # common path (ts/tick_hz) and only falls back to time.time()
+        # when the firmware tick rate hasn't arrived yet — anchoring at
+        # first dispatch handles both.
+        self._dispatch_sample_base: Optional[float] = None
+        self._dispatch_epoch_base: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._read_buffer = ""  # Buffer for partial data (JSON/CSV)
@@ -685,14 +696,33 @@ class StreamManager:
         """Fan a multi-channel :class:`Sample` out to per-channel handlers
         when ``per_channel_dispatch`` is wired (closes #107).
 
+        ``Sample.timestamp`` is device-relative seconds in the common
+        decode paths (``ts / tick_hz``), not UNIX epoch seconds — feeding
+        it to ``datetime.fromtimestamp`` directly produces 1970-era
+        timestamps. We anchor against the first dispatched sample's
+        timestamp to recover wall-clock time:
+
+            epoch = epoch_at_first_dispatch + (sample.ts - sample.ts_at_first_dispatch)
+
+        This is approach B from Qodo PR #142 pass 2 — keeps
+        ``Sample.timestamp`` semantics unchanged and shifts the
+        epoch-anchoring concern into the dispatch closure where the
+        per-channel ``DataSample`` is actually constructed.
+
         A misbehaving handler must not poison the streaming thread or
         starve other channels — log and continue per channel.
         """
         if self._per_channel_dispatch is None:
             return
+        if self._dispatch_sample_base is None:
+            self._dispatch_sample_base = sample.timestamp
+            self._dispatch_epoch_base = time.time()
+        epoch_seconds = self._dispatch_epoch_base + (
+            sample.timestamp - self._dispatch_sample_base
+        )
         for channel_index, value in sample.channels.items():
             try:
-                self._per_channel_dispatch(channel_index, value, sample.timestamp)
+                self._per_channel_dispatch(channel_index, value, epoch_seconds)
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception(

@@ -26,6 +26,10 @@ from daqifi.streaming import Sample, StreamManager
 
 class TestStreamManagerPerChannelDispatch:
     def test_dispatch_called_per_channel_value(self):
+        """All channels in a single Sample receive the same anchored
+        epoch timestamp; values fan out per channel index."""
+        import time
+
         comm = MagicMock()
         calls = []
 
@@ -33,14 +37,42 @@ class TestStreamManagerPerChannelDispatch:
             calls.append((idx, value, ts))
 
         sm = StreamManager(comm, [0, 1, 2], per_channel_dispatch=dispatcher)
+        before = time.time()
         sample = Sample(timestamp=1234.5, channels={0: 1.0, 1: 2.0, 2: 3.0})
         sm._dispatch_per_channel(sample)
+        after = time.time()
 
-        assert calls == [
-            (0, 1.0, 1234.5),
-            (1, 2.0, 1234.5),
-            (2, 3.0, 1234.5),
-        ]
+        # First sample anchors: epoch ≈ wall-clock, regardless of the
+        # device-relative Sample.timestamp value.
+        assert [(c[0], c[1]) for c in calls] == [(0, 1.0), (1, 2.0), (2, 3.0)]
+        for _, _, ts in calls:
+            assert before <= ts <= after
+        # All three channels in the same Sample share one timestamp.
+        assert len({c[2] for c in calls}) == 1
+
+    def test_relative_timestamps_anchor_to_wall_clock(self):
+        """Subsequent Samples maintain monotonic wall-clock spacing
+        equal to the spacing of their relative device timestamps —
+        verifies the Qodo PR 142 pass 2 timestamp-basis fix."""
+        import time
+
+        comm = MagicMock()
+        calls = []
+
+        def dispatcher(idx, value, ts):
+            calls.append(ts)
+
+        sm = StreamManager(comm, [0], per_channel_dispatch=dispatcher)
+        before = time.time()
+        # Three samples, 0.5s apart in device-relative time.
+        sm._dispatch_per_channel(Sample(timestamp=10.0, channels={0: 1.0}))
+        sm._dispatch_per_channel(Sample(timestamp=10.5, channels={0: 2.0}))
+        sm._dispatch_per_channel(Sample(timestamp=11.0, channels={0: 3.0}))
+
+        # Anchored at wall-clock; subsequent gaps preserved exactly.
+        assert calls[0] >= before
+        assert abs((calls[1] - calls[0]) - 0.5) < 1e-6
+        assert abs((calls[2] - calls[1]) - 0.5) < 1e-6
 
     def test_dispatch_no_op_when_unset(self):
         comm = MagicMock()
