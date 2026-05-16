@@ -103,67 +103,67 @@ def test_raw_serial_capture(port, filename, output_dir='./test_output'):
     print("="*80)
 
     try:
-        # Open serial port
+        # Open serial port via context manager so it's released even
+        # if the read loop raises mid-transfer. (Qodo PR 144 #1
+        # importance 8.)
         print(f"\nOpening {port}...")
-        ser = serial.Serial(port, 115200, timeout=1)
-        time.sleep(0.5)
+        with serial.Serial(port, 115200, timeout=1) as ser:
+            time.sleep(0.5)
 
-        # Clear any pending data
-        ser.reset_input_buffer()
+            # Clear any pending data
+            ser.reset_input_buffer()
 
-        # Send command
-        cmd = f'SYST:STOR:SD:GET "{filename}"\r'
-        print(f"Sending command: {cmd.strip()}")
-        ser.write(cmd.encode('ascii'))
-        ser.flush()
+            # Send command
+            cmd = f'SYST:STOR:SD:GET "{filename}"\r'
+            print(f"Sending command: {cmd.strip()}")
+            ser.write(cmd.encode('ascii'))
+            ser.flush()
 
-        # Read response.
-        # NB: bytearray + extend (not `response += chunk` on bytes) —
-        # bytes concatenation is O(n) per chunk, O(n²) over the whole
-        # transfer, which is painful at multi-MB SD downloads.
-        # Marker check uses a rolling tail buffer so the scan stays
-        # constant-time per chunk instead of growing O(n²) across the
-        # download.
-        print("Reading response...")
-        response = bytearray()
-        end_marker = b"__END_OF_FILE__"
-        tail = bytearray()
-        tail_keep = len(end_marker) + 64
-        # Absolute deadline + inactivity timeout: an inactivity-only
-        # timer would never exit on a trickling stream.
-        timeout = 300.0
-        deadline = time.monotonic() + timeout
-        last_rx = time.monotonic()
-        last_progress_mb = 0
+            # Read response.
+            # NB: bytearray + extend (not `response += chunk` on bytes)
+            # — bytes concatenation is O(n) per chunk, O(n²) over the
+            # whole transfer. Marker check uses a rolling tail buffer
+            # so the scan stays constant-time per chunk.
+            print("Reading response...")
+            response = bytearray()
+            end_marker = b"__END_OF_FILE__"
+            tail = bytearray()
+            tail_keep = len(end_marker) + 64
+            # Absolute deadline + inactivity timeout: an inactivity-
+            # only timer would never exit on a trickling stream.
+            timeout = 300.0
+            deadline = time.monotonic() + timeout
+            last_rx = time.monotonic()
+            last_progress_mb = 0
 
-        while time.monotonic() < deadline and (time.monotonic() - last_rx) < timeout:
-            if ser.in_waiting > 0:
-                chunk = ser.read(ser.in_waiting)
-                response.extend(chunk)
-                tail.extend(chunk)
-                if len(tail) > tail_keep:
-                    del tail[:-tail_keep]
+            while time.monotonic() < deadline and (time.monotonic() - last_rx) < timeout:
+                if ser.in_waiting > 0:
+                    chunk = ser.read(ser.in_waiting)
+                    response.extend(chunk)
+                    tail.extend(chunk)
+                    if len(tail) > tail_keep:
+                        del tail[:-tail_keep]
 
-                if end_marker in tail:
-                    marker_idx = response.find(end_marker)
-                    if marker_idx != -1:
-                        # Truncate AT the marker (exclude it). The
-                        # marker is a protocol terminator, not part of
-                        # the payload — keeping it corrupts the saved
-                        # binary and mismatches sd_get_file()'s output.
-                        del response[marker_idx:]
-                    break
+                    if end_marker in tail:
+                        marker_idx = response.find(end_marker)
+                        if marker_idx != -1:
+                            # Truncate AT the marker (exclude it). The
+                            # marker is a protocol terminator, not part
+                            # of the payload — keeping it corrupts the
+                            # saved binary and mismatches
+                            # sd_get_file()'s output.
+                            del response[marker_idx:]
+                        break
 
-                mb = len(response) // (1024 * 1024)
-                if mb > last_progress_mb:
-                    print(f"  Received: {len(response):,} bytes...")
-                    last_progress_mb = mb
+                    mb = len(response) // (1024 * 1024)
+                    if mb > last_progress_mb:
+                        print(f"  Received: {len(response):,} bytes...")
+                        last_progress_mb = mb
 
-                last_rx = time.monotonic()  # Reset inactivity timer
-            else:
-                time.sleep(0.01)
-
-        ser.close()
+                    last_rx = time.monotonic()  # Reset inactivity timer
+                else:
+                    time.sleep(0.01)
+        # ser closed automatically by the with-block.
 
         # Save raw response
         output_file_raw = output_path / f"{filename}.raw_binary"

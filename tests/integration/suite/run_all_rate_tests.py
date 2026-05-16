@@ -128,6 +128,18 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
 
         data = b"".join(chunks)
         if not eof_found:
+            # Best-effort: tear down SD logging + reset the streaming
+            # interface so the next test isn't poisoned by a half-open
+            # SD session. (Qodo PR 144 #2 importance 5.)
+            for cmd in (
+                'SYST:STOR:SD:FILE ""',
+                'SYST:STOR:SD:ENAble 0',
+                'SYST:STReam:INTerface 0',
+            ):
+                try:
+                    device._comm.send_command(cmd)
+                except Exception:
+                    pass
             return {
                 'rate': sample_rate,
                 'success': False,

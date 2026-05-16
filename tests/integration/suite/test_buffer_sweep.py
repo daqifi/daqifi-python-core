@@ -198,9 +198,11 @@ def main():
         for r in group_results:
             label = f"{r['interface']} {r['format']} {r['channels']}ch@{r['freq_hz']}Hz"
             # run_benchmark() returns sample_loss_pct + byte_loss_pct;
-            # there's no `loss_percent` key. Take the worse of the two.
-            loss_pct = max(r.get('sample_loss_pct', 0), r.get('byte_loss_pct', 0))
-            loss = f"{loss_pct}%" if loss_pct > 0 else "0%"
+            # there's no `loss_percent` key. Take the worse of the two,
+            # treating None values as 0 (a partially-failed benchmark
+            # may not populate one of the keys).
+            loss_pct = max(r.get('sample_loss_pct') or 0, r.get('byte_loss_pct') or 0)
+            loss = f"{loss_pct:.1f}%" if loss_pct > 0 else "0%"
             drops = r['queue_drops'] + r['usb_drops'] + r['sd_drops']
             usb_s = f"{r['usb_buf_size']//1024}K"
             wifi_s = f"{r['wifi_buf_size']//1024}K" if r['wifi_buf_size'] >= 1024 else f"{r['wifi_buf_size']}"
