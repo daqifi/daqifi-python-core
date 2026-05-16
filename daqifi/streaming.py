@@ -5,6 +5,7 @@ Provides real-time data acquisition with support for multiple channels,
 configurable sample rates, and data export.
 """
 
+import math
 import time
 import threading
 from typing import List, Dict, Optional, Callable, Any
@@ -27,8 +28,20 @@ class StreamState(Enum):
 
 @dataclass
 class Sample:
-    """Single sample across all enabled channels"""
-    timestamp: float  # Seconds since epoch
+    """Single sample across all enabled channels.
+
+    ``timestamp`` is **device-relative seconds** in the common decode
+    paths — the JSON / CSV parsers compute it as ``ts / tick_hz`` from
+    the firmware's tick counter. It is NOT UNIX epoch seconds; feeding
+    it directly to ``datetime.fromtimestamp`` yields 1970-era values.
+    Only the fallback paths (no ``tick_hz`` known yet, or the protobuf
+    decoder) populate it with ``time.time()``. The per-channel dispatch
+    pipeline anchors it against wall-clock at first sample to recover a
+    real epoch — see :meth:`StreamManager._dispatch_per_channel`. If
+    you need a wall-clock time from a Sample directly, use the per-
+    channel ``DataSample.timestamp`` instead.
+    """
+    timestamp: float
     channels: Dict[int, float]  # Channel ID -> voltage
 
     def __getitem__(self, channel: int) -> float:
@@ -184,7 +197,14 @@ class StreamManager:
     sample rates and channel selection.
     """
 
-    def __init__(self, comm: SerialInterface, channels: List[int], sample_rate: int = 1000, format: int = 1):
+    def __init__(
+        self,
+        comm: SerialInterface,
+        channels: List[int],
+        sample_rate: int = 1000,
+        format: int = 1,
+        per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+    ):
         """
         Initialize stream manager.
 
@@ -193,6 +213,16 @@ class StreamManager:
             channels: List of channel indices to stream
             sample_rate: Sample rate in Hz (default 1000)
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
+            per_channel_dispatch: Optional callback invoked once per
+                channel value in every produced :class:`Sample`. Signature:
+                ``(channel_index, value, epoch_seconds) -> None`` where
+                ``epoch_seconds`` is wall-clock time anchored against the
+                first sample's relative timestamp (see
+                :meth:`_dispatch_per_channel`). When set (typically by
+                :meth:`NyquistDevice.create_stream`), the streaming thread
+                fans the sample out to per-channel ``SampleReceived``
+                handlers without callers having to wire dispatch
+                themselves. Closes daqifi-python-core#107.
         """
         self._comm = comm
         self._channels = channels
@@ -201,6 +231,22 @@ class StreamManager:
         self._state = StreamState.STOPPED
         self._buffer = SampleBuffer(channels=channels, sample_rate=sample_rate)
         self._callback: Optional[Callable[[Sample], None]] = None
+        self._per_channel_dispatch = per_channel_dispatch
+        # Anchor for relative-device-time → wall-clock conversion in
+        # _dispatch_per_channel. Lazily set on the first dispatched
+        # sample. Sample.timestamp is device-relative seconds in the
+        # common path (ts/tick_hz) and only falls back to time.time()
+        # when the firmware tick rate hasn't arrived yet — anchoring at
+        # first dispatch handles both. _dispatch_last_sample_ts tracks
+        # the previous sample's relative timestamp so the re-anchor
+        # guard fires on per-sample anomalies (a single backwards step
+        # or a >60s jump from one sample to the next), not on
+        # cumulative elapsed time — Qodo PR #142 pass 5 #4 caught the
+        # cumulative-delta version which would re-anchor every 60s on a
+        # healthy stream.
+        self._dispatch_sample_base: Optional[float] = None
+        self._dispatch_epoch_base: Optional[float] = None
+        self._dispatch_last_sample_ts: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._read_buffer = ""  # Buffer for partial data (JSON/CSV)
@@ -255,6 +301,14 @@ class StreamManager:
         self._stop_event.clear()
         self._buffer.clear()
         self._read_buffer = ""  # Clear read buffer
+        # Reset the per-channel dispatch anchor so a stop/start of the
+        # same StreamManager instance starts a fresh epoch base. Without
+        # this, the previous session's anchor gets reused and downstream
+        # epoch_seconds drift by the gap between sessions (Qodo PR #142
+        # pass 4 inline finding).
+        self._dispatch_sample_base = None
+        self._dispatch_epoch_base = None
+        self._dispatch_last_sample_ts = None
 
         try:
             # Verify at least one channel is enabled (firmware bug workaround)
@@ -352,6 +406,10 @@ class StreamManager:
             if sample is not None:
                 samples.append(sample)
                 self._buffer.add_sample(sample)
+                # Per-channel dispatch must fire from blocking reads too
+                # — silently skipping it left polling-mode callers' channel
+                # handlers stuck on stale samples (Qodo PR #142 pass 3 #1).
+                self._dispatch_per_channel(sample)
 
             time.sleep(0.001)  # Small delay to avoid busy loop
 
@@ -655,6 +713,7 @@ class StreamManager:
                 sample = self._read_sample()
                 if sample is not None:
                     self._buffer.add_sample(sample)
+                    self._dispatch_per_channel(sample)
                     if self._callback is not None:
                         self._callback(sample)
 
@@ -664,6 +723,63 @@ class StreamManager:
                 print(f"Streaming error: {e}")
                 self._state = StreamState.ERROR
                 break
+
+    def _dispatch_per_channel(self, sample: Sample) -> None:
+        """Fan a multi-channel :class:`Sample` out to per-channel handlers
+        when ``per_channel_dispatch`` is wired (closes #107).
+
+        ``Sample.timestamp`` is device-relative seconds in the common
+        decode paths (``ts / tick_hz``), not UNIX epoch seconds — feeding
+        it to ``datetime.fromtimestamp`` directly produces 1970-era
+        timestamps. We anchor against the first dispatched sample's
+        timestamp to recover wall-clock time:
+
+            epoch = epoch_at_first_dispatch + (sample.ts - sample.ts_at_first_dispatch)
+
+        This is approach B from Qodo PR #142 pass 2 — keeps
+        ``Sample.timestamp`` semantics unchanged and shifts the
+        epoch-anchoring concern into the dispatch closure where the
+        per-channel ``DataSample`` is actually constructed.
+
+        A misbehaving handler must not poison the streaming thread or
+        starve other channels — log and continue per channel.
+        """
+        if self._per_channel_dispatch is None:
+            return
+        # NaN/inf in sample.timestamp would poison _dispatch_last_sample_ts
+        # because NaN comparisons (NaN < 0, NaN > 60) all evaluate False,
+        # so the re-anchor guard never triggers; subsequent epoch_seconds
+        # become NaN and never recover. Drop the sample without touching
+        # any state — preserves the prior good anchor for the next valid
+        # sample. (Qodo PR #142 pass 6 importance 9.)
+        if not math.isfinite(sample.timestamp):
+            return
+        if self._dispatch_sample_base is None or self._dispatch_epoch_base is None:
+            self._dispatch_sample_base = sample.timestamp
+            self._dispatch_epoch_base = time.time()
+            self._dispatch_last_sample_ts = sample.timestamp
+        # Per-sample step (NOT cumulative delta). Re-anchor on
+        # backwards or >60s jumps from the previous sample — those
+        # signal device tick wrap, mid-stream reset, or parser
+        # reseating after a recovery window. The earlier cumulative-
+        # delta guard incorrectly fired ~every 60s on a healthy stream
+        # (Qodo PR #142 pass 5 #4).
+        step = sample.timestamp - self._dispatch_last_sample_ts
+        if step < 0.0 or step > 60.0:
+            self._dispatch_sample_base = sample.timestamp
+            self._dispatch_epoch_base = time.time()
+        epoch_seconds = self._dispatch_epoch_base + (
+            sample.timestamp - self._dispatch_sample_base
+        )
+        self._dispatch_last_sample_ts = sample.timestamp
+        for channel_index, value in sample.channels.items():
+            try:
+                self._per_channel_dispatch(channel_index, value, epoch_seconds)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "per-channel dispatch raised on channel %d", channel_index
+                )
 
     def __enter__(self):
         """Context manager entry"""
@@ -687,7 +803,14 @@ class AsyncStreamManager:
     Requires Python 3.7+ with asyncio.
     """
 
-    def __init__(self, comm: SerialInterface, channels: List[int], sample_rate: int = 1000, format: int = 1):
+    def __init__(
+        self,
+        comm: SerialInterface,
+        channels: List[int],
+        sample_rate: int = 1000,
+        format: int = 1,
+        per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+    ):
         """
         Initialize async stream manager.
 
@@ -696,8 +819,16 @@ class AsyncStreamManager:
             channels: List of channel indices to stream
             sample_rate: Sample rate in Hz
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
+            per_channel_dispatch: See :class:`StreamManager`. Forwarded
+                to the wrapped synchronous manager.
         """
-        self._stream = StreamManager(comm, channels, sample_rate, format)
+        self._stream = StreamManager(
+            comm,
+            channels,
+            sample_rate,
+            format,
+            per_channel_dispatch=per_channel_dispatch,
+        )
 
     async def start(self):
         """Start streaming (async)"""
