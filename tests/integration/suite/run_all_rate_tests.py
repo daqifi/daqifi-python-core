@@ -117,8 +117,25 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
         # Scale the download timeout with test duration; long high-rate
         # tests can produce large SD files that need more than 60s.
         # DAQIFI_SD_GET_TIMEOUT_SEC overrides the baseline. (Qodo PR
-        # 144 pass 6 importance 7.)
-        base_timeout = float(os.environ.get("DAQIFI_SD_GET_TIMEOUT_SEC", "60"))
+        # 144 pass 6 importance 7.) Validate the env-var: garbage
+        # would raise from float(); a <=0 value would make the loop
+        # exit instantly and report a bogus timeout. (Qodo PR 144 pass
+        # 7 ⭐ New finding.)
+        _env_timeout = os.environ.get("DAQIFI_SD_GET_TIMEOUT_SEC", "60")
+        try:
+            base_timeout = float(_env_timeout)
+        except ValueError:
+            print(
+                f"  WARNING: DAQIFI_SD_GET_TIMEOUT_SEC={_env_timeout!r} "
+                "is not a valid number; falling back to 60s."
+            )
+            base_timeout = 60.0
+        if base_timeout < 1.0:
+            print(
+                f"  WARNING: DAQIFI_SD_GET_TIMEOUT_SEC={_env_timeout!r} "
+                "must be >= 1.0; clamping."
+            )
+            base_timeout = 1.0
         download_timeout = max(base_timeout, 3.0 * float(duration_sec))
 
         while (time.monotonic() - start_time) < download_timeout:
