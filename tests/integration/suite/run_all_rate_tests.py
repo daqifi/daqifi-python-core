@@ -131,7 +131,10 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
         if not eof_found:
             # Best-effort: tear down SD logging + reset the streaming
             # interface so the next test isn't poisoned by a half-open
-            # SD session. (Qodo PR 144 #2 importance 5.)
+            # SD session. (Qodo PR 144 #2 importance 5.) Surface any
+            # cleanup failure in the diagnostic — silent suppression
+            # hides further trouble. (Qodo PR 144 pass 3 #3.)
+            cleanup_errors = []
             for cmd in (
                 'SYST:STOR:SD:FILE ""',
                 'SYST:STOR:SD:ENAble 0',
@@ -139,12 +142,16 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
             ):
                 try:
                     device._comm.send_command(cmd)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"  WARNING: cleanup '{cmd}' failed: {e}")
+                    cleanup_errors.append(f"{cmd}: {e}")
+            err = f'SD download timed out (no EOF marker in {len(data)} bytes)'
+            if cleanup_errors:
+                err += f' [cleanup failures: {"; ".join(cleanup_errors)}]'
             return {
                 'rate': sample_rate,
                 'success': False,
-                'error': f'SD download timed out (no EOF marker in {len(data)} bytes)',
+                'error': err,
             }
 
         # Trim trailing EOF and the leading CSV comment header (#).

@@ -135,10 +135,19 @@ def test_raw_serial_capture(port, filename, output_dir='./test_output'):
             deadline = time.monotonic() + timeout
             last_rx = time.monotonic()
             last_progress_mb = 0
+            eof_found = False
 
             while time.monotonic() < deadline and (time.monotonic() - last_rx) < timeout:
                 if ser.in_waiting > 0:
                     chunk = ser.read(ser.in_waiting)
+                    # pyserial can return empty bytes even when
+                    # in_waiting>0 (port flakiness on Windows). Don't
+                    # let an empty read reset the inactivity timer —
+                    # that turns into a busy loop. (Qodo PR 144 pass 3
+                    # /improve importance 5.)
+                    if not chunk:
+                        time.sleep(0.01)
+                        continue
                     response.extend(chunk)
                     tail.extend(chunk)
                     if len(tail) > tail_keep:
@@ -153,6 +162,7 @@ def test_raw_serial_capture(port, filename, output_dir='./test_output'):
                             # saved binary and mismatches
                             # sd_get_file()'s output.
                             del response[marker_idx:]
+                        eof_found = True
                         break
 
                     mb = len(response) // (1024 * 1024)
@@ -164,6 +174,17 @@ def test_raw_serial_capture(port, filename, output_dir='./test_output'):
                 else:
                     time.sleep(0.01)
         # ser closed automatically by the with-block.
+
+        if not eof_found:
+            # Don't write partial data and pretend it succeeded — the
+            # checksum/line-count analysis below would silently report
+            # a corrupted download as a real result. (Qodo PR 144 pass
+            # 3 /agentic_review #2: 'No EOF verification'.)
+            print(
+                f"\nERROR: Timed out after {len(response):,} bytes without "
+                "seeing __END_OF_FILE__ marker."
+            )
+            return None
 
         # Save raw response
         output_file_raw = output_path / f"{filename}.raw_binary"
