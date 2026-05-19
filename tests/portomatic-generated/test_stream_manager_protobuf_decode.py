@@ -165,6 +165,31 @@ class TestReadSampleProtobufDecodesRealValues:
         assert sample is not None
         assert sample.channels[0] == pytest.approx(0.125)
 
+    def test_buffer_hard_cap_drops_old_garbage_on_desync(self):
+        """When the parser repeatedly returns (no messages, 0 bytes
+        consumed) — the real-world signal of a stuck wait-for-tail
+        state — the buffer is trimmed to its hard cap to prevent
+        unbounded growth. Verifies the safety cap added in pass-1
+        review (Qodo /improve #1 importance 7)."""
+        comm = _make_comm_with_bytes(b"")
+        sm = StreamManager(comm, channels=[0], format=0)
+        sm._PB_BUFFER_HARD_CAP = 32  # tiny cap so the test stays fast
+        sm._pb_buffer.extend(b"\xab" * 100)  # well over the cap
+
+        # Force the parser into "made no progress" by stubbing it.
+        # Real desync scenarios that produce this state: an apparent
+        # partial frame whose declared length never arrives because
+        # the device disconnected mid-write.
+        sm._pb_parser = MagicMock()
+        sm._pb_parser.parse_messages.return_value = ([], 0)
+
+        sm._read_sample_protobuf()
+
+        # Cap trims to half the cap (16 bytes); content is the tail
+        # of the original buffer, not the head.
+        assert len(sm._pb_buffer) == 16
+        assert all(b == 0xAB for b in sm._pb_buffer)
+
     def test_misaligned_frame_drops_silently(self):
         """If the per-frame value count isn't a clean multiple of the
         channel list, decoder returns no sample for that frame

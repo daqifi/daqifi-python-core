@@ -199,6 +199,13 @@ class StreamManager:
     sample rates and channel selection.
     """
 
+    # Maximum size of the protobuf decode buffer before forced trim.
+    # 1 MiB is ~200x the largest realistic single PB streaming frame
+    # (well under 1 KB on observed firmware); past this point the
+    # wire is desynced, not just slow. Class-level constant so tests
+    # can monkey-patch without crafting MiB-sized fixtures.
+    _PB_BUFFER_HARD_CAP = 1024 * 1024
+
     def __init__(
         self,
         comm: SerialInterface,
@@ -255,8 +262,12 @@ class StreamManager:
         self._tick_rate_hz = None  # Tick rate from metadata header (for timestamp conversion)
         # Protobuf decode state. Lazily initialised on the first
         # _read_sample_protobuf call so callers using JSON/CSV pay
-        # nothing for the import or buffer allocation.
-        self._pb_buffer: bytes = b""
+        # nothing for the import.
+        #
+        # _pb_buffer is a bytearray (not bytes) so per-read appends
+        # are O(chunk) instead of O(total) — at 50 kHz the bytes
+        # path would copy the whole buffer on every poll.
+        self._pb_buffer: bytearray = bytearray()
         self._pb_parser: Optional[ProtobufMessageParser] = None
         self._pending_pb_samples: Deque[Sample] = deque()
 
@@ -743,7 +754,7 @@ class StreamManager:
             raise CommandError(f"Failed to poll serial for PB data: {e}") from e
 
         if in_waiting > 0:
-            self._pb_buffer += self._comm._serial.read(in_waiting)
+            self._pb_buffer.extend(self._comm._serial.read(in_waiting))
 
         if not self._pb_buffer:
             return None
@@ -760,9 +771,21 @@ class StreamManager:
                 )
             )
 
-        messages, consumed = self._pb_parser.parse_messages(self._pb_buffer)
+        messages, consumed = self._pb_parser.parse_messages(bytes(self._pb_buffer))
         if consumed:
-            self._pb_buffer = self._pb_buffer[consumed:]
+            del self._pb_buffer[:consumed]
+        elif len(self._pb_buffer) > self._PB_BUFFER_HARD_CAP:
+            # Parser made no forward progress and the buffer keeps
+            # growing — the wire is desynced (firmware reboot mid-
+            # stream, garbage from another device, transient line
+            # corruption). Drop the oldest half and keep the tail:
+            # any in-flight frame is much more likely to be near the
+            # current write pointer than at the start of the
+            # accumulated garbage. The parser's resync-on-malformed
+            # logic (advance one byte at a time) will recover from
+            # the kept tail.
+            half = self._PB_BUFFER_HARD_CAP // 2
+            del self._pb_buffer[:-half]
 
         for inbound in messages:
             for sample in self._samples_from_pb_message(inbound.data):
