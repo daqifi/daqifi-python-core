@@ -64,8 +64,8 @@ def main():
         # Initial drain
         drain_and_dump(ser, "initial idle drain")
 
-        send(ser, "SYST:StopStreamData", delay=1.0)
-        drain_and_dump(ser, "after StopStreamData")
+        send(ser, "SYST:STReam:STOP", delay=1.0)
+        drain_and_dump(ser, "after STReam:STOP")
 
         send(ser, "SYST:STR:BENCHmark 0", delay=0.2)
         drain_and_dump(ser, "after BENCHmark 0")
@@ -93,7 +93,7 @@ def main():
         send(ser, "ENABle:VOLTage:DC 1", delay=0.2)
         drain_and_dump(ser, "after ENABle:VOLT:DC 1")
 
-        send(ser, "SYST:StartStreamData 100", delay=0.0)
+        send(ser, "SYST:STReam:START 100", delay=0.0)
 
         # Read whatever flows for 2s
         deadline = time.monotonic() + 2.0
@@ -114,7 +114,7 @@ def main():
         else:
             print("  (empty)")
 
-        send(ser, "SYST:StopStreamData", delay=1.0)
+        send(ser, "SYST:STReam:STOP", delay=1.0)
         drain_and_dump(ser, "after final stop")
 
         # Sanity: query stream stats

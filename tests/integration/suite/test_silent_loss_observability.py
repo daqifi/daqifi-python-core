@@ -58,10 +58,10 @@ def stream_and_collect(scpi: ReliableSCPI, freq: int, duration: float,
 
     reader = FastReader(scpi._serial)
     reader.start()
-    scpi._serial.write(f"SYST:StartStreamData {freq}\r".encode('ascii'))
+    scpi._serial.write(f"SYST:STReam:START {freq}\r".encode('ascii'))
     scpi._serial.flush()
     time.sleep(duration)
-    scpi._serial.write(b"SYST:StopStreamData\r")
+    scpi._serial.write(b"SYST:STReam:STOP\r")
     scpi._serial.flush()
     time.sleep(0.5)
     reader.stop()

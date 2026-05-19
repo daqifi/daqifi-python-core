@@ -197,7 +197,7 @@ def _run_one(
             # a Python-side guard that pre-dates the firmware accepting
             # higher rates. The benchmark explicitly targets 5/10/50 kHz
             # per the #18 spec.
-            _send(serial_obj, f"SYSTem:StartStreamData {rate_hz}", 0.05)
+            _send(serial_obj, f"SYSTem:STReam:START {rate_hz}", 0.05)
             streaming_started = True
             time.sleep(duration_s)
         finally:

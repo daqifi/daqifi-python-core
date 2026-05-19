@@ -120,7 +120,7 @@ class StreamingMeasurement:
 
     The pattern:
 
-    1. Caller sends ``SYST:StartStreamData <freq>`` (outside the window)
+    1. Caller sends ``SYST:STReam:START <freq>`` (outside the window)
     2. Caller calls ``open_window()`` — PC clock starts
     3. Caller polls ``record_chunk(data)`` for each batch of bytes read
        (or attaches via ``FastReader(on_chunk=measurement.record_chunk)``)

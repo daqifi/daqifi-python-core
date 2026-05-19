@@ -294,7 +294,7 @@ class StreamingMeasurement:
         # Start reader + streaming
         t = threading.Thread(target=reader, daemon=True)
         t.start()
-        self._scpi.command(f'SYST:StartStreamData {freq}', 0)
+        self._scpi.command(f'SYST:STReam:START {freq}', 0)
 
         # Wait for first serial data (excludes SCPI start latency).
         # For WiFi/SD-only streaming, skip this — data arrives on TCP/SD,
@@ -306,7 +306,7 @@ class StreamingMeasurement:
 
             if first_data_time is None:
                 stop = True; t.join(timeout=3)
-                self._scpi.command('SYST:StopStreamData', 0)
+                self._scpi.command('SYST:STReam:STOP', 0)
                 time.sleep(1); self._scpi.drain(2)
                 self.leaked = True
                 return
@@ -323,7 +323,7 @@ class StreamingMeasurement:
         # === END MEASUREMENT WINDOW ===
 
         # Stop streaming (outside window — doesn't affect measurement)
-        self._scpi.command('SYST:StopStreamData', 0)
+        self._scpi.command('SYST:STReam:STOP', 0)
         time.sleep(1)
         stop = True; t.join(timeout=3)
         self._scpi.drain(2)
@@ -405,14 +405,14 @@ def device_reset(scpi):
     - SD disabled
     - All channels disabled
     - Interface set to USB
-    - MemoryConfig zeroed (auto mode for next StartStreamData)
+    - MemoryConfig zeroed (auto mode for next STReam:START)
     - Serial buffer drained
     """
     # Verify identity before issuing any state-changing SCPI command —
     # see CLAUDE.md "Identity-gating destructive operations".
     _assert_expected_device(scpi)
     # Stop any active streaming
-    scpi.command("SYST:StopStreamData", delay=1.0)
+    scpi.command("SYST:STReam:STOP", delay=1.0)
     scpi.drain(1.0)
 
     # Disable benchmark mode and test patterns

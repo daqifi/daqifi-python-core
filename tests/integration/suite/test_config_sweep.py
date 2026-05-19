@@ -141,7 +141,7 @@ def device_reset(scpi):
     to close cleanly. (Qodo PR 143 pass 3 #6.)
     """
     _assert_expected_device(scpi)
-    scpi.command("SYST:StopStreamData", delay=1.0)
+    scpi.command("SYST:STReam:STOP", delay=1.0)
     scpi.drain(1.0)
     scpi.command("SYST:STR:BENCHmark 0", delay=0.2)
     scpi.command("SYST:STR:TESTpattern 0", delay=0.2)
@@ -180,7 +180,7 @@ def run_test(scpi, interface, fmt, channels, freq, duration, label, tcp=None):
     if tcp:
         tcp.bytes_received = 0
 
-    # Stream — MemoryConfig is zeroed (from device_reset), StartStreamData auto-balances
+    # Stream — MemoryConfig is zeroed (from device_reset), STReam:START auto-balances
     m = StreamingMeasurement(scpi, scpi._serial)
     m.start(freq=freq, duration=duration, is_csv=(fmt == 2),
             wait_for_serial=(interface == 0))
@@ -340,23 +340,23 @@ def main():
 
             # USB
             scpi.command("SYST:STR:INT 0")
-            scpi.command("SYST:MEM:RESet", delay=0.3)  # Zero MemoryConfig — let StartStreamData auto-balance
-            scpi.command("SYST:StartStreamData 1000", delay=0.5)
+            scpi.command("SYST:MEM:RESet", delay=0.3)  # Zero MemoryConfig — let STReam:START auto-balance
+            scpi.command("SYST:STReam:START 1000", delay=0.5)
             time.sleep(1)
             n = scpi._serial.in_waiting
             if n > 0: scpi._serial.read(n)
-            scpi.command("SYST:StopStreamData", delay=1.0)
+            scpi.command("SYST:STReam:STOP", delay=1.0)
             scpi.drain(0.5)
 
             # SD
             scpi.command("SYST:STOR:SD:ENAble 1", delay=1.0)
             scpi.command("SYST:STR:INT 2")
-            scpi.command("SYST:MEM:RESet", delay=0.3)  # Zero MemoryConfig — let StartStreamData auto-balance
-            scpi.command("SYST:StartStreamData 1000", delay=0.5)
+            scpi.command("SYST:MEM:RESet", delay=0.3)  # Zero MemoryConfig — let STReam:START auto-balance
+            scpi.command("SYST:STReam:START 1000", delay=0.5)
             time.sleep(1)
             n = scpi._serial.in_waiting
             if n > 0: scpi._serial.read(n)
-            scpi.command("SYST:StopStreamData", delay=1.0)
+            scpi.command("SYST:STReam:STOP", delay=1.0)
             scpi.drain(0.5)
             scpi.command("SYST:STOR:SD:ENAble 0", delay=1.0)
 

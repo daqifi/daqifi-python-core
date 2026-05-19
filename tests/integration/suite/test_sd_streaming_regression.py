@@ -78,7 +78,7 @@ def run_test(ser, label, channels, freq, duration_sec, pattern=0):
     print(f"{'='*60}")
 
     # Setup
-    send_cmd(ser, "SYST:StopStreamData", 1)
+    send_cmd(ser, "SYST:STReam:STOP", 1)
     drain_errors(ser)
     send_cmd(ser, "SYST:STR:ClearStats", 0.5)
     send_cmd(ser, "SYST:LOG:CLEar", 0.5)
@@ -107,7 +107,7 @@ def run_test(ser, label, channels, freq, duration_sec, pattern=0):
     print(f"  File: {fname}")
 
     # Start streaming
-    send_cmd(ser, f"SYST:StartStreamData {freq}", 2)
+    send_cmd(ser, f"SYST:STReam:START {freq}", 2)
 
     # Monitor every 60s
     start = time.time()
@@ -126,7 +126,7 @@ def run_test(ser, label, channels, freq, duration_sec, pattern=0):
 
     # Stop
     print("  Stopping...")
-    send_cmd(ser, "SYST:StopStreamData", 3)
+    send_cmd(ser, "SYST:STReam:STOP", 3)
     send_cmd(ser, "SYST:STR:TESTpattern 0", 0.5)  # Disable test pattern
     send_cmd(ser, "SYST:STR:INTerface 0", 0.5)  # Reset to default
 

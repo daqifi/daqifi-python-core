@@ -149,7 +149,7 @@ def test(scpi, ser, iface, fmt, channels, freq, benchmark_mode, test_pattern=3, 
     from test_harness import StreamingMeasurement
 
     # Setup: stop, reset, configure
-    scpi.command('SYST:StopStreamData', 1); scpi.drain(1)
+    scpi.command('SYST:STReam:STOP', 1); scpi.drain(1)
     scpi.command('SYST:STR:BENCHmark 0'); scpi.command('SYST:STR:TESTpattern 0')
     scpi.command('SYST:STOR:SD:ENAble 0', 1); time.sleep(1)
     scpi.command('SYST:MEM:RESet', 0.3)

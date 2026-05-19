@@ -12,7 +12,7 @@ What this script does that the library doesn't (yet):
 1. Wraps `send_command` in a small `checked()` helper that ALWAYS queries
    `SYST:ERR?` afterwards and surfaces the failure.
 2. Sequences the wake/init so the device leaves Standby before
-   StartStreamData is attempted.
+   STReam:START is attempted.
 """
 
 from __future__ import annotations

@@ -150,13 +150,13 @@ def run_stream(transport, run: StreamRun) -> None:
 
     consumer.start()
     try:
-        send(ser, f"SYSTem:StartStreamData {run.rate_hz}", delay=0.0)
+        send(ser, f"SYSTem:STReam:START {run.rate_hz}", delay=0.0)
         time.sleep(run.duration_s)
     finally:
         consumer.stop()
 
     # Stop streaming
-    send(ser, "SYSTem:StopStreamData", delay=0.5)
+    send(ser, "SYSTem:STReam:STOP", delay=0.5)
     drain(ser, timeout=0.5)
 
     # Post-snapshot
