@@ -337,9 +337,16 @@ class StreamManager:
             # silently leave us in RUNNING and surface later as read()
             # timeouts instead of a clear start failure. (Qodo PR #6
             # pass 1 #2.)
-            if scpi.is_error_response(response):
+            #
+            # NB: use the prefix-checking contains_scpi_error() on a
+            # single status line — is_error_response() does a substring
+            # scan over the whole buffer and false-positives on stream
+            # payload that happens to include the word "ERROR" (Qodo
+            # PR #6 pass 2 #1 — regression from the naïve guard above).
+            first_line = response.splitlines()[0] if response else ""
+            if scpi.contains_scpi_error([first_line]):
                 raise CommandError(
-                    f"Streaming START rejected by device: {response.strip()!r}"
+                    f"Streaming START rejected by device: {first_line.strip()!r}"
                 )
 
             self._state = StreamState.RUNNING
