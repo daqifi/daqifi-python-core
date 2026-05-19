@@ -222,11 +222,11 @@ def start_streaming(frequency: int) -> ScpiMessage:
         raise TypeError("frequency must be an int.")
     if frequency < 1 or frequency > 1000:
         raise ValueError("frequency must be between 1 and 1000 Hz.")
-    return ScpiMessage(f"SYSTem:StartStreamData {frequency}")
+    return ScpiMessage(f"SYSTem:STReam:START {frequency}")
 
 
 def stop_streaming() -> ScpiMessage:
-    return ScpiMessage("SYSTem:StopStreamData")
+    return ScpiMessage("SYSTem:STReam:STOP")
 
 
 def set_protobuf_stream_format() -> ScpiMessage:

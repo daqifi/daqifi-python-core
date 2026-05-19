@@ -308,7 +308,7 @@ class TestDaqifiStreamingDevice:
         sd.start_streaming()
         assert sd.is_streaming
         assert sd.state is DeviceState.Streaming
-        assert any(b"StartStreamData 250" in w for w in t.stream.written)
+        assert any(b"STReam:START 250" in w for w in t.stream.written)
         sd.stop_streaming()
         assert not sd.is_streaming
         assert sd.state is DeviceState.Ready

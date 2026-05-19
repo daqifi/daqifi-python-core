@@ -326,9 +326,28 @@ class StreamManager:
             self._comm.send_set(scpi.Streaming.FORMAT_SET, self._format)
 
             # Send SCPI command to start streaming with frequency parameter
-            # Don't issue any other commands during streaming (only StopStreamData allowed)
+            # Don't issue any other commands during streaming (only STReam:STOP allowed)
             start_cmd = f"{scpi.Streaming.START} {self._sample_rate}"
             response = self._comm.send_command(start_cmd, delay=0.2)
+
+            # Validate the START response before transitioning to RUNNING.
+            # Without this, a device-side rejection (e.g. unknown command
+            # on older firmware that hasn't picked up the SYST:STR:START
+            # alias, or an "execution error" from invalid state) would
+            # silently leave us in RUNNING and surface later as read()
+            # timeouts instead of a clear start failure. (Qodo PR #6
+            # pass 1 #2.)
+            #
+            # NB: use the prefix-checking contains_scpi_error() on a
+            # single status line — is_error_response() does a substring
+            # scan over the whole buffer and false-positives on stream
+            # payload that happens to include the word "ERROR" (Qodo
+            # PR #6 pass 2 #1 — regression from the naïve guard above).
+            first_line = response.splitlines()[0] if response else ""
+            if scpi.contains_scpi_error([first_line]):
+                raise CommandError(
+                    f"Streaming START rejected by device: {first_line.strip()!r}"
+                )
 
             self._state = StreamState.RUNNING
 
@@ -339,7 +358,16 @@ class StreamManager:
 
         except Exception as e:
             self._state = StreamState.ERROR
-            raise CommandError(f"Failed to start streaming: {e}")
+            # Don't double-wrap the explicit CommandError raised inside
+            # the try (e.g. the START-rejection guard above). Re-raise it
+            # as-is so callers see "Streaming START rejected by device:
+            # ..." instead of "Failed to start streaming: Streaming
+            # START rejected by device: ...". For any other exception,
+            # wrap with `from e` to preserve the original traceback.
+            # (Qodo PR #6 pass 3 #1.)
+            if isinstance(e, CommandError):
+                raise
+            raise CommandError(f"Failed to start streaming: {e}") from e
 
     def stop(self):
         """
@@ -367,7 +395,11 @@ class StreamManager:
             self._state = StreamState.STOPPED
         except Exception as e:
             self._state = StreamState.ERROR
-            raise CommandError(f"Failed to stop streaming: {e}")
+            # Mirror the start() handler: don't double-wrap CommandError,
+            # and preserve the traceback via `from e` for other types.
+            if isinstance(e, CommandError):
+                raise
+            raise CommandError(f"Failed to stop streaming: {e}") from e
 
     def read(self, num_samples: int = 1, timeout: float = 1.0) -> List[Sample]:
         """
