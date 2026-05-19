@@ -20,6 +20,7 @@ from daqifi.communication import (
     StreamMessageConsumer,
 )
 from daqifi.transport import SerialStreamTransport
+from daqifi._internal import scpi
 
 
 PORT = "COM7"
@@ -109,13 +110,13 @@ def test_rate(transport, log_label, rate_hz: int, duration_s: float) -> tuple[in
 
     consumer.start()
     try:
-        send(ser, f"SYSTem:STReam:START {rate_hz}", delay=0.0)
+        send(ser, f"{scpi.Streaming.START} {rate_hz}", delay=0.0)
         time.sleep(duration_s)
     finally:
         consumer.stop()
 
     # Stop
-    send(ser, "SYSTem:STReam:STOP", delay=0.5)
+    send(ser, scpi.Streaming.STOP, delay=0.5)
     leftover = drain(ser, timeout=0.5)
     raw_seen[0] = len(leftover)
 

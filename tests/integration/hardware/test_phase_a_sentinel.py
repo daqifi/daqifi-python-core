@@ -22,6 +22,7 @@ import time
 
 import pytest
 
+from daqifi._internal import scpi
 from tests.integration.hardware._harness import FastReader
 
 
@@ -95,7 +96,7 @@ def test_short_streaming_smoke(
         serial_obj.write(b"ENAble:VOLTage:DC 1\r")
         serial_obj.flush()
         time.sleep(0.2)
-        serial_obj.write(b"SYSTem:STReam:START 100\r")
+        serial_obj.write(f"{scpi.Streaming.START} 100\r".encode("ascii"))
         serial_obj.flush()
         time.sleep(1.0)
     finally:
@@ -106,7 +107,7 @@ def test_short_streaming_smoke(
         # bytes. Best-effort because we're already in a teardown
         # path and a raise here would mask the original failure.
         try:
-            serial_obj.write(b"SYSTem:STReam:STOP\r")
+            serial_obj.write(f"{scpi.Streaming.STOP}\r".encode("ascii"))
             serial_obj.flush()
             time.sleep(0.3)
         except Exception:

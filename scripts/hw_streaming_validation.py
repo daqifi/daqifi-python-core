@@ -26,6 +26,7 @@ from daqifi.communication import (
     StreamMessageConsumer,
 )
 from daqifi.transport import SerialStreamTransport
+from daqifi._internal import scpi
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
 
 
@@ -150,13 +151,13 @@ def run_stream(transport, run: StreamRun) -> None:
 
     consumer.start()
     try:
-        send(ser, f"SYSTem:STReam:START {run.rate_hz}", delay=0.0)
+        send(ser, f"{scpi.Streaming.START} {run.rate_hz}", delay=0.0)
         time.sleep(run.duration_s)
     finally:
         consumer.stop()
 
     # Stop streaming
-    send(ser, "SYSTem:STReam:STOP", delay=0.5)
+    send(ser, scpi.Streaming.STOP, delay=0.5)
     drain(ser, timeout=0.5)
 
     # Post-snapshot

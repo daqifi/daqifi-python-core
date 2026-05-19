@@ -42,7 +42,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import serial  # noqa: E402  pyserial
 
-from daqifi._internal import scpi_commands  # noqa: E402
+from daqifi._internal import scpi, scpi_commands  # noqa: E402
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage  # noqa: E402
 from daqifi.communication import CompositeMessageParser, StreamMessageConsumer  # noqa: E402
 from daqifi.devices import DaqifiDeviceFactory  # noqa: E402
@@ -197,7 +197,7 @@ def _run_one(
             # a Python-side guard that pre-dates the firmware accepting
             # higher rates. The benchmark explicitly targets 5/10/50 kHz
             # per the #18 spec.
-            _send(serial_obj, f"SYSTem:STReam:START {rate_hz}", 0.05)
+            _send(serial_obj, f"{scpi.Streaming.START} {rate_hz}", 0.05)
             streaming_started = True
             time.sleep(duration_s)
         finally:
