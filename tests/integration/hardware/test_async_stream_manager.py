@@ -39,7 +39,7 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture
 def streaming_nyquist(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
     """Open NyquistDevice with one ADC channel enabled. Teardown
-    issues a best-effort StopStreamData (in case a test left the
+    issues a best-effort STReam:STOP (in case a test left the
     firmware streaming), disables every analog channel, and
     disconnects."""
     port = device_info.port
@@ -58,7 +58,7 @@ def streaming_nyquist(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
         yield dev
     finally:
         try:
-            dev._comm.send_command("SYSTem:StopStreamData")
+            dev._comm.send_command("SYSTem:STReam:STOP")
         except Exception:
             pass
         try:

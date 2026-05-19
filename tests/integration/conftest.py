@@ -345,7 +345,7 @@ def clean_device(serial_transport: SerialStreamTransport):
             "clean_device: unable to confirm SCPI error queue cleared "
             "during pre-init drain:\n  " + "\n  ".join(pre)
         )
-    _send_scpi(serial_obj, "SYSTem:StopStreamData", delay=0.5)
+    _send_scpi(serial_obj, "SYSTem:STReam:STOP", delay=0.5)
     _drain(serial_obj, timeout=0.3)
     _send_scpi(serial_obj, "ENAble:VOLTage:DC 0", delay=0.2)
     _drain(serial_obj, timeout=0.2)
@@ -366,7 +366,7 @@ def clean_device(serial_transport: SerialStreamTransport):
 
     # Best-effort teardown: stop streaming, disable channels.
     try:
-        _send_scpi(serial_obj, "SYSTem:StopStreamData", delay=0.3)
+        _send_scpi(serial_obj, "SYSTem:STReam:STOP", delay=0.3)
         _drain(serial_obj, timeout=0.3)
         _send_scpi(serial_obj, "ENAble:VOLTage:DC 0", delay=0.1)
         _drain(serial_obj, timeout=0.2)

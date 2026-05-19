@@ -43,7 +43,7 @@ from daqifi.streaming import Sample, SampleBuffer, StreamManager, StreamState
 def streaming_nyquist(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
     """Open NyquistDevice, yield it ready to construct streams from
     (powered-up, errors drained, all channels disabled). Teardown
-    issues a best-effort StopStreamData (in case a test left the
+    issues a best-effort STReam:STOP (in case a test left the
     firmware streaming), disables every analog channel, and
     disconnects."""
     port = device_info.port
@@ -67,12 +67,12 @@ def streaming_nyquist(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
         _disable_all_adc(dev)
         yield dev
     finally:
-        # Best-effort StopStreamData first — if a test exited with
+        # Best-effort STReam:STOP first — if a test exited with
         # the firmware still streaming (e.g. its own stream.stop()
         # raised), un-stuck the device-side state machine before
         # the next test or session inherits it.
         try:
-            dev._comm.send_command("SYSTem:StopStreamData")
+            dev._comm.send_command("SYSTem:STReam:STOP")
         except Exception:
             pass
         try:

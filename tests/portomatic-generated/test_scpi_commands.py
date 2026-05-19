@@ -34,7 +34,7 @@ class TestSimpleCommands:
             (scpi_commands.get_sd_max_file_size, "SYSTem:STORage:SD:MAXSize?"),
             (scpi_commands.get_sd_benchmark_results, "SYSTem:STORage:SD:BENCHmark?"),
             (scpi_commands.get_stream_interface, "SYSTem:STReam:INTerface?"),
-            (scpi_commands.stop_streaming, "SYSTem:StopStreamData"),
+            (scpi_commands.stop_streaming, "SYSTem:STReam:STOP"),
             (scpi_commands.set_protobuf_stream_format, "SYSTem:STReam:FORmat 0"),
             (scpi_commands.set_json_stream_format, "SYSTem:STReam:FORmat 1"),
             (scpi_commands.set_csv_stream_format, "SYSTem:STReam:FORmat 2"),
@@ -136,7 +136,7 @@ class TestParameterizedCommands:
             scpi_commands.set_stream_interface(99)  # type: ignore[arg-type]
 
     def test_start_streaming(self):
-        assert scpi_commands.start_streaming(100).data == "SYSTem:StartStreamData 100"
+        assert scpi_commands.start_streaming(100).data == "SYSTem:STReam:START 100"
 
     def test_enable_adc_channels(self):
         assert scpi_commands.enable_adc_channels("84").data == "ENAble:VOLTage:DC 84"

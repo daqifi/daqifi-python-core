@@ -248,7 +248,7 @@ class TestStartSdCardLogging:
             assert b"SYSTem:STReam:INTerface 2" in written
             assert b'SD:FILE "run_a.bin"' in written
             assert b"SYSTem:STReam:FORmat 0" in written
-            assert b"StartStreamData" in written
+            assert b"STReam:START" in written
             assert sd.is_logging_to_sd_card is True
             assert sd.is_streaming is True
         finally:
@@ -321,7 +321,7 @@ class TestStopSdCardLogging:
             sd._transport.stream.written.clear()
             sd.stop_sd_card_logging()
             written = b"".join(sd._transport.stream.written)
-            assert b"StopStreamData" in written
+            assert b"STReam:STOP" in written
             assert b"SD:ENAble 0" in written
             assert b"SYSTem:STReam:INTerface 0" in written
             assert b"LAN:ENAbled 1" in written

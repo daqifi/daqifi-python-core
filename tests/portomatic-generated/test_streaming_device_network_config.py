@@ -242,8 +242,8 @@ class TestUpdateNetworkConfiguration:
             )
             sd.update_network_configuration(cfg)
             written = b"".join(sd._transport.stream.written)
-            # StopStreamData must precede the WiFi config commands.
-            stop_idx = written.find(b"StopStream")
+            # STReam:STOP must precede the WiFi config commands.
+            stop_idx = written.find(b"STReam:STOP")
             apply_idx = written.find(b"LAN:APPLY")
             assert stop_idx >= 0
             assert apply_idx > stop_idx
