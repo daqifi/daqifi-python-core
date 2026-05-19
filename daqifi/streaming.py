@@ -319,7 +319,14 @@ class StreamManager:
         self._callback = callback
         self._stop_event.clear()
         self._buffer.clear()
-        self._read_buffer = ""  # Clear read buffer
+        self._read_buffer = ""  # Clear read buffer (JSON/CSV)
+        # Clear protobuf decode state for the same reason — leftover
+        # bytes from a previous stop()'d session would otherwise be
+        # decoded as the start of the new stream, and queued samples
+        # from before stop() would surface ahead of any new data
+        # (Qodo PR #149 /agentic_review #2).
+        self._pb_buffer.clear()
+        self._pending_pb_samples.clear()
         # Reset the per-channel dispatch anchor so a stop/start of the
         # same StreamManager instance starts a fresh epoch base. Without
         # this, the previous session's anchor gets reused and downstream
@@ -745,51 +752,62 @@ class StreamManager:
         if self._pending_pb_samples:
             return self._pending_pb_samples.popleft()
 
+        # Wrap the entire read+parse pipeline so any transport hiccup
+        # (in_waiting probe, serial.read I/O error) or parser failure
+        # surfaces as a CommandError. Without this, blocking read()
+        # callers would see raw pyserial / protobuf exceptions and
+        # the callback thread's generic "Streaming error" message
+        # would mask the actual fault site (Qodo PR #149
+        # /agentic_review #3).
         try:
             in_waiting = self._comm._serial.in_waiting
-        except Exception as e:
-            # Transport hiccup — surface to the streaming thread the
-            # same way the legacy path did so it can transition to
-            # ERROR rather than silently spinning.
-            raise CommandError(f"Failed to poll serial for PB data: {e}") from e
 
-        if in_waiting > 0:
-            self._pb_buffer.extend(self._comm._serial.read(in_waiting))
+            if in_waiting > 0:
+                self._pb_buffer.extend(self._comm._serial.read(in_waiting))
 
-        if not self._pb_buffer:
-            return None
+            if not self._pb_buffer:
+                return None
 
-        if self._pb_parser is None:
-            # Lazy import keeps the protobuf generated module out of
-            # the CSV/JSON hot path. The factory mirrors
-            # ``DaqifiStreamingDevice._default_message_factory`` so
-            # both paths decode identically.
-            from ._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
-            self._pb_parser = ProtobufMessageParser(
-                message_factory=lambda payload: DaqifiOutMessage.FromString(
-                    bytes(payload)
+            if self._pb_parser is None:
+                # Lazy import keeps the protobuf generated module out
+                # of the CSV/JSON hot path. The factory mirrors
+                # ``DaqifiStreamingDevice._default_message_factory``
+                # so both paths decode identically.
+                from ._internal.proto.DaqifiOutMessage_pb2 import (
+                    DaqifiOutMessage,
                 )
+                self._pb_parser = ProtobufMessageParser(
+                    message_factory=lambda payload: DaqifiOutMessage.FromString(
+                        bytes(payload)
+                    )
+                )
+
+            messages, consumed = self._pb_parser.parse_messages(
+                bytes(self._pb_buffer)
             )
+            if consumed:
+                del self._pb_buffer[:consumed]
+            elif len(self._pb_buffer) > self._PB_BUFFER_HARD_CAP:
+                # Parser made no forward progress and the buffer keeps
+                # growing — the wire is desynced (firmware reboot mid-
+                # stream, garbage from another device, transient line
+                # corruption). Drop the oldest half and keep the tail:
+                # any in-flight frame is much more likely to be near
+                # the current write pointer than at the start of the
+                # accumulated garbage. The parser's resync-on-
+                # malformed logic (advance one byte at a time) will
+                # recover from the kept tail.
+                half = self._PB_BUFFER_HARD_CAP // 2
+                del self._pb_buffer[:-half]
 
-        messages, consumed = self._pb_parser.parse_messages(bytes(self._pb_buffer))
-        if consumed:
-            del self._pb_buffer[:consumed]
-        elif len(self._pb_buffer) > self._PB_BUFFER_HARD_CAP:
-            # Parser made no forward progress and the buffer keeps
-            # growing — the wire is desynced (firmware reboot mid-
-            # stream, garbage from another device, transient line
-            # corruption). Drop the oldest half and keep the tail:
-            # any in-flight frame is much more likely to be near the
-            # current write pointer than at the start of the
-            # accumulated garbage. The parser's resync-on-malformed
-            # logic (advance one byte at a time) will recover from
-            # the kept tail.
-            half = self._PB_BUFFER_HARD_CAP // 2
-            del self._pb_buffer[:-half]
-
-        for inbound in messages:
-            for sample in self._samples_from_pb_message(inbound.data):
-                self._pending_pb_samples.append(sample)
+            for inbound in messages:
+                for sample in self._samples_from_pb_message(inbound.data):
+                    self._pending_pb_samples.append(sample)
+        except CommandError:
+            # Already in the right shape — don't double-wrap.
+            raise
+        except Exception as e:
+            raise CommandError(f"Failed to read PB stream: {e}") from e
 
         if self._pending_pb_samples:
             return self._pending_pb_samples.popleft()

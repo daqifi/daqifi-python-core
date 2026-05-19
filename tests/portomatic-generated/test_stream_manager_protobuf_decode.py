@@ -15,7 +15,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
-from daqifi.streaming import Sample, StreamManager
+from daqifi.exceptions import CommandError
+from daqifi.streaming import Sample, StreamManager, StreamState
 
 
 def _length_prefix(length: int) -> bytes:
@@ -205,3 +206,101 @@ class TestReadSampleProtobufDecodesRealValues:
 
         sm = StreamManager(comm, channels=[0, 1], format=0)
         assert sm._read_sample_protobuf() is None
+
+
+class TestProtobufStateLifecycle:
+    """Cover the lifecycle of the new PB decode state across start/
+    stop cycles (Qodo PR #149 /agentic_review #2)."""
+
+    def test_start_clears_leftover_pb_buffer_and_pending_samples(self):
+        """A stop()'d StreamManager that gets start()ed again must
+        not surface stale buffered bytes or queued samples from the
+        previous session. Without the reset, the very first
+        _read_sample_protobuf call in the new session would pop a
+        sample from the OLD session's queue."""
+        comm = _make_comm_with_bytes(b"")
+        sm = StreamManager(comm, channels=[0], format=0)
+
+        # Simulate a previous session leaving residue behind.
+        sm._pb_buffer.extend(b"\xde\xad\xbe\xef")
+        sm._pending_pb_samples.append(
+            Sample(timestamp=0.0, channels={0: 99.9})
+        )
+
+        # start() does its real-side-effect machinery; mock the
+        # SCPI sends so we don't actually drive a device.
+        sm._comm.send_set = MagicMock()
+        sm._comm.send_command = MagicMock(return_value="OK")
+
+        # Don't pass a callback, so start() runs synchronously and
+        # transitions to RUNNING without spawning a thread.
+        sm.start()
+
+        assert len(sm._pb_buffer) == 0
+        assert len(sm._pending_pb_samples) == 0
+
+
+class TestProtobufExceptionWrapping:
+    """The synchronous read() path must surface PB transport /
+    parser errors as CommandError, not raw pyserial or protobuf
+    exceptions (Qodo PR #149 /agentic_review #3)."""
+
+    def test_serial_read_exception_wrapped(self):
+        serial = MagicMock()
+        # `in_waiting` succeeds, but the .read() that follows raises
+        # — represents a pyserial transport error mid-read.
+        type(serial).in_waiting = property(lambda self: 8)
+        serial.read = MagicMock(side_effect=OSError("port closed"))
+        comm = MagicMock()
+        comm._serial = serial
+
+        sm = StreamManager(comm, channels=[0], format=0)
+        with pytest.raises(CommandError, match="Failed to read PB stream"):
+            sm._read_sample_protobuf()
+
+    def test_in_waiting_exception_wrapped(self):
+        serial = MagicMock()
+
+        def _boom(self):
+            raise OSError("device disconnected")
+
+        type(serial).in_waiting = property(_boom)
+        comm = MagicMock()
+        comm._serial = serial
+
+        sm = StreamManager(comm, channels=[0], format=0)
+        with pytest.raises(CommandError, match="Failed to read PB stream"):
+            sm._read_sample_protobuf()
+
+    def test_parser_exception_wrapped(self):
+        comm = _make_comm_with_bytes(b"\x01\x02")
+        sm = StreamManager(comm, channels=[0], format=0)
+        sm._pb_parser = MagicMock()
+        sm._pb_parser.parse_messages.side_effect = RuntimeError("bad varint")
+
+        with pytest.raises(CommandError, match="Failed to read PB stream"):
+            sm._read_sample_protobuf()
+
+
+class TestStreamManagerReadProtobufEndToEnd:
+    """Higher-level: walk a real PB frame through StreamManager.read
+    (the blocking read path) instead of calling
+    _read_sample_protobuf directly. Catches wiring breaks between
+    the new decoder and the public API (Qodo PR #149
+    /agentic_review #1)."""
+
+    def test_read_returns_decoded_sample_via_blocking_api(self):
+        msg = DaqifiOutMessage()
+        msg.msg_time_stamp = 200
+        msg.analog_in_data_float.append(1.5)
+        msg.analog_in_data_float.append(2.5)
+        comm = _make_comm_with_bytes(_wire_frame(msg))
+
+        sm = StreamManager(comm, channels=[0, 1], format=0)
+        sm._state = StreamState.RUNNING  # bypass start()'s SCPI side effects
+
+        samples = sm.read(num_samples=1, timeout=2.0)
+
+        assert len(samples) == 1
+        assert samples[0].channels[0] == pytest.approx(1.5)
+        assert samples[0].channels[1] == pytest.approx(2.5)
