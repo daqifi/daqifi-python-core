@@ -23,7 +23,7 @@ def run(interface, fmt, channels, freq, label, duration=10):
     fmt_names = {0: "PB", 2: "CSV"}
     print(f"  {label:<40s}", end='', flush=True)
 
-    scpi.command('SYST:StopStreamData', 1); scpi.drain(1)
+    scpi.command('SYST:STReam:STOP', 1); scpi.drain(1)
     scpi.command('SYST:STR:BENCHmark 0'); scpi.command('SYST:STR:TESTpattern 0')
     scpi.command('SYST:STOR:SD:ENAble 0', 1)
     scpi.command('SYST:MEM:RESet', 0.3)

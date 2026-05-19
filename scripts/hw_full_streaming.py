@@ -109,13 +109,13 @@ def test_rate(transport, log_label, rate_hz: int, duration_s: float) -> tuple[in
 
     consumer.start()
     try:
-        send(ser, f"SYSTem:StartStreamData {rate_hz}", delay=0.0)
+        send(ser, f"SYSTem:STReam:START {rate_hz}", delay=0.0)
         time.sleep(duration_s)
     finally:
         consumer.stop()
 
     # Stop
-    send(ser, "SYSTem:StopStreamData", delay=0.5)
+    send(ser, "SYSTem:STReam:STOP", delay=0.5)
     leftover = drain(ser, timeout=0.5)
     raw_seen[0] = len(leftover)
 

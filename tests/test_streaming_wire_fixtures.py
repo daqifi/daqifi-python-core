@@ -34,7 +34,7 @@ from daqifi.protocol import ProtobufProtocolHandler
 #
 #   ENAble:VOLTage:DC 1                    (bitmask form, ch0 only)
 #   SYSTem:STReam:FORmat 0                 (protobuf)
-#   SYSTem:StartStreamData 100             (100 Hz)
+#   SYSTem:STReam:START 100             (100 Hz)
 #
 # Wire bytes (one frame, 19 bytes total):
 #

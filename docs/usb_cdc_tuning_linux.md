@@ -139,7 +139,7 @@ PC-side frames ÷ expected frames × 100), so 100% = no drops, lower
 |  50 000 | **~27%** | **~10%** |
 
 (Yields slightly above 100% are a measurement artifact: the
-benchmark's consumer thread starts before `StartStreamData` is
+benchmark's consumer thread starts before `STReam:START` is
 issued and continues through the start/stop SCPI command +
 settle delays, so the effective measurement window is a bit
 longer than the `--duration` value used to compute

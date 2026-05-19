@@ -1616,9 +1616,9 @@ class SerialInterface:
         Closes Gap 2 of daqifi/daqifi-python-core#22: the prior
         ``clear_errors()`` discarded errors silently and capped at 10.
         On a device exercised by another session (or one that's
-        crashed mid-stream) >10 errors can be queued — observed on
-        COM7, ~12 errors had to drain before ``StartStreamData``
-        would succeed.
+        crashed mid-stream) >10 errors can be queued — observed in
+        the wild, ~12 errors had to drain before
+        ``SYSTem:STReam:START`` would succeed.
 
         ``empty_budget`` (default 3) is the **fail-fast** escape
         hatch surfaced by Qodo PR #62 review #1: if the device

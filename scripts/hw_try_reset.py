@@ -1,4 +1,4 @@
-"""Try *CLS and *RST to clear whatever state is blocking StartStreamData."""
+"""Try *CLS and *RST to clear whatever state is blocking STReam:START."""
 
 from __future__ import annotations
 
@@ -82,20 +82,20 @@ def main():
 
         print("\n=== Step 5: enable ch0 + try start ===")
         step(ser, "ENABle:VOLTage:DC 1")
-        step(ser, "SYST:StartStreamData 100", delay=0.0, drain_timeout=1.5)
+        step(ser, "SYST:STReam:START 100", delay=0.0, drain_timeout=1.5)
 
         print("\n=== Step 6: check stream stats ===")
         reply = step(ser, "SYST:STR:STATS?", delay=0.5, drain_timeout=1.5)
 
         print("\n=== Step 7: stop & try with *RST first ===")
-        step(ser, "SYST:StopStreamData", delay=1.0)
+        step(ser, "SYST:STReam:STOP", delay=1.0)
         drain_collect(ser, timeout=1.0)
 
         step(ser, "*RST", delay=2.0, drain_timeout=2.0)
         step(ser, "*CLS")
         step(ser, "*IDN?")
         step(ser, "ENABle:VOLTage:DC 1")
-        step(ser, "SYST:StartStreamData 100", delay=0.0, drain_timeout=1.5)
+        step(ser, "SYST:STReam:START 100", delay=0.0, drain_timeout=1.5)
 
         # See if data flows now
         print("\n=== Step 8: 1.5s data window after *RST start ===")
@@ -114,7 +114,7 @@ def main():
             hexdump(bytes(buf[:128]), prefix="    ")
             print(f"    ... ({len(buf) - 128} more bytes)")
 
-        step(ser, "SYST:StopStreamData", delay=1.0)
+        step(ser, "SYST:STReam:STOP", delay=1.0)
 
     finally:
         transport.disconnect()

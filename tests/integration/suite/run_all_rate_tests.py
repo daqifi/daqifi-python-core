@@ -82,7 +82,7 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
 
         # Start streaming
         print(f"Streaming at {sample_rate} Hz for {duration_sec} seconds...")
-        device._comm.send_command(f"SYST:StartStreamData {sample_rate}")
+        device._comm.send_command(f"SYST:STReam:START {sample_rate}")
 
         for i in range(duration_sec):
             time.sleep(1)
@@ -90,7 +90,7 @@ def run_single_test(device, sample_rate, duration_sec, test_num, total_tests, du
         print()
 
         # Stop
-        device._comm.send_command("SYST:StopStreamData")
+        device._comm.send_command("SYST:STReam:STOP")
         time.sleep(0.5)
 
         # Check errors
