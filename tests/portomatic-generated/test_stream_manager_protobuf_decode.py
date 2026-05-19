@@ -226,6 +226,7 @@ class TestProtobufStateLifecycle:
         sm._pending_pb_samples.append(
             Sample(timestamp=0.0, channels={0: 99.9})
         )
+        sm._pb_parser = MagicMock()  # carry-over parser instance
 
         # start() does its real-side-effect machinery; mock the
         # SCPI sends so we don't actually drive a device.
@@ -238,6 +239,9 @@ class TestProtobufStateLifecycle:
 
         assert len(sm._pb_buffer) == 0
         assert len(sm._pending_pb_samples) == 0
+        # _pb_parser also reset so every PB lifecycle field clears
+        # symmetrically (Qodo /improve pass 2 #2).
+        assert sm._pb_parser is None
 
 
 class TestProtobufExceptionWrapping:

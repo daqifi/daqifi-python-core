@@ -324,9 +324,14 @@ class StreamManager:
         # bytes from a previous stop()'d session would otherwise be
         # decoded as the start of the new stream, and queued samples
         # from before stop() would surface ahead of any new data
-        # (Qodo PR #149 /agentic_review #2).
+        # (Qodo PR #149 /agentic_review #2). Reset _pb_parser too so
+        # every PB lifecycle field clears symmetrically; the parser
+        # itself is stateless (a thin wrapper around the factory
+        # callable), but re-creating it on demand keeps the lifecycle
+        # uniform and trivial to reason about (Qodo /improve pass 2 #2).
         self._pb_buffer.clear()
         self._pending_pb_samples.clear()
+        self._pb_parser = None
         # Reset the per-channel dispatch anchor so a stop/start of the
         # same StreamManager instance starts a fresh epoch base. Without
         # this, the previous session's anchor gets reused and downstream
