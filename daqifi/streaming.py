@@ -330,6 +330,18 @@ class StreamManager:
             start_cmd = f"{scpi.Streaming.START} {self._sample_rate}"
             response = self._comm.send_command(start_cmd, delay=0.2)
 
+            # Validate the START response before transitioning to RUNNING.
+            # Without this, a device-side rejection (e.g. unknown command
+            # on older firmware that hasn't picked up the SYST:STR:START
+            # alias, or an "execution error" from invalid state) would
+            # silently leave us in RUNNING and surface later as read()
+            # timeouts instead of a clear start failure. (Qodo PR #6
+            # pass 1 #2.)
+            if scpi.is_error_response(response):
+                raise CommandError(
+                    f"Streaming START rejected by device: {response.strip()!r}"
+                )
+
             self._state = StreamState.RUNNING
 
             # Start background thread if callback provided
