@@ -4,10 +4,124 @@ Channel classes for DAQiFi Nyquist devices.
 Provides property-based access to analog and digital channels.
 """
 
-from typing import Dict, List, Optional, Any
-from ._internal.comm import SerialInterface
+import logging
+import threading
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from ._internal.comm import DataSample, SerialInterface
 from ._internal import scpi
+from ._internal.scpi import check_setter_response
 from .exceptions import CommandError, ConfigurationError
+
+
+_log = logging.getLogger(__name__)
+
+
+# Backward-compat alias — `_check_setter_response` was the original
+# private name. Now exposed publicly via `daqifi._internal.scpi`
+# so non-channel modules (e.g. NyquistDevice.power_state) can use
+# the same setter-response validation without importing across a
+# private (underscore-prefixed) boundary (Qodo PR #61 review #1).
+_check_setter_response = check_setter_response
+
+
+class _SampleReceivedMixin:
+    """Per-channel SampleReceived event + ActiveSample cache surface.
+
+    Mirrors the C# ``AnalogChannel`` / ``DigitalChannel`` events from
+    ``Daqifi.Core/Channel`` (#99 group B). Hosted as a mixin because
+    AnalogInputChannel and DigitalIOChannel both need the exact same
+    shape — both ports of the C# IChannel surface that exposes
+    ``SampleReceived`` / ``ActiveSample`` / ``SetActiveSample``.
+
+    Lifecycle:
+    - Subclass __init__ calls :meth:`_init_sample_events` to set up
+      the cache + handler list.
+    - The streaming pipeline calls :meth:`set_active_sample` whenever
+      a new sample arrives for this channel (mirrors C#
+      ``SetActiveSample``).
+    - Callers register handlers via :meth:`add_sample_received` —
+      each handler is invoked with the new :class:`DataSample` after
+      the cache is updated.
+    """
+
+    def _init_sample_events(self) -> None:
+        self._active_sample: Optional[DataSample] = None
+        self._sample_received_handlers: List[Callable[[DataSample], None]] = []
+        # Plain Lock would suffice given that set_active_sample
+        # releases the lock before invoking handlers (so a handler
+        # that calls add/remove_sample_received doesn't actually
+        # contend against an already-held lock). RLock is the
+        # defensive choice anyway: it costs nothing in the
+        # uncontended case and keeps re-entrant register/dispatch
+        # patterns safe if a future change ever moves handler
+        # invocation back under the lock. Streaming pipeline
+        # integration (see #107) will dispatch from a background
+        # thread; user code typically registers handlers from the
+        # main thread.
+        self._sample_received_lock = threading.RLock()
+
+    @property
+    def active_sample(self) -> Optional[DataSample]:
+        """Last :class:`DataSample` dispatched to this channel via
+        :meth:`set_active_sample`, or ``None`` if no sample has been
+        received yet. Mirrors C# ``IChannel.ActiveSample``.
+        """
+        return self._active_sample
+
+    def add_sample_received(
+        self, handler: Callable[[DataSample], None]
+    ) -> None:
+        """Register a handler called for each sample dispatched to
+        this channel. Idempotent — registering the same handler twice
+        adds it once. Mirrors C# ``SampleReceived += handler``.
+        """
+        with self._sample_received_lock:
+            if handler not in self._sample_received_handlers:
+                self._sample_received_handlers.append(handler)
+
+    def remove_sample_received(
+        self, handler: Callable[[DataSample], None]
+    ) -> None:
+        """Unregister a previously-added handler. No-op if the
+        handler isn't currently registered. Mirrors C#
+        ``SampleReceived -= handler``.
+        """
+        with self._sample_received_lock:
+            try:
+                self._sample_received_handlers.remove(handler)
+            except ValueError:
+                pass
+
+    def set_active_sample(self, sample: DataSample) -> None:
+        """Update the cached :attr:`active_sample` and invoke every
+        registered handler with the new sample. Called by the
+        streaming pipeline. Mirrors C# ``SetActiveSample(sample)``.
+
+        Lock is held only over the cache update + handler-list
+        snapshot — handler invocation runs OUTSIDE the lock so a
+        slow handler can't block other threads from registering /
+        unregistering handlers. Snapshot is a defensive copy so a
+        handler that adds/removes from inside the callback doesn't
+        break iteration (and the RLock allows the re-entrant
+        add/remove from the same thread).
+        """
+        with self._sample_received_lock:
+            self._active_sample = sample
+            handlers = list(self._sample_received_handlers)
+        for handler in handlers:
+            try:
+                handler(sample)
+            except Exception:
+                # One handler's failure must not break the others or
+                # corrupt the cache that's already been updated. Log
+                # so the failure is observable — silent swallowing
+                # made bugs in user-supplied handlers invisible.
+                _log.exception(
+                    "SampleReceived handler %r raised on sample %r",
+                    handler,
+                    sample,
+                )
 
 
 class AnalogOutputChannel:
@@ -28,11 +142,29 @@ class AnalogOutputChannel:
         """
         self._channel = channel_id
         self._comm = comm
+        # Local cache of the last value successfully written via the
+        # voltage setter — exposed as `output_value`. Mirrors the
+        # client-side cache C# AnalogChannel.OutputValue keeps so
+        # callers can ask "what did I last set?" without re-querying
+        # the device. None until the first successful write.
+        self._output_value: Optional[float] = None
 
     @property
     def index(self) -> int:
         """Get channel index"""
         return self._channel
+
+    @property
+    def output_value(self) -> Optional[float]:
+        """Last voltage successfully written via the :attr:`voltage`
+        setter, or ``None`` if no write has succeeded yet.
+
+        Mirrors C# ``AnalogChannel.OutputValue`` — a client-side
+        cache for "what did I last set?" that doesn't round-trip to
+        the device. Use :attr:`voltage` if you want the device's
+        current view.
+        """
+        return self._output_value
 
     @property
     def voltage(self) -> float:
@@ -67,12 +199,21 @@ class AnalogOutputChannel:
             raise ConfigurationError(f"Voltage must be between 0.0 and 10.0V, got {value}V")
 
         try:
-            success = self._comm.send_set(f"{scpi.AnalogOutput.VOLTAGE_SET} {self._channel}", value)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set voltage: {error}")
+            success, error_response = self._comm.send_set_with_error(
+                f"{scpi.AnalogOutput.VOLTAGE_SET} {self._channel}", value,
+            )
+            _check_setter_response(success, error_response, "set voltage")
+        except CommandError as e:
+            raise CommandError(
+                f"Failed to set voltage on channel {self._channel}: {e}"
+            ) from e
         except Exception as e:
             raise CommandError(f"Failed to set voltage on channel {self._channel}: {e}")
+
+        # Update the local cache only after the device confirms the
+        # write succeeded — `output_value` should never report a
+        # value the device rejected.
+        self._output_value = value
 
     @property
     def enabled(self) -> bool:
@@ -97,10 +238,14 @@ class AnalogOutputChannel:
             value: True to enable, False to disable
         """
         try:
-            success = self._comm.send_set(f"{scpi.AnalogOutput.ENABLE_SET} {self._channel}", value)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set enable state: {error}")
+            success, error_response = self._comm.send_set_with_error(
+                f"{scpi.AnalogOutput.ENABLE_SET} {self._channel}", value,
+            )
+            _check_setter_response(success, error_response, "set enable state")
+        except CommandError as e:
+            raise CommandError(
+                f"Failed to set enable state on channel {self._channel}: {e}"
+            ) from e
         except Exception as e:
             raise CommandError(f"Failed to set enable state on channel {self._channel}: {e}")
 
@@ -113,14 +258,21 @@ class AnalogOutputChannel:
             return f"AnalogOutputChannel({self._channel})"
 
 
-class AnalogInputChannel:
+class AnalogInputChannel(_SampleReceivedMixin):
     """
     Single analog input (ADC) channel.
 
     Provides range configuration and enable/disable functionality.
     """
 
-    def __init__(self, channel_id: int, comm: SerialInterface, variant: Optional[str] = None):
+    def __init__(
+        self,
+        channel_id: int,
+        comm: SerialInterface,
+        variant: Optional[str] = None,
+        *,
+        range_cache: Optional[List[Optional[tuple]]] = None,
+    ):
         """
         Initialize ADC channel.
 
@@ -128,15 +280,87 @@ class AnalogInputChannel:
             channel_id: Channel index
             comm: Serial communication interface
             variant: Board variant ("NQ1", "NQ2", "NQ3") - optional
+            range_cache: Single-element list serving as a shared
+                mutable cache holder for the (min, max) range bounds.
+                Range is module-level on NQ3 (AD7609 register), so
+                channels constructed by the same collection share one
+                cache so a `range = ...` write on any channel
+                invalidates the bounds for all of them. When
+                ``None`` (the default for solo construction), the
+                channel gets its own private cache.
         """
         self._channel = channel_id
         self._comm = comm
         self._variant = variant
+        # See `range_cache` arg above. Stored as a 1-element list so
+        # writes from one channel are visible to siblings sharing the
+        # same list.
+        self._range_cache: List[Optional[tuple]] = (
+            range_cache if range_cache is not None else [None]
+        )
+        self._init_sample_events()
 
     @property
     def index(self) -> int:
         """Get channel index"""
         return self._channel
+
+    @property
+    def min_value(self) -> float:
+        """Minimum representable input voltage for this channel.
+
+        Mirrors C# ``IAnalogChannel.MinValue``. For NQ1/NQ2 the
+        MC12bADC has a fixed ±5V range so the value is hardcoded;
+        for NQ3 the AD7609 range is configurable so the value is
+        derived from the current :attr:`range` setting.
+        """
+        return self._range_bounds()[0]
+
+    @property
+    def max_value(self) -> float:
+        """Maximum representable input voltage for this channel.
+
+        Mirrors C# ``IAnalogChannel.MaxValue``. See :attr:`min_value`
+        for variant-specific derivation.
+        """
+        return self._range_bounds()[1]
+
+    def _range_bounds(self) -> tuple:
+        """Return (min, max) volts for this channel based on variant
+        and (for NQ3) the configured range. Centralizes the lookup so
+        :attr:`min_value` and :attr:`max_value` stay in lock-step.
+
+        Result is cached on the instance after the first SCPI-backed
+        lookup (NQ3 / variant=None) and invalidated by the range
+        setter — first access pays the SCPI cost; subsequent accesses
+        are O(1) and guaranteed to return a consistent (min, max)
+        snapshot even if the device range changes between two reads.
+
+        NQ1/NQ2 → fixed ±5V (MC12bADC + AD7173 are both ±5V; no SCPI
+        needed, so no cache layer either).
+        NQ3 → range "0" → ±5V; range "1" → ±10V; anything else
+        (e.g. "FIXED" or unparseable) falls back to the AD7609
+        firmware default of ±10V.
+        """
+        if self._variant in ("NQ1", "NQ2"):
+            return (-5.0, 5.0)
+        if self._range_cache[0] is not None:
+            return self._range_cache[0]
+        try:
+            r = self.range  # SCPI query — caller pays the cost on access
+        except CommandError:
+            # Range query failed; fall back to AD7609 firmware default
+            # without caching — next access can retry the query.
+            return (-10.0, 10.0)
+        if r == "0":
+            bounds = (-5.0, 5.0)
+        elif r == "1":
+            bounds = (-10.0, 10.0)
+        else:
+            # FIXED or any unrecognized response — AD7609 default.
+            bounds = (-10.0, 10.0)
+        self._range_cache[0] = bounds
+        return bounds
 
     @property
     def range(self) -> str:
@@ -196,14 +420,27 @@ class AnalogInputChannel:
             else:
                 range_val = int(value)
 
-            success = self._comm.send_set(scpi.AnalogInput.RANGE_SET, range_val)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set range: {error}")
+            success, error_response = self._comm.send_set_with_error(
+                scpi.AnalogInput.RANGE_SET, range_val,
+            )
+            _check_setter_response(success, error_response, "set range")
         except FeatureNotSupportedError:
             raise
+        except CommandError as e:
+            # No per-channel context (range is module-level on NQ3)
+            # so the inner message already says everything useful;
+            # just preserve the chain.
+            raise CommandError(f"Failed to set range: {e}") from e
         except Exception as e:
             raise CommandError(f"Failed to set range: {e}")
+
+        # Range is module-level on NQ3 — invalidate the shared cache
+        # so every sibling channel constructed with the same
+        # range_cache list also sees the next access re-query the
+        # device. Sole-construction channels invalidate only their
+        # private cache (the default range_cache=None gives each
+        # channel its own list).
+        self._range_cache[0] = None
 
     @property
     def enabled(self) -> bool:
@@ -226,12 +463,28 @@ class AnalogInputChannel:
 
         Args:
             value: True to enable, False to disable
+
+        Note:
+            Firmware syntax for the per-channel enable is
+            ``CONFigure:ADC:CHANnel <ch>,<state>`` — comma-separated,
+            NOT space-separated. Sending space (the previous behavior
+            from before send_set_with_error was wired in) produced
+            ``-101,"Invalid character"`` from the device. Closes the
+            hardware-side gap that made #32's logic fix non-functional
+            on real NQ1 firmware (3.4.6b1).
         """
+        # Pre-format channel + value with the comma so the inner
+        # ``send_set_with_error`` doesn't insert a space between them.
+        cmd_value = f"{self._channel},{1 if value else 0}"
         try:
-            success = self._comm.send_set(f"{scpi.AnalogInput.ENABLE_CHANNEL_SET} {self._channel}", value)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set enable state: {error}")
+            success, error_response = self._comm.send_set_with_error(
+                scpi.AnalogInput.ENABLE_CHANNEL_SET, cmd_value,
+            )
+            _check_setter_response(success, error_response, "set enable state")
+        except CommandError as e:
+            raise CommandError(
+                f"Failed to set enable state on channel {self._channel}: {e}"
+            ) from e
         except Exception as e:
             raise CommandError(f"Failed to set enable state on channel {self._channel}: {e}")
 
@@ -244,7 +497,7 @@ class AnalogInputChannel:
             return f"AnalogInputChannel({self._channel})"
 
 
-class DigitalIOChannel:
+class DigitalIOChannel(_SampleReceivedMixin):
     """
     Single digital I/O channel.
 
@@ -261,11 +514,31 @@ class DigitalIOChannel:
         """
         self._channel = channel_id
         self._comm = comm
+        # Local cache of the last state successfully written via the
+        # state setter — exposed as `output_value`. Mirrors C#
+        # DigitalChannel.OutputValue (the commanded bool, not the
+        # live pin level). Only meaningful for channels configured
+        # as outputs; None until the first successful write.
+        self._output_value: Optional[bool] = None
+        self._init_sample_events()
 
     @property
     def index(self) -> int:
         """Get channel index"""
         return self._channel
+
+    @property
+    def output_value(self) -> Optional[bool]:
+        """Last state successfully written via the :attr:`state`
+        setter, or ``None`` if no write has succeeded yet.
+
+        Mirrors C# ``DigitalChannel.OutputValue`` — a client-side
+        cache for "what did I last command?" that doesn't round-
+        trip to the device. C# ``IsHigh`` (live pin readback) maps
+        to the existing :attr:`state` getter, which queries the
+        device on every access.
+        """
+        return self._output_value
 
     @property
     def direction(self) -> str:
@@ -313,12 +586,22 @@ class DigitalIOChannel:
                 port_dir &= ~(1 << self._channel)  # Clear bit
 
             # Write back entire port direction
-            success = self._comm.send_set(scpi.DigitalIO.PORT_DIRECTION_SET, port_dir)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set direction: {error}")
+            success, error_response = self._comm.send_set_with_error(
+                scpi.DigitalIO.PORT_DIRECTION_SET, port_dir,
+            )
+            _check_setter_response(success, error_response, "set direction")
+        except CommandError as e:
+            raise CommandError(
+                f"Failed to set direction on channel {self._channel}: {e}"
+            ) from e
         except Exception as e:
             raise CommandError(f"Failed to set direction on channel {self._channel}: {e}")
+
+        # Switching to input invalidates the cached commanded output
+        # value — there's no commanded value on an input pin and a
+        # subsequent re-flip back to output should start fresh.
+        if value_lower == "input":
+            self._output_value = None
 
     @property
     def state(self) -> bool:
@@ -368,12 +651,21 @@ class DigitalIOChannel:
                 port_state &= ~(1 << self._channel)  # Clear bit
 
             # Write back entire port state
-            success = self._comm.send_set(scpi.DigitalIO.PORT_STATE_SET, port_state)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set state: {error}")
+            success, error_response = self._comm.send_set_with_error(
+                scpi.DigitalIO.PORT_STATE_SET, port_state,
+            )
+            _check_setter_response(success, error_response, "set state")
+        except CommandError as e:
+            raise CommandError(
+                f"Failed to set state on channel {self._channel}: {e}"
+            ) from e
         except Exception as e:
             raise CommandError(f"Failed to set state on channel {self._channel}: {e}")
+
+        # Update the local cache only after the device confirms the
+        # write succeeded — `output_value` should never report a
+        # value the device rejected.
+        self._output_value = value
 
     def __repr__(self) -> str:
         try:
@@ -452,15 +744,33 @@ class AnalogInputs(ChannelCollection):
 
         Args:
             channels: List of channel indices to configure
-            range: Input voltage range
+            range: Input voltage range. Silently ignored on variants
+                   with fixed-range ADCs (NQ1, NQ2 — MC12bADC).
             enabled: Enable channels after configuration
 
         Example:
             analog_inputs.configure_channels([0, 1, 2], range="5V", enabled=True)
+
+        Note:
+            Closes daqifi/daqifi-python-core#32 — on NQ1/NQ2 the range
+            setter raises ``FeatureNotSupportedError`` (the hardware has
+            a fixed input range), and the original implementation let
+            that exception abort the loop without ever setting
+            ``enabled``. ``configure_channels(..., enabled=True)`` was
+            therefore fully unusable on the only variants we currently
+            ship. Swallow the range-not-supported error so the enabled
+            write always reaches the channel; callers that want strict
+            range enforcement can call ``channel.range = ...`` directly.
         """
+        from .exceptions import FeatureNotSupportedError
+
         for channel_id in channels:
             if 0 <= channel_id < len(self._channels):
-                self._channels[channel_id].range = range
+                try:
+                    self._channels[channel_id].range = range
+                except FeatureNotSupportedError:
+                    # NQ1/NQ2 fixed-range ADC — leave range alone, still apply enabled.
+                    pass
                 self._channels[channel_id].enabled = enabled
 
     def enable_all(self):
@@ -537,3 +847,21 @@ class DigitalIO(ChannelCollection):
 
     def __repr__(self) -> str:
         return f"DigitalIO({len(self._channels)} channels)"
+
+
+@dataclass(frozen=True)
+class ChannelsPopulatedEventArgs:
+    """Payload for the ``channels populated`` event.
+
+    Ports the C# ``ChannelsPopulatedEventArgs`` (subclass of
+    ``EventArgs``) from ``Daqifi.Core/Device/ChannelsPopulatedEventArgs.cs``.
+    Per the project convention, ``EventArgs`` -> frozen dataclass.
+
+    ``channels`` is a tuple (immutable) — the upstream type uses
+    ``IReadOnlyList<IChannel>`` and frozen dataclasses can't carry a
+    mutable list field without breaking immutability semantics.
+    """
+
+    channels: Tuple[Any, ...]
+    analog_channel_count: int
+    digital_channel_count: int

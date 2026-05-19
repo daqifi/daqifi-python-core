@@ -1,0 +1,195 @@
+schema_version: 1
+shard: Communication.Messages
+upstream_root: src/Daqifi.Core/Communication/Messages
+downstream_root: daqifi
+last_synced_upstream_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+files:
+- upstream: src/Daqifi.Core/Communication/Messages/DaqifiOutMessage.cs
+  downstream: daqifi/_internal/proto/DaqifiOutMessage_pb2.py
+  relation: divergent
+  notes: Both sides are auto-generated from the same .proto schema (Protos/DaqifiOutMessage.proto)
+    by the protobuf compiler. The C# file is `protoc --csharp_out`, the Python file
+    is `protoc --python_out`. Field accessors are PascalCase (.MsgTimeStamp) on the
+    C# side and snake_case (.msg_time_stamp) on the Python side per their respective
+    code-generator conventions.
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream: src/Daqifi.Core/Communication/Messages/GenericInboundMessage.cs
+  downstream: daqifi/_internal/comm.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream: src/Daqifi.Core/Communication/Messages/IInboundMessage.cs
+  downstream: daqifi/communication.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream: src/Daqifi.Core/Communication/Messages/IOutboundMessage.cs
+  downstream: daqifi/_internal/comm.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream: src/Daqifi.Core/Communication/Messages/ProtobufMessage.cs
+  downstream: daqifi/communication.py
+  relation: divergent
+  notes: "C# `ProtobufMessage : IInboundMessage<DaqifiOutMessage>` is a thin concrete\
+    \ wrapper. Python collapses the named subclass into `daqifi.communication.ObjectInboundMessage`,\
+    \ the generic object-payload `InboundMessage` shape \u2014 same `data` field,\
+    \ same structural conformance to `IInboundMessage`. Avoids redundant 1-field subclasses\
+    \ (project port convention)."
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream: src/Daqifi.Core/Communication/Messages/ScpiMessage.cs
+  downstream: daqifi/_internal/comm.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream: src/Daqifi.Core/Communication/Messages/TestMessage.cs
+  downstream: daqifi/communication.py
+  relation: divergent
+  notes: "C# `TextMessage : IInboundMessage<string>` (file is confusingly named `TestMessage.cs`)\
+    \ is a thin concrete wrapper. Python uses `TextInboundMessage = InboundMessage[str]`\
+    \ \u2014 a generic-instantiation alias rather than a named subclass. Same `data`\
+    \ field, same structural conformance."
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+symbols:
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Communication.Messages.GenericInboundMessage
+    file: src/Daqifi.Core/Communication/Messages/GenericInboundMessage.cs
+  downstream:
+    kind: class
+    qualified: daqifi._internal.comm.GenericInboundMessage
+    file: daqifi/_internal/comm.py
+  relation: one_to_one
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: null
+  rationale: null
+  members:
+  - upstream: Data
+    downstream: data
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Communication.Messages.IInboundMessage
+    file: src/Daqifi.Core/Communication/Messages/IInboundMessage.cs
+  downstream:
+    kind: class
+    qualified: daqifi.communication.InboundMessage
+    file: daqifi/communication.py
+  relation: one_to_one
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: null
+  rationale: null
+  members:
+  - upstream: Data
+    downstream: data
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Communication.Messages.IOutboundMessage
+    file: src/Daqifi.Core/Communication/Messages/IOutboundMessage.cs
+  downstream:
+    kind: interface
+    qualified: daqifi._internal.comm.OutboundMessage
+    file: daqifi/_internal/comm.py
+  relation: one_to_one
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: null
+  rationale: null
+  members:
+  - upstream: Data
+    downstream: data
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: GetBytes
+    downstream: get_bytes
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Communication.Messages.ProtobufMessage
+    file: src/Daqifi.Core/Communication/Messages/ProtobufMessage.cs
+  downstream:
+    kind: class
+    qualified: daqifi.communication.ObjectInboundMessage
+    file: daqifi/communication.py
+  relation: divergent
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: null
+  rationale: "C# `ProtobufMessage : IInboundMessage<DaqifiOutMessage>` is a 1-field\
+    \ concrete wrapper. Python uses the generic `ObjectInboundMessage` (any object\
+    \ payload, including a `DaqifiOutMessage` instance) \u2014 same `data` field,\
+    \ same structural conformance. Avoids redundant 1-field subclasses."
+  members:
+  - upstream: Data
+    downstream: data
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Communication.Messages.ScpiMessage
+    file: src/Daqifi.Core/Communication/Messages/ScpiMessage.cs
+  downstream:
+    kind: class
+    qualified: daqifi._internal.comm.ScpiMessage
+    file: daqifi/_internal/comm.py
+  relation: one_to_one
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: null
+  rationale: null
+  members:
+  - upstream: Data
+    downstream: data
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: GetBytes
+    downstream: get_bytes
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Communication.Messages.TextMessage
+    file: src/Daqifi.Core/Communication/Messages/TestMessage.cs
+  downstream:
+    kind: class
+    qualified: daqifi.communication.TextInboundMessage
+    file: daqifi/communication.py
+  relation: divergent
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: null
+  rationale: "C# `TextMessage : IInboundMessage<string>` is a 1-field concrete wrapper.\
+    \ Python uses `TextInboundMessage = InboundMessage[str]` \u2014 a generic instantiation\
+    \ alias rather than a named subclass. Same `data` field, same structural conformance."
+  members:
+  - upstream: Data
+    downstream: data
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: '2026-04-26T08:44:22.273699Z'

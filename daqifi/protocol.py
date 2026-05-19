@@ -1,0 +1,257 @@
+"""Protocol handlers for DAQiFi device messages.
+
+Ported from upstream ``Daqifi.Core.Device.Protocol.ProtobufProtocolHandler``
+(``src/Daqifi.Core/Device/Protocol/ProtobufProtocolHandler.cs`` @ e8d84af).
+"""
+
+from __future__ import annotations
+
+import inspect
+import logging
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
+
+from daqifi.communication import InboundMessage
+from daqifi.enums import ProtobufMessageType
+
+_log = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class IProtocolHandler(Protocol):
+    """Structural contract for objects that can dispatch inbound messages."""
+
+    def can_handle(self, message: InboundMessage[Any]) -> bool:
+        """Return True if this handler can process ``message``."""
+        ...
+
+    async def handle_async(self, message: InboundMessage[Any]) -> None:
+        """Process ``message`` asynchronously."""
+        ...
+
+
+# TODO(portomatic): shallow-stub for upstream
+# src/Daqifi.Core/Communication/Messages/DaqifiOutMessage.cs — the real protobuf
+# class is duck-typed here. Any object exposing the field names referenced
+# below (``device_status``, ``digital_port_num``, ``analog_in_port_num``,
+# ``analog_out_port_num``, ``msg_time_stamp``, ``analog_in_data``,
+# ``analog_in_data_float``, ``digital_data``) is acceptable.
+DaqifiOutMessage = Any
+
+
+class ProtobufProtocolHandler:
+    """Handles protobuf-based protocol messages from DAQiFi devices.
+
+    Routes a ``DaqifiOutMessage`` payload to one of four optional callbacks
+    based on a content-driven type detection (see :meth:`detect_message_type`).
+    """
+
+    def __init__(
+        self,
+        status_message_handler: Optional[Callable[[DaqifiOutMessage], None]] = None,
+        stream_message_handler: Optional[Callable[[DaqifiOutMessage], None]] = None,
+        sd_card_message_handler: Optional[Callable[[DaqifiOutMessage], None]] = None,
+        error_message_handler: Optional[Callable[[DaqifiOutMessage], None]] = None,
+    ) -> None:
+        self._status_message_handler = status_message_handler
+        self._stream_message_handler = stream_message_handler
+        self._sd_card_message_handler = sd_card_message_handler
+        self._error_message_handler = error_message_handler
+
+    def _invoke_callback(
+        self,
+        cb: Callable[[DaqifiOutMessage], None],
+        pb_message: DaqifiOutMessage,
+    ) -> None:
+        # If an integrator hands us an ``async def`` callback by
+        # mistake, the coroutine returned here would never be awaited
+        # and the body would never run. Log loudly so the misuse
+        # surfaces immediately instead of becoming a silent dropped
+        # message (Qodo PR 17 pass 35 #1). Also explicitly close()
+        # the coroutine so Python doesn't emit a noisy
+        # ``RuntimeWarning: coroutine '...' was never awaited`` and
+        # the frame is freed immediately (Qodo PR 17 pass 36 #1).
+        result = cb(pb_message)
+        if inspect.isawaitable(result):
+            _log.error(
+                "Protocol handler callback returned an awaitable; "
+                "callbacks must be synchronous (this message was dropped)."
+            )
+            if inspect.iscoroutine(result):
+                result.close()
+            else:
+                # Future / Task / asyncio.ensure_future result —
+                # cancel so it doesn't keep running detached in
+                # the background (Qodo PR 17 pass 37 #3).
+                cancel = getattr(result, "cancel", None)
+                if callable(cancel):
+                    try:
+                        cancel()
+                    except Exception:
+                        _log.exception(
+                            "Failed to cancel returned awaitable."
+                        )
+
+    def can_handle(self, message: InboundMessage[Any]) -> bool:
+        """Return True iff ``message.data`` looks like a DaqifiOutMessage.
+
+        Duck-typed: presence of the ``device_status`` attribute is treated as
+        the discriminator since the upstream type check (``is DaqifiOutMessage``)
+        has no clean Python analog without coupling to a real protobuf class.
+
+        Uses ``try/getattr`` rather than ``hasattr`` so a misbehaving
+        property getter (raising any non-AttributeError exception) on
+        ``message.data`` can't crash the consumer thread (Qodo PR 17
+        pass 36 #3, mirroring pass 21 #3).
+        """
+        if message is None:
+            return False
+        try:
+            data = message.data
+        except Exception:
+            return False
+        return _is_daqifi_out_message(data)
+
+    def handle(self, message: InboundMessage[Any]) -> None:
+        """Synchronous dispatch — preferred hot-path entry point.
+
+        ``handle_async`` exists for ``IProtocolHandler`` Protocol
+        compliance, but in this project the body never awaits, so the
+        sync version skips the cost of creating + tearing down an
+        event loop per inbound message (Qodo PR 17 finding 4).
+        """
+        # Mirror `can_handle`'s defensive shape: a malformed event-args
+        # arrival (None / property raising on .data) shouldn't crash
+        # the consumer thread (Qodo PR 17 pass 37 #2, refining pass
+        # 2 #4 + pass 36 #3).
+        if message is None:
+            return
+        try:
+            pb_message = message.data
+        except Exception:
+            return
+        if not _is_daqifi_out_message(pb_message):
+            return
+
+        # Wrap detection AND dispatch in the try/except — a malformed
+        # duck-typed payload could raise from inside detect_message_type
+        # (e.g. attribute access on an unexpected type), which would
+        # otherwise propagate up the consumer thread (Qodo PR 17 pass
+        # 8 #5). `message_type` may be unset if detection itself fails.
+        message_type: Optional["ProtobufMessageType"] = None
+        try:
+            message_type = self.detect_message_type(pb_message)
+            if message_type is ProtobufMessageType.STATUS:
+                if self._status_message_handler is not None:
+                    self._invoke_callback(self._status_message_handler, pb_message)
+            elif message_type is ProtobufMessageType.STREAM:
+                if self._stream_message_handler is not None:
+                    self._invoke_callback(self._stream_message_handler, pb_message)
+            elif message_type is ProtobufMessageType.SD_CARD:
+                if self._sd_card_message_handler is not None:
+                    self._invoke_callback(self._sd_card_message_handler, pb_message)
+            elif message_type is ProtobufMessageType.ERROR:
+                if self._error_message_handler is not None:
+                    self._invoke_callback(self._error_message_handler, pb_message)
+            # ProtobufMessageType.UNKNOWN and any unmapped value: no-op.
+        except Exception:
+            _log.exception(
+                "Protocol handler callback raised for %s",
+                message_type if message_type is not None else "UNKNOWN",
+            )
+
+    async def handle_async(self, message: InboundMessage[Any]) -> None:
+        """``IProtocolHandler`` Protocol compliance — delegates to
+        the sync :meth:`handle`. Kept as ``async def`` so static
+        type checks against the ``IProtocolHandler`` Protocol
+        succeed."""
+        self.handle(message)
+
+    @staticmethod
+    def detect_message_type(message: DaqifiOutMessage) -> ProtobufMessageType:
+        """Detect the type of a protobuf message based on its contents."""
+        # Check stream FIRST: a streaming frame can incidentally
+        # carry the port-count fields _is_status_message looks at,
+        # which would otherwise misclassify the frame as STATUS and
+        # send it down the wrong handler chain (Qodo PR 17 pass 18 #1).
+        if ProtobufProtocolHandler._is_stream_message(message):
+            return ProtobufMessageType.STREAM
+
+        # STATUS before ERROR: a status response (SYSInfoPB?) ALWAYS
+        # carries a non-zero `device_status` runtime field — it
+        # reports the device's current power/streaming/SD state, not
+        # an error. So `device_status != 0` alone can't classify a
+        # frame as ERROR; the port-count discriminator is the
+        # reliable status signal. (Qodo PR 17 pass 39 #2 reordered
+        # ERROR before STATUS based on the wrong assumption that
+        # `device_status` only fires on faults — verified against
+        # NQ1 hardware 2026-04-24 that the SYSInfoPB? response has
+        # device_status=3 + analog_in_port_num=16, and the prior
+        # ordering misrouted every init reply to ERROR.)
+        if ProtobufProtocolHandler._is_status_message(message):
+            return ProtobufMessageType.STATUS
+
+        # Error messages: non-zero device_status WITHOUT the status
+        # frame's port-count fields. SD card messages are typically
+        # text-based and handled separately (placeholder — actual
+        # SD card messages come as text responses, not protobuf).
+        if getattr(message, "device_status", 0) != 0:
+            return ProtobufMessageType.ERROR
+
+        return ProtobufMessageType.UNKNOWN
+
+    @staticmethod
+    def _is_status_message(message: DaqifiOutMessage) -> bool:
+        """A message is a status message if it advertises any port count."""
+        return (
+            getattr(message, "digital_port_num", 0) != 0
+            or getattr(message, "analog_in_port_num", 0) != 0
+            or getattr(message, "analog_out_port_num", 0) != 0
+        )
+
+    @staticmethod
+    def _is_stream_message(message: DaqifiOutMessage) -> bool:
+        """A message is a stream message if it has a timestamp + payload data.
+
+        USB firmware sends ``analog_in_data_float`` (pre-scaled floats);
+        WiFi firmware may send ``analog_in_data`` (raw integer ADC counts).
+        Both must be detected. ``digital_data`` is a ``bytes`` blob.
+        """
+        if getattr(message, "msg_time_stamp", 0) == 0:
+            return False
+
+        # Real protobuf-generated messages always carry sized containers
+        # here, but a stub / duck-typed fake might not. Use try/except
+        # around len() so a misbehaving __len__ implementation also
+        # falls through to "no data" rather than crashing the consumer
+        # (Qodo PR 17 pass 43 #1, replacing the earlier hasattr guard).
+        def _nonempty(value: Any) -> bool:
+            if value is None:
+                return False
+            try:
+                return len(value) > 0
+            except Exception:
+                return False
+
+        return (
+            _nonempty(getattr(message, "analog_in_data", None))
+            or _nonempty(getattr(message, "analog_in_data_float", None))
+            or _nonempty(getattr(message, "digital_data", None))
+        )
+
+
+def _is_daqifi_out_message(value: object) -> bool:
+    """Duck-type check for a DaqifiOutMessage-shaped object.
+
+    Accepts anything carrying the ``device_status`` field, which is the
+    universal discriminator across status / stream / error variants.
+    Uses ``getattr`` inside a ``try/except`` rather than ``hasattr``
+    so a property getter that raises a non-AttributeError exception
+    can't crash the consumer thread (Qodo PR 17 pass 21 #3).
+    """
+    if value is None:
+        return False
+    try:
+        getattr(value, "device_status")
+    except Exception:
+        return False
+    return True

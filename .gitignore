@@ -39,6 +39,19 @@ htmlcov/
 .tox/
 testing/suites/test_config.yaml  # Exclude config files with credentials
 
+# Secrets / credentials
+.env
+.env.*
+!.env.example
+
+# Hardware-test wire captures (raw serial bytes — local-only diagnostics)
+tests/integration/captures/
+
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent / portomatic working dirs (local cache, never commit)
+.portomatic/
+.claude/
+.codex

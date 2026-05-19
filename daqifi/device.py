@@ -5,15 +5,16 @@ Provides high-level API for device interaction.
 """
 
 from typing import Dict, Any, Optional, Union, List
-from ._internal.comm import SerialInterface, PowerState
-from ._internal import scpi
+from ._internal.comm import DataSample, SerialInterface, PowerState, DeviceMetadata
+from ._internal import scpi, scpi_commands
+from ._internal.scpi import check_setter_response
 from .channels import (
     AnalogOutputChannel,
     AnalogInputChannel,
     DigitalIOChannel,
     AnalogOutputs,
     AnalogInputs,
-    DigitalIO
+    DigitalIO,
 )
 from .streaming import StreamManager, AsyncStreamManager
 from .discovery import DeviceInfo, BoardVariant
@@ -22,6 +23,38 @@ from .exceptions import (
     CommandError,
     FeatureNotSupportedError
 )
+
+
+_METADATA_FIELD_NAMES = (
+    "device_pn",
+    "device_sn",
+    "device_fw_rev",
+    "device_hw_rev",
+    "host_name",
+    "ssid",
+)
+
+
+def _frame_has_metadata_fields(data: Any) -> bool:
+    """Heuristic: does ``data`` (a parsed DaqifiOutMessage) look like
+    a SYSInfoPB? reply rather than a streaming-status frame?
+
+    Returns True iff at least one of the canonical SystStatusPB-only
+    fields is populated. The string ``"0"`` is rejected explicitly —
+    firmware 3.4.6b1 uses it as a placeholder for the *IDN? SN field
+    and we don't want a future cross-wire bug to make that count as
+    real metadata. For numeric / bytes fields, falsy values (``0`` /
+    ``b""``) are skipped via the ``elif value:`` arm.
+    """
+    for name in _METADATA_FIELD_NAMES:
+        value = getattr(data, name, None)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and stripped != "0":
+                return True
+        elif value:
+            return True
+    return False
 
 
 class NyquistDevice:
@@ -65,6 +98,16 @@ class NyquistDevice:
         self._variant = BoardVariant.UNKNOWN
         self._device_info: Dict[str, Any] = {}
         self._connected = False
+        # Protobuf-populated metadata (real SN, MAC, IP, SSID, ...).
+        # Best-effort populated during `_connect()`; callers can re-
+        # fetch on demand via :meth:`refresh_metadata` (e.g. after a
+        # USB drop / reconnect).
+        self._metadata: DeviceMetadata = DeviceMetadata()
+        # Captured exception (if any) from the most recent best-
+        # effort metadata refresh inside `_connect()`. Lets callers
+        # observe an otherwise-silent SYSInfoPB? failure without
+        # changing the non-fatal behavior.
+        self._last_metadata_refresh_error: Optional[Exception] = None
 
         # Channel collections (created on connection)
         self._analog_outputs: Optional[AnalogOutputs] = None
@@ -115,7 +158,7 @@ class NyquistDevice:
 
         try:
             # Query device identification
-            idn = self._comm.send_query(scpi.System.IDN)
+            idn = self._comm.send_query(scpi_commands.get_idn().data)
             self._device_info["idn"] = idn
 
             # Parse variant from IDN
@@ -141,6 +184,27 @@ class NyquistDevice:
             # Initialize channel collections based on variant
             self._initialize_channels()
 
+            # Best-effort populate `metadata` from SYSInfoPB? so callers
+            # can read `device.metadata.serial_number` without an extra
+            # round-trip. Failure is non-fatal — older firmware or a
+            # noisy USB enumeration may not respond in 2s, in which
+            # case `metadata` stays at its empty default and callers
+            # can call `refresh_metadata()` explicitly.
+            #
+            # Must include DAQiFiConnectionError because
+            # refresh_metadata translates query_binary's RuntimeError
+            # into DAQiFiConnectionError to honor its docstring
+            # contract — without this entry a transient I/O hiccup
+            # during SYSInfoPB? would abort an otherwise-successful
+            # connect via the outer except below.
+            try:
+                self.refresh_metadata(timeout=2.0)
+                self._last_metadata_refresh_error = None
+            except (CommandError, DAQiFiConnectionError, RuntimeError) as exc:
+                # Observability hook — see `last_metadata_refresh_error`.
+                # Behavior remains best-effort: connect still succeeds.
+                self._last_metadata_refresh_error = exc
+
         except Exception as e:
             self._connected = False
             self._comm.close()
@@ -159,7 +223,17 @@ class NyquistDevice:
             num_adc = 0
 
         if num_adc > 0:
-            adc_channels = [AnalogInputChannel(i, self._comm, self._variant.value) for i in range(num_adc)]
+            # Range is module-level on NQ3 (AD7609 register), so all
+            # channels constructed here share one cache holder so a
+            # `range = ...` write on any single channel invalidates
+            # the bounds for all of its siblings (#99 group A).
+            shared_range_cache: List[Optional[tuple]] = [None]
+            adc_channels = [
+                AnalogInputChannel(
+                    i, self._comm, self._variant.value, range_cache=shared_range_cache
+                )
+                for i in range(num_adc)
+            ]
             self._analog_inputs = AnalogInputs(adc_channels)
 
         # Analog outputs (DAC) - NQ3 only
@@ -204,8 +278,143 @@ class NyquistDevice:
 
     @property
     def serial_number(self) -> str:
-        """Get device serial number"""
+        """Get device serial number from the ``*IDN?`` response.
+
+        Note:
+            Firmware 3.4.6b1 (the current release) reports the SN
+            field of ``*IDN?`` as a literal ``"0"`` placeholder for
+            every unit. Use :attr:`metadata.serial_number` instead
+            for identity verification — that field is populated from
+            the protobuf ``SYSInfoPB?`` reply and contains the real
+            decimal SN.
+        """
         return self._device_info.get("serial_number", "Unknown")
+
+    @property
+    def last_metadata_refresh_error(self) -> Optional[Exception]:
+        """The exception captured by the most recent best-effort
+        metadata refresh inside :meth:`connect`, or ``None`` if the
+        refresh succeeded (or was never attempted).
+
+        Useful for observability: after :meth:`connect` returns, a
+        non-``None`` value here means SYSInfoPB? failed during
+        connect-time auto-refresh and ``self.metadata`` is at its
+        empty default. Callers can decide whether to retry via
+        :meth:`refresh_metadata` or proceed with limited identity.
+        """
+        return self._last_metadata_refresh_error
+
+    @property
+    def metadata(self) -> DeviceMetadata:
+        """Protobuf-populated device metadata (real SN, MAC, IP, ...).
+
+        Returns the cached :class:`DeviceMetadata`. Populated
+        automatically during :meth:`connect` via a best-effort
+        ``SYSTem:SYSInfoPB?`` query; if that round-trip failed at
+        connect-time the cache is left at its empty default and
+        callers can re-populate it explicitly via
+        :meth:`refresh_metadata`.
+
+        Distinct from :attr:`serial_number` (the ``*IDN?`` field,
+        which is a ``"0"`` placeholder on firmware 3.4.6b1).
+        ``metadata.serial_number`` is the canonical real SN —
+        suitable for identity verification before destructive
+        operations like :meth:`reset`.
+
+        Closes daqifi-python-core#74.
+        """
+        return self._metadata
+
+    def refresh_metadata(self, timeout: float = 2.0) -> DeviceMetadata:
+        """Re-query ``SYSInfoPB?`` and refresh the cached metadata.
+
+        Args:
+            timeout: Seconds to wait for a parseable protobuf reply.
+
+        Returns:
+            The refreshed :class:`DeviceMetadata` (also accessible
+            via :attr:`metadata`).
+
+        Raises:
+            CommandError: If no parseable protobuf message arrives
+                within ``timeout`` seconds.
+            DAQiFiConnectionError: If the device isn't connected.
+        """
+        # Use the public `is_connected` so a closed underlying serial
+        # handle (e.g. after USB drop while `_connected` is still
+        # True) surfaces as the documented `DAQiFiConnectionError`
+        # instead of falling through to query_binary's `RuntimeError`.
+        if not self.is_connected:
+            raise DAQiFiConnectionError(
+                "Cannot refresh metadata: device not connected"
+            )
+        from ._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+        from .communication import ProtobufMessageParser
+
+        try:
+            raw = self._comm.query_binary(
+                scpi_commands.get_device_info().data, timeout=timeout
+            )
+        except RuntimeError as e:
+            # SerialInterface.query_binary raises RuntimeError on
+            # closed-port / I/O failure; honor the documented
+            # exception contract by re-raising as a connection error.
+            raise DAQiFiConnectionError(
+                f"Cannot refresh metadata: {e}"
+            ) from e
+        parser = ProtobufMessageParser(message_factory=DaqifiOutMessage.FromString)
+        try:
+            messages, _consumed = parser.parse_messages(raw)
+        except Exception as e:
+            # ProtobufMessageParser is documented to be resilient
+            # (advances one byte on bad payloads), but defense-in-depth
+            # against a future schema change or a parser bug — keep the
+            # documented exception contract intact.
+            raise CommandError(
+                f"SYSInfoPB? returned unparseable bytes after {timeout}s "
+                f"(received {len(raw)} bytes): {e}"
+            ) from e
+        if not messages:
+            raise CommandError(
+                f"SYSInfoPB? returned no parseable protobuf message after "
+                f"{timeout}s (received {len(raw)} bytes)"
+            )
+        # Walk the parsed frames newest-to-oldest and pick the latest
+        # one that actually carries SYSInfoPB-shaped metadata. If
+        # background streaming is active when this query runs,
+        # query_binary's buffer can contain stream frames AFTER the
+        # SYSInfoPB reply; ``update_from_protobuf`` would no-op on
+        # those (it only writes non-empty fields) and leave metadata
+        # stale.
+        #
+        # The "metadata-shaped" check accepts any of the SystStatusPB-
+        # specific fields (pn, sn, fw_rev, hw_rev, host_name, ssid)
+        # being populated — a SYSInfoPB? response that omits pn/sn
+        # but carries other identity fields is still a valid refresh
+        # source, and stream frames carry none of these. The string
+        # ``"0"`` is rejected explicitly because firmware 3.4.6b1
+        # uses it as a placeholder in the *IDN? field, so a future
+        # cross-wiring bug couldn't sneak it through here.
+        metadata_msg = None
+        for candidate in reversed(messages):
+            if _frame_has_metadata_fields(candidate.data):
+                metadata_msg = candidate.data
+                break
+        if metadata_msg is None:
+            # Parseable frames arrived but none carried SYSInfoPB-
+            # shaped metadata (e.g. only background-streaming
+            # frames were in the buffer when SYSInfoPB? was lost on
+            # the wire). Surface this as a CommandError rather than
+            # returning silently — the cache stays unchanged, but
+            # callers (especially destructive-op identity gates)
+            # need to know the refresh didn't actually succeed.
+            raise CommandError(
+                f"SYSInfoPB? returned {len(messages)} parseable frame(s), "
+                f"none of which carried SYSInfoPB metadata fields "
+                f"(received {len(raw)} bytes; metadata cache unchanged)"
+            )
+        self._metadata.update_from_protobuf(metadata_msg)
+        return self._metadata
 
     @property
     def firmware_version(self) -> str:
@@ -292,7 +501,7 @@ class NyquistDevice:
                 print("Device fully powered")
         """
         try:
-            response = self._comm.send_query(scpi.System.POWER_STATE_QUERY)
+            response = self._comm.send_query(scpi_commands.get_power_state().data)
             state_val = scpi.parse_int(response)
             return PowerState(state_val)
         except Exception as e:
@@ -309,11 +518,17 @@ class NyquistDevice:
         Example:
             device.power_state = PowerState.POWERED_UP
         """
+        # Use send_set_with_error so the SYST:ERR? response captured
+        # by the setter is the one we evaluate — re-querying after a
+        # False return advances the device's error queue past the
+        # actual entry and silently swallows it (#14 / Qodo PR #53).
         try:
-            success = self._comm.send_set(scpi.System.POWER_STATE_SET, int(state), delay=1.0)
-            if not success:
-                error = self._comm.send_query(scpi.System.ERR)
-                raise CommandError(f"Failed to set power state: {error}")
+            success, error_response = self._comm.send_command_with_error(
+                scpi_commands.set_power_state(int(state)).data, delay=1.0,
+            )
+            check_setter_response(success, error_response, "set power state")
+        except CommandError:
+            raise
         except Exception as e:
             raise CommandError(f"Failed to set power state: {e}")
 
@@ -359,7 +574,7 @@ class NyquistDevice:
             print(info)
         """
         try:
-            return self._comm.send_query(scpi.System.INFO)
+            return self._comm.send_query(scpi_commands.get_system_info().data)
         except Exception as e:
             raise CommandError(f"Failed to get system info: {e}")
 
@@ -376,7 +591,7 @@ class NyquistDevice:
                 print(f"Device error: {error}")
         """
         try:
-            return self._comm.send_query(scpi.System.ERR)
+            return self._comm.send_query(scpi_commands.get_last_error().data)
         except Exception as e:
             raise CommandError(f"Failed to query error: {e}")
 
@@ -388,6 +603,55 @@ class NyquistDevice:
             device.clear_errors()
         """
         self._comm.clear_errors()
+
+    def drain_errors(
+        self, max_iterations: int = 256, empty_budget: int = 3
+    ) -> List[str]:
+        """Pop ``SYST:ERR?`` entries from the device until the queue
+        reports ``"No error"`` and return the popped entries.
+
+        Counterpart to :meth:`get_last_error` (which pops one entry):
+        this drains the whole queue and returns ownership of the
+        popped entries to the caller — log them, surface them in a
+        health-check report, throw on hardware faults, or discard if
+        known-stale. Mirrors upstream
+        ``DaqifiDevice.DrainErrorQueueAsync`` (daqifi-core PR #185).
+
+        Args:
+            max_iterations: Safety cap on the number of ``SYST:ERR?``
+                queries. Defaults to 256 — large enough to drain a
+                deeply queued device, small enough that a runaway loop
+                is bounded.
+            empty_budget: Number of consecutive empty/unparseable
+                replies tolerated before bailing. Defaults to 3 (~0.3 s
+                worst-case stall vs ~25 s with the unconditional cap).
+
+        Returns:
+            The list of error strings popped from the queue. Empty
+            when the queue was already clean. May contain a synthetic
+            ``DRAIN_INCONCLUSIVE`` sentinel if drain exited without
+            seeing ``0,"No error"`` — caller can detect "queue not
+            confirmed clean."
+
+        Raises:
+            ValueError: ``max_iterations`` or ``empty_budget`` ≤ 0.
+            CommandError: transport-level failure during the drain
+                (matches the pattern used by :meth:`get_last_error`).
+        """
+        # Validate before the try/except so ValueError propagates
+        # cleanly instead of getting wrapped into CommandError.
+        if max_iterations <= 0:
+            raise ValueError("max_iterations must be positive")
+        if empty_budget <= 0:
+            raise ValueError("empty_budget must be positive")
+        try:
+            return self._comm.drain_errors(
+                max_iterations=max_iterations, empty_budget=empty_budget
+            )
+        except Exception as e:
+            # Preserve original exception context for debugging
+            # transport-level failures.
+            raise CommandError(f"Failed to drain error queue: {e}") from e
 
     # ==========================================================================
     # SD Card File Management
@@ -403,8 +667,9 @@ class NyquistDevice:
         Example:
             device.sd_enable(True)
         """
-        from ._internal.scpi import System
-        self._comm.send_command(f"{System.SD_ENABLE_SET} {1 if enable else 0}")
+        msg = scpi_commands.enable_storage_sd() if enable else scpi_commands.disable_storage_sd()
+        success, error_response = self._comm.send_command_with_error(msg.data)
+        check_setter_response(success, error_response, f"set SD enabled={enable}")
 
     def sd_list_files(self, directory: str = "") -> List[str]:
         """
@@ -421,11 +686,11 @@ class NyquistDevice:
             for f in files:
                 print(f)
         """
-        from ._internal.scpi import System
         if directory:
-            response = self._comm.send_command(f'{System.SD_LIST_QUERY} "{directory}"')
+            cmd = scpi_commands.get_sd_file_list_for_directory(directory)
         else:
-            response = self._comm.send_command(System.SD_LIST_QUERY)
+            cmd = scpi_commands.get_sd_file_list()
+        response = self._comm.send_command(cmd.data)
 
         # Parse file list from response (format: path,size per line)
         files = []
@@ -467,13 +732,12 @@ class NyquistDevice:
             print(data)
         """
         import time
-        from ._internal.scpi import System
 
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
         # Send GET command
-        cmd = f'{System.SD_GET} "{filename}"'
+        cmd = scpi_commands.get_sd_file(filename).data
         cmd_bytes = (cmd + "\r").encode('ascii')
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
@@ -539,13 +803,12 @@ class NyquistDevice:
             assert len(data) == expected_size
         """
         import time
-        from ._internal.scpi import System
 
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
         # Send GET command
-        cmd = f'{System.SD_GET} "{filename}"'
+        cmd = scpi_commands.get_sd_file(filename).data
         cmd_bytes = (cmd + "\r").encode('ascii')
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
@@ -598,8 +861,10 @@ class NyquistDevice:
         Example:
             device.sd_delete_file("old_data.csv")
         """
-        from ._internal.scpi import System
-        self._comm.send_command(f'{System.SD_DELETE} "{filename}"')
+        success, error_response = self._comm.send_command_with_error(
+            scpi_commands.delete_sd_file(filename).data
+        )
+        check_setter_response(success, error_response, f"delete SD file {filename!r}")
 
     def sd_format(self):
         """
@@ -610,8 +875,10 @@ class NyquistDevice:
         Example:
             device.sd_format()  # Careful!
         """
-        from ._internal.scpi import System
-        self._comm.send_command(System.SD_FORMAT)
+        success, error_response = self._comm.send_command_with_error(
+            scpi_commands.format_sd_card().data
+        )
+        check_setter_response(success, error_response, "format SD card")
 
     def sd_set_logging(self, filename: str):
         """
@@ -625,8 +892,10 @@ class NyquistDevice:
             device.sd_set_logging("data.csv")
             # Now streaming will log to SD card
         """
-        from ._internal.scpi import System
-        self._comm.send_command(f'{System.SD_FILE_SET} "{filename}"')
+        success, error_response = self._comm.send_command_with_error(
+            scpi_commands.set_sd_logging_file_name(filename).data
+        )
+        check_setter_response(success, error_response, f"set SD logging file {filename!r}")
 
     def sd_benchmark(self, size_kb: int = 1024) -> dict:
         """
@@ -642,12 +911,11 @@ class NyquistDevice:
             results = device.sd_benchmark(1024)
             print(f"Speed: {results['speed_mbps']:.2f} MB/s")
         """
-        from ._internal.scpi import System
         # Run benchmark
-        self._comm.send_command(f"{System.SD_BENCHMARK} {size_kb}")
+        self._comm.send_command(scpi_commands.run_sd_benchmark(size_kb).data)
 
         # Query results
-        response = self._comm.send_command(System.SD_BENCHMARK_QUERY)
+        response = self._comm.send_command(scpi_commands.get_sd_benchmark_results().data)
         parts = response.strip().split(',')
 
         if len(parts) == 3:
@@ -725,11 +993,50 @@ class NyquistDevice:
                     f"Invalid channel {ch}. Valid range: 0-{max_channels-1}"
                 )
 
+        dispatch = self._build_per_channel_dispatch()
+
         # Create appropriate stream manager
         if async_mode:
-            return AsyncStreamManager(self._comm, channels, sample_rate, format)
+            return AsyncStreamManager(
+                self._comm, channels, sample_rate, format,
+                per_channel_dispatch=dispatch,
+            )
         else:
-            return StreamManager(self._comm, channels, sample_rate, format)
+            return StreamManager(
+                self._comm, channels, sample_rate, format,
+                per_channel_dispatch=dispatch,
+            )
+
+    def _build_per_channel_dispatch(self):
+        """Return a callable the StreamManager will invoke per channel
+        per produced :class:`Sample` so per-channel ``SampleReceived``
+        handlers fire automatically (closes #107).
+
+        The returned closure is intentionally tolerant: indices outside
+        the analog-input range are skipped silently (StreamManager
+        already validated channel indices at start_streaming time, but
+        the dispatch path runs in the streaming thread where partially-
+        formed samples shouldn't crash the loop).
+        """
+        from datetime import datetime, timezone
+
+        def _dispatch(channel_index: int, value: float, timestamp_seconds: float) -> None:
+            if self._analog_inputs is None:
+                return
+            if not (0 <= channel_index < len(self._analog_inputs)):
+                return
+            try:
+                ts = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                # A malformed timestamp (e.g. a JSON/CSV decode glitch
+                # producing an out-of-range float) must not poison the
+                # streaming thread. Skip this dispatch.
+                return
+            self._analog_inputs[channel_index].set_active_sample(
+                DataSample(timestamp=ts, value=value)
+            )
+
+        return _dispatch
 
     def __enter__(self):
         """

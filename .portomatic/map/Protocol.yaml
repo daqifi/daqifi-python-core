@@ -1,0 +1,140 @@
+schema_version: 1
+shard: Protocol
+upstream_root: src/Daqifi.Core/Device/Protocol
+downstream_root: daqifi
+last_synced_upstream_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+files:
+- upstream: src/Daqifi.Core/Device/Protocol/IProtocolHandler.cs
+  downstream: daqifi/protocol.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream: src/Daqifi.Core/Device/Protocol/ProtobufMessageType.cs
+  downstream: daqifi/enums.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream: src/Daqifi.Core/Device/Protocol/ProtobufProtocolHandler.cs
+  downstream: daqifi/protocol.py
+  relation: one_to_one
+  notes: null
+  rationale: null
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+symbols:
+- upstream:
+    kind: enum
+    qualified: Daqifi.Core.Device.Protocol.ProtobufMessageType
+    file: src/Daqifi.Core/Device/Protocol/ProtobufMessageType.cs
+  downstream:
+    kind: enum
+    qualified: daqifi.enums.ProtobufMessageType
+    file: daqifi/enums.py
+  relation: one_to_one
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: null
+  rationale: null
+  members:
+  - upstream: Unknown
+    downstream: UNKNOWN
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: Status
+    downstream: STATUS
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: Stream
+    downstream: STREAM
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: SdCard
+    downstream: SD_CARD
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: <downstream-only:ERROR>
+    downstream: ERROR
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream:
+    kind: class
+    qualified: Daqifi.Core.Device.Protocol.ProtobufProtocolHandler
+    file: src/Daqifi.Core/Device/Protocol/ProtobufProtocolHandler.cs
+  downstream:
+    kind: class
+    qualified: daqifi.protocol.ProtobufProtocolHandler
+    file: daqifi/protocol.py
+  relation: one_to_one
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: null
+  rationale: null
+  members:
+  - upstream: CanHandle
+    downstream: can_handle
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: HandleAsync
+    downstream: handle
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: DetectMessageType
+    downstream: detect_message_type
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: <downstream-only:handle_async>
+    downstream: handle_async
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: <downstream-only:__init__>
+    downstream: __init__
+    relation: divergent
+    notes: Downstream-only addition; no upstream counterpart.
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+- upstream:
+    kind: interface
+    qualified: Daqifi.Core.Device.Protocol.IProtocolHandler
+    file: src/Daqifi.Core/Device/Protocol/IProtocolHandler.cs
+  downstream:
+    kind: interface
+    qualified: daqifi.protocol.IProtocolHandler
+    file: daqifi/protocol.py
+  relation: one_to_one
+  last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  notes: null
+  rationale: null
+  members:
+  - upstream: CanHandle
+    downstream: can_handle
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+  - upstream: HandleAsync
+    downstream: handle_async
+    relation: one_to_one
+    notes: null
+    backlog_id: null
+    last_synced_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
+divergences: []
+backlog: []
+hal_pairs: []
+updated_at: '2026-04-26T08:44:22.541173Z'
