@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from daqifi.transport import SerialStreamTransport
+from daqifi._internal import scpi
 
 
 PORT = "COM7"
@@ -58,7 +59,7 @@ def looks_like_error(reply: bytes) -> bool:
 def try_start(ser, label, setup_lines, start_line, stream_seconds=2.0):
     print(f"\n========== {label} ==========")
     # Drain any stale output first
-    send(ser, "SYST:STReam:STOP", delay=0.5)
+    send(ser, scpi.Streaming.STOP, delay=0.5)
     drain_collect(ser, timeout=1.0)
 
     for line in setup_lines:
@@ -93,7 +94,7 @@ def try_start(ser, label, setup_lines, start_line, stream_seconds=2.0):
         hexdump(bytes(buf[:80]), prefix="    ")
         print(f"    ... ({len(buf) - 80} more bytes)")
 
-    send(ser, "SYST:STReam:STOP", delay=0.5)
+    send(ser, scpi.Streaming.STOP, delay=0.5)
     drain_collect(ser, timeout=1.0)
 
 
@@ -107,7 +108,7 @@ def main():
             ser,
             "Variant A: bitmask enable + STReam:START",
             ["ENABle:VOLTage:DC 1"],
-            "SYST:STReam:START 100",
+            f"{scpi.Streaming.START} 100",
         )
 
         # Per-channel enable form
@@ -115,7 +116,7 @@ def main():
             ser,
             "Variant B: per-channel ENABLE:VOLT:DC 0,1 + STReam:START",
             ["ENABle:VOLTage:DC 0,1"],
-            "SYST:STReam:START 100",
+            f"{scpi.Streaming.START} 100",
         )
 
         # Add MEM:RESet before
@@ -123,7 +124,7 @@ def main():
             ser,
             "Variant C: MEM:RESet then enable then start",
             ["SYST:MEM:RESet", "ENABle:VOLTage:DC 1"],
-            "SYST:STReam:START 100",
+            f"{scpi.Streaming.START} 100",
         )
 
         # All bits set (all 16 channels)
@@ -131,7 +132,7 @@ def main():
             ser,
             "Variant D: enable all channels + start",
             ["ENABle:VOLTage:DC 65535"],
-            "SYST:STReam:START 100",
+            f"{scpi.Streaming.START} 100",
         )
 
         # Try short form

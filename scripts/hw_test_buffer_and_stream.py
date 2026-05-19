@@ -30,6 +30,7 @@ from daqifi.communication import (
     StreamMessageConsumer,
 )
 from daqifi.transport import SerialStreamTransport
+from daqifi._internal import scpi
 
 
 PORT = "COM7"
@@ -72,7 +73,7 @@ def _drain(serial_obj, timeout: float = 1.0) -> int:
 def _device_reset(ser, log: logging.Logger) -> None:
     """Mirror test_harness.device_reset — clean state for next start."""
     log.info("device_reset: stopping any active stream")
-    _send(ser, "SYST:STReam:STOP", delay=1.0)
+    _send(ser, scpi.Streaming.STOP, delay=1.0)
     drained = _drain(ser, timeout=1.0)
     log.info("  drained %d bytes after stop", drained)
     _send(ser, "SYST:STR:BENCHmark 0", delay=0.2)
@@ -128,7 +129,7 @@ def test_raw_bytes(log: logging.Logger, rate_hz: int, duration_s: float) -> int:
     try:
         _device_reset(ser, log)
         _send(ser, "ENABle:VOLTage:DC 1", delay=0.2)  # bitmask: ch0 only
-        _send(ser, f"SYST:STReam:START {rate_hz}", delay=0.0)
+        _send(ser, f"{scpi.Streaming.START} {rate_hz}", delay=0.0)
 
         deadline = time.monotonic() + duration_s
         while time.monotonic() < deadline:
@@ -141,7 +142,7 @@ def test_raw_bytes(log: logging.Logger, rate_hz: int, duration_s: float) -> int:
             else:
                 time.sleep(0.001)
 
-        _send(ser, "SYST:STReam:STOP", delay=1.0)
+        _send(ser, scpi.Streaming.STOP, delay=1.0)
         _drain(ser, timeout=0.5)
     finally:
         transport.disconnect()
@@ -187,12 +188,12 @@ def test_parsed(log: logging.Logger, rate_hz: int, duration_s: float) -> int:
         _device_reset(ser, log)
         _send(ser, "ENABle:VOLTage:DC 1", delay=0.2)
         consumer.start()
-        _send(ser, f"SYST:STReam:START {rate_hz}", delay=0.0)
+        _send(ser, f"{scpi.Streaming.START} {rate_hz}", delay=0.0)
 
         time.sleep(duration_s)
 
         consumer.stop()
-        _send(ser, "SYST:STReam:STOP", delay=1.0)
+        _send(ser, scpi.Streaming.STOP, delay=1.0)
         _drain(ser, timeout=0.5)
     finally:
         transport.disconnect()

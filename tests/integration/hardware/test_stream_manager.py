@@ -30,6 +30,7 @@ from typing import Iterator
 import pytest
 
 from daqifi.device import NyquistDevice
+from daqifi._internal import scpi
 from daqifi.discovery import DeviceInfo
 from daqifi.exceptions import CommandError
 from daqifi.streaming import Sample, SampleBuffer, StreamManager, StreamState
@@ -72,7 +73,7 @@ def streaming_nyquist(device_info: DeviceInfo) -> Iterator[NyquistDevice]:
         # raised), un-stuck the device-side state machine before
         # the next test or session inherits it.
         try:
-            dev._comm.send_command("SYSTem:STReam:STOP")
+            dev._comm.send_command(scpi.Streaming.STOP)
         except Exception:
             pass
         try:
