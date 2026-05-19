@@ -358,7 +358,16 @@ class StreamManager:
 
         except Exception as e:
             self._state = StreamState.ERROR
-            raise CommandError(f"Failed to start streaming: {e}")
+            # Don't double-wrap the explicit CommandError raised inside
+            # the try (e.g. the START-rejection guard above). Re-raise it
+            # as-is so callers see "Streaming START rejected by device:
+            # ..." instead of "Failed to start streaming: Streaming
+            # START rejected by device: ...". For any other exception,
+            # wrap with `from e` to preserve the original traceback.
+            # (Qodo PR #6 pass 3 #1.)
+            if isinstance(e, CommandError):
+                raise
+            raise CommandError(f"Failed to start streaming: {e}") from e
 
     def stop(self):
         """
@@ -386,7 +395,11 @@ class StreamManager:
             self._state = StreamState.STOPPED
         except Exception as e:
             self._state = StreamState.ERROR
-            raise CommandError(f"Failed to stop streaming: {e}")
+            # Mirror the start() handler: don't double-wrap CommandError,
+            # and preserve the traceback via `from e` for other types.
+            if isinstance(e, CommandError):
+                raise
+            raise CommandError(f"Failed to stop streaming: {e}") from e
 
     def read(self, num_samples: int = 1, timeout: float = 1.0) -> List[Sample]:
         """
