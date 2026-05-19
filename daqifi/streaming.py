@@ -8,13 +8,15 @@ configurable sample rates, and data export.
 import math
 import time
 import threading
-from typing import List, Dict, Optional, Callable, Any
+from collections import deque
+from typing import List, Dict, Optional, Callable, Any, Deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
 from ._internal.comm import SerialInterface
 from ._internal import scpi
+from .communication import ProtobufMessageParser
 from .exceptions import CommandError, ConfigurationError
 
 
@@ -251,6 +253,12 @@ class StreamManager:
         self._stop_event = threading.Event()
         self._read_buffer = ""  # Buffer for partial data (JSON/CSV)
         self._tick_rate_hz = None  # Tick rate from metadata header (for timestamp conversion)
+        # Protobuf decode state. Lazily initialised on the first
+        # _read_sample_protobuf call so callers using JSON/CSV pay
+        # nothing for the import or buffer allocation.
+        self._pb_buffer: bytes = b""
+        self._pb_parser: Optional[ProtobufMessageParser] = None
+        self._pending_pb_samples: Deque[Sample] = deque()
 
     @property
     def state(self) -> StreamState:
@@ -703,40 +711,134 @@ class StreamManager:
             return None
 
     def _read_sample_protobuf(self) -> Optional[Sample]:
-        """
-        Parse ProtoBuf streaming data from the device.
+        """Decode one streaming sample from the protobuf byte stream.
 
-        ProtoBuf format uses DaqifiOutMessage binary encoding.
-        Currently in testing mode - verifies data flow without full decoding.
+        Reads any available bytes, feeds them to a
+        :class:`ProtobufMessageParser` (length-prefixed
+        ``DaqifiOutMessage`` frames), and returns one :class:`Sample`
+        per call. When a single frame produces multiple samples
+        (e.g. firmware batched several ticks), the surplus is queued
+        in ``self._pending_pb_samples`` and returned on subsequent
+        calls.
 
-        Returns:
-            Sample or None if no data available
+        Returns ``None`` if no complete frame is buffered yet — the
+        caller (``read()`` / ``_streaming_thread``) re-invokes after
+        the next read window.
+
+        Closes #148. The previous implementation hex-dumped the
+        first 32 bytes and returned a hardcoded
+        ``Sample(channels={0: 0.0})`` placeholder, so every PB
+        consumer received the same fake value regardless of the
+        actual ADC reading.
         """
+        if self._pending_pb_samples:
+            return self._pending_pb_samples.popleft()
+
         try:
-            # Read available binary data from serial port
-            if self._comm._serial.in_waiting > 0:
-                chunk = self._comm._serial.read(self._comm._serial.in_waiting)
-
-                # For testing: display hex dump of received data
-                if len(chunk) > 0:
-                    hex_str = ' '.join(f'{b:02x}' for b in chunk[:32])  # First 32 bytes
-                    if len(chunk) > 32:
-                        hex_str += f' ... ({len(chunk)} bytes total)'
-                    print(f"ProtoBuf data received: {hex_str}")
-
-                    # Create a placeholder sample to indicate data was received
-                    # In real implementation, we would decode the protobuf message here
-                    sample = Sample(
-                        timestamp=time.time(),
-                        channels={0: 0.0}  # Placeholder - would parse from protobuf
-                    )
-                    return sample
-
-            return None
-
+            in_waiting = self._comm._serial.in_waiting
         except Exception as e:
-            print(f"Error reading ProtoBuf sample: {e}")
+            # Transport hiccup — surface to the streaming thread the
+            # same way the legacy path did so it can transition to
+            # ERROR rather than silently spinning.
+            raise CommandError(f"Failed to poll serial for PB data: {e}") from e
+
+        if in_waiting > 0:
+            self._pb_buffer += self._comm._serial.read(in_waiting)
+
+        if not self._pb_buffer:
             return None
+
+        if self._pb_parser is None:
+            # Lazy import keeps the protobuf generated module out of
+            # the CSV/JSON hot path. The factory mirrors
+            # ``DaqifiStreamingDevice._default_message_factory`` so
+            # both paths decode identically.
+            from ._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+            self._pb_parser = ProtobufMessageParser(
+                message_factory=lambda payload: DaqifiOutMessage.FromString(
+                    bytes(payload)
+                )
+            )
+
+        messages, consumed = self._pb_parser.parse_messages(self._pb_buffer)
+        if consumed:
+            self._pb_buffer = self._pb_buffer[consumed:]
+
+        for inbound in messages:
+            for sample in self._samples_from_pb_message(inbound.data):
+                self._pending_pb_samples.append(sample)
+
+        if self._pending_pb_samples:
+            return self._pending_pb_samples.popleft()
+        return None
+
+    def _samples_from_pb_message(self, message: Any) -> List["Sample"]:
+        """Convert a parsed ``DaqifiOutMessage`` into one or more
+        :class:`Sample` objects.
+
+        - Prefers ``analog_in_data_float`` (USB firmware, pre-scaled
+          to volts) over ``analog_in_data`` (WiFi firmware, raw ADC
+          counts). The raw path is exposed unscaled — callers that
+          need volts on WiFi should go through ``DaqifiStreamingDevice``
+          which carries the calibration coefficients.
+        - Maps payload positions to channel indices via
+          ``self._channels`` (the channel list the caller started
+          streaming with). ``self._channels[0]`` owns
+          ``analog_in_data_float[0]``, etc.
+        - Computes ``Sample.timestamp`` from ``msg_time_stamp /
+          tick_rate_hz`` when the tick rate is known, falling back
+          to ``time.time()`` otherwise. The CSV path establishes
+          ``_tick_rate_hz`` from the header line; the protobuf
+          stream has no equivalent header, so callers needing
+          precise device-relative timestamps should set it
+          out-of-band (typically via the device's status message).
+        - Handles batched frames where ``len(analog_in_data_float)``
+          is a multiple of ``len(self._channels)`` greater than one:
+          each block of ``len(channels)`` values becomes its own
+          ``Sample``, with per-sample timestamps from
+          ``analog_in_data_ts`` when available.
+        """
+        values = list(getattr(message, "analog_in_data_float", None) or [])
+        if not values:
+            values = [float(v) for v in (
+                getattr(message, "analog_in_data", None) or []
+            )]
+        if not values or not self._channels:
+            return []
+
+        num_channels = len(self._channels)
+        if len(values) % num_channels != 0:
+            # Partial / misaligned frame — refuse to guess at the
+            # per-channel split. The CSV/JSON paths silently drop
+            # malformed lines too.
+            return []
+
+        per_sample_ts = list(getattr(message, "analog_in_data_ts", None) or [])
+        msg_ts = getattr(message, "msg_time_stamp", 0)
+
+        def _convert_ts(raw_ts: int) -> float:
+            if self._tick_rate_hz and self._tick_rate_hz > 0:
+                return raw_ts / float(self._tick_rate_hz)
+            return time.time()
+
+        samples: List[Sample] = []
+        batch_count = len(values) // num_channels
+        for i in range(batch_count):
+            block = values[i * num_channels : (i + 1) * num_channels]
+            raw_ts = (
+                per_sample_ts[i]
+                if i < len(per_sample_ts) else msg_ts
+            )
+            samples.append(
+                Sample(
+                    timestamp=_convert_ts(raw_ts),
+                    channels={
+                        ch: float(block[idx])
+                        for idx, ch in enumerate(self._channels)
+                    },
+                )
+            )
+        return samples
 
     def _streaming_thread(self):
         """Background thread for callback-based streaming"""
