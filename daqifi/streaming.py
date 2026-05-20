@@ -787,8 +787,14 @@ class StreamManager:
                     )
                 )
 
+            # Pass the bytearray directly — the parser uses index
+            # and slice operations both of which work on bytearray
+            # without conversion. Wrapping with bytes(...) here
+            # would re-copy the entire buffer on every parse, exactly
+            # the O(n) cost the bytearray switch was meant to avoid.
+            # (Qodo PR #149 /agentic_review pass 3 #3.)
             messages, consumed = self._pb_parser.parse_messages(
-                bytes(self._pb_buffer)
+                self._pb_buffer
             )
             if consumed:
                 del self._pb_buffer[:consumed]
@@ -802,7 +808,13 @@ class StreamManager:
                 # accumulated garbage. The parser's resync-on-
                 # malformed logic (advance one byte at a time) will
                 # recover from the kept tail.
-                half = self._PB_BUFFER_HARD_CAP // 2
+                #
+                # max(1, …) guards the monkeypatched-tiny-cap case
+                # where _PB_BUFFER_HARD_CAP // 2 == 0 would make
+                # del buf[:-0] a no-op and silently disable the
+                # safety mechanism (Qodo PR #149 /agentic_review
+                # pass 3 #6).
+                half = max(1, self._PB_BUFFER_HARD_CAP // 2)
                 del self._pb_buffer[:-half]
 
             for inbound in messages:

@@ -166,6 +166,26 @@ class TestReadSampleProtobufDecodesRealValues:
         assert sample is not None
         assert sample.channels[0] == pytest.approx(0.125)
 
+    def test_hard_cap_trim_with_tiny_cap_still_progresses(self):
+        """When _PB_BUFFER_HARD_CAP is set to 1 (the boundary case
+        where // 2 == 0), the trim must still drop bytes — otherwise
+        the safety mechanism silently no-ops. max(1, …) guards this
+        (Qodo PR #149 /agentic_review pass 3 #6)."""
+        comm = _make_comm_with_bytes(b"")
+        sm = StreamManager(comm, channels=[0], format=0)
+        sm._PB_BUFFER_HARD_CAP = 1  # boundary: // 2 == 0
+        sm._pb_buffer.extend(b"\xab" * 20)
+
+        sm._pb_parser = MagicMock()
+        sm._pb_parser.parse_messages.return_value = ([], 0)
+
+        sm._read_sample_protobuf()
+
+        # Trim kept the tail-half but the floor of 1 means we keep
+        # at least 1 byte (not zero) and drop the rest.
+        assert len(sm._pb_buffer) == 1
+        assert sm._pb_buffer == bytearray(b"\xab")
+
     def test_buffer_hard_cap_drops_old_garbage_on_desync(self):
         """When the parser repeatedly returns (no messages, 0 bytes
         consumed) — the real-world signal of a stuck wait-for-tail
