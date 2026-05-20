@@ -329,3 +329,56 @@ def test_context_manager_stops_on_exception(
             assert stream.state == StreamState.RUNNING
             raise RuntimeError(sentinel_message)
     assert stream.state == StreamState.STOPPED
+
+
+# ---- protobuf streaming end-to-end -----------------------------------------
+
+
+def test_read_protobuf_returns_decoded_channel_samples(
+    streaming_nyquist: NyquistDevice,
+) -> None:
+    """``create_stream(..., format=0)`` exercises the full PB path:
+    NyquistDevice → StreamManager → ProtobufMessageParser →
+    Sample.channels with actual ADC values, not the
+    ``{0: 0.0}`` placeholder that PR #149 (closing #148) removed.
+
+    Asserts:
+    * read() returns the requested sample count
+    * every Sample.channels[N] is a finite float (not the bogus
+      hardcoded 0.0 from the placeholder — a real reading is in
+      [0.0, 3.3] for the NQ1 default ±3.3V range, so we accept any
+      finite value to stay tolerant of rail-to-rail / open-input
+      conditions)
+    * timestamps advance monotonically across samples (PB tick
+      counter is per-sample, so successive Samples must increase)
+    """
+    import math
+
+    dev = streaming_nyquist
+    _enable_adc_channel(dev, 0)
+
+    stream = dev.create_stream(channels=[0], sample_rate=200, format=0)
+    stop_exc: Exception | None = None
+    try:
+        stream.start()
+        samples = stream.read(num_samples=5, timeout=3.0)
+        assert len(samples) == 5
+        for s in samples:
+            assert isinstance(s, Sample)
+            assert 0 in s.channels
+            assert math.isfinite(s.channels[0]), (
+                f"Sample.channels[0] not finite: {s.channels[0]!r} — "
+                "would indicate the placeholder regression returned"
+            )
+        timestamps = [s.timestamp for s in samples]
+        assert all(b >= a for a, b in zip(timestamps, timestamps[1:])), (
+            f"PB timestamps not monotonic: {timestamps!r}"
+        )
+    finally:
+        try:
+            stream.stop()
+        except Exception as e:
+            stop_exc = e
+
+    if stop_exc is not None:
+        pytest.fail(f"stream.stop() failed in cleanup: {stop_exc!r}")

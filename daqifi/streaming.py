@@ -8,13 +8,15 @@ configurable sample rates, and data export.
 import math
 import time
 import threading
-from typing import List, Dict, Optional, Callable, Any
+from collections import deque
+from typing import List, Dict, Optional, Callable, Any, Deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
 from ._internal.comm import SerialInterface
 from ._internal import scpi
+from .communication import ProtobufMessageParser
 from .exceptions import CommandError, ConfigurationError
 
 
@@ -197,6 +199,13 @@ class StreamManager:
     sample rates and channel selection.
     """
 
+    # Maximum size of the protobuf decode buffer before forced trim.
+    # 1 MiB is ~200x the largest realistic single PB streaming frame
+    # (well under 1 KB on observed firmware); past this point the
+    # wire is desynced, not just slow. Class-level constant so tests
+    # can monkey-patch without crafting MiB-sized fixtures.
+    _PB_BUFFER_HARD_CAP = 1024 * 1024
+
     def __init__(
         self,
         comm: SerialInterface,
@@ -251,6 +260,16 @@ class StreamManager:
         self._stop_event = threading.Event()
         self._read_buffer = ""  # Buffer for partial data (JSON/CSV)
         self._tick_rate_hz = None  # Tick rate from metadata header (for timestamp conversion)
+        # Protobuf decode state. Lazily initialised on the first
+        # _read_sample_protobuf call so callers using JSON/CSV pay
+        # nothing for the import.
+        #
+        # _pb_buffer is a bytearray (not bytes) so per-read appends
+        # are O(chunk) instead of O(total) — at 50 kHz the bytes
+        # path would copy the whole buffer on every poll.
+        self._pb_buffer: bytearray = bytearray()
+        self._pb_parser: Optional[ProtobufMessageParser] = None
+        self._pending_pb_samples: Deque[Sample] = deque()
 
     @property
     def state(self) -> StreamState:
@@ -300,7 +319,19 @@ class StreamManager:
         self._callback = callback
         self._stop_event.clear()
         self._buffer.clear()
-        self._read_buffer = ""  # Clear read buffer
+        self._read_buffer = ""  # Clear read buffer (JSON/CSV)
+        # Clear protobuf decode state for the same reason — leftover
+        # bytes from a previous stop()'d session would otherwise be
+        # decoded as the start of the new stream, and queued samples
+        # from before stop() would surface ahead of any new data
+        # (Qodo PR #149 /agentic_review #2). Reset _pb_parser too so
+        # every PB lifecycle field clears symmetrically; the parser
+        # itself is stateless (a thin wrapper around the factory
+        # callable), but re-creating it on demand keeps the lifecycle
+        # uniform and trivial to reason about (Qodo /improve pass 2 #2).
+        self._pb_buffer.clear()
+        self._pending_pb_samples.clear()
+        self._pb_parser = None
         # Reset the per-channel dispatch anchor so a stop/start of the
         # same StreamManager instance starts a fresh epoch base. Without
         # this, the previous session's anchor gets reused and downstream
@@ -703,40 +734,169 @@ class StreamManager:
             return None
 
     def _read_sample_protobuf(self) -> Optional[Sample]:
-        """
-        Parse ProtoBuf streaming data from the device.
+        """Decode one streaming sample from the protobuf byte stream.
 
-        ProtoBuf format uses DaqifiOutMessage binary encoding.
-        Currently in testing mode - verifies data flow without full decoding.
+        Reads any available bytes, feeds them to a
+        :class:`ProtobufMessageParser` (length-prefixed
+        ``DaqifiOutMessage`` frames), and returns one :class:`Sample`
+        per call. When a single frame produces multiple samples
+        (e.g. firmware batched several ticks), the surplus is queued
+        in ``self._pending_pb_samples`` and returned on subsequent
+        calls.
 
-        Returns:
-            Sample or None if no data available
+        Returns ``None`` if no complete frame is buffered yet — the
+        caller (``read()`` / ``_streaming_thread``) re-invokes after
+        the next read window.
+
+        Closes #148. The previous implementation hex-dumped the
+        first 32 bytes and returned a hardcoded
+        ``Sample(channels={0: 0.0})`` placeholder, so every PB
+        consumer received the same fake value regardless of the
+        actual ADC reading.
         """
+        if self._pending_pb_samples:
+            return self._pending_pb_samples.popleft()
+
+        # Wrap the entire read+parse pipeline so any transport hiccup
+        # (in_waiting probe, serial.read I/O error) or parser failure
+        # surfaces as a CommandError. Without this, blocking read()
+        # callers would see raw pyserial / protobuf exceptions and
+        # the callback thread's generic "Streaming error" message
+        # would mask the actual fault site (Qodo PR #149
+        # /agentic_review #3).
         try:
-            # Read available binary data from serial port
-            if self._comm._serial.in_waiting > 0:
-                chunk = self._comm._serial.read(self._comm._serial.in_waiting)
+            in_waiting = self._comm._serial.in_waiting
 
-                # For testing: display hex dump of received data
-                if len(chunk) > 0:
-                    hex_str = ' '.join(f'{b:02x}' for b in chunk[:32])  # First 32 bytes
-                    if len(chunk) > 32:
-                        hex_str += f' ... ({len(chunk)} bytes total)'
-                    print(f"ProtoBuf data received: {hex_str}")
+            if in_waiting > 0:
+                self._pb_buffer.extend(self._comm._serial.read(in_waiting))
 
-                    # Create a placeholder sample to indicate data was received
-                    # In real implementation, we would decode the protobuf message here
-                    sample = Sample(
-                        timestamp=time.time(),
-                        channels={0: 0.0}  # Placeholder - would parse from protobuf
+            if not self._pb_buffer:
+                return None
+
+            if self._pb_parser is None:
+                # Lazy import keeps the protobuf generated module out
+                # of the CSV/JSON hot path. The factory mirrors
+                # ``DaqifiStreamingDevice._default_message_factory``
+                # so both paths decode identically.
+                from ._internal.proto.DaqifiOutMessage_pb2 import (
+                    DaqifiOutMessage,
+                )
+                self._pb_parser = ProtobufMessageParser(
+                    message_factory=lambda payload: DaqifiOutMessage.FromString(
+                        bytes(payload)
                     )
-                    return sample
+                )
 
-            return None
+            # Pass the bytearray directly — the parser uses index
+            # and slice operations both of which work on bytearray
+            # without conversion. Wrapping with bytes(...) here
+            # would re-copy the entire buffer on every parse, exactly
+            # the O(n) cost the bytearray switch was meant to avoid.
+            # (Qodo PR #149 /agentic_review pass 3 #3.)
+            messages, consumed = self._pb_parser.parse_messages(
+                self._pb_buffer
+            )
+            if consumed:
+                del self._pb_buffer[:consumed]
+            elif len(self._pb_buffer) > self._PB_BUFFER_HARD_CAP:
+                # Parser made no forward progress and the buffer keeps
+                # growing — the wire is desynced (firmware reboot mid-
+                # stream, garbage from another device, transient line
+                # corruption). Drop the oldest half and keep the tail:
+                # any in-flight frame is much more likely to be near
+                # the current write pointer than at the start of the
+                # accumulated garbage. The parser's resync-on-
+                # malformed logic (advance one byte at a time) will
+                # recover from the kept tail.
+                #
+                # max(1, …) guards the monkeypatched-tiny-cap case
+                # where _PB_BUFFER_HARD_CAP // 2 == 0 would make
+                # del buf[:-0] a no-op and silently disable the
+                # safety mechanism (Qodo PR #149 /agentic_review
+                # pass 3 #6).
+                half = max(1, self._PB_BUFFER_HARD_CAP // 2)
+                del self._pb_buffer[:-half]
 
+            for inbound in messages:
+                for sample in self._samples_from_pb_message(inbound.data):
+                    self._pending_pb_samples.append(sample)
+        except CommandError:
+            # Already in the right shape — don't double-wrap.
+            raise
         except Exception as e:
-            print(f"Error reading ProtoBuf sample: {e}")
-            return None
+            raise CommandError(f"Failed to read PB stream: {e}") from e
+
+        if self._pending_pb_samples:
+            return self._pending_pb_samples.popleft()
+        return None
+
+    def _samples_from_pb_message(self, message: Any) -> List["Sample"]:
+        """Convert a parsed ``DaqifiOutMessage`` into one or more
+        :class:`Sample` objects.
+
+        - Prefers ``analog_in_data_float`` (USB firmware, pre-scaled
+          to volts) over ``analog_in_data`` (WiFi firmware, raw ADC
+          counts). The raw path is exposed unscaled — callers that
+          need volts on WiFi should go through ``DaqifiStreamingDevice``
+          which carries the calibration coefficients.
+        - Maps payload positions to channel indices via
+          ``self._channels`` (the channel list the caller started
+          streaming with). ``self._channels[0]`` owns
+          ``analog_in_data_float[0]``, etc.
+        - Computes ``Sample.timestamp`` from ``msg_time_stamp /
+          tick_rate_hz`` when the tick rate is known, falling back
+          to ``time.time()`` otherwise. The CSV path establishes
+          ``_tick_rate_hz`` from the header line; the protobuf
+          stream has no equivalent header, so callers needing
+          precise device-relative timestamps should set it
+          out-of-band (typically via the device's status message).
+        - Handles batched frames where ``len(analog_in_data_float)``
+          is a multiple of ``len(self._channels)`` greater than one:
+          each block of ``len(channels)`` values becomes its own
+          ``Sample``, with per-sample timestamps from
+          ``analog_in_data_ts`` when available.
+        """
+        values = list(getattr(message, "analog_in_data_float", None) or [])
+        if not values:
+            values = [float(v) for v in (
+                getattr(message, "analog_in_data", None) or []
+            )]
+        if not values or not self._channels:
+            return []
+
+        num_channels = len(self._channels)
+        if len(values) % num_channels != 0:
+            # Partial / misaligned frame — refuse to guess at the
+            # per-channel split. The CSV/JSON paths silently drop
+            # malformed lines too.
+            return []
+
+        per_sample_ts = list(getattr(message, "analog_in_data_ts", None) or [])
+        msg_ts = getattr(message, "msg_time_stamp", 0)
+
+        def _convert_ts(raw_ts: int) -> float:
+            if self._tick_rate_hz and self._tick_rate_hz > 0:
+                return raw_ts / float(self._tick_rate_hz)
+            return time.time()
+
+        samples: List[Sample] = []
+        batch_count = len(values) // num_channels
+        for i in range(batch_count):
+            block = values[i * num_channels : (i + 1) * num_channels]
+            raw_ts = (
+                per_sample_ts[i]
+                if i < len(per_sample_ts) else msg_ts
+            )
+            samples.append(
+                Sample(
+                    timestamp=_convert_ts(raw_ts),
+                    channels={
+                        ch: float(block[idx])
+                        for idx, ch in enumerate(self._channels)
+                    },
+                )
+            )
+        return samples
 
     def _streaming_thread(self):
         """Background thread for callback-based streaming"""
