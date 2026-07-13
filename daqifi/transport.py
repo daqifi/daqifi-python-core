@@ -976,15 +976,32 @@ class _HidConnectedDevice:
     def is_connected(self) -> bool:
         return not self._closed
 
+    # DAQiFi HID (bootloader) uses report ID 0 with a 64-byte report payload,
+    # so a framed write is the 0x00 report-ID byte + 64 = 65 bytes.
+    _HID_WRITE_REPORT_LEN = 65
+
     def write(self, data: bytes, timeout_ms: int) -> bool:
-        # hidapi's `write` returns the number of bytes written, or -1
-        # on error. Return True iff bytes-written matches input length.
+        # hidapi's `write` returns the number of bytes written, or -1 on error.
+        # Return True iff bytes-written matches the framed length.
         del timeout_ms  # hidapi write is non-blocking on most platforms
+        # Frame for hidapi: HID output reports must lead with the report-ID byte
+        # (0x00 for the DAQiFi report-ID-0 device) and, on Windows, match the
+        # device's output report length. Sending the raw AN1388 frame makes
+        # hidapi return -1, so the entire HID bootloader / firmware-update path
+        # fails on Windows. Prepend the report ID and pad up to the report
+        # length (never truncate).
+        report = b"\x00" + bytes(data)
+        if len(report) > self._HID_WRITE_REPORT_LEN:
+            # Payload exceeds the 64-byte report body — it can't fit in a single
+            # HID output report. Fail rather than send a truncated/oversized one.
+            return False
+        if len(report) < self._HID_WRITE_REPORT_LEN:
+            report += b"\x00" * (self._HID_WRITE_REPORT_LEN - len(report))
         try:
-            written = self._handle.write(data)
+            written = self._handle.write(report)
         except Exception:
             return False
-        return written == len(data)
+        return written == len(report)
 
     def read(self, timeout_ms: int) -> bytes:
         # hidapi `read(max_length, timeout_ms)` returns a list[int]
