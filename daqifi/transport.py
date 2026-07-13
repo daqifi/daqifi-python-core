@@ -991,6 +991,10 @@ class _HidConnectedDevice:
         # fails on Windows. Prepend the report ID and pad up to the report
         # length (never truncate).
         report = b"\x00" + bytes(data)
+        if len(report) > self._HID_WRITE_REPORT_LEN:
+            # Payload exceeds the 64-byte report body — it can't fit in a single
+            # HID output report. Fail rather than send a truncated/oversized one.
+            return False
         if len(report) < self._HID_WRITE_REPORT_LEN:
             report += b"\x00" * (self._HID_WRITE_REPORT_LEN - len(report))
         try:
