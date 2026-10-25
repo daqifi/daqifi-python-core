@@ -80,10 +80,18 @@ def _requirements_txt() -> list[str]:
 def test_both_declarations_are_non_empty():
     """⛔ THE VACUITY GUARD, and it runs first on purpose.
 
-    If either parse returned nothing, the set comparison below would pass with
-    no input -- the failure mode where a check reports what you hoped because
-    it was given nothing to check. So assert BOTH sides have content before any
-    comparison is trusted.
+    Scope, measured rather than assumed -- an earlier version of this docstring
+    claimed "if EITHER parse returns nothing", which is false:
+
+        setup.py empty, requirements.txt full  -> the comparison already FAILS
+        requirements.txt empty, setup.py full  -> the comparison already FAILS
+        BOTH empty                             -> the comparison PASSES, vacuously
+
+    So one empty side is caught by the agreement test itself; it is the
+    both-empty case that slips through, which is what this guard is for. The
+    >= 2 floor covers the subtler version: both parsers degrading to a single
+    item that happens to agree, which the comparison also cannot see, because a
+    set comparison of equal garbage is equal.
     """
     installed = _install_requires()
     pinned = _requirements_txt()
