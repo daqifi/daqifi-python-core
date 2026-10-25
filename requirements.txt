@@ -29,5 +29,8 @@
 # flat, pinnable list.
 
 pyserial>=3.5
-protobuf>=5.28,<7.0
+# ⛔ The protobuf FLOOR is not a preference -- it is enforced at import by the
+# generated bindings, and it is checked against them by
+# tests/test_dependency_declarations.py. See that test before changing it.
+protobuf>=6.31.1,<7.0
 ifaddr>=0.2

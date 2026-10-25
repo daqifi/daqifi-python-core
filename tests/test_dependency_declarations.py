@@ -77,6 +77,98 @@ def _requirements_txt() -> list[str]:
     return out
 
 
+PROTO_DIR = REPO_ROOT / "daqifi" / "_internal" / "proto"
+
+
+def _gencode_versions() -> list[tuple[Path, tuple[int, int, int]]]:
+    """The ``(major, minor, patch)`` each generated binding demands at import.
+
+    Read with ``ast``, like ``install_requires`` and for the same reason: the
+    value is a declaration, so it is read as data rather than by importing the
+    module (importing it would run the very validation under test).
+    """
+    out = []
+    for pb2 in sorted(PROTO_DIR.glob("*_pb2.py")):
+        tree = ast.parse(pb2.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "ValidateProtobufRuntimeVersion"
+            ):
+                continue
+            # args: (domain, major, minor, patch, suffix, location)
+            major, minor, patch = (
+                ast.literal_eval(a) for a in node.args[1:4]
+            )
+            out.append((pb2, (major, minor, patch)))
+            break
+    return out
+
+
+def _declared_protobuf_floor() -> tuple[int, int, int]:
+    """The ``>=`` floor declared for protobuf, as a comparable tuple."""
+    for req in _install_requires():
+        name, spec = _normalise(req)
+        if name != "protobuf":
+            continue
+        m = re.search(r">=\s*([0-9]+(?:\.[0-9]+)*)", spec)
+        assert m, (
+            f"protobuf is declared as {spec!r} with no >= floor. The floor is "
+            "enforced at import by the generated bindings, so it cannot be "
+            "left open."
+        )
+        parts = [int(p) for p in m.group(1).split(".")]
+        parts += [0] * (3 - len(parts))
+        return tuple(parts[:3])
+    raise AssertionError("protobuf is not declared in install_requires")
+
+
+def test_declared_protobuf_floor_covers_the_generated_bindings():
+    """⛔ The declared floor must not be lower than what the bindings enforce.
+
+    ``DaqifiOutMessage_pb2.py`` opens with
+    ``ValidateProtobufRuntimeVersion(PUBLIC, 6, 31, 1, ...)``, and
+    ``google/protobuf/runtime_version.py`` raises ``VersionError`` unless the
+    installed runtime's ``(MAJOR, MINOR, PATCH)`` is ``>=`` that tuple. So the
+    floor is not a preference -- a declaration below it permits an install the
+    package rejects at import.
+
+    This existed: the floor read ``>=5.28`` against a ``6.31.1`` gencode,
+    understating it by a major version. Measured against the real rule,
+    5.28.3 / 6.30.0 / 6.31.0 all raise and 6.31.1 is the first that passes.
+
+    ⭐ It is a TEST rather than a corrected number because the number drifts by
+    construction: regenerating the bindings with a newer protoc rewrites the
+    gencode stamp, and nothing else would notice the floor no longer covering
+    it. Coupling the two makes a regeneration say so.
+    """
+    gencodes = _gencode_versions()
+    # Vacuity guard, same reasoning as the one below: an empty list would make
+    # the loop pass having compared nothing.
+    assert gencodes, (
+        f"found no ValidateProtobufRuntimeVersion call under {PROTO_DIR} -- "
+        "either the bindings moved or the generator stopped emitting the "
+        "check. Do NOT let this read as 'nothing to verify'."
+    )
+
+    floor = _declared_protobuf_floor()
+    too_low = [(p, g) for p, g in gencodes if floor < g]
+
+    assert not too_low, (
+        "the declared protobuf floor is lower than the generated bindings "
+        f"enforce at import.\n  declared floor: {'.'.join(map(str, floor))}\n"
+        + "".join(
+            f"  {p.relative_to(REPO_ROOT)} requires >= "
+            f"{'.'.join(map(str, g))}\n"
+            for p, g in too_low
+        )
+        + "A runtime satisfying the declaration would raise VersionError on "
+        "first use of the generated module. Raise the floor in setup.py AND "
+        "requirements.txt to the highest gencode version above."
+    )
+
+
 def test_both_declarations_are_non_empty():
     """⛔ THE VACUITY GUARD, and it runs first on purpose.
 

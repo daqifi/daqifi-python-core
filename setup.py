@@ -49,9 +49,35 @@ setup(
         # protobuf is required by the generated DaqifiOutMessage_pb2
         # module (daqifi/_internal/proto/) that DaqifiDevice's default
         # message factory imports to decode device status / streaming
-        # frames. The runtime version validation baked into the
-        # generated module requires protobuf 5.28+ (protoc 6.31.x output).
-        "protobuf>=5.28,<7.0",
+        # frames.
+        #
+        # ⛔ THE FLOOR IS ENFORCED AT IMPORT, so it is not a preference.
+        # DaqifiOutMessage_pb2.py opens with
+        #     ValidateProtobufRuntimeVersion(PUBLIC, 6, 31, 1, '', ...)
+        # and google/protobuf/runtime_version.py raises VersionError unless the
+        # installed runtime's (MAJOR, MINOR, PATCH) is >= that gencode tuple.
+        # Measured against the real rule, the boundary is exact:
+        #     protobuf 5.28.3 -> VersionError    6.31.0 -> VersionError
+        #     protobuf 6.31.1 -> OK              6.33.6 -> OK
+        # So the floor must track the gencode stamp, which is what
+        # tests/test_dependency_declarations.py now enforces -- regenerating
+        # the bindings with a newer protoc raises the floor and the test says
+        # so, instead of the declaration quietly understating it.
+        #
+        # An earlier revision of this comment read "requires protobuf 5.28+
+        # (protoc 6.31.x output)", which conflated the GENERATOR version with
+        # the RUNTIME floor and understated the floor by a whole major
+        # version: >=5.28 permitted a 5.x runtime that the bindings reject at
+        # import. Because every use of the generated module is a
+        # function-local import, that failed at first device use rather than
+        # at install.
+        #
+        # ⚠ The <7.0 ceiling is a deliberate guard, NOT a measured bound: this
+        # runtime's checker has no gencode-too-old branch (a 7.x runtime reads
+        # as OK today), but that is 6.33.6's policy answering for 7.0's, which
+        # it cannot do. Protobuf's cross-version guarantee is a limited
+        # window, so a major bump is reviewed rather than assumed compatible.
+        "protobuf>=6.31.1,<7.0",
         # ifaddr is a small pure-Python NIC enumerator used by
         # WiFiDeviceFinder (port of daqifi-core PR #179/#180): the
         # finder needs to broadcast on every real LAN interface so
