@@ -1,1 +1,33 @@
+# Runtime dependencies for daqifi-python-core.
+#
+# ⛔ KEEP THIS IN SYNC WITH setup.py's install_requires. It drifted, and the
+# drift was a release blocker: this file listed pyserial ALONE while
+# install_requires also carried protobuf and ifaddr, so anyone following
+# `pip install -r requirements.txt` got a package that IMPORTS CLEANLY and then
+# fails at first real device use.
+#
+# Why it failed late rather than at install: every use of the generated
+# protobuf module is a FUNCTION-LOCAL import, so nothing fails until the
+# feature is reached. Measured on a clean venv with this file alone --
+# `import daqifi` succeeds, then
+#   from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+#   -> ModuleNotFoundError: No module named 'google'
+# Four of the five deferred sites are UNGUARDED and break (device.py's metadata
+# refresh, devices.py's message factory, sdcard.py's reader, streaming.py's
+# parser); the fifth (device_finders.py) is wrapped in try/except and degrades
+# to a legacy text parse, which is why the honest count is "four break and one
+# silently falls back", not a flat five.
+#
+# ⚠ The agreement between this file and install_requires is checked by
+# tests/test_dependency_declarations.py, because the DISAGREEMENT was the
+# defect -- not either file on its own. Editing one without the other now fails
+# a test instead of shipping a broken install path.
+#
+# ⭐ Prefer `pip install .` to `pip install -r requirements.txt`: the former
+# honours install_requires and is what a published wheel gives a user. This
+# file exists for development convenience and for environments that want a
+# flat, pinnable list.
+
 pyserial>=3.5
+protobuf>=5.28,<7.0
+ifaddr>=0.2

@@ -1,0 +1,55 @@
+# Build backend and tool configuration for daqifi-python-core.
+#
+# ⛔ DELIBERATELY NOT A METADATA MOVE. Package metadata -- name, version,
+# dependencies, classifiers, python_requires -- stays in setup.py and is NOT
+# duplicated here. Declaring install_requires in both files would create a
+# second source of truth for the dependency set, which is exactly the drift
+# that shipped a broken install path once already (requirements.txt listed
+# pyserial alone while setup.py also required protobuf and ifaddr) and is now
+# guarded by tests/test_dependency_declarations.py. Adding a third declaration
+# to fix a two-declaration problem would be a step backwards.
+#
+# This file exists for two narrow reasons:
+#   1. a declared PEP 517 build backend, so `pip install .` does not depend on
+#      pip's legacy setup.py fallback; and
+#   2. a declared TEST INVOCATION, so how to run this suite is written down
+#      rather than folklore. Before this there was no pyproject.toml, no
+#      pytest.ini, no tox.ini and no setup.cfg -- an outside contributor had to
+#      guess.
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Registered so an unknown-marker warning cannot hide a typo'd marker. Measured
+# before registering: `pytest.mark.integration` raised PytestUnknownMarkWarning,
+# which means a misspelled marker would have been equally silent -- and a
+# misspelled EXCLUSION marker is the dangerous case, because the test it was
+# meant to skip runs instead.
+markers = [
+    "portomatic_generated: generated from the upstream parity source; do not hand-edit",
+    "integration: exercises more than one unit together; no hardware required",
+    "hardware: REQUIRES a physically attached DAQiFi device",
+    "hardware_slow: requires hardware and takes minutes",
+    "hardware_destructive: requires hardware AND mutates persistent device state (NVM, SD card)",
+    "asyncio: async test, needs pytest-asyncio",
+]
+
+# ⚠ The hardware exclusion is deliberately NOT in addopts. A bare `pytest` keeps
+# meaning "everything", and the hardware-free subset is selected EXPLICITLY by
+# whoever wants it (CI does: --ignore=tests/integration/hardware). Hiding the
+# exclusion here would make `pytest` quietly narrower than it looks, and a
+# contributor who later removed the line would not know what it had been
+# suppressing.
+#
+# ⚠⚠ AND NEITHER EXCLUSION MECHANISM IS SUFFICIENT ALONE -- measured, and worth
+# knowing before relying on either:
+#     tests/integration/hardware/        15 files
+#     hardware* marker usages            6
+# So excluding by PATH catches files that carry no marker, and excluding by
+# MARKER catches hardware tests that live outside that directory. Keeping the
+# two in agreement wants its own check (every file under that path should carry
+# a hardware marker); that is filed, not built here.

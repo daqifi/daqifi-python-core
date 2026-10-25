@@ -1140,9 +1140,24 @@ def _read_all_messages(
     ``DaqifiOutMessage.FromString``. Carries unconsumed bytes between
     chunks so a frame straddling a buffer boundary still parses.
     """
-    # Lazy import — keeps this module importable in environments where
-    # the generated protobuf modules aren't available (tests can
-    # monkeypatch the factory directly via ``parser._message_factory``).
+    # Lazy import — keeps this MODULE importable where the generated protobuf
+    # modules aren't available (tests can monkeypatch the factory directly via
+    # ``parser._message_factory``).
+    #
+    # ⚠ IT DOES NOT MAKE THEIR ABSENCE SURVIVABLE, and an earlier revision of
+    # this comment read as though it did. The claim is true about IMPORT TIME
+    # and only about import time: reaching this line without protobuf installed
+    # raises ModuleNotFoundError. Deferring the import moves the failure from
+    # `import daqifi` to first use of this feature, which is later and harder
+    # to read, not softer.
+    #
+    # Four of the five deferred proto imports in this package are bare like
+    # this one (here, device.py, devices.py, streaming.py); only
+    # device_finders.py guards its own with try/except and a documented
+    # fallback. So `protobuf` is a hard runtime requirement and is declared as
+    # one in both setup.py and requirements.txt -- whose agreement is enforced
+    # by tests/test_dependency_declarations.py, because it was the
+    # DISAGREEMENT between them that let a broken install path ship.
     from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
 
     parser = ProtobufMessageParser(message_factory=DaqifiOutMessage.FromString)
