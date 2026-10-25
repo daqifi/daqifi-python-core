@@ -189,7 +189,7 @@ def main():
     try:
         scpi = ReliableSCPI(device)
 
-        # Per CLAUDE.md "Identity-gating destructive operations": verify
+        # Per CONTRIBUTING.md "Identity-gating destructive operations": verify
         # the connected unit's SN before any write. Refuses to run when
         # DAQIFI_EXPECTED_SERIAL_NUMBER is unset (unless
         # DAQIFI_ALLOW_UNGATED_RESET=1 is set as the explicit opt-out).

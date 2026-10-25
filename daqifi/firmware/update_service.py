@@ -189,7 +189,7 @@ class FirmwareUpdateService(Protocol):
         **Caller responsibility:** this is a destructive operation
         (flashes firmware over USB-HID). Callers driving multi-device
         rigs MUST gate the call against ``device.metadata.serial_number``
-        per ``CLAUDE.md`` ("Identity-gating destructive operations in
+        per ``CONTRIBUTING.md`` ("Identity-gating destructive operations in
         your own code"). The library does not enforce identity itself
         because the expected value is a property of the caller's rig
         configuration, not of the device transport.

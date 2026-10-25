@@ -55,3 +55,7 @@ Thumbs.db
 .portomatic/
 .claude/
 .codex
+
+# Agent instructions and port working notes (local only)
+CLAUDE.md
+PORT_NOTES.md

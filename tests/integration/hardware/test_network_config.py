@@ -261,7 +261,7 @@ def test_update_network_configuration_round_trip(
     dev = streaming_device
 
     # Identity gate — never write to a device the operator hasn't
-    # explicitly declared as ours. CLAUDE.md requires SN
+    # explicitly declared as ours. CONTRIBUTING.md requires SN
     # verification before any flash-touching write because
     # multiple DAQiFi units may be exposed on the same workstation.
     expected_sn = os.environ.get("DAQIFI_EXPECTED_SERIAL_NUMBER")
@@ -287,7 +287,7 @@ def test_update_network_configuration_round_trip(
             "round-trip would leave the device mis-configured"
         )
 
-    # Transient creds must come from env per CLAUDE.md compliance —
+    # Transient creds must come from env per CONTRIBUTING.md compliance —
     # tests must not embed WiFi credentials in tracked files. The
     # transient SSID/password is intentionally chosen NOT to match
     # any real AP (it gets written briefly then overwritten by the
@@ -299,7 +299,7 @@ def test_update_network_configuration_round_trip(
         pytest.skip(
             "DAQIFI_TEST_WIFI_TRANSIENT_SSID + "
             "DAQIFI_TEST_WIFI_TRANSIENT_PASSWORD not set; transient "
-            "creds must come from env (CLAUDE.md compliance)"
+            "creds must come from env (CONTRIBUTING.md compliance)"
         )
 
     restore = NetworkConfiguration(

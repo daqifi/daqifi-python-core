@@ -4,7 +4,7 @@ import sys
 
 from daqifi import NyquistDevice
 
-# Per CLAUDE.md: resolve serial port from CLI arg or env var, never
+# Per CONTRIBUTING.md: resolve serial port from CLI arg or env var, never
 # from a hardcoded workstation-specific identifier.
 port = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('DAQIFI_DEVICE_PORT')
 if not port:
