@@ -32,7 +32,6 @@ setup(
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
@@ -41,9 +40,23 @@ setup(
         "Topic :: Software Development :: Embedded Systems",
         "Topic :: System :: Hardware",
     ],
-    # 3.8+: ported modules use typing.Protocol / runtime_checkable, which are
-    # not available in 3.7. Python 3.7 reached EOL in June 2023.
-    python_requires=">=3.8",
+    # ⛔ THE FLOOR IS 3.9 BECAUSE THE PROTOBUF FLOOR FORCES IT. These two
+    # declarations are coupled, and the coupling is invisible unless you look:
+    # protobuf's 5.x -> 6.x major is ALSO a Requires-Python boundary.
+    # Measured, from pypi.org per release:
+    #     protobuf 5.28.0 / 5.29.0  Requires-Python >=3.8
+    #     protobuf 6.30.0 and later Requires-Python >=3.9
+    # Since the generated bindings pin the runtime to >=6.31.1 (see
+    # install_requires below), no protobuf admitting 3.8 is installable. A
+    # python_requires of ">=3.8" would advertise an interpreter on which
+    # `pip install` resolves protobuf, finds no candidate, and FAILS OUTRIGHT
+    # -- worse than not advertising it. tests/test_dependency_declarations.py
+    # asserts this pairing so a future floor bump cannot silently re-open it.
+    #
+    # The original reason for a floor also still holds and is unchanged:
+    # ported modules use typing.Protocol / runtime_checkable, unavailable in
+    # 3.7. (Python 3.7 reached EOL June 2023; 3.8 reached EOL October 2024.)
+    python_requires=">=3.9",
     install_requires=[
         "pyserial>=3.5",
         # protobuf is required by the generated DaqifiOutMessage_pb2

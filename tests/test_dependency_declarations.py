@@ -169,6 +169,73 @@ def test_declared_protobuf_floor_covers_the_generated_bindings():
     )
 
 
+# Requires-Python per protobuf release, measured from pypi.org (the authority;
+# this is not inferable from the package itself):
+#     protobuf 5.28.0, 5.29.0   -> >=3.8
+#     protobuf 6.30.0 and later -> >=3.9
+# So protobuf's 5.x -> 6.x major is ALSO a Python-version boundary, which is the
+# coupling this test exists to hold.
+_PROTOBUF_MAJOR_MIN_PYTHON = {5: (3, 8), 6: (3, 9)}
+
+
+def _python_requires_floor() -> tuple[int, int]:
+    """The ``>=`` floor from setup.py's ``python_requires``, as a tuple."""
+    tree = ast.parse(SETUP_PY.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "setup"
+        ):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "python_requires":
+                spec = ast.literal_eval(kw.value)
+                m = re.search(r">=\s*([0-9]+)\.([0-9]+)", spec)
+                assert m, f"python_requires={spec!r} has no >= floor to check"
+                return int(m.group(1)), int(m.group(2))
+    raise AssertionError("no python_requires in setup.py")
+
+
+def test_python_requires_is_compatible_with_the_declared_protobuf_floor():
+    """⛔ An advertised interpreter must be one the dependencies can install on.
+
+    This broke exactly once and is the reason for the test. Raising the protobuf
+    floor to ``>=6.31.1`` (correct -- the gencode enforces it at import) left
+    ``python_requires=">=3.8"`` standing, and no 6.x protobuf admits 3.8. The
+    result is worse than not advertising 3.8: pip accepts the package, resolves
+    protobuf, finds no candidate, and the install FAILS OUTRIGHT.
+
+    ⭐ The two declarations are forty lines apart and nothing connected them. A
+    dependency floor crossing a major can move Requires-Python with it, so the
+    pairing is asserted rather than remembered.
+    """
+    py_floor = _python_requires_floor()
+    proto_floor = _declared_protobuf_floor()
+    proto_major = proto_floor[0]
+
+    assert proto_major in _PROTOBUF_MAJOR_MIN_PYTHON, (
+        f"protobuf floor is {'.'.join(map(str, proto_floor))}, whose major "
+        f"({proto_major}) is not in the measured Requires-Python table. "
+        "Re-measure it from pypi.org for that major and extend "
+        "_PROTOBUF_MAJOR_MIN_PYTHON -- do NOT drop the check, because the "
+        "whole point is that a major bump can move Requires-Python."
+    )
+
+    required_py = _PROTOBUF_MAJOR_MIN_PYTHON[proto_major]
+    assert py_floor >= required_py, (
+        "python_requires advertises an interpreter the dependency set cannot "
+        "install on.\n"
+        f"  python_requires floor : {'.'.join(map(str, py_floor))}\n"
+        f"  protobuf floor        : {'.'.join(map(str, proto_floor))}\n"
+        f"  protobuf {proto_major}.x needs  : Python "
+        f">={'.'.join(map(str, required_py))}\n"
+        "Either raise python_requires (and drop the matching classifier), or "
+        "lower the protobuf floor -- but the protobuf floor is pinned by the "
+        "generated bindings, so in practice it is python_requires that moves."
+    )
+
+
 def test_both_declarations_are_non_empty():
     """⛔ THE VACUITY GUARD, and it runs first on purpose.
 

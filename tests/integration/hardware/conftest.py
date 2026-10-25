@@ -251,18 +251,17 @@ def pytest_collection_modifyitems(config, items):
     in every file. ``hardware_destructive`` and ``hardware_slow`` still
     need to be applied explicitly per test.
 
-    Compares paths via ``Path.is_relative_to`` on 3.9+ and falls back
-    to ``_HARDWARE_DIR in path.parents`` on 3.8 (the project's lowest
-    supported Python; setup.py declares ``python_requires=">=3.8"``).
+    Compares paths via ``Path.is_relative_to``, which exists on every
+    supported interpreter: ``is_relative_to`` was added in 3.9 and
+    setup.py declares ``python_requires=">=3.9"``. The old
+    ``_HARDWARE_DIR in path.parents`` fallback was removed with 3.8
+    support — it had become unreachable, and its comment gave a reason
+    that no longer applied, which is worse than no fallback.
     """
     for item in items:
         try:
             item_path = Path(str(item.fspath)).resolve()
-            try:
-                is_under_hw = item_path.is_relative_to(_HARDWARE_DIR)
-            except AttributeError:
-                # Python 3.8 fallback — is_relative_to was added in 3.9.
-                is_under_hw = _HARDWARE_DIR in item_path.parents
+            is_under_hw = item_path.is_relative_to(_HARDWARE_DIR)
         except (ValueError, OSError):
             is_under_hw = False
         if is_under_hw:
