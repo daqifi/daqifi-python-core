@@ -85,11 +85,23 @@ setup(
         # function-local import, that failed at first device use rather than
         # at install.
         #
-        # ⚠ The <7.0 ceiling is a deliberate guard, NOT a measured bound: this
-        # runtime's checker has no gencode-too-old branch (a 7.x runtime reads
-        # as OK today), but that is 6.33.6's policy answering for 7.0's, which
-        # it cannot do. Protobuf's cross-version guarantee is a limited
-        # window, so a major bump is reviewed rather than assumed compatible.
+        # ⛔ THE <7.0 CEILING IS LOAD-BEARING, and measured -- not the mere
+        # prudential guard an earlier revision of this comment called it.
+        # protobuf 7.x exists (7.36.2 at the time of writing) and moved
+        # Requires-Python to >=3.10, while the entire 6.x line (6.30 - 6.33)
+        # is >=3.9. Without this ceiling a fresh resolve takes 7.x and
+        # contradicts python_requires=">=3.9" above -- re-opening, from the
+        # other direction, exactly the defect that dropping 3.8 fixed.
+        # Every protobuf major so far has moved Requires-Python, so raising
+        # this ceiling means re-measuring the interpreter floor with it; the
+        # table in tests/test_dependency_declarations.py records both.
+        #
+        # (Separately, cross-major GENCODE compatibility is governed by
+        # protobuf's limited support window, which this runtime's checker
+        # cannot answer for: 6.33.6 has no gencode-too-old branch, so a 7.x
+        # runtime reads as OK when asked here. That is this runtime answering
+        # for 7.0's policy, which is not evidence -- another reason a major
+        # bump is reviewed rather than assumed.)
         "protobuf>=6.31.1,<7.0",
         # ifaddr is a small pure-Python NIC enumerator used by
         # WiFiDeviceFinder (port of daqifi-core PR #179/#180): the

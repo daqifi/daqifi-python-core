@@ -171,11 +171,13 @@ def test_declared_protobuf_floor_covers_the_generated_bindings():
 
 # Requires-Python per protobuf release, measured from pypi.org (the authority;
 # this is not inferable from the package itself):
-#     protobuf 5.28.0, 5.29.0   -> >=3.8
-#     protobuf 6.30.0 and later -> >=3.9
-# So protobuf's 5.x -> 6.x major is ALSO a Python-version boundary, which is the
-# coupling this test exists to hold.
-_PROTOBUF_MAJOR_MIN_PYTHON = {5: (3, 8), 6: (3, 9)}
+#     protobuf 5.28.x, 5.29.x        -> >=3.8
+#     protobuf 6.30.x ... 6.33.x     -> >=3.9    (the whole 6.x line agrees)
+#     protobuf 7.34.x ... 7.36.x     -> >=3.10
+# ⭐ EVERY protobuf major so far has moved Requires-Python. That is the pattern
+# this table exists to record: a dependency floor crossing a major can drag the
+# interpreter floor with it, and nothing in either declaration says so.
+_PROTOBUF_MAJOR_MIN_PYTHON = {5: (3, 8), 6: (3, 9), 7: (3, 10)}
 
 
 def _python_requires_floor() -> tuple[int, int]:
