@@ -29,12 +29,21 @@ testpaths = ["tests"]
 # which means a misspelled marker would have been equally silent -- and a
 # misspelled EXCLUSION marker is the dangerous case, because the test it was
 # meant to skip runs instead.
+#
+# ⛔ ONLY THE TWO THAT NOTHING ELSE REGISTERS. tests/conftest.py already
+# registers hardware, hardware_slow, hardware_destructive and
+# portomatic_generated via addinivalue_line, and conftest.py is their owner.
+# Listing them here too would add a SECOND source of truth for the same four
+# markers -- the identical mistake as duplicating install_requires, which the
+# comment at the top of this file refuses. Measured, markers used vs registered:
+#     used:                 portomatic_generated 39, hardware 3,
+#                           hardware_destructive 2, asyncio 2,
+#                           integration 1, hardware_slow 1
+#     conftest registers:   hardware, hardware_destructive, hardware_slow,
+#                           portomatic_generated
+#     so genuinely missing: integration, asyncio   <- exactly these two
 markers = [
-    "portomatic_generated: generated from the upstream parity source; do not hand-edit",
     "integration: exercises more than one unit together; no hardware required",
-    "hardware: REQUIRES a physically attached DAQiFi device",
-    "hardware_slow: requires hardware and takes minutes",
-    "hardware_destructive: requires hardware AND mutates persistent device state (NVM, SD card)",
     "asyncio: async test, needs pytest-asyncio",
 ]
 
