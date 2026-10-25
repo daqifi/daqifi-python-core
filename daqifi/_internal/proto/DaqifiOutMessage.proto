@@ -36,8 +36,8 @@ message DaqifiOutMessage
 	repeated float analog_in_port_av_range_priv = 24;		//	Private analog in port voltage range (volts span:RSE 0 to range, NON-RSE -(range/2) to (range/2))
 	repeated float analog_in_port_range = 25;				//	Analog in port voltage range (volts span:RSE 0 to range, NON-RSE -(range/2) to (range/2))
 	repeated float analog_in_port_range_priv = 26;			//	Private analog in port voltage range (volts span:RSE 0 to range, NON-RSE -(range/2) to (range/2))
-	uint32 analog_in_res = 27;						//  Public analog in (ADC) resolution (bits used to convert from integer value to volts)
-	uint32 analog_in_res_priv = 28;				//  Private analog in (ADC) resolution (bits used to convert from integer value to volts)
+	uint32 analog_in_res = 27;						//  Public analog in (ADC) resolution as a CODE COUNT, not a bit width (12-bit -> 4096, 18-bit -> 262144). Scale: raw / analog_in_res * analog_in_port_range
+	uint32 analog_in_res_priv = 28;				//  Private analog in (ADC) resolution as a CODE COUNT, not a bit width (see analog_in_res)
 	repeated float analog_in_int_scale_m = 29;				//  Analog in port internal scale m value (should be applied to integer value before converting to volts)
 	repeated float analog_in_int_scale_m_priv = 30;			//  Private analog in port internal scale m value (should be applied to integer value before converting to volts)
 	repeated float analog_in_cal_m = 31;					//  Analog in port calibration m value (should be applied to integer value before converting to volts)
@@ -94,16 +94,25 @@ message DaqifiOutMessage
 	string device_fw_rev = 68;						//  Device firmware revision
     uint64 device_sn = 69;                         //  Device serial number
 
-    // Capability framework (#327) — optional top-level fields so a
-    // client that receives a device-info message can learn the
-    // streaming frequency cap for the reported channel configuration
-    // without a second round-trip. Full capability schema is still
-    // owned by the SCPI CONFigure:CAPabilities:JSON? command; these
-    // fields carry the most actionable subset inline.
-    uint32 cap_version         = 70;  // DAQIFI_CAPABILITIES_VERSION
-    uint32 cap_max_freq_hz     = 71;  // current-config streaming cap
-    uint32 cap_isr_max_hz      = 72;  // formula constant
-    uint32 cap_type1_agg_hz    = 73;  // formula constant
-    uint32 cap_tick_budget     = 74;  // formula constant
-    uint32 cap_tick_overhead   = 75;  // formula constant
+	// Streaming timebase (#730). timestamp_freq (16) is the timestamp counter;
+	// these three complete the picture so a client never has to assume a clock
+	// or a prescale ratio, and can see the rate the hardware ACTUALLY runs.
+	uint32 stream_timer_freq = 70;                 //  Streaming trigger timer frequency, Hz
+	uint32 timestamp_ticks_per_sample = 71;        //  Exact timestamp ticks per streaming period (0 = unconfigured)
+	uint32 actual_rate_millihz = 72;               //  Quantized streaming rate actually applied, millihertz (0 = unconfigured)
+
+	// 73-79 reserved for the firmware to grow the timebase block into.
+	// Client-side only below this line: NOT emitted by any shipped firmware.
+	// Capability framework (firmware #327). These six previously sat on
+	// 70-75, colliding with the timebase fields above, so a client decoding
+	// a real SYSInfoPB frame read stream_timer_freq as cap_version. Moved to
+	// 80-85. The authoritative capability surface is the SCPI command
+	// CONFigure:CAPabilities:JSON?; these are an inline subset a future
+	// firmware may populate. Until then they decode as 0 (absent).
+	uint32 cap_version         = 80;  // DAQIFI_CAPABILITIES_VERSION
+	uint32 cap_max_freq_hz     = 81;  // current-config streaming cap
+	uint32 cap_isr_max_hz      = 82;  // formula constant
+	uint32 cap_type1_agg_hz    = 83;  // formula constant
+	uint32 cap_tick_budget     = 84;  // formula constant
+	uint32 cap_tick_overhead   = 85;  // formula constant
 }
