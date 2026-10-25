@@ -72,8 +72,8 @@ class SdCardOperationException(DAQiFiError):
     #: The last SCPI error line observed in the response (e.g.
     #: ``**ERROR: -200, "Execution error"``), or ``None`` if none was
     #: present. Uses ``Optional[str]`` rather than the PEP-604 ``str | None``
-    #: form so ``typing.get_type_hints()`` works on Python 3.8/3.9
-    #: (the project's declared minimum is 3.8).
+    #: form so ``typing.get_type_hints()`` works on Python 3.9
+    #: (the project's declared minimum; PEP-604 in annotations needs 3.10).
     last_scpi_error: Optional[str]
 
     def __init__(
