@@ -135,7 +135,7 @@ class TcpDrainClient:
 def device_reset(scpi):
     """Reset device to clean state between tests. Waits for SD idle.
 
-    Identity-gated against DAQIFI_EXPECTED_SERIAL_NUMBER per CLAUDE.md.
+    Identity-gated against DAQIFI_EXPECTED_SERIAL_NUMBER per CONTRIBUTING.md.
     Local override of test_harness.device_reset because this script's
     SD interface needs an extra second after the disable for the file
     to close cleanly. (Qodo PR 143 pass 3 #6.)
@@ -222,7 +222,7 @@ def run_test(scpi, interface, fmt, channels, freq, duration, label, tcp=None):
 
 
 def main():
-    # Resolve rig-specific identifiers from CLI → env (see CLAUDE.md).
+    # Resolve rig-specific identifiers from CLI → env (see CONTRIBUTING.md).
     import os
     parser = argparse.ArgumentParser(description='Config sweep: max throughput on every allowed path')
     parser.add_argument('port', nargs='?', default=os.environ.get('DAQIFI_DEVICE_PORT'), help='USB serial port (or env DAQIFI_DEVICE_PORT)')

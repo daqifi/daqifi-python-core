@@ -33,7 +33,7 @@ directory tells pytest to skip the whole tree.
 
 ## Required environment
 
-Per the repo's [CLAUDE.md](../../../CLAUDE.md) "Identify your device"
+Per the repo's [CONTRIBUTING.md](../../../CONTRIBUTING.md) "Identify your device"
 + "Local rig file" sections, the suite refuses to use hardcoded
 workstation-specific identifiers. Set these before running any
 script:
@@ -55,7 +55,7 @@ single-device rig).
 ## Running a script
 
 ```bash
-# Identify your device (see CLAUDE.md "Identify your device"), then:
+# Identify your device (see CONTRIBUTING.md "Identify your device"), then:
 export DAQIFI_DEVICE_PORT=<your-port>
 export DAQIFI_EXPECTED_SERIAL_NUMBER=<your-sn>
 cd tests/integration/suite

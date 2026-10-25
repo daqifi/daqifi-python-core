@@ -204,7 +204,7 @@ def find_ceiling(scpi, ser, iface, fmt, channels, rates, label, benchmark_mode, 
 
 
 def main():
-    # Resolve rig-specific identifiers from CLI → env (see CLAUDE.md).
+    # Resolve rig-specific identifiers from CLI → env (see CONTRIBUTING.md).
     parser = argparse.ArgumentParser(description='4-tier ceiling test for all interfaces')
     parser.add_argument('port', nargs='?', default=os.environ.get('DAQIFI_DEVICE_PORT'), help='USB serial port (or env DAQIFI_DEVICE_PORT)')
     parser.add_argument('duration', nargs='?', type=int, default=10)

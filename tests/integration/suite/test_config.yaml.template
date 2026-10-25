@@ -4,7 +4,7 @@
 # rig-specific values. NEVER commit a populated test_config.yaml —
 # the suite's loader supports ${ENV_VAR} interpolation, so values
 # can also be sourced from environment variables (preferred for
-# CI / shared rigs). See CLAUDE.md "Local rig file" and
+# CI / shared rigs). See CONTRIBUTING.md "Local rig file" and
 # "Identity-gating destructive operations" for the policy.
 
 # Device Configuration

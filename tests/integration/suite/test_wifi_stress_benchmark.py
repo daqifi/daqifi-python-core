@@ -125,7 +125,7 @@ def run_wifi_test(scpi, tcp, fmt, channels, freq, duration_sec):
 
 
 def main():
-    # Rig-specific identifiers MUST NOT be hardcoded — see CLAUDE.md
+    # Rig-specific identifiers MUST NOT be hardcoded — see CONTRIBUTING.md
     # "Identify your device" + "Local rig file" sections. Resolve from
     # CLI arg → env var; refuse to run silently against an unknown
     # device or workstation-shared IP.
@@ -143,7 +143,7 @@ def main():
             "usage: test_wifi_stress_benchmark.py <port> <host> [duration]\n"
             "  or set DAQIFI_DEVICE_PORT and DAQIFI_DEVICE_HOST. "
             "Default values were removed to avoid writing to a "
-            "neighbour's rig — see CLAUDE.md."
+            "neighbour's rig — see CONTRIBUTING.md."
         )
     duration = int(sys.argv[3]) if len(sys.argv) > 3 else 10
 

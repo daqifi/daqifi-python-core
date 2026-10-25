@@ -149,7 +149,7 @@ def main():
     all_ch = list(range(16))
     ch8 = list(range(8))
 
-    # Baseline from CLAUDE.md (8KB DMA buffer):
+    # Baseline from daqifi-nyquist-firmware CLAUDE.md (8KB DMA buffer):
     # SD PB 1ch: 11kHz, SD PB 16ch: 7kHz
     # SD CSV 1ch: 5kHz, SD CSV 16ch: 1kHz
     # SD raw write: 665 KB/s

@@ -498,8 +498,7 @@ daqifi/
         └── scpi_commands.py - SCPI command factories (mirrors C# ScpiMessageProducer)
 ```
 
-See [PORT_NOTES.md](./PORT_NOTES.md) for the layer diagram and full
-module index.
+The package tree above is the module index.
 
 ## Alignment with daqifi-core
 

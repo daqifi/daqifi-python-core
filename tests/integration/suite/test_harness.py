@@ -353,7 +353,7 @@ class StreamingMeasurement:
 
 def _assert_expected_device(scpi):
     """Gate destructive harness ops behind a serial-number identity
-    check, per the daqifi-python-core CLAUDE.md "Identity-gating
+    check, per the daqifi-python-core CONTRIBUTING.md "Identity-gating
     destructive operations" rule.
 
     Refuses to mutate device state when:
@@ -390,7 +390,7 @@ def _assert_expected_device(scpi):
             "Refusing destructive harness op: neither "
             "DAQIFI_EXPECTED_SERIAL_NUMBER (the gate) nor "
             "DAQIFI_ALLOW_UNGATED_RESET=1 (the opt-out) is set. See "
-            "CLAUDE.md 'Identity-gating destructive operations'."
+            "CONTRIBUTING.md 'Identity-gating destructive operations'."
         )
 
 
@@ -409,7 +409,7 @@ def device_reset(scpi):
     - Serial buffer drained
     """
     # Verify identity before issuing any state-changing SCPI command —
-    # see CLAUDE.md "Identity-gating destructive operations".
+    # see CONTRIBUTING.md "Identity-gating destructive operations".
     _assert_expected_device(scpi)
     # Stop any active streaming
     scpi.command("SYST:STReam:STOP", delay=1.0)

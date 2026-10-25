@@ -36,7 +36,7 @@ Example:
         ...     # Device automatically disconnects on exit
 
 For more information, see the documentation at:
-https://github.com/daqifi/daqifi-python
+https://github.com/daqifi/daqifi-python-core
 """
 
 from .version import __version__, __author__, __license__

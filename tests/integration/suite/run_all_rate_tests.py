@@ -503,7 +503,7 @@ def main():
         device = NyquistDevice.connect(port, baudrate=115200)
         print(f"[OK] Connected to {device.variant.value}")
 
-        # Per CLAUDE.md "Identity-gating destructive operations": verify
+        # Per CONTRIBUTING.md "Identity-gating destructive operations": verify
         # the connected unit's SN against DAQIFI_EXPECTED_SERIAL_NUMBER
         # BEFORE any write (power_up, ENABLE:VOLT:DC, etc.). Refuses
         # to run when the env var is unset unless DAQIFI_ALLOW_UNGATED_RESET=1.

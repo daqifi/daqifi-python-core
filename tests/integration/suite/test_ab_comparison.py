@@ -10,7 +10,7 @@ import sys, time, threading
 from daqifi import NyquistDevice
 from test_harness import ReliableSCPI, StreamingMeasurement
 
-# Per CLAUDE.md: rig-specific identifiers come from CLI arg or env,
+# Per CONTRIBUTING.md: rig-specific identifiers come from CLI arg or env,
 # never from a tracked literal.
 _port = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('DAQIFI_DEVICE_PORT')
 if not _port:

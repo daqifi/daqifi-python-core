@@ -24,7 +24,7 @@ setup(
     description="Python API for DAQiFi Nyquist devices",
     long_description=readme,
     long_description_content_type="text/markdown",
-    url="https://github.com/daqifi/daqifi-python",
+    url="https://github.com/daqifi/daqifi-python-core",
     packages=find_packages(exclude=["tests", "examples"]),
     classifiers=[
         "Development Status :: 3 - Alpha",

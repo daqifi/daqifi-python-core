@@ -14,7 +14,7 @@ fields.
 Identifiers are deliberately synthetic — IPs come from the RFC
 5737 documentation ranges (``192.0.2.0/24``, ``198.51.100.0/24``)
 and port paths are generic placeholders. No workstation-specific
-values per CLAUDE.md PR Compliance ID 5.
+values, per CONTRIBUTING.md "Pull requests".
 """
 from __future__ import annotations
 
