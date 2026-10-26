@@ -613,3 +613,29 @@ class TestSetupInsideCleanup:
                 )
             )
         assert time.monotonic() - began < 5.0
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX select-based readers")
+def test_detached_worker_does_not_keep_readers_alive_after_a_timeout():
+    # Audit finding on #166 (round 10): a worker that left the process group
+    # kept both reader threads blocked, and their pipes open, after run()
+    # returned, once per timed-out run.
+    import threading as th
+    import time
+
+    script = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],"
+        " start_new_session=True)\n"
+        "time.sleep(60)\n"
+    )
+    before = set(th.enumerate())
+    for _ in range(2):
+        result = SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable, arguments=["-c", script], timeout_seconds=0.3
+            )
+        )
+        assert result.timed_out
+    time.sleep(0.5)
+    assert [t for t in th.enumerate() if t not in before] == []

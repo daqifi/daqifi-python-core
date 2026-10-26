@@ -1232,8 +1232,10 @@ class TestUpdateWifiModule:
         finally:
             shutil.rmtree(firmware_dir, ignore_errors=True)
 
-        assert "/p TEST-PORT-7" in runner.last_request.arguments[1]
-        assert "DaqifiDevice" not in runner.last_request.arguments[1]
+        arguments = runner.last_request.arguments
+        flat = arguments if isinstance(arguments, str) else " ".join(arguments)
+        assert "TEST-PORT-7" in flat
+        assert "DaqifiDevice" not in flat
 
     def test_device_without_a_serial_port_fails_before_update_mode(self) -> None:
         device = _FakeStreamingDevice("DaqifiDevice")
@@ -1309,9 +1311,106 @@ class TestUpdateWifiModule:
         finally:
             shutil.rmtree(firmware_dir, ignore_errors=True)
 
-        command = runner.last_request.arguments[1]
-        assert os.path.join(firmware_dir, "winc_flash_tool.cmd") in command
+        # The .cmd script is named relative to the working directory, which
+        # is absolute (cmd.exe under WSL can't open a Linux path argument).
+        arguments = runner.last_request.arguments
+        flat = arguments if isinstance(arguments, str) else " ".join(arguments)
+        assert "winc_flash_tool.cmd" in flat
+        assert firmware_dir not in flat
         assert runner.last_request.working_directory == firmware_dir
+
+    def test_relative_path_to_a_native_tool_is_absolute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_file_name = "flash-tool"
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+
+        firmware_dir = _make_temp_directory()
+        with open(os.path.join(firmware_dir, "flash-tool"), "w") as handle:
+            handle.write("#!/bin/sh\n")
+        parent, name = os.path.split(firmware_dir)
+        monkeypatch.chdir(parent)
+        try:
+            service.update_wifi_module(device, name)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        assert runner.last_request.file_name == os.path.join(firmware_dir, "flash-tool")
+
+    def test_firmware_path_given_to_cmd_exe_is_translated_under_wsl(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding on #166 (round 10): WSL passes arguments to Windows
+        # programs untranslated, so cmd.exe got a Linux path it can't open.
+        import subprocess as sp
+
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "_running_under_wsl", lambda: True)
+        real_run = sp.run
+
+        def _wslpath(cmd, *a, **k):
+            if cmd[:2] == ["wslpath", "-w"]:
+                return sp.CompletedProcess(cmd, 0, stdout="C:\\fw\\bundle\n", stderr="")
+            return real_run(cmd, *a, **k)
+
+        monkeypatch.setattr(update_service.subprocess, "run", _wslpath)
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_arguments_template = "/p {port} /i {firmwarePath}"
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        arguments = runner.last_request.arguments
+        flat = arguments if isinstance(arguments, str) else " ".join(arguments)
+        assert "C:\\fw\\bundle" in flat
+        assert firmware_dir not in flat
+
+    def test_cmd_exe_line_on_native_windows_is_one_verbatim_string(self) -> None:
+        # Verified on a real Windows interpreter: main's ["/c", command]
+        # went through list2cmdline, which escaped the inner quotes as \",
+        # and cmd.exe reported the script as "not recognized".
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        arguments = _cmd_exe_arguments(
+            "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}", "A&B", r"C:\fw dir",
+            native_windows=True,
+        )
+        assert arguments == r'/d /s /c ""winc_flash_tool.cmd" /p "A&B" /i "C:\fw dir""'
+
+    def test_cmd_exe_arguments_under_wsl_are_separate_and_unquoted(self) -> None:
+        # Verified under real WSL interop: quotes inside an argument reach
+        # cmd.exe as \", so WSL must do the quoting.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        arguments = _cmd_exe_arguments(
+            "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}", "PORT 1", r"C:\fw dir",
+            native_windows=False,
+        )
+        assert arguments == ["/c", "winc_flash_tool.cmd", "/p", "PORT 1", "/i", r"C:\fw dir"]
 
     def test_happy_path_sends_expected_commands_and_reports_progress(
         self,

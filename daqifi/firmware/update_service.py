@@ -34,9 +34,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shlex
 import re
+import shlex
 import shutil
+import subprocess
 import threading
 import time
 from typing import (
@@ -50,6 +51,7 @@ from typing import (
     Protocol,
     Sequence,
     Tuple,
+    Union,
     runtime_checkable,
 )
 
@@ -982,14 +984,12 @@ class DefaultFirmwareUpdateService:
         tool_path = _anchor_to_cwd(self._resolve_wifi_tool_path(firmware_path))
         port = self._resolve_wifi_port(device)
 
-        tool_arguments = self._options.wifi_flash_tool_arguments_template
-        tool_arguments = tool_arguments.replace("{port}", _quote_argument(port))
-        tool_arguments = tool_arguments.replace(
-            "{firmwarePath}", _quote_argument(firmware_path)
-        )
+        template = self._options.wifi_flash_tool_arguments_template
 
         executable_path = tool_path
-        executable_arguments: Any = tool_arguments
+        executable_arguments: Any = template.replace(
+            "{port}", _quote_argument(port)
+        ).replace("{firmwarePath}", _quote_argument(firmware_path))
 
         extension = os.path.splitext(tool_path)[1].lower()
         if extension in (".cmd", ".bat"):
@@ -1001,17 +1001,17 @@ class DefaultFirmwareUpdateService:
                     "Windows or WSL with Windows interop enabled."
                 )
             executable_path = cmd_exe
-            # cmd.exe parses ONE command-line string after /c. Build that
-            # string explicitly and pass it as a single list element so
-            # quoting is applied exactly once: subprocess.list2cmdline
-            # wraps the whole element, cmd.exe strips the outer quotes,
-            # and the inner _quote_argument-protected pieces survive
-            # untouched. Splitting tool_arguments + relying on list2cmdline
-            # to re-encode each piece risks double-quoting on Windows.
-            command = (
-                f"{_quote_argument(tool_path)} {tool_arguments}"
-            ).strip()
-            executable_arguments = ["/c", command]
+            # The script is named relative to the working directory set
+            # below (WSL translates that for the Windows process), and Linux
+            # paths in its arguments are translated: WSL hands arguments to
+            # Windows programs as-is.
+            executable_arguments = _cmd_exe_arguments(
+                os.path.basename(tool_path),
+                template,
+                port,
+                _path_for_windows_tool(firmware_path),
+                native_windows=os.name == "nt",
+            )
 
         progress_state = {"last_process_percent": 0}
         progress_lock = threading.Lock()
@@ -2007,14 +2007,89 @@ def _quote_argument(value: str) -> str:
         return '""'
 
     if os.name == "nt":
-        # Always-quote on Windows to neutralise cmd.exe metacharacters.
-        return '"' + value.replace('"', '""') + '"'
+        return _quote_windows_argument(value)
 
     # POSIX: the arguments are split by shlex (SubprocessRunner), so quote
     # for shlex. Quoting only whitespace and double quotes left a path such
     # as /tmp/O'Brien/fw unbalanced, and the split raised "No closing
     # quotation" after the device had entered WiFi-update mode.
     return shlex.quote(value)
+
+
+def _cmd_exe_arguments(
+    script: str,
+    template: str,
+    port: str,
+    firmware_path: str,
+    *,
+    native_windows: bool,
+) -> Union[str, List[str]]:
+    """Arguments for ``cmd.exe`` running the WiFi flash script.
+
+    Native Windows: one verbatim command line (SubprocessRunner passes a
+    string through untouched there). ``/s`` strips exactly the outer quote
+    pair, so the quoted pieces inside reach the script intact, and quoting
+    every piece keeps cmd.exe metacharacters in configured values from being
+    read as command syntax. A list would go through list2cmdline, which
+    escapes inner quotes as ``\\"``; cmd.exe does not honour that, and the
+    script was "not recognized".
+
+    WSL: WSL rebuilds the Windows command line from argv the same way, so
+    the arguments go separately and unquoted, and WSL quotes the ones with
+    spaces itself.
+    """
+    if native_windows:
+        tool_arguments = template.replace(
+            "{port}", _quote_windows_argument(port)
+        ).replace("{firmwarePath}", _quote_windows_argument(firmware_path))
+        command = f"{_quote_windows_argument(script)} {tool_arguments}".strip()
+        return f'/d /s /c "{command}"'
+    tokens = [
+        token.replace("{port}", port).replace("{firmwarePath}", firmware_path)
+        for token in shlex.split(template)
+    ]
+    return ["/c", script] + tokens
+
+
+def _quote_windows_argument(value: str) -> str:
+    """Quote for a Windows/cmd.exe command line, whatever the host.
+
+    Always quoted, so cmd.exe metacharacters (``& | > < ^ ( ) % !``) in a
+    configured value can't be read as command syntax; embedded double
+    quotes are doubled, which is what cmd.exe honours.
+    """
+    if value is None or value == "":
+        return '""'
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _running_under_wsl() -> bool:
+    try:
+        with open("/proc/sys/kernel/osrelease") as handle:
+            return "microsoft" in handle.read().lower()
+    except OSError:
+        return False
+
+
+def _path_for_windows_tool(path: str) -> str:
+    """A Linux path as a Windows program under WSL can open it (``wslpath -w``).
+
+    Unchanged off WSL, for relative paths, or if the translation fails.
+    """
+    if not path.startswith("/") or not _running_under_wsl():
+        return path
+    try:
+        result = subprocess.run(
+            ["wslpath", "-w", path],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return path
+    translated = result.stdout.strip()
+    return translated if result.returncode == 0 and translated else path
 
 
 def _try_parse_wifi_tool_percent(line: str) -> Optional[int]:

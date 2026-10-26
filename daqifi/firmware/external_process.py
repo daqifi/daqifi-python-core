@@ -12,7 +12,10 @@ when callbacks are registered.
 """
 from __future__ import annotations
 
+import codecs
 import os
+import re
+import select
 import shlex
 import signal
 import subprocess
@@ -429,6 +432,51 @@ class SubprocessRunner:
         )
 
 
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
+def _iter_lines(stream, delivering: threading.Event):
+    """Lines of `stream` (universal newlines), ending early once the run has
+    returned (`delivering` cleared).
+
+    On POSIX the pipe is polled with select() so the reader can stop even
+    while a descendant that left the process group keeps the write end open;
+    a plain blocking read would park the thread, and its pipe, for as long
+    as that descendant lives, once per timed-out run. On Windows such a
+    descendant is inside the job and is killed with it, so EOF arrives and
+    the text stream is read directly.
+    """
+    if _IS_WINDOWS:
+        yield from stream
+        return
+    fd = stream.fileno()
+    decoder = codecs.getincrementaldecoder(stream.encoding or "utf-8")(
+        errors=stream.errors or "strict"
+    )
+    pending = ""
+    while delivering.is_set():
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if not ready:
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            pending += decoder.decode(b"", final=True)
+            if pending:
+                yield pending
+            return
+        pending += decoder.decode(chunk)
+        # A trailing "\r" may be the first half of "\r\n"; hold it back.
+        hold = pending.endswith("\r")
+        if hold:
+            pending = pending[:-1]
+        parts = _LINE_BREAK.split(pending)
+        pending = parts.pop()
+        for part in parts:
+            yield part + "\n"
+        if hold:
+            pending += "\r"
+
+
 def _pump_stream(
     stream,
     sink: List[str],
@@ -445,7 +493,7 @@ def _pump_stream(
     if stream is None:
         return
     try:
-        for raw_line in stream:
+        for raw_line in _iter_lines(stream, delivering):
             if not delivering.is_set():
                 continue
             line = raw_line.rstrip("\r\n")

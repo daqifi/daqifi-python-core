@@ -42,7 +42,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   transport's port, and fails before entering WiFi-update mode when there
   is none and no `wifi_port_override` (#161).
 - WiFi flashing with a relative firmware or tool path looked the tool up
-  relative to its own directory; paths are made absolute first (#161).
+  relative to its own directory; paths are anchored to the caller's
+  working directory first (#161).
+- WiFi flashing through `winc_flash_tool.cmd` never ran on Windows: the
+  `cmd.exe` arguments went through `list2cmdline`, whose `\"` escapes
+  cmd.exe does not honour, so the script was "not recognized". Native
+  Windows now passes one verbatim `/d /s /c "..."` line; under WSL the
+  arguments go separately (WSL quotes them) and Linux paths are translated
+  with `wslpath -w` (#161).
 - `SubprocessRunner` killed only the direct child on timeout, so a
   descendant holding the pipes kept `run()` blocked; the whole process
   tree is killed now (a process group on POSIX, a Job Object on Windows,
