@@ -52,7 +52,11 @@ from typing import (
     runtime_checkable,
 )
 
-from daqifi._internal.usb_location import hid_device_location, serial_port_location
+from daqifi._internal.usb_location import (
+    canonical_port_name,
+    hid_device_location,
+    serial_port_location,
+)
 from daqifi.enums import FirmwareUpdateState
 from daqifi.firmware.bootloader import (
     BootloaderProtocol,
@@ -1170,7 +1174,9 @@ class DefaultFirmwareUpdateService:
         ports = _list_serial_port_names()
         if ports is None:
             return
-        present = self._target_port_name in ports
+        # Re-resolved each poll: a by-id alias dangles while the device is
+        # gone and points at its node again once it is back.
+        present = canonical_port_name(self._target_port_name) in ports
         if not present:
             self._target_port_seen_gone = True
         elif self._target_port_seen_gone:

@@ -337,6 +337,14 @@ class TestHidLibraryTransport:
         assert opened == ["/dev/hidraw1"]
         assert t.device_path == "/dev/hidraw1"
 
+    def test_connect_by_path_accepts_the_bytes_form_hidapi_returns(self):
+        # Audit finding on #165: the platform stores paths as str, so a
+        # bytes path (hidapi's own form) never matched.
+        info = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw1", None, "Bootloader")
+        t = HidLibraryTransport(platform=_FakeHidPlatform([info]))
+        t.connect(0x04D8, 0x003C, device_path=b"/dev/hidraw1")
+        assert t.device_path == "/dev/hidraw1"
+
     def test_connect_by_path_that_is_gone_raises(self):
         t = HidLibraryTransport(platform=_FakeHidPlatform([_DAQIFI_INFO]))
         with pytest.raises(IOError, match="Path='/dev/hidraw9'"):

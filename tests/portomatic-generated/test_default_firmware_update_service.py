@@ -787,6 +787,44 @@ class TestUpdateFirmwareFailureModes:
         assert hid._connect_calls == 0
         assert hid.writes == []
 
+    def test_return_to_application_is_seen_through_a_by_id_alias(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        # Port listings name the node (/dev/ttyACM0); the device may have
+        # been opened through a /dev/serial/by-id alias.
+        import daqifi.firmware.update_service as update_service
+
+        node = tmp_path / "ttyACM0"
+        node.write_text("")
+        alias = tmp_path / "usb-DAQiFi-if00"
+        alias.symlink_to(node)
+        listings = iter([frozenset(), frozenset({str(node)})])
+        monkeypatch.setattr(
+            update_service,
+            "_list_serial_port_names",
+            lambda: next(listings, frozenset({str(node)})),
+        )
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: None)
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": str(alias)})()
+        hid = _FakeHidTransport()
+        foreign = HidDeviceInfo(0x04D8, 0x003C, "path-x", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [], [foreign]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert "came back as the application" in str(exc_info.value.__cause__)
+        assert hid.writes == []
+
     def test_port_still_listed_before_the_reset_lands_is_not_a_return(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

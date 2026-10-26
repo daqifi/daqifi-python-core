@@ -53,3 +53,18 @@ def test_usbip_virtual_ports_are_unknown(tmp_path):
 def test_unknowable_locations_are_none(tmp_path, path):
     assert serial_port_location(path if isinstance(path, str) else None, str(tmp_path)) is None
     assert hid_device_location(path, str(tmp_path)) is None
+
+
+def test_by_id_alias_resolves_to_its_tty(tmp_path):
+    # Audit finding on #165: /dev/serial/by-id/... aliases bypassed the
+    # lookup (no such name under /sys/class/tty), disabling port binding.
+    root = str(tmp_path / "sys")
+    _link(root, "tty", "ttyACM0", "devices/pci0000:00/usb1/1-2/1-2:1.0")
+    node = tmp_path / "dev" / "ttyACM0"
+    node.parent.mkdir()
+    node.write_text("")
+    alias = tmp_path / "by-id" / "usb-DAQiFi_Nyquist-if00"
+    alias.parent.mkdir()
+    alias.symlink_to(node)
+
+    assert serial_port_location(str(alias), root) == "1-2"

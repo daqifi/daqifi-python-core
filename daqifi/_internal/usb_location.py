@@ -19,7 +19,7 @@ import re
 import sys
 from typing import Optional, Union
 
-__all__ = ["hid_device_location", "serial_port_location"]
+__all__ = ["canonical_port_name", "hid_device_location", "serial_port_location"]
 
 _USB_DEVICE_DIR = re.compile(r"^\d+-\d+(\.\d+)*$")
 _SYSFS_ROOT = "/sys"
@@ -39,10 +39,24 @@ def _usb_port_path(class_name: str, node: str, sysfs_root: str) -> Optional[str]
     return ports[-1] if ports else None
 
 
+def canonical_port_name(port_name: Optional[str]) -> Optional[str]:
+    """Resolve a POSIX alias such as ``/dev/serial/by-id/...`` to its node.
+
+    Port listings and ``/sys/class/tty`` use the node name (``ttyACM0``), so
+    an alias must be resolved before comparing against either. Windows names
+    (``COM3``) and anything not an absolute POSIX path pass through: there,
+    ``realpath`` would join them onto the working directory.
+    """
+    if not port_name or not port_name.startswith("/") or os.name != "posix":
+        return port_name
+    return os.path.realpath(port_name)
+
+
 def serial_port_location(
     port_name: Optional[str], sysfs_root: str = _SYSFS_ROOT
 ) -> Optional[str]:
     """``"<bus>-<ports>"`` for a Linux USB tty such as ``/dev/ttyACM0``, else None."""
+    port_name = canonical_port_name(port_name)
     if not port_name:
         return None
     return _usb_port_path("tty", os.path.basename(port_name), sysfs_root)

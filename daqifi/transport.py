@@ -727,6 +727,14 @@ class UdpTransport:
 # ---- HidLibraryTransport -----------------------------------------------------
 
 
+def _hid_path_key(path: Union[str, bytes, None]) -> Optional[str]:
+    # hidapi hands out bytes paths; HidApiPlatform stores them as str.
+    # Compare one form so a caller passing either still matches.
+    if isinstance(path, bytes):
+        return path.decode("utf-8", "replace")
+    return path
+
+
 class HidLibraryTransport:
     """HID transport backed by an injectable :class:`HidPlatform`.
 
@@ -831,7 +839,10 @@ class HidLibraryTransport:
                     serial_filter is None
                     or (d.serial_number or "").strip().lower() == serial_filter.lower()
                 )
-                and (device_path is None or d.device_path == device_path)
+                and (
+                    device_path is None
+                    or _hid_path_key(d.device_path) == _hid_path_key(device_path)
+                )
             ]
             candidates.sort(key=lambda d: d.device_path)
 
