@@ -1169,6 +1169,85 @@ class TestUpdateWifiModule:
         assert isinstance(exc_info.value.__cause__, FileNotFoundError)
         assert "cmd.exe" in str(exc_info.value.__cause__)
         assert runner.last_request is None
+        # Resolved before the device is switched into WiFi-update mode.
+        assert device.sent_commands == []
+        assert device.disconnect_calls == 0
+
+    def test_port_is_the_serial_transports_port_not_the_device_name(self) -> None:
+        # Audit finding: the factory names every device "DaqifiDevice", and
+        # that name was handed to the flash tool as its port.
+        device = _FakeStreamingDevice("DaqifiDevice")
+        device.transport = type("T", (), {"port_name": "TEST-PORT-7"})()
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        assert "/p TEST-PORT-7" in runner.last_request.arguments[1]
+        assert "DaqifiDevice" not in runner.last_request.arguments[1]
+
+    def test_device_without_a_serial_port_fails_before_update_mode(self) -> None:
+        device = _FakeStreamingDevice("DaqifiDevice")
+        device.transport = type("TcpLike", (), {})()
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        assert "wifi_port_override" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []
+        assert runner.last_request is None
+
+    def test_relative_firmware_path_is_made_absolute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding: the tool runs with its own directory as cwd, so a
+        # relative tool path was looked up as bundle/bundle/<tool>.
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        parent, name = os.path.split(firmware_dir)
+        monkeypatch.chdir(parent)
+        try:
+            service.update_wifi_module(device, name)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        command = runner.last_request.arguments[1]
+        assert os.path.join(firmware_dir, "winc_flash_tool.cmd") in command
+        assert runner.last_request.working_directory == firmware_dir
 
     def test_happy_path_sends_expected_commands_and_reports_progress(
         self,

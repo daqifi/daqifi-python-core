@@ -37,6 +37,21 @@ aims to follow [Semantic Versioning](https://semver.org/).
   report are split into 16-byte records instead of failing after erase (#161).
 - Bootloader replies are now checked for framing, CRC, EOT and the command
   they answer; truncated or mismatched replies are no longer accepted (#161).
+- WiFi module flashing passed the device's display name (`DaqifiDevice` by
+  default) to the flash tool as its serial port; it now uses the serial
+  transport's port, and fails before entering WiFi-update mode when there
+  is none and no `wifi_port_override` (#161).
+- WiFi flashing with a relative firmware or tool path looked the tool up
+  relative to its own directory; paths are made absolute first (#161).
+- `SubprocessRunner` killed only the direct child on timeout, so a
+  descendant holding the pipes kept `run()` blocked; the whole process
+  tree is killed now, and a surviving descendant can no longer hang
+  cleanup (#161).
+- On Windows, a string argument list reached the child with literal quote
+  characters; it is now passed through as the command line verbatim (#161).
+- `FirmwareVersion` aliases (`3.0.0b1`, `3.0.0beta1`, `3.0.0-beta.1`)
+  compared as both greater than each other, so the update check offered
+  the installed firmware as an update (#161).
 
 ## [0.1.0]
 

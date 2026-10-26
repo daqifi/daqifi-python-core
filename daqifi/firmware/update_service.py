@@ -717,6 +717,13 @@ class DefaultFirmwareUpdateService:
                 return
             _check_cancel(cancel_event)
 
+            # Built before the device is switched into WiFi-update mode, so
+            # an unresolvable port, tool or cmd.exe fails while the device
+            # is still untouched.
+            request = self._build_wifi_process_request(
+                device, firmware_path, progress
+            )
+
             self._transition_to_state(
                 FirmwareUpdateState.PREPARING_DEVICE,
                 "Preparing device for WiFi module update.",
@@ -762,9 +769,6 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
             )
 
-            request = self._build_wifi_process_request(
-                device, firmware_path, progress
-            )
             # Cap the external process's own timeout to the remaining
             # state deadline so the process can't outlive the
             # PROGRAMMING state timeout (the deadline.check() inside
@@ -960,7 +964,11 @@ class DefaultFirmwareUpdateService:
         firmware_path: str,
         progress: _PROGRESS_CALLBACK,
     ) -> ExternalProcessRequest:
-        tool_path = self._resolve_wifi_tool_path(firmware_path)
+        # Absolute before anything else: the tool runs with its own directory
+        # as the working directory, so a relative tool or firmware path would
+        # be resolved against that directory instead of the caller's.
+        firmware_path = os.path.abspath(firmware_path)
+        tool_path = os.path.abspath(self._resolve_wifi_tool_path(firmware_path))
         port = self._resolve_wifi_port(device)
 
         tool_arguments = self._options.wifi_flash_tool_arguments_template
@@ -1104,6 +1112,22 @@ class DefaultFirmwareUpdateService:
         if override and override.strip():
             return override
 
+        # The serial port the device is connected through, not its display
+        # name: DaqifiDeviceFactory names every device "DaqifiDevice" by
+        # default, which the flash tool would be handed as its port.
+        transport = getattr(device, "transport", None)
+        port_name = getattr(transport, "port_name", None)
+        if port_name and str(port_name).strip():
+            return str(port_name)
+        if transport is not None:
+            raise RuntimeError(
+                "The device is not connected over a serial port, so the WiFi "
+                "flash tool's port is unknown; set "
+                "FirmwareUpdateServiceOptions.wifi_port_override."
+            )
+
+        # Duck-typed devices with no transport keep the old contract: their
+        # name is their port.
         name = getattr(device, "name", None)
         if name and str(name).strip():
             return str(name)

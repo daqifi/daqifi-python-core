@@ -173,3 +173,86 @@ class TestSubprocessRunner:
         result = runner.run(req)
         # Callback errors are swallowed — process should still complete cleanly.
         assert result.exit_code == 0
+
+
+class TestProcessTreeOnTimeout:
+    # Audit finding: only the direct child was killed; a descendant holding
+    # the output pipes kept run() blocked until it exited (6.1 s for a 6 s
+    # child with a 0.3 s timeout), and forever for a hung one.
+
+    _PARENT = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "time.sleep(60)\n"
+    )
+
+    @pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX process groups")
+    def test_timeout_returns_promptly_and_kills_descendants(self):
+        import time
+
+        start = time.monotonic()
+        result = SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable,
+                arguments=["-c", self._PARENT],
+                timeout_seconds=0.3,
+            )
+        )
+        elapsed = time.monotonic() - start
+
+        assert result.timed_out
+        assert elapsed < 3.0
+
+    @pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX process groups")
+    def test_descendant_holding_pipes_after_normal_exit_does_not_hang_run(self):
+        import time
+
+        script = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])\n"
+            "print('done')\n"
+        )
+        start = time.monotonic()
+        result = SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable,
+                arguments=["-c", script],
+                timeout_seconds=30,
+            )
+        )
+        assert not result.timed_out
+        assert result.exit_code == 0
+        assert time.monotonic() - start < 6.0
+
+
+class TestWindowsCommandLine:
+    # Audit finding: on Windows a string argument list was shlex-split with
+    # posix=False, which keeps quotes, and list2cmdline then escaped them, so
+    # '"C:\Firmware Files\x.bin"' arrived with literal quotes. Verified on a
+    # real Windows interpreter; this pins the command construction.
+
+    def test_string_arguments_pass_through_verbatim_on_windows(self, monkeypatch):
+        from daqifi.firmware import external_process
+
+        monkeypatch.setattr(external_process, "_IS_WINDOWS", True)
+        request = ExternalProcessRequest(
+            file_name=r"C:\Tools\flash tool.exe",
+            arguments=r'/i "C:\Firmware Files\image.bin" /w',
+        )
+        assert external_process._build_command(request) == (
+            r'"C:\Tools\flash tool.exe" /i "C:\Firmware Files\image.bin" /w'
+        )
+
+    def test_list_arguments_stay_a_list_on_windows(self, monkeypatch):
+        from daqifi.firmware import external_process
+
+        monkeypatch.setattr(external_process, "_IS_WINDOWS", True)
+        request = ExternalProcessRequest(file_name="tool.exe", arguments=["/c", "a b"])
+        assert external_process._build_command(request) == ["tool.exe", "/c", "a b"]
+
+    def test_string_arguments_are_split_on_posix(self, monkeypatch):
+        from daqifi.firmware import external_process
+
+        monkeypatch.setattr(external_process, "_IS_WINDOWS", False)
+        request = ExternalProcessRequest(file_name="tool", arguments='-x "a b"')
+        assert external_process._build_command(request) == ["tool", "-x", "a b"]

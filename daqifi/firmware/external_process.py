@@ -12,13 +12,15 @@ when callbacks are registered.
 """
 from __future__ import annotations
 
+import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Protocol, Sequence, Tuple, Union, runtime_checkable
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple, Union, runtime_checkable
 
 
 __all__ = [
@@ -72,21 +74,67 @@ class ExternalProcessRunner(Protocol):
         ...
 
 
+_IS_WINDOWS = sys.platform.startswith("win")
+
+
 def _split_arguments(arguments: Union[str, Sequence[str]]) -> List[str]:
     """Normalize the `arguments` field into a list passed to subprocess.
 
-    String inputs go through `shlex.split`. On Windows we run with
-    ``posix=False`` so backslashes (`C:\\path\\tool.exe`) and double-
-    quoted arguments parse correctly — POSIX mode treats backslashes
-    as escape characters and corrupts Windows paths.
+    String inputs go through POSIX `shlex.split`. (On Windows a string is
+    not split at all; `_build_command` passes it through verbatim.)
     Sequence inputs (list/tuple) are returned as-is — useful when an
     argument needs to contain literal spaces or quote characters.
     """
     if not arguments:
         return []
     if isinstance(arguments, str):
-        return shlex.split(arguments, posix=not sys.platform.startswith("win"))
+        return shlex.split(arguments)
     return list(arguments)
+
+
+def _build_command(request: "ExternalProcessRequest") -> Union[str, List[str]]:
+    if _IS_WINDOWS and isinstance(request.arguments, str):
+        # A Windows command line is one string that the callee parses
+        # itself, which is what upstream's ProcessStartInfo.Arguments
+        # passes. Splitting it and letting list2cmdline re-quote each piece
+        # turned '"C:\Firmware Files\x.bin"' into an argument with literal
+        # quotes in it.
+        command = subprocess.list2cmdline([request.file_name])
+        if request.arguments:
+            command += " " + request.arguments
+        return command
+    return [request.file_name] + _split_arguments(request.arguments)
+
+
+def _kill_process_tree(proc: "subprocess.Popen") -> None:
+    """Kill the process and everything it started (upstream:
+    ``Process.Kill(entireProcessTree: true)``).
+
+    Killing only the direct child left its descendants running, still
+    holding the output pipes, so a flash tool's real worker outlived the
+    timeout and the reader threads never saw EOF.
+    """
+    if proc.poll() is not None and _IS_WINDOWS:
+        return
+    try:
+        if _IS_WINDOWS:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        else:
+            # start_new_session made the child a group leader, so its pid
+            # is the group id; descendants stay in the group unless they
+            # deliberately leave it.
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
 
 
 class SubprocessRunner:
@@ -102,7 +150,7 @@ class SubprocessRunner:
         if not request.file_name:
             raise ValueError("request.file_name must not be empty")
 
-        cmd = [request.file_name] + _split_arguments(request.arguments)
+        cmd = _build_command(request)
 
         stdout_lines: List[str] = []
         stderr_lines: List[str] = []
@@ -110,8 +158,13 @@ class SubprocessRunner:
         start = time.monotonic()
         timed_out = False
 
+        group_kwargs: Dict[str, Any] = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
+            if _IS_WINDOWS
+            else {"start_new_session": True}
+        )
         try:
-            with subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd,
                 cwd=request.working_directory,
                 stdin=subprocess.PIPE if request.standard_input_response_factory else None,
@@ -119,33 +172,50 @@ class SubprocessRunner:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
-            ) as proc:
-                stdout_thread = threading.Thread(
-                    target=_pump_stream,
-                    args=(proc.stdout, stdout_lines, request.on_standard_output_line, request.standard_input_response_factory, proc.stdin),
-                    daemon=True,
-                )
-                stderr_thread = threading.Thread(
-                    target=_pump_stream,
-                    args=(proc.stderr, stderr_lines, request.on_standard_error_line, None, None),
-                    daemon=True,
-                )
-                stdout_thread.start()
-                stderr_thread.start()
-
-                try:
-                    exit_code = proc.wait(timeout=request.timeout_seconds)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    proc.kill()
-                    exit_code = proc.wait()
-
-                stdout_thread.join(timeout=2.0)
-                stderr_thread.join(timeout=2.0)
+                **group_kwargs,
+            )
         except FileNotFoundError as exc:
             raise FileNotFoundError(
                 f"External process executable not found: {request.file_name!r}"
             ) from exc
+
+        stdout_thread = threading.Thread(
+            target=_pump_stream,
+            args=(proc.stdout, stdout_lines, request.on_standard_output_line, request.standard_input_response_factory, proc.stdin),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_pump_stream,
+            args=(proc.stderr, stderr_lines, request.on_standard_error_line, None, None),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        try:
+            try:
+                exit_code = proc.wait(timeout=request.timeout_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_process_tree(proc)
+                exit_code = proc.wait()
+        except BaseException:
+            # KeyboardInterrupt and friends: the child is in its own
+            # session/group and won't see the terminal's signal.
+            _kill_process_tree(proc)
+            raise
+        finally:
+            stdout_thread.join(timeout=2.0)
+            stderr_thread.join(timeout=2.0)
+            # The pump threads close their own streams at EOF. One still
+            # alive is blocked reading a pipe a surviving descendant holds;
+            # closing it from here would block on that read, which is how
+            # run() used to hang past its timeout. Leave it to the daemon.
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
 
         duration = time.monotonic() - start
 

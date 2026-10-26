@@ -60,7 +60,7 @@ _RELEASE_RANK = 3
 
 
 @total_ordering
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class FirmwareVersion:
     """Parsed firmware version: major.minor.patch with optional pre-release suffix."""
 
@@ -97,6 +97,18 @@ class FirmwareVersion:
         if not isinstance(other, FirmwareVersion):
             return NotImplemented
         return self._sort_key() < other._sort_key()
+
+    # Equality on the same key as ordering. With the dataclass default, the
+    # aliases "3.0.0b1" and "3.0.0-beta.1" compared unequal while neither was
+    # less than the other, so total_ordering reported both a > b and b > a,
+    # and the update check offered the installed firmware as an update.
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, FirmwareVersion):
+            return NotImplemented
+        return self._sort_key() == other._sort_key()
+
+    def __hash__(self) -> int:
+        return hash(self._sort_key())
 
     @classmethod
     def parse(cls, value: Optional[str]) -> Optional["FirmwareVersion"]:
