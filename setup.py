@@ -102,7 +102,7 @@ setup(
         # runtime reads as OK when asked here. That is this runtime answering
         # for 7.0's policy, which is not evidence -- another reason a major
         # bump is reviewed rather than assumed.)
-        "protobuf>=6.31.1,<7.0",
+        "protobuf>=5.28,<7.0",
         # ifaddr is a small pure-Python NIC enumerator used by
         # WiFiDeviceFinder (port of daqifi-core PR #179/#180): the
         # finder needs to broadcast on every real LAN interface so
