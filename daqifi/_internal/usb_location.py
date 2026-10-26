@@ -23,6 +23,8 @@ __all__ = ["canonical_port_name", "hid_device_location", "serial_port_location"]
 
 _USB_DEVICE_DIR = re.compile(r"^\d+-\d+(\.\d+)*$")
 _LIBUSB_PATH = re.compile(r"^(\d+-\d+(?:\.\d+)*):\d+\.\d+$")
+# Older libusb-backend hidapi: "<bus>:<address>:<interface>" in hex.
+_LEGACY_LIBUSB_PATH = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4}):([0-9a-fA-F]{2})$")
 _SYSFS_ROOT = "/sys"
 
 
@@ -70,7 +72,9 @@ def hid_device_location(
 
     hidapi's hidraw backend reports ``/dev/hidrawN``; its libusb backend
     reports ``<bus>-<ports>:<config>.<interface>``, which names the port
-    directly but still has to be checked against usbip in sysfs.
+    directly, or (older releases) hex ``<bus>:<address>:<interface>``,
+    which is mapped to a port through sysfs ``busnum``/``devnum``. Either
+    is still checked against usbip.
     """
     if isinstance(device_path, bytes):
         device_path = device_path.decode("utf-8", "replace")
@@ -79,10 +83,39 @@ def hid_device_location(
     if device_path.startswith("/dev/hidraw"):
         return _usb_port_path("hidraw", os.path.basename(device_path), sysfs_root)
     match = _LIBUSB_PATH.match(device_path)
-    if match is None:
-        return None
-    port = match.group(1)
+    if match is not None:
+        return _checked_port(match.group(1), sysfs_root)
+    match = _LEGACY_LIBUSB_PATH.match(device_path)
+    if match is not None:
+        return _port_for_bus_address(
+            int(match.group(1), 16), int(match.group(2), 16), sysfs_root
+        )
+    return None
+
+
+def _checked_port(port: str, sysfs_root: str) -> Optional[str]:
     resolved = os.path.realpath(os.path.join(sysfs_root, "bus", "usb", "devices", port))
     if not os.path.exists(resolved) or "vhci_hcd" in resolved:
         return None
     return port
+
+
+def _port_for_bus_address(bus: int, address: int, sysfs_root: str) -> Optional[str]:
+    devices_dir = os.path.join(sysfs_root, "bus", "usb", "devices")
+    try:
+        names = os.listdir(devices_dir)
+    except OSError:
+        return None
+    for name in names:
+        if not _USB_DEVICE_DIR.match(name):
+            continue
+        try:
+            with open(os.path.join(devices_dir, name, "busnum")) as f:
+                busnum = int(f.read().strip())
+            with open(os.path.join(devices_dir, name, "devnum")) as f:
+                devnum = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        if (busnum, devnum) == (bus, address):
+            return _checked_port(name, sysfs_root)
+    return None
