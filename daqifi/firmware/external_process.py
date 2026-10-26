@@ -192,9 +192,24 @@ class SubprocessRunner:
         stdout_thread.start()
         stderr_thread.start()
 
+        timeout = request.timeout_seconds
+        deadline = None if timeout is None else start + timeout
         try:
             try:
-                exit_code = proc.wait(timeout=request.timeout_seconds)
+                exit_code = proc.wait(timeout=timeout)
+                # Done means the output is done too, as with .NET's
+                # WaitForExit(): a descendant that inherited the pipes may
+                # still be writing (a launcher that exits while its worker
+                # flashes and reports). Its output decides success, so wait
+                # for EOF within the same budget.
+                for thread in (stdout_thread, stderr_thread):
+                    thread.join(
+                        None if deadline is None
+                        else max(0.0, deadline - time.monotonic())
+                    )
+                if stdout_thread.is_alive() or stderr_thread.is_alive():
+                    timed_out = True
+                    _kill_process_tree(proc)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 _kill_process_tree(proc)
@@ -208,10 +223,12 @@ class SubprocessRunner:
             stdout_thread.join(timeout=2.0)
             stderr_thread.join(timeout=2.0)
             # The pump threads close their own streams at EOF. One still
-            # alive is blocked reading a pipe a surviving descendant holds;
-            # closing it from here would block on that read, which is how
-            # run() used to hang past its timeout. Leave it to the daemon.
-            if proc.stdin is not None:
+            # alive is blocked on a pipe a descendant outside the process
+            # group holds; closing that stream from here would block behind
+            # it, which is how run() used to hang past its timeout. Leave it
+            # to the daemon thread. stdin is written by the stdout pump, so
+            # it is only safe to close once that thread is done.
+            if proc.stdin is not None and not stdout_thread.is_alive():
                 try:
                     proc.stdin.close()
                 except OSError:

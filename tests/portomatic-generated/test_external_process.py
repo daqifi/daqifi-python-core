@@ -203,27 +203,6 @@ class TestProcessTreeOnTimeout:
         assert result.timed_out
         assert elapsed < 3.0
 
-    @pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX process groups")
-    def test_descendant_holding_pipes_after_normal_exit_does_not_hang_run(self):
-        import time
-
-        script = (
-            "import subprocess, sys\n"
-            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])\n"
-            "print('done')\n"
-        )
-        start = time.monotonic()
-        result = SubprocessRunner().run(
-            ExternalProcessRequest(
-                file_name=sys.executable,
-                arguments=["-c", script],
-                timeout_seconds=30,
-            )
-        )
-        assert not result.timed_out
-        assert result.exit_code == 0
-        assert time.monotonic() - start < 6.0
-
 
 class TestWindowsCommandLine:
     # Audit finding: on Windows a string argument list was shlex-split with
@@ -256,3 +235,64 @@ class TestWindowsCommandLine:
         monkeypatch.setattr(external_process, "_IS_WINDOWS", False)
         request = ExternalProcessRequest(file_name="tool", arguments='-x "a b"')
         assert external_process._build_command(request) == ["tool", "-x", "a b"]
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX process groups")
+class TestDescendantOutput:
+    def test_output_from_a_descendant_after_the_launcher_exits_is_captured(self):
+        # Audit finding on #166: run() returned when the launcher exited and
+        # dropped its worker's later "failed" line, so a failed flash passed.
+        script = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c',"
+            " 'import time; time.sleep(6); print(\"Programming device failed\", flush=True)'])\n"
+            "print('started', flush=True)\n"
+        )
+        result = SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable, arguments=["-c", script], timeout_seconds=15
+            )
+        )
+        assert not result.timed_out
+        assert result.standard_output_lines == ("started", "Programming device failed")
+
+    def test_descendant_outliving_the_budget_is_a_timeout(self):
+        import time
+
+        script = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        )
+        start = time.monotonic()
+        result = SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable, arguments=["-c", script], timeout_seconds=1.0
+            )
+        )
+        assert result.timed_out
+        assert time.monotonic() - start < 4.0
+
+    def test_stdin_held_by_an_escaped_descendant_does_not_hang_cleanup(self):
+        # Audit finding on #166: the stdout pump blocked writing a response
+        # into a pipe a detached descendant held; closing stdin then waited
+        # on the writer's lock until that descendant exited.
+        import time
+
+        script = (
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(8)'],"
+            " start_new_session=True)\n"
+            "print('prompt', flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        start = time.monotonic()
+        result = SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable,
+                arguments=["-c", script],
+                timeout_seconds=0.5,
+                standard_input_response_factory=lambda line: "x" * 1_000_000,
+            )
+        )
+        assert result.timed_out
+        assert time.monotonic() - start < 5.0
