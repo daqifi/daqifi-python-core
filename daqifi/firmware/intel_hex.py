@@ -60,7 +60,8 @@ class IntelHexParser:
 
         Raises:
             TypeError: if `lines` is None.
-            ValueError: if a line is malformed or has an invalid checksum.
+            ValueError: if a line is malformed or has an invalid checksum,
+                or a data record runs into the protected range.
         """
         if lines is None:
             raise TypeError("lines must not be None")
@@ -79,6 +80,7 @@ class IntelHexParser:
             self._validate_line(line)
             hex_line = self._convert_line_to_bytes(line)
             self._validate_checksum(hex_line, line)
+            self._validate_record_length(hex_line, line)
 
             base_address = self._update_base_address(hex_line, base_address)
 
@@ -96,7 +98,8 @@ class IntelHexParser:
 
         Raises:
             TypeError: if `lines` is None.
-            ValueError: if a line is malformed or has an invalid checksum.
+            ValueError: if a line is malformed or has an invalid checksum,
+                or a data record runs into the protected range.
         """
         if lines is None:
             raise TypeError("lines must not be None")
@@ -114,6 +117,7 @@ class IntelHexParser:
             self._validate_line(line)
             hex_line = self._convert_line_to_bytes(line)
             self._validate_checksum(hex_line, line)
+            self._validate_record_length(hex_line, line)
             record_type = hex_line[3]
 
             base_address = self._update_base_address(hex_line, base_address)
@@ -156,6 +160,20 @@ class IntelHexParser:
             raise ValueError(f'The hex record "{line}" has an invalid checksum')
 
     @staticmethod
+    def _validate_record_length(record: bytes, line: str) -> None:
+        # Port of upstream ValidateRecordLength (daqifi-core #370). The
+        # checksum alone can't catch a record whose declared byte count
+        # disagrees with what it carries: ":10000000F0" declares 16 data
+        # bytes, carries none, and still sums to zero.
+        declared_data_length = record[0]
+        actual_data_length = len(record) - 5
+        if actual_data_length != declared_data_length:
+            raise ValueError(
+                f'The hex record "{line}" declares {declared_data_length} '
+                f"data byte(s) but contains {actual_data_length}"
+            )
+
+    @staticmethod
     def _convert_line_to_bytes(line: str) -> bytes:
         try:
             return bytes.fromhex(line[1:])
@@ -188,10 +206,18 @@ class IntelHexParser:
             return False
 
         offset_address = int.from_bytes(hex_record[1:3], byteorder="big")
-        hex_record_address = (base_address << 16) | offset_address
+        first_address = (base_address << 16) | offset_address
+        last_address = first_address + max(hex_record[0], 1) - 1
 
-        return (
-            self._begin_protected_address
-            <= hex_record_address
-            <= self._end_protected_address
-        )
+        if self._begin_protected_address <= first_address <= self._end_protected_address:
+            return True
+        if first_address < self._begin_protected_address <= last_address:
+            # Starts outside the range but runs into it. Keeping the record
+            # reflashes protected bytes and dropping it loses unprotected
+            # ones, so refuse the image here, before any device I/O.
+            raise ValueError(
+                f"Hex record at 0x{first_address:08X}-0x{last_address:08X} "
+                "runs into the protected range starting at "
+                f"0x{self._begin_protected_address:08X}."
+            )
+        return False

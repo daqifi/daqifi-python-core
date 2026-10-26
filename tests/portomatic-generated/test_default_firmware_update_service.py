@@ -17,7 +17,7 @@ from typing import List, Optional, Sequence
 import pytest
 
 from daqifi.enums import FirmwareUpdateState
-from daqifi.firmware.bootloader import BootloaderProtocol
+from daqifi.firmware.bootloader import BootloaderProtocol, Pic32BootloaderProtocol
 from daqifi.firmware.external_process import (
     ExternalProcessRequest,
     ExternalProcessResult,
@@ -126,14 +126,18 @@ class _FakeHidEnumerator:
 
 
 class _ThrowingHidEnumerator:
-    def __init__(self, exception: BaseException) -> None:
+    def __init__(self, exception: BaseException, succeed_first: int = 0) -> None:
         self._exception = exception
+        self._successes_left = succeed_first
 
     def enumerate(
         self,
         vendor_id: Optional[int] = None,
         product_id: Optional[int] = None,
     ) -> Sequence[HidDeviceInfo]:
+        if self._successes_left > 0:
+            self._successes_left -= 1
+            return []
         raise self._exception
 
 
@@ -513,7 +517,7 @@ class TestUpdateFirmwareFailureModes:
         hid.enqueue_read(bytes([0x01, 0x10]))  # verify version
 
         info = HidDeviceInfo(0x04D8, 0x003C, "path-1", "SN-1", "Bootloader")
-        enumerator = _FakeHidEnumerator([[info]])
+        enumerator = _FakeHidEnumerator([[], [info]])
         protocol = _FakeBootloaderProtocol(
             [bytes([0xA1, 0x01]), bytes([0xA1, 0x02])]
         )
@@ -539,8 +543,10 @@ class TestUpdateFirmwareFailureModes:
     ) -> None:
         device = _FakeStreamingDevice("fake-port-3")
         hid = _FakeHidTransport()
+        # The pre-FORceBoot snapshot succeeds; the failure under test is in
+        # the wait for the bootloader that follows.
         enumerator = _ThrowingHidEnumerator(
-            RuntimeError("HID backend unavailable.")
+            RuntimeError("HID backend unavailable."), succeed_first=1
         )
         # Tight WaitingForBootloader timeout so the retry loop exits
         # quickly into the timeout path.
@@ -586,7 +592,7 @@ class TestUpdateFirmwareFailureModes:
         hid = _FakeHidTransport()
         info_a = HidDeviceInfo(0x04D8, 0x003C, "path-a", "SN-A", "Bootloader")
         info_b = HidDeviceInfo(0x04D8, 0x003C, "path-b", "SN-B", "Bootloader")
-        enumerator = _FakeHidEnumerator([[info_a, info_b]])
+        enumerator = _FakeHidEnumerator([[], [info_a, info_b]])
 
         service = _build_pic32_service(
             hid,
@@ -607,6 +613,123 @@ class TestUpdateFirmwareFailureModes:
         assert "Multiple HID bootloader devices detected" in str(exc.__cause__)
         assert "SN-A" in str(exc.__cause__)
         assert "SN-B" in str(exc.__cause__)
+
+    def test_bootloader_already_enumerated_before_force_boot_is_never_selected(
+        self,
+    ) -> None:
+        # Audit finding: board B was already in its bootloader, and ours had
+        # not re-enumerated by the first poll. B was the only candidate, so
+        # the service connected to it and erased it.
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        other = HidDeviceInfo(0x04D8, 0x003C, "path-b", "SN-B", "Bootloader")
+        enumerator = _FakeHidEnumerator([[other]] * 200)
+        options = _fast_options()
+        options.waiting_for_bootloader_timeout = 0.2
+
+        service = _build_pic32_service(
+            hid, enumerator, _FakeBootloaderProtocol([bytes([0xA1])]), options
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert exc_info.value.failed_state == FirmwareUpdateState.WAITING_FOR_BOOTLOADER
+        assert "already enumerated before FORceBoot" in str(exc_info.value.__cause__)
+        assert hid._connect_calls == 0
+        assert hid.writes == []
+
+    def test_bootloader_that_appears_after_force_boot_is_selected(self) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        connected_serials: List[Optional[str]] = []
+
+        class _RecordingHid(_FakeHidTransport):
+            def connect(self, vendor_id, product_id, serial_number=None):
+                connected_serials.append(serial_number)
+                super().connect(vendor_id, product_id, serial_number)
+
+        hid = _RecordingHid()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        other = HidDeviceInfo(0x04D8, 0x003C, "path-b", "SN-B", "Bootloader")
+        ours = HidDeviceInfo(0x04D8, 0x003C, "path-a", "SN-A", "Bootloader")
+        enumerator = _FakeHidEnumerator([[other], [other], [other, ours]])
+
+        service = _build_pic32_service(
+            hid, enumerator, _FakeBootloaderProtocol([bytes([0xA1])])
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+        assert connected_serials == ["SN-A"]
+
+    def test_when_enumeration_fails_before_force_boot_nothing_is_sent(
+        self,
+    ) -> None:
+        # Without the pre-FORceBoot snapshot a stray bootloader can't be told
+        # apart from ours, so the update stops before touching the device.
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        enumerator = _ThrowingHidEnumerator(RuntimeError("HID backend unavailable."))
+        options = _fast_options()
+        options.preparing_device_timeout = 0.2
+
+        service = DefaultFirmwareUpdateService(
+            hid_transport=hid,
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=_FakeExternalProcessRunner(),
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=enumerator,
+            options=options,
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert exc_info.value.failed_state == FirmwareUpdateState.PREPARING_DEVICE
+        assert device.sent_commands == []
+        assert hid.writes == []
+
+    def test_image_without_data_records_is_refused_before_any_device_io(
+        self,
+    ) -> None:
+        # Audit finding: with the real protocol, an EOF-only image passed the
+        # byte-count check; the service erased flash and reported COMPLETE.
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=hid,
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=_FakeExternalProcessRunner(),
+            bootloader_protocol=Pic32BootloaderProtocol(),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        fd, hex_path = tempfile.mkstemp(suffix=".hex")
+        with os.fdopen(fd, "w") as handle:
+            handle.write(":00000001FF\n")
+        try:
+            with pytest.raises(ValueError, match="no data records"):
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert device.sent_commands == []
+        assert hid.writes == []
 
     def test_rejects_empty_hex_file_path(self) -> None:
         service = _build_pic32_service(
@@ -1022,7 +1145,7 @@ class TestStateMachine:
         info = HidDeviceInfo(0x04D8, 0x003C, "path-1", "SN-1", "Bootloader")
         service = _build_pic32_service(
             hid,
-            _FakeHidEnumerator([[info]]),
+            _FakeHidEnumerator([[], [info]]),
             _FakeBootloaderProtocol([bytes([0xA1])]),
         )
 
@@ -1052,7 +1175,7 @@ class TestStateMachine:
         info = HidDeviceInfo(0x04D8, 0x003C, "path-1", "SN-1", "Bootloader")
         service = _build_pic32_service(
             hid,
-            _FakeHidEnumerator([[info], [info]]),
+            _FakeHidEnumerator([[], [info], [], [info]]),
             _FakeBootloaderProtocol([bytes([0xA1])]),
         )
 

@@ -42,11 +42,13 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    FrozenSet,
     Iterable,
     List,
     Optional,
     Protocol,
     Sequence,
+    Tuple,
     runtime_checkable,
 )
 
@@ -300,6 +302,7 @@ class DefaultFirmwareUpdateService:
         self._last_reported_percent = 0.0
         self._bootloader_poll_attempts = 0
         self._last_bootloader_enumeration_error: Optional[BaseException] = None
+        self._preexisting_bootloaders: FrozenSet[Tuple[Any, Any]] = frozenset()
         self._closed = False
 
     # -- public API ------------------------------------------------------
@@ -447,6 +450,11 @@ class DefaultFirmwareUpdateService:
                     device.stop_streaming()
                 from daqifi._internal import scpi_commands
 
+                # Taken before FORceBoot so the wait below can tell this
+                # device's bootloader from one that was already enumerated.
+                self._preexisting_bootloaders = (
+                    self._snapshot_bootloader_devices(deadline)
+                )
                 device.send(scpi_commands.force_bootloader())
                 self._sleep_with_cancel(
                     self._options.post_force_boot_delay, deadline
@@ -1077,15 +1085,52 @@ class DefaultFirmwareUpdateService:
             lines = handle.read().splitlines()
         return list(self._bootloader_protocol.parse_hex_file(lines))
 
+    def _bootloader_enumerator(self) -> "HidDeviceEnumerator":
+        from daqifi._internal.hid_enumerator import HidLibraryDeviceEnumerator
+
+        if self._hid_device_enumerator is None:
+            self._hid_device_enumerator = HidLibraryDeviceEnumerator()
+        return self._hid_device_enumerator
+
+    @staticmethod
+    def _bootloader_identity(device: "HidDeviceInfo") -> Tuple[Any, Any]:
+        return (
+            getattr(device, "device_path", None),
+            getattr(device, "serial_number", None),
+        )
+
+    def _snapshot_bootloader_devices(
+        self, deadline: _Cancellation
+    ) -> FrozenSet[Tuple[Any, Any]]:
+        """Identities of the bootloaders enumerated before FORceBoot.
+
+        Retries transient enumeration errors until the deadline, then
+        raises: without the snapshot, a board that was already sitting in
+        its bootloader is indistinguishable from the one being updated.
+        Nothing has been sent to the device yet, so failing here is safe.
+        """
+        enumerator = self._bootloader_enumerator()
+        while True:
+            deadline.check()
+            try:
+                devices = enumerator.enumerate(
+                    self._options.bootloader_vendor_id,
+                    self._options.bootloader_product_id,
+                )
+                return frozenset(self._bootloader_identity(d) for d in devices)
+            except Exception as exc:
+                self._last_bootloader_enumeration_error = exc
+                self._logger.debug(
+                    "HID enumeration failed before FORceBoot; will retry "
+                    "until timeout: %s",
+                    exc,
+                )
+                self._sleep_with_cancel(self._options.poll_interval, deadline)
+
     def _wait_for_bootloader_device(
         self, deadline: _Cancellation
     ) -> "HidDeviceInfo":
-        from daqifi._internal.hid_enumerator import HidLibraryDeviceEnumerator
-
-        enumerator = self._hid_device_enumerator
-        if enumerator is None:
-            enumerator = HidLibraryDeviceEnumerator()
-            self._hid_device_enumerator = enumerator
+        enumerator = self._bootloader_enumerator()
 
         while True:
             deadline.check()
@@ -1115,11 +1160,19 @@ class DefaultFirmwareUpdateService:
                 self._sleep_with_cancel(self._options.poll_interval, deadline)
                 continue
 
-            devices_list = list(devices)
+            # Only a bootloader that appeared after FORceBoot can be the
+            # device being updated. One that was already enumerated belongs
+            # to another board, and taking it when it happens to be the only
+            # candidate (ours still re-enumerating) would erase that board.
+            devices_list = [
+                d
+                for d in devices
+                if self._bootloader_identity(d) not in self._preexisting_bootloaders
+            ]
             if len(devices_list) == 1:
                 return devices_list[0]
             if len(devices_list) > 1:
-                # Multiple bootloader-mode units enumerated on the same
+                # Multiple bootloader-mode units appeared on the same
                 # workstation — refuse to pick one implicitly. The
                 # caller should narrow the field (e.g. detach all but
                 # the target unit via usbipd, or extend this Service to
@@ -1517,6 +1570,12 @@ class DefaultFirmwareUpdateService:
             f"PID=0x{self._options.bootloader_product_id:04X} after "
             f"{self._bootloader_poll_attempts} poll attempt(s)."
         )
+        if self._preexisting_bootloaders:
+            details += (
+                f" Ignored {len(self._preexisting_bootloaders)} bootloader "
+                "device(s) already enumerated before FORceBoot (another "
+                "board); detach it to update this one."
+            )
 
         if self._last_bootloader_enumeration_error is None:
             return f"{message} {details}"

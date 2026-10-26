@@ -19,6 +19,19 @@ aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - Package homepage URL pointed at a repository that does not exist.
+- PIC32 firmware update could erase a different board: a bootloader that was
+  already enumerated before `SYSTem:FORceBoot` is no longer accepted as the
+  device being updated (#161).
+- PIC32 firmware update erased flash for an image with no data records
+  (EOF-only, or all data in the protected range); such images are now
+  refused before any device I/O (#161).
+- Intel HEX records whose byte count disagrees with their length, and data
+  records that run into the protected range, are refused instead of
+  accepted (#161).
+- HEX data records whose escaped program frame exceeds one 64-byte HID
+  report are split into 16-byte records instead of failing after erase (#161).
+- Bootloader replies are now checked for framing, CRC, EOT and the command
+  they answer; truncated or mismatched replies are no longer accepted (#161).
 
 ## [0.1.0]
 
