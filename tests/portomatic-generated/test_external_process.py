@@ -1,6 +1,7 @@
 """Tests for `daqifi.firmware.external_process`."""
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -637,5 +638,76 @@ def test_detached_worker_does_not_keep_readers_alive_after_a_timeout():
             )
         )
         assert result.timed_out
+    time.sleep(0.5)
+    assert [t for t in th.enumerate() if t not in before] == []
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX descriptors")
+def test_pipes_on_high_descriptors_are_read():
+    # Audit finding on #166 (round 11): select() rejects descriptors >= 1024,
+    # both readers died and the run reported success with no output.
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 1200:
+        pytest.skip("descriptor limit too low")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 1200), hard))
+    held = []
+    try:
+        while not held or held[-1] < 1100:
+            held.append(os.open(os.devnull, os.O_RDONLY))
+        result = SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable,
+                arguments=["-c", "print('Programming device failed')"],
+                timeout_seconds=10,
+            )
+        )
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert result.standard_output_lines == ("Programming device failed",)
+
+
+def test_a_reader_that_fails_fails_the_run(monkeypatch):
+    from daqifi.firmware import external_process
+
+    def _broken(stream, delivering):
+        raise ValueError("reader exploded")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(external_process, "_iter_lines", _broken)
+    with pytest.raises(OSError, match="result is unknown") as info:
+        SubprocessRunner().run(
+            ExternalProcessRequest(file_name=sys.executable, arguments=["-c", "print(1)"], timeout_seconds=10)
+        )
+    assert isinstance(info.value.__cause__, ValueError)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX non-blocking stdin")
+def test_blocked_stdin_response_does_not_outlive_a_timeout():
+    # Audit finding on #166 (round 11): the response write blocked on a pipe
+    # an escaped descendant held but never read, leaking the reader thread.
+    import threading as th
+    import time
+
+    script = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],"
+        " start_new_session=True)\n"
+        "print('prompt', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    before = set(th.enumerate())
+    result = SubprocessRunner().run(
+        ExternalProcessRequest(
+            file_name=sys.executable,
+            arguments=["-c", script],
+            timeout_seconds=0.3,
+            standard_input_response_factory=lambda line: "x" * 1_000_000,
+        )
+    )
+    assert result.timed_out
     time.sleep(0.5)
     assert [t for t in th.enumerate() if t not in before] == []

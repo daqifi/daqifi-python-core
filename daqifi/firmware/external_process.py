@@ -15,7 +15,7 @@ from __future__ import annotations
 import codecs
 import os
 import re
-import select
+import selectors
 import shlex
 import signal
 import subprocess
@@ -308,6 +308,7 @@ class SubprocessRunner:
         delivering.set()
         threads: List[threading.Thread] = []
         readers: List[Tuple[threading.Thread, Any]] = []
+        reader_failures: List[BaseException] = []
         timeout = request.timeout_seconds
         deadline = None if timeout is None else start + timeout
         exit_code: Optional[int] = None
@@ -342,12 +343,12 @@ class SubprocessRunner:
 
             stdout_thread = threading.Thread(
                 target=_pump_stream,
-                args=(proc.stdout, stdout_lines, request.on_standard_output_line, request.standard_input_response_factory, proc.stdin, delivering),
+                args=(proc.stdout, stdout_lines, request.on_standard_output_line, request.standard_input_response_factory, proc.stdin, delivering, reader_failures),
                 daemon=True,
             )
             stderr_thread = threading.Thread(
                 target=_pump_stream,
-                args=(proc.stderr, stderr_lines, request.on_standard_error_line, None, None, delivering),
+                args=(proc.stderr, stderr_lines, request.on_standard_error_line, None, None, delivering, reader_failures),
                 daemon=True,
             )
             readers = [(stdout_thread, proc.stdout), (stderr_thread, proc.stderr)]
@@ -421,6 +422,12 @@ class SubprocessRunner:
             if job is not None:
                 job.close()
 
+        if reader_failures:
+            raise OSError(
+                f"Reading the output of {request.file_name!r} failed; its "
+                "result is unknown."
+            ) from reader_failures[0]
+
         duration = time.monotonic() - start
 
         return ExternalProcessResult(
@@ -439,7 +446,8 @@ def _iter_lines(stream, delivering: threading.Event):
     """Lines of `stream` (universal newlines), ending early once the run has
     returned (`delivering` cleared).
 
-    On POSIX the pipe is polled with select() so the reader can stop even
+    On POSIX the pipe is polled (selectors: epoll/kqueue/poll, which unlike
+    select() have no 1024-descriptor ceiling) so the reader can stop even
     while a descendant that left the process group keeps the write end open;
     a plain blocking read would park the thread, and its pipe, for as long
     as that descendant lives, once per timed-out run. On Windows such a
@@ -454,27 +462,28 @@ def _iter_lines(stream, delivering: threading.Event):
         errors=stream.errors or "strict"
     )
     pending = ""
-    while delivering.is_set():
-        ready, _, _ = select.select([fd], [], [], 0.1)
-        if not ready:
-            continue
-        chunk = os.read(fd, 65536)
-        if not chunk:
-            pending += decoder.decode(b"", final=True)
-            if pending:
-                yield pending
-            return
-        pending += decoder.decode(chunk)
-        # A trailing "\r" may be the first half of "\r\n"; hold it back.
-        hold = pending.endswith("\r")
-        if hold:
-            pending = pending[:-1]
-        parts = _LINE_BREAK.split(pending)
-        pending = parts.pop()
-        for part in parts:
-            yield part + "\n"
-        if hold:
-            pending += "\r"
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        while delivering.is_set():
+            if not selector.select(0.1):
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                pending += decoder.decode(b"", final=True)
+                if pending:
+                    yield pending
+                return
+            pending += decoder.decode(chunk)
+            # A trailing "\r" may be the first half of "\r\n"; hold it back.
+            hold = pending.endswith("\r")
+            if hold:
+                pending = pending[:-1]
+            parts = _LINE_BREAK.split(pending)
+            pending = parts.pop()
+            for part in parts:
+                yield part + "\n"
+            if hold:
+                pending += "\r"
 
 
 def _pump_stream(
@@ -484,6 +493,7 @@ def _pump_stream(
     response_factory: Optional[Callable[[str], Optional[str]]],
     stdin,
     delivering: threading.Event,
+    failures: List[BaseException],
 ) -> None:
     """Read `stream` line-by-line, capture into `sink`, and fire callbacks.
 
@@ -509,12 +519,44 @@ def _pump_stream(
                 response = response_factory(line)
                 if response is not None:
                     try:
-                        stdin.write(response + "\n")
-                        stdin.flush()
+                        _write_response(stdin, response + "\n", delivering)
                     except Exception:
                         pass
+    except BaseException as exc:
+        # Reported to run(), which fails the run: a reader that died has not
+        # seen the output, and the output decides whether a flash succeeded.
+        failures.append(exc)
     finally:
         try:
             stream.close()
         except Exception:
             pass
+
+
+def _write_response(stdin, text: str, delivering: threading.Event) -> None:
+    """Write a stdin response without blocking past the end of the run.
+
+    A descendant that holds stdin but never reads it fills the pipe; a
+    blocking write would then park this reader thread (and its pipes) for
+    that descendant's lifetime. On POSIX the write is non-blocking and
+    abandoned once the run has returned. On Windows such a descendant is in
+    the job and killed with it, which breaks the pipe.
+    """
+    if _IS_WINDOWS:
+        stdin.write(text)
+        stdin.flush()
+        return
+    stdin.flush()
+    data = text.encode(stdin.encoding or "utf-8", stdin.errors or "strict")
+    fd = stdin.fileno()
+    os.set_blocking(fd, False)
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_WRITE)
+        while data and delivering.is_set():
+            if not selector.select(0.1):
+                continue
+            try:
+                written = os.write(fd, data)
+            except BlockingIOError:
+                continue
+            data = data[written:]

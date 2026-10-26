@@ -1005,6 +1005,18 @@ class DefaultFirmwareUpdateService:
             # below (WSL translates that for the Windows process), and Linux
             # paths in its arguments are translated: WSL hands arguments to
             # Windows programs as-is.
+            if os.name != "nt" and _path_for_windows_tool(
+                os.path.dirname(tool_path)
+            ).startswith("\\\\"):
+                # WSL hands a Linux-filesystem directory to Windows as a UNC
+                # path, which cmd.exe refuses as a working directory, so the
+                # script could not be found once the device is already in
+                # update mode.
+                raise FileNotFoundError(
+                    f"WiFi flash tool {tool_path!r} is on the Linux filesystem; "
+                    "cmd.exe cannot run it from there under WSL. Put the WiFi "
+                    "firmware bundle on a Windows drive (e.g. under /mnt/c/)."
+                )
             executable_arguments = _cmd_exe_arguments(
                 os.path.basename(tool_path),
                 template,
@@ -2044,11 +2056,26 @@ def _cmd_exe_arguments(
         ).replace("{firmwarePath}", _quote_windows_argument(firmware_path))
         command = f"{_quote_windows_argument(script)} {tool_arguments}".strip()
         return f'/d /s /c "{command}"'
+    # WSL quotes only arguments containing whitespace, and caret escapes
+    # would arrive literally inside the ones it does quote, so a cmd.exe
+    # metacharacter can't be passed safely: "&" in a path would run what
+    # follows it as a command. Refuse those values instead.
+    for name, value in (("port", port), ("firmware path", firmware_path)):
+        unsafe = sorted(set(value) & _CMD_METACHARACTERS)
+        if unsafe:
+            raise ValueError(
+                f"The WiFi flash {name} {value!r} contains {''.join(unsafe)!r}, "
+                "which cmd.exe would interpret when run from WSL. Use a path "
+                "or port name without cmd.exe special characters."
+            )
     tokens = [
         token.replace("{port}", port).replace("{firmwarePath}", firmware_path)
         for token in shlex.split(template)
     ]
     return ["/c", script] + tokens
+
+
+_CMD_METACHARACTERS = frozenset('&|<>^%!"')
 
 
 def _quote_windows_argument(value: str) -> str:

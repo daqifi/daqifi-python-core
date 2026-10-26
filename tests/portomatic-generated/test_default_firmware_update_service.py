@@ -38,6 +38,16 @@ from daqifi._internal.comm import HidDeviceInfo
 pytestmark = pytest.mark.portomatic_generated
 
 
+@pytest.fixture(autouse=True)
+def _pin_not_wsl(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Under WSL the service translates paths for cmd.exe and refuses bundles
+    # on the Linux filesystem, which is where these tests' temp directories
+    # live. Pinned so every host takes the same branch; the WSL tests opt in.
+    import daqifi.firmware.update_service as update_service
+
+    monkeypatch.setattr(update_service, "_running_under_wsl", lambda: False)
+
+
 # ---- Fakes ---------------------------------------------------------------
 
 
@@ -1400,6 +1410,65 @@ class TestUpdateWifiModule:
             native_windows=True,
         )
         assert arguments == r'/d /s /c ""winc_flash_tool.cmd" /p "A&B" /i "C:\fw dir""'
+
+    @pytest.mark.parametrize("bad", [r"C:\fw&calc.exe&rem", r"C:\fw|x", r"C:\%PATH%", "PORT^1"])
+    def test_cmd_metacharacters_are_refused_under_wsl(self, bad) -> None:
+        # Audit finding on #166 (round 11): WSL leaves an argument without
+        # whitespace unquoted, so "&" in a path ran what followed as a command.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        with pytest.raises(ValueError, match="cmd.exe"):
+            _cmd_exe_arguments(
+                "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}",
+                bad if bad.startswith("PORT") else "PORT1",
+                bad if not bad.startswith("PORT") else r"C:\fw",
+                native_windows=False,
+            )
+
+    def test_program_files_x86_is_allowed_under_wsl(self) -> None:
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        assert _cmd_exe_arguments(
+            "t.cmd", "/i {firmwarePath}", "P", r"C:\Program Files (x86)\fw",
+            native_windows=False,
+        )[-1] == r"C:\Program Files (x86)\fw"
+
+    def test_bundle_on_the_linux_filesystem_is_refused_under_wsl_before_update_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding on #166 (round 11): cmd.exe rejects the UNC working
+        # directory WSL gives a Linux-filesystem bundle, so the script was
+        # not found after the device had entered update mode.
+        import daqifi.firmware.update_service as update_service
+
+        if os.name == "nt":
+            pytest.skip("WSL-only path")
+        monkeypatch.setattr(
+            update_service,
+            "_path_for_windows_tool",
+            lambda path: "\\\\wsl.localhost\\Ubuntu" + path.replace("/", "\\"),
+        )
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        assert "Windows drive" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []
+        assert runner.last_request is None
 
     def test_cmd_exe_arguments_under_wsl_are_separate_and_unquoted(self) -> None:
         # Verified under real WSL interop: quotes inside an argument reach
