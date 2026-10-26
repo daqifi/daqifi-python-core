@@ -369,8 +369,13 @@ class SubprocessRunner:
                 exit_code = proc.wait()
         except BaseException:
             # KeyboardInterrupt and friends: the child is in its own
-            # session/group and won't see the terminal's signal.
+            # session/group and won't see the terminal's signal. Reap it
+            # too, or a caller holding on to the exception keeps a zombie.
             _kill_process_tree(proc, job)
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
             raise
         finally:
             stdout_thread.join(timeout=2.0)

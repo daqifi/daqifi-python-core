@@ -410,3 +410,35 @@ class TestWindowsTreeKill:
         with pytest.raises(type(error)):
             SubprocessRunner().run(ExternalProcessRequest(file_name="flash.exe"))
         assert closed == [True]
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX zombies")
+def test_child_is_reaped_when_the_wait_is_interrupted(monkeypatch):
+    # Audit finding on #166 (round 6): on KeyboardInterrupt the child was
+    # killed but never waited for, so it stayed a zombie for as long as the
+    # caller kept the exception.
+    import subprocess as sp
+
+    from daqifi.firmware import external_process
+
+    started = []
+    real_popen = sp.Popen
+
+    class _InterruptedPopen(real_popen):
+        def wait(self, timeout=None):
+            if not started:
+                started.append(self)
+                raise KeyboardInterrupt
+            return super().wait(timeout)
+
+    monkeypatch.setattr(external_process.subprocess, "Popen", _InterruptedPopen)
+    with pytest.raises(KeyboardInterrupt) as kept:
+        SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable,
+                arguments=["-c", "import time; time.sleep(60)"],
+                timeout_seconds=30,
+            )
+        )
+    assert kept.value is not None
+    assert started[0].returncode is not None  # reaped
