@@ -580,3 +580,36 @@ class TestSetupInsideCleanup:
         except KeyboardInterrupt:
             pass
         assert spawned[0].returncode is not None
+
+    def test_interrupt_just_after_a_reader_starts_does_not_block_cleanup(self, monkeypatch):
+        # Audit finding on #166 (round 9): the reader had started but was not
+        # yet recorded, so cleanup closed its pipe itself and blocked behind
+        # it while an escaped descendant held the write end.
+        import threading as th
+        import time
+
+        real_start = th.Thread.start
+        starts = []
+
+        def _start_then_interrupt(self):
+            real_start(self)
+            starts.append(self)
+            if len(starts) == 1:
+                time.sleep(1.0)  # let the launcher hand the pipe to its descendant
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(th.Thread, "start", _start_then_interrupt)
+        script = (
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(8)'],"
+            " start_new_session=True)\n"
+            "time.sleep(60)\n"
+        )
+        began = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            SubprocessRunner().run(
+                ExternalProcessRequest(
+                    file_name=sys.executable, arguments=["-c", script], timeout_seconds=0.2
+                )
+            )
+        assert time.monotonic() - began < 5.0

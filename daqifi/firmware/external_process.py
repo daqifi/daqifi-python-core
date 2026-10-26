@@ -304,7 +304,7 @@ class SubprocessRunner:
         delivering = threading.Event()
         delivering.set()
         threads: List[threading.Thread] = []
-        started_streams: List[Any] = []
+        readers: List[Tuple[threading.Thread, Any]] = []
         timeout = request.timeout_seconds
         deadline = None if timeout is None else start + timeout
         exit_code: Optional[int] = None
@@ -347,10 +347,10 @@ class SubprocessRunner:
                 args=(proc.stderr, stderr_lines, request.on_standard_error_line, None, None, delivering),
                 daemon=True,
             )
-            for thread, stream in ((stdout_thread, proc.stdout), (stderr_thread, proc.stderr)):
+            readers = [(stdout_thread, proc.stdout), (stderr_thread, proc.stderr)]
+            for thread, _ in readers:
                 thread.start()
                 threads.append(thread)
-                started_streams.append(stream)
 
             try:
                 exit_code = proc.wait(timeout=timeout)
@@ -382,13 +382,14 @@ class SubprocessRunner:
                     pass
             raise
         finally:
-            for thread in threads:
-                thread.join(timeout=2.0)
+            for thread, _ in readers:
+                if thread.ident is not None:
+                    thread.join(timeout=2.0)
             # Whatever a surviving reader sees from here on belongs to a run
             # that has already returned: it is discarded, not appended to
             # the result or handed to the caller's callbacks.
             delivering.clear()
-            stdout_alive = bool(threads) and threads[0].is_alive()
+            stdout_alive = bool(readers) and readers[0][0].is_alive()
             # The pump threads close their own streams at EOF. One still
             # alive is blocked on a pipe a descendant outside the process
             # group holds; closing that stream from here would block behind
@@ -403,8 +404,13 @@ class SubprocessRunner:
                     except OSError:
                         pass
                 # A pipe whose reader never started has nobody to close it.
+                # Judged by the thread itself (ident is set by start()), not
+                # by bookkeeping an interrupt could cut short: closing a pipe
+                # that a live reader is blocked on would block here too.
+                reader_of = {id(stream): thread for thread, stream in readers}
                 for stream in (proc.stdout, proc.stderr):
-                    if stream is not None and stream not in started_streams:
+                    thread = reader_of.get(id(stream))
+                    if stream is not None and (thread is None or thread.ident is None):
                         try:
                             stream.close()
                         except OSError:

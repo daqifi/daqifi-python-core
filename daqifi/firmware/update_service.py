@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import re
 import shutil
 import threading
@@ -2009,10 +2010,11 @@ def _quote_argument(value: str) -> str:
         # Always-quote on Windows to neutralise cmd.exe metacharacters.
         return '"' + value.replace('"', '""') + '"'
 
-    if any(ch in value for ch in (" ", "\t", '"')):
-        escaped = value.replace('"', r'\"')
-        return f'"{escaped}"'
-    return value
+    # POSIX: the arguments are split by shlex (SubprocessRunner), so quote
+    # for shlex. Quoting only whitespace and double quotes left a path such
+    # as /tmp/O'Brien/fw unbalanced, and the split raised "No closing
+    # quotation" after the device had entered WiFi-update mode.
+    return shlex.quote(value)
 
 
 def _try_parse_wifi_tool_percent(line: str) -> Optional[int]:

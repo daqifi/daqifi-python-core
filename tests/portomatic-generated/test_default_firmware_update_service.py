@@ -1274,6 +1274,17 @@ class TestUpdateWifiModule:
         assert _anchor_to_cwd(dotted) == dotted
         assert os.path.realpath(_anchor_to_cwd(dotted)) == str(tmp_path / "releases" / "bundle")
 
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX shlex quoting")
+    @pytest.mark.parametrize("value", ["/tmp/O'Brien/fw", "/tmp/a b/fw", '/tmp/q"x/fw', "plain"])
+    def test_quoted_arguments_survive_the_runners_split(self, value) -> None:
+        # Audit finding on #166 (round 9): an apostrophe in an anchored path
+        # was left unquoted and the shlex split raised "No closing quotation".
+        import shlex
+
+        from daqifi.firmware.update_service import _quote_argument
+
+        assert shlex.split(f"--bundle {_quote_argument(value)} /w") == ["--bundle", value, "/w"]
+
     def test_relative_firmware_path_is_made_absolute(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
