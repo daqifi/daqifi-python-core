@@ -483,11 +483,15 @@ def wire_capture(serial_transport: SerialStreamTransport, request):
             fh.close()
         except Exception:
             pass
+        # No `return` in this finally: it would swallow an exception
+        # already propagating from the test (CPython 3.14 warns).
         try:
             size = out_path.stat().st_size
         except Exception:
-            return
-        if size == 0:
+            size = None
+        if size is None:
+            pass
+        elif size == 0:
             # Don't litter the captures dir with empty files.
             try:
                 out_path.unlink()
