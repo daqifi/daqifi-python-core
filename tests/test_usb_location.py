@@ -89,3 +89,22 @@ def test_libusb_backend_path_on_usbip_is_unknown(tmp_path):
     os.makedirs(os.path.join(root, "bus", "usb", "devices"))
     os.symlink(port_dir, os.path.join(root, "bus", "usb", "devices", "1-1"))
     assert hid_device_location("1-1:1.0", root) is None
+
+
+def test_legacy_libusb_bus_address_path_maps_to_its_port(tmp_path):
+    # Audit finding (round 7): older hidapi's libusb backend reports
+    # "<bus>:<addr>:<iface>" in hex, which the positive-match rule rejected.
+    root = str(tmp_path)
+    for port, devnum in (("1-2", 5), ("1-4", 17)):
+        port_dir = os.path.join(root, "devices", "pci0000:00", "usb1", port)
+        os.makedirs(port_dir)
+        with open(os.path.join(port_dir, "busnum"), "w") as f:
+            f.write("1\n")
+        with open(os.path.join(port_dir, "devnum"), "w") as f:
+            f.write(f"{devnum}\n")
+        os.makedirs(os.path.join(root, "bus", "usb", "devices"), exist_ok=True)
+        os.symlink(port_dir, os.path.join(root, "bus", "usb", "devices", port))
+
+    assert hid_device_location("0001:0005:00", root) == "1-2"
+    assert hid_device_location("0001:0011:00", root) == "1-4"
+    assert hid_device_location("0001:0063:00", root) is None
