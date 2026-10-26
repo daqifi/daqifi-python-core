@@ -782,6 +782,51 @@ class TestUpdateFirmwareFailureModes:
         assert service.current_state == FirmwareUpdateState.COMPLETE
         assert hid.connected_path == "/dev/hidraw0"
 
+    def test_node_handed_to_another_board_before_open_is_refused_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding (round 4): ours was selected at /dev/hidraw0 on port
+        # 1-2, vanished before the open, and board B on 1-4 took the node.
+        # Opening by path alone would have erased B.
+        import daqifi.firmware.update_service as update_service
+
+        swapped = {"done": False}
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        monkeypatch.setattr(
+            update_service,
+            "hid_device_location",
+            lambda path: "1-4" if swapped["done"] else "1-2",
+        )
+
+        class _SwappingHid(_FakeHidTransport):
+            def connect(self, vendor_id, product_id, serial_number=None, device_path=None):
+                swapped["done"] = True
+                super().connect(vendor_id, product_id, serial_number, device_path)
+
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _SwappingHid()
+        node = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw0", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [node]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert exc_info.value.failed_state == FirmwareUpdateState.CONNECTING
+        assert "between selection and open" in str(exc_info.value.__cause__)
+        assert hid._connect_calls == 1
+        assert hid.writes == []
+        assert not hid.is_connected
+
     def test_new_bootloader_on_the_devices_usb_port_is_selected(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

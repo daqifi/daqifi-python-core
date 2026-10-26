@@ -22,6 +22,7 @@ from typing import Optional, Union
 __all__ = ["canonical_port_name", "hid_device_location", "serial_port_location"]
 
 _USB_DEVICE_DIR = re.compile(r"^\d+-\d+(\.\d+)*$")
+_LIBUSB_PATH = re.compile(r"^(\d+-\d+(?:\.\d+)*):\d+\.\d+$")
 _SYSFS_ROOT = "/sys"
 
 
@@ -65,9 +66,23 @@ def serial_port_location(
 def hid_device_location(
     device_path: Union[str, bytes, None], sysfs_root: str = _SYSFS_ROOT
 ) -> Optional[str]:
-    """``"<bus>-<ports>"`` for a hidapi hidraw path such as ``/dev/hidraw0``, else None."""
+    """``"<bus>-<ports>"`` for a Linux hidapi path, else None.
+
+    hidapi's hidraw backend reports ``/dev/hidrawN``; its libusb backend
+    reports ``<bus>-<ports>:<config>.<interface>``, which names the port
+    directly but still has to be checked against usbip in sysfs.
+    """
     if isinstance(device_path, bytes):
         device_path = device_path.decode("utf-8", "replace")
-    if not device_path or not device_path.startswith("/dev/hidraw"):
+    if not device_path or not sys.platform.startswith("linux"):
         return None
-    return _usb_port_path("hidraw", os.path.basename(device_path), sysfs_root)
+    if device_path.startswith("/dev/hidraw"):
+        return _usb_port_path("hidraw", os.path.basename(device_path), sysfs_root)
+    match = _LIBUSB_PATH.match(device_path)
+    if match is None:
+        return None
+    port = match.group(1)
+    resolved = os.path.realpath(os.path.join(sysfs_root, "bus", "usb", "devices", port))
+    if not os.path.exists(resolved) or "vhci_hcd" in resolved:
+        return None
+    return port

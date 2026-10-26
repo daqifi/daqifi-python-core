@@ -325,6 +325,7 @@ class DefaultFirmwareUpdateService:
         self._target_port_name: Optional[str] = None
         self._target_port_seen_gone = False
         self._target_usb_location: Optional[str] = None
+        self._selected_bootloader_location: Optional[str] = None
         self._rejected_by_location = 0
         self._closed = False
 
@@ -487,6 +488,7 @@ class DefaultFirmwareUpdateService:
                     self._target_port_name
                 )
                 self._target_port_seen_gone = False
+                self._selected_bootloader_location = None
                 device.send(scpi_commands.force_bootloader())
                 self._sleep_with_cancel(
                     self._options.post_force_boot_delay, deadline
@@ -1250,6 +1252,9 @@ class DefaultFirmwareUpdateService:
                 self._rejected_by_location = len(on_other_ports)
                 devices_list = [d for d in devices_list if d not in on_other_ports]
             if len(devices_list) == 1:
+                self._selected_bootloader_location = hid_device_location(
+                    getattr(devices_list[0], "device_path", None)
+                )
                 return devices_list[0]
             if len(devices_list) > 1:
                 # Multiple bootloader-mode units appeared on the same
@@ -1287,6 +1292,21 @@ class DefaultFirmwareUpdateService:
                 bootloader_device.serial_number,
                 device_path=bootloader_device.device_path,
             )
+            # Checked after the open, against the device now behind the
+            # handle: if ours vanished between selection and open, Linux can
+            # hand its hidraw node to another board, and the path alone would
+            # open that board. A node swapped after the open leaves this
+            # handle on the departed device, where I/O fails.
+            expected = self._selected_bootloader_location
+            if expected is not None:
+                actual = hid_device_location(bootloader_device.device_path)
+                if actual != expected:
+                    self._hid_transport.disconnect()
+                    raise _WrongBootloaderError(
+                        f"{bootloader_device.device_path!r} moved from USB port "
+                        f"{expected} to {actual} between selection and open; "
+                        "refusing to program a different board."
+                    )
 
         self._execute_with_retry(
             "connect HID bootloader",
@@ -1868,6 +1888,10 @@ def _ensure_device_connected(device: Any) -> None:
         raise RuntimeError(
             "Device must be connected before starting firmware update."
         )
+
+
+class _WrongBootloaderError(Exception):
+    """The opened bootloader is not the one selected. Never retried."""
 
 
 def _is_transient_hid_error(exc: BaseException) -> bool:

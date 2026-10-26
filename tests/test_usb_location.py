@@ -68,3 +68,24 @@ def test_by_id_alias_resolves_to_its_tty(tmp_path):
     alias.symlink_to(node)
 
     assert serial_port_location(str(alias), root) == "1-2"
+
+
+def test_libusb_backend_path_names_its_port(tmp_path):
+    # Audit finding (round 4): hidapi's libusb backend reports
+    # "<bus>-<ports>:<cfg>.<iface>", which the positive-match rule rejected.
+    root = str(tmp_path)
+    port_dir = os.path.join(root, "devices", "pci0000:00", "usb1", "1-2")
+    os.makedirs(port_dir)
+    os.makedirs(os.path.join(root, "bus", "usb", "devices"))
+    os.symlink(port_dir, os.path.join(root, "bus", "usb", "devices", "1-2"))
+    assert hid_device_location("1-2:1.0", root) == "1-2"
+    assert hid_device_location(b"1-2:1.0", root) == "1-2"
+
+
+def test_libusb_backend_path_on_usbip_is_unknown(tmp_path):
+    root = str(tmp_path)
+    port_dir = os.path.join(root, "devices", "platform", "vhci_hcd.0", "usb1", "1-1")
+    os.makedirs(port_dir)
+    os.makedirs(os.path.join(root, "bus", "usb", "devices"))
+    os.symlink(port_dir, os.path.join(root, "bus", "usb", "devices", "1-1"))
+    assert hid_device_location("1-1:1.0", root) is None
