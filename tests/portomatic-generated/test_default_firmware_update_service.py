@@ -89,8 +89,10 @@ class _FakeHidTransport:
         vendor_id: int,
         product_id: int,
         serial_number: Optional[str] = None,
+        device_path=None,
     ) -> None:
         self._connect_calls += 1
+        self.connected_path = device_path
         self.is_connected = True
 
     def write(self, data: bytes) -> None:
@@ -648,9 +650,9 @@ class TestUpdateFirmwareFailureModes:
         connected_serials: List[Optional[str]] = []
 
         class _RecordingHid(_FakeHidTransport):
-            def connect(self, vendor_id, product_id, serial_number=None):
+            def connect(self, vendor_id, product_id, serial_number=None, device_path=None):
                 connected_serials.append(serial_number)
-                super().connect(vendor_id, product_id, serial_number)
+                super().connect(vendor_id, product_id, serial_number, device_path)
 
         hid = _RecordingHid()
         for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
@@ -671,6 +673,79 @@ class TestUpdateFirmwareFailureModes:
 
         assert service.current_state == FirmwareUpdateState.COMPLETE
         assert connected_serials == ["SN-A"]
+        assert hid.connected_path == "path-a"
+
+    def test_new_bootloader_on_another_usb_port_is_never_selected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Another board entering its bootloader during the wait is "new" to
+        # the snapshot; where USB locations are known it is refused.
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(
+            update_service,
+            "hid_device_location",
+            lambda path: {"path-b": "1-4", "path-a": "1-2"}.get(path),
+        )
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        other = HidDeviceInfo(0x04D8, 0x003C, "path-b", None, "Bootloader")
+        options = _fast_options()
+        options.waiting_for_bootloader_timeout = 0.2
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[]] + [[other]] * 200),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+            options,
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert "on a USB port other than this device's (1-2)" in str(
+            exc_info.value.__cause__
+        )
+        assert hid._connect_calls == 0
+        assert hid.writes == []
+
+    def test_new_bootloader_on_the_devices_usb_port_is_selected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(
+            update_service,
+            "hid_device_location",
+            lambda path: {"path-b": "1-4", "path-a": "1-2"}.get(path),
+        )
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        other = HidDeviceInfo(0x04D8, 0x003C, "path-b", None, "Bootloader")
+        ours = HidDeviceInfo(0x04D8, 0x003C, "path-a", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [other, ours]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+        assert hid.connected_path == "path-a"
 
     def test_when_enumeration_fails_before_force_boot_nothing_is_sent(
         self,

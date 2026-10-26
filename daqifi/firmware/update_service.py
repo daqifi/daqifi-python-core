@@ -52,6 +52,7 @@ from typing import (
     runtime_checkable,
 )
 
+from daqifi._internal.usb_location import hid_device_location, serial_port_location
 from daqifi.enums import FirmwareUpdateState
 from daqifi.firmware.bootloader import (
     BootloaderProtocol,
@@ -303,6 +304,8 @@ class DefaultFirmwareUpdateService:
         self._bootloader_poll_attempts = 0
         self._last_bootloader_enumeration_error: Optional[BaseException] = None
         self._preexisting_bootloaders: FrozenSet[Tuple[Any, Any]] = frozenset()
+        self._target_usb_location: Optional[str] = None
+        self._rejected_by_location = 0
         self._closed = False
 
     # -- public API ------------------------------------------------------
@@ -451,9 +454,14 @@ class DefaultFirmwareUpdateService:
                 from daqifi._internal import scpi_commands
 
                 # Taken before FORceBoot so the wait below can tell this
-                # device's bootloader from one that was already enumerated.
+                # device's bootloader from one that was already enumerated,
+                # and (where the OS exposes it) bind it to this device's
+                # physical USB port.
                 self._preexisting_bootloaders = (
                     self._snapshot_bootloader_devices(deadline)
+                )
+                self._target_usb_location = serial_port_location(
+                    getattr(getattr(device, "transport", None), "port_name", None)
                 )
                 device.send(scpi_commands.force_bootloader())
                 self._sleep_with_cancel(
@@ -1169,6 +1177,20 @@ class DefaultFirmwareUpdateService:
                 for d in devices
                 if self._bootloader_identity(d) not in self._preexisting_bootloaders
             ]
+            # A new bootloader can still be another board that entered its
+            # bootloader during the wait. Where both locations are known
+            # (Linux, not usbip) the bootloader must sit on the USB port this
+            # device's serial port used. Where either is unknown, only the
+            # snapshot above protects the selection.
+            if self._target_usb_location is not None:
+                on_other_ports = [
+                    d
+                    for d in devices_list
+                    if hid_device_location(getattr(d, "device_path", None))
+                    not in (None, self._target_usb_location)
+                ]
+                self._rejected_by_location = len(on_other_ports)
+                devices_list = [d for d in devices_list if d not in on_other_ports]
             if len(devices_list) == 1:
                 return devices_list[0]
             if len(devices_list) > 1:
@@ -1198,10 +1220,14 @@ class DefaultFirmwareUpdateService:
         def _attempt() -> None:
             if self._hid_transport.is_connected:
                 self._hid_transport.disconnect()
+            # By path: bootloaders report no serial string, so connecting by
+            # VID/PID/serial alone could open a different board than the
+            # one selected above.
             self._hid_transport.connect(
                 self._options.bootloader_vendor_id,
                 self._options.bootloader_product_id,
                 bootloader_device.serial_number,
+                device_path=bootloader_device.device_path,
             )
 
         self._execute_with_retry(
@@ -1570,6 +1596,12 @@ class DefaultFirmwareUpdateService:
             f"PID=0x{self._options.bootloader_product_id:04X} after "
             f"{self._bootloader_poll_attempts} poll attempt(s)."
         )
+        if self._rejected_by_location:
+            details += (
+                f" Ignored {self._rejected_by_location} bootloader device(s) "
+                "on a USB port other than this device's "
+                f"({self._target_usb_location})."
+            )
         if self._preexisting_bootloaders:
             details += (
                 f" Ignored {len(self._preexisting_bootloaders)} bootloader "

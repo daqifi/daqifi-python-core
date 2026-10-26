@@ -319,6 +319,32 @@ class TestHidLibraryTransport:
         assert t.is_connected
         assert t.serial_number == "SN-ABC"
 
+    def test_connect_by_path_opens_that_device_among_identical_ones(self):
+        # Audit finding on #165: two bootloaders with the same VID/PID and no
+        # serial string; connecting by VID/PID/serial opened the first by
+        # path order, not the one the updater had selected.
+        first = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw0", None, "Bootloader")
+        second = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw1", None, "Bootloader")
+        opened = []
+
+        class _RecordingPlatform(_FakeHidPlatform):
+            def open_device(self, info):
+                opened.append(info.device_path)
+                return super().open_device(info)
+
+        t = HidLibraryTransport(platform=_RecordingPlatform([first, second]))
+        t.connect(0x04D8, 0x003C, None, device_path="/dev/hidraw1")
+        assert opened == ["/dev/hidraw1"]
+        assert t.device_path == "/dev/hidraw1"
+
+    def test_connect_by_path_that_is_gone_raises(self):
+        t = HidLibraryTransport(platform=_FakeHidPlatform([_DAQIFI_INFO]))
+        with pytest.raises(IOError, match="Path='/dev/hidraw9'"):
+            t.connect(0x04D8, 0x000A, device_path="/dev/hidraw9")
+
+    def test_serial_transport_exposes_its_port_name(self):
+        assert SerialStreamTransport("/dev/ttyACM7").port_name == "/dev/ttyACM7"
+
     def test_invalid_vendor_id_rejected(self):
         t = HidLibraryTransport(platform=_FakeHidPlatform([]))
         with pytest.raises(ValueError, match="vendor_id"):

@@ -325,6 +325,30 @@ opts.validate()                                # raises ValueError on misconfig
 # for a full wiring example.
 ```
 
+### Several boards on one host: which bootloader gets flashed
+
+A PIC32 update reboots the board into its HID bootloader
+(`SYSTem:FORceBoot`) and then has to find that bootloader among every
+HID device with the same VID/PID. Bootloaders report no serial number,
+so the service narrows the choice in two steps:
+
+1. **Snapshot.** Bootloaders already enumerated before `FORceBoot`
+   belong to other boards and are never selected.
+2. **USB port.** On Linux, a bootloader must appear on the same physical
+   USB port as the board's serial port, read from sysfs. A board that
+   enters its bootloader on another port during the wait is ignored.
+
+The service then opens the selected bootloader by device path, and
+refuses if more than one candidate remains.
+
+**Residual risk.** Step 2 is unavailable on Windows, on macOS, and under
+WSL2 + usbipd, where the virtual port can change when the board
+re-attaches. There, a *different* board entering its bootloader in the
+seconds between `FORceBoot` and enumeration is indistinguishable from
+the target. On a shared multi-board host, take the bench lock (or
+otherwise make sure no other board is being flashed) for the duration
+of an update.
+
 ### Multi-NIC WiFi Discovery
 
 On hosts with multiple network interfaces (Ethernet + WiFi, VPN
