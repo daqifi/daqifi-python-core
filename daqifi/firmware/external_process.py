@@ -297,39 +297,35 @@ class SubprocessRunner:
             group_kwargs: Dict[str, Any] = {"creationflags": flags}
         else:
             group_kwargs = {"start_new_session": True}
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=request.working_directory,
-                stdin=subprocess.PIPE if request.standard_input_response_factory else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                **group_kwargs,
-            )
-        except FileNotFoundError as exc:
-            if job is not None:
-                job.close()
-            raise FileNotFoundError(
-                f"External process executable not found: {request.file_name!r}"
-            ) from exc
-        except BaseException:
-            # The job handle is a raw kernel handle with no finalizer.
-            if job is not None:
-                job.close()
-            raise
-        # Everything after Popen sits inside one cleanup scope: an interrupt
-        # or a failed thread start in between would otherwise leave the
-        # child running (it is in its own session and won't see a terminal
-        # signal) with its pipes open.
+        # Set up before the child exists, so nothing between Popen returning
+        # and the cleanup scope can be interrupted. Popen itself is inside
+        # that scope; the only window left is the single bytecode that binds
+        # its result to `proc`, which Python code cannot close.
         delivering = threading.Event()
         delivering.set()
         threads: List[threading.Thread] = []
+        started_streams: List[Any] = []
         timeout = request.timeout_seconds
         deadline = None if timeout is None else start + timeout
         exit_code: Optional[int] = None
+        proc: Optional[subprocess.Popen] = None
         try:
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=request.working_directory,
+                    stdin=subprocess.PIPE if request.standard_input_response_factory else None,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                    **group_kwargs,
+                )
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(
+                    f"External process executable not found: {request.file_name!r}"
+                ) from exc
+
             if job is not None and job.available:
                 job.assign(proc)
                 # Resumed whether or not the assignment took: a child left
@@ -351,9 +347,10 @@ class SubprocessRunner:
                 args=(proc.stderr, stderr_lines, request.on_standard_error_line, None, None, delivering),
                 daemon=True,
             )
-            for thread in (stdout_thread, stderr_thread):
+            for thread, stream in ((stdout_thread, proc.stdout), (stderr_thread, proc.stderr)):
                 thread.start()
                 threads.append(thread)
+                started_streams.append(stream)
 
             try:
                 exit_code = proc.wait(timeout=timeout)
@@ -377,11 +374,12 @@ class SubprocessRunner:
         except BaseException:
             # Interrupted, or setup failed: kill the tree and reap the child,
             # or a caller holding on to the exception keeps a zombie.
-            _kill_process_tree(proc, job)
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                pass
+            if proc is not None:
+                _kill_process_tree(proc, job)
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
             raise
         finally:
             for thread in threads:
@@ -398,14 +396,15 @@ class SubprocessRunner:
             # to the daemon thread. stdin is written by the stdout pump, so
             # it is only safe to close once that thread is done (or never
             # started).
-            if proc.stdin is not None and not stdout_alive:
-                try:
-                    proc.stdin.close()
-                except OSError:
-                    pass
-            if not threads:
+            if proc is not None:
+                if proc.stdin is not None and not stdout_alive:
+                    try:
+                        proc.stdin.close()
+                    except OSError:
+                        pass
+                # A pipe whose reader never started has nobody to close it.
                 for stream in (proc.stdout, proc.stderr):
-                    if stream is not None:
+                    if stream is not None and stream not in started_streams:
                         try:
                             stream.close()
                         except OSError:

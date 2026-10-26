@@ -505,3 +505,78 @@ class TestSetupInsideCleanup:
         time.sleep(1.0)
         assert len(seen) == count_at_return
         assert lines_at_return == len(result.standard_output_lines)
+
+    def test_pipe_of_a_reader_that_never_started_is_closed(self, monkeypatch):
+        # Audit finding on #166 (round 8): stdout's reader started, stderr's
+        # didn't, and the stderr pipe was left open.
+        import subprocess as sp
+        import threading as th
+
+        from daqifi.firmware import external_process
+
+        spawned = []
+        real_popen = sp.Popen
+        real_start = th.Thread.start
+        starts = []
+
+        class _RecordingPopen(real_popen):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                spawned.append(self)
+
+        def _second_start_fails(self):
+            starts.append(self)
+            if len(starts) == 2:
+                raise RuntimeError("can't start new thread")
+            return real_start(self)
+
+        monkeypatch.setattr(external_process.subprocess, "Popen", _RecordingPopen)
+        monkeypatch.setattr(th.Thread, "start", _second_start_fails)
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            SubprocessRunner().run(
+                ExternalProcessRequest(
+                    file_name=sys.executable,
+                    arguments=["-c", "import time; time.sleep(60)"],
+                    timeout_seconds=30,
+                )
+            )
+        assert spawned[0].returncode is not None
+        assert spawned[0].stderr.closed
+
+    def test_interrupt_right_after_the_child_starts_kills_and_reaps_it(self, monkeypatch):
+        # Audit finding on #166 (round 8): setup between Popen returning and
+        # the cleanup scope (creating the reader Event) could be interrupted,
+        # leaving the child running. Any setup that still runs after the
+        # child exists raises here; either way the child must end up reaped.
+        import subprocess as sp
+        import threading as th
+
+        from daqifi.firmware import external_process
+
+        spawned = []
+        real_popen = sp.Popen
+        real_event = th.Event
+
+        class _RecordingPopen(real_popen):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                spawned.append(self)
+
+        def _event_after_spawn_interrupts(*a, **k):
+            if spawned:
+                raise KeyboardInterrupt
+            return real_event(*a, **k)
+
+        monkeypatch.setattr(external_process.subprocess, "Popen", _RecordingPopen)
+        monkeypatch.setattr(external_process.threading, "Event", _event_after_spawn_interrupts)
+        try:
+            SubprocessRunner().run(
+                ExternalProcessRequest(
+                    file_name=sys.executable,
+                    arguments=["-c", "import time; time.sleep(60)"],
+                    timeout_seconds=1,
+                )
+            )
+        except KeyboardInterrupt:
+            pass
+        assert spawned[0].returncode is not None
