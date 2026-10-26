@@ -47,6 +47,19 @@ def test_unknown_metadata_never_matches(actual):
     assert not serial_number_matches(str(SN), actual)
 
 
+def test_an_all_digit_value_names_one_board_not_two():
+    # Audit finding on the first revision: "1234567890123456" read both ways
+    # authorized two different boards. All digits now means decimal only.
+    digits = "1234567890123456"
+    decimal_board = digits
+    hex_board = str(int(digits, 16))  # another valid uint64 serial
+    assert serial_number_matches(digits, decimal_board)
+    assert not serial_number_matches(digits, hex_board)
+    # The hex reading has to be asked for explicitly.
+    assert serial_number_matches("0x" + digits, hex_board)
+    assert not serial_number_matches("0x" + digits, decimal_board)
+
+
 def test_metadata_is_read_as_decimal_only():
     # The hex reading of the decimal string is some other number; the
     # metadata side must not be reinterpreted, or a hex expected value could

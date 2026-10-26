@@ -95,7 +95,7 @@ def wait_for_device_back(
             "DAQIFI_EXPECTED_SERIAL_NUMBER not set; can't safely "
             "reconnect after device disruption — refusing to bind to "
             "an arbitrary unit. Set this to your unit's SN, decimal "
-            "or the hex *IDN? reports (see .claude/hardware-rig.md)."
+            "or hex (0x-prefixed if all digits; see CONTRIBUTING.md)."
         )
 
     def _quick_port_has_daqifi(port: str) -> bool:

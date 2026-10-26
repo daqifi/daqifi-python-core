@@ -94,6 +94,10 @@ plain `!=` against a hex value refuses the correct board, so the suite's gates
 use `serial_number_matches`, which accepts either form. Their refusal messages
 show the connected board's serial in both forms.
 
+Each value names exactly one board. A `0x` prefix or any letter a-f means hex,
+and all digits means decimal. A hex serial that happens to be all digits needs
+the `0x` prefix; without it, the gate reads it as decimal and refuses.
+
 ### Running the hardware suite
 
 ```bash
@@ -102,7 +106,7 @@ DAQIFI_DEVICE_PORT=/dev/ttyACM<N> DAQIFI_DEVICE_REQUIRED=1 \
     python -m pytest tests/integration/hardware/ -v
 ```
 
-`DAQIFI_EXPECTED_SERIAL_NUMBER` may be decimal or hex.
+`DAQIFI_EXPECTED_SERIAL_NUMBER` may be decimal or hex (all-digit hex needs `0x`).
 
 Wi-Fi round-trip tests read `DAQIFI_TEST_WIFI_SSID` and
 `DAQIFI_TEST_WIFI_PASSWORD` from the environment; a gitignored `.env` works.

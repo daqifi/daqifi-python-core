@@ -11,28 +11,37 @@ value as strings, so setting the variable to the serial ``*IDN?`` printed
 refused the *correct* board and named its decimal form as if it were another
 unit. A safety check that rejects the right board invites someone to disable
 it, so the gates accept either spelling and their messages show both.
+
+⛔ Each expected value has exactly ONE reading, never two. ``0x`` or any of
+a-f means hex; all digits means decimal. An earlier revision read an
+all-digit value both ways, which let one setting authorize two different
+boards (``1234567890123456`` is also the hex spelling of another valid
+serial). A hex serial that happens to be all digits must carry ``0x``;
+without it the gate refuses, and its message shows both spellings so the fix
+is obvious. Refusing the right board is recoverable; resetting the wrong one
+is not.
 """
 
 from __future__ import annotations
 
 import string
-from typing import Any, Optional, Set
+from typing import Any, Optional
 
 _HEX_DIGITS = frozenset(string.hexdigits)
 
 
-def _readings(text: str) -> Set[int]:
-    """Every integer *text* can denote as a serial: decimal and/or hex."""
+def _expected_value(text: str) -> Optional[int]:
+    """The one serial *text* names: hex if ``0x``-prefixed or it contains
+    a-f, decimal if all digits, otherwise none."""
     s = text.strip().lower()
     if s.startswith("0x"):
         s = s[2:]
-        return {int(s, 16)} if s and set(s) <= _HEX_DIGITS else set()
-    readings = set()
+        return int(s, 16) if s and set(s) <= _HEX_DIGITS else None
     if s.isdigit():
-        readings.add(int(s, 10))
+        return int(s, 10)
     if s and set(s) <= _HEX_DIGITS:
-        readings.add(int(s, 16))
-    return readings
+        return int(s, 16)
+    return None
 
 
 def _metadata_value(actual: Any) -> Optional[int]:
@@ -45,15 +54,10 @@ def _metadata_value(actual: Any) -> Optional[int]:
 
 
 def serial_number_matches(expected: str, actual: Any) -> bool:
-    """True iff *expected* (decimal or hex) names the board whose
-    ``metadata.serial_number`` is *actual*.
-
-    An all-digit *expected* is read both ways. A false accept would need
-    its other reading to equal this exact board's serial, which leaves the
-    gate's job intact: telling apart the handful of boards on one bench.
-    """
+    """True iff *expected* (decimal or hex, see the module docstring for
+    which) names the board whose ``metadata.serial_number`` is *actual*."""
     value = _metadata_value(actual)
-    return value is not None and value in _readings(expected)
+    return value is not None and value == _expected_value(expected)
 
 
 def describe_serial_number(actual: Any) -> str:
