@@ -337,26 +337,42 @@ class TestWindowsTreeKill:
         assert job.terminated
         assert calls == []
 
-    def test_live_launcher_gets_taskkill_before_the_job_is_terminated(self, monkeypatch):
-        # Audit finding on #166 (round 3): a worker spawned before the job
-        # assignment sits outside the job; terminating the job first killed
-        # the launcher, cutting the parent link taskkill /T follows.
+    def test_job_then_taskkill_for_a_live_launcher(self, monkeypatch):
         from daqifi.firmware import external_process
 
         order = []
         monkeypatch.setattr(external_process, "_IS_WINDOWS", True)
         monkeypatch.setattr(
-            external_process.subprocess, "run", lambda *a, **k: order.append(("taskkill", a[0]))
+            external_process.subprocess, "run", lambda *a, **k: order.append("taskkill")
         )
 
         class _OrderedJob(self._Job):
             def terminate(inner):
-                order.append(("job", None))
+                order.append("job")
                 return super().terminate()
 
         proc = self._Proc(exited=False)
         external_process._kill_process_tree(proc, _OrderedJob(ok=True))
-        assert order == [("taskkill", ["taskkill", "/F", "/T", "/PID", "4242"]), ("job", None)]
+        assert order == ["job", "taskkill"]
+        assert proc.killed
+
+    @pytest.mark.parametrize(
+        "error", [PermissionError("blocked by policy"), FileNotFoundError("taskkill")]
+    )
+    def test_a_failing_taskkill_skips_nothing_else(self, monkeypatch, error):
+        # Audit finding on #166 (round 4): taskkill raising jumped past the
+        # job termination, leaving workers alive.
+        from daqifi.firmware import external_process
+
+        def _raise(*a, **k):
+            raise error
+
+        monkeypatch.setattr(external_process, "_IS_WINDOWS", True)
+        monkeypatch.setattr(external_process.subprocess, "run", _raise)
+        proc = self._Proc(exited=False)
+        job = self._Job(ok=True)
+        external_process._kill_process_tree(proc, job)
+        assert job.terminated
         assert proc.killed
 
     def test_taskkill_alone_without_a_job(self, monkeypatch):

@@ -113,16 +113,12 @@ class _WindowsJob:
     exits, ``taskkill /T`` can no longer find the workers it left behind, and
     a flash worker would keep driving the device after a timeout. A job
     contains every descendant regardless of who exited, and terminating it
-    kills them all. It is terminated only on timeout or interruption, like
-    the POSIX process group; closing it leaves a finished run's descendants
-    alone. Any failure leaves the job unset and the runner falls back to
-    ``taskkill /T``.
-
-    The child is assigned right after it starts, so anything it spawns in
-    that first instant is outside the job. ``taskkill /T`` runs first on
-    timeout and covers those while the child is still alive; a worker
-    spawned in that instant by a launcher that has also exited before the
-    timeout is beyond both (``subprocess`` cannot start a child suspended).
+    kills them all. The child is created suspended and assigned before any
+    of its code runs, so nothing it spawns can start outside the job. The
+    job is terminated only on timeout or interruption, like the POSIX
+    process group; closing it leaves a finished run's descendants alone.
+    If a job can't be made, the child starts normally and the runner falls
+    back to ``taskkill /T``.
     """
 
     def __init__(self) -> None:
@@ -146,14 +142,20 @@ class _WindowsJob:
         except Exception:
             self._handle = None
 
-    def assign(self, proc: "subprocess.Popen") -> None:
+    @property
+    def available(self) -> bool:
+        return self._handle is not None
+
+    def assign(self, proc: "subprocess.Popen") -> bool:
         if self._handle is None:
-            return
+            return False
         process_handle = getattr(proc, "_handle", None)
         if process_handle is None or not self._kernel32.AssignProcessToJobObject(
             self._handle, int(process_handle)
         ):
             self.close()
+            return False
+        return True
 
     def terminate(self) -> bool:
         if self._handle is None:
@@ -166,6 +168,62 @@ class _WindowsJob:
             self._handle = None
 
 
+_CREATE_SUSPENDED = 0x00000004
+
+
+def _resume_process(pid: int) -> bool:
+    """Resume every thread of a process created with CREATE_SUSPENDED.
+
+    ``subprocess`` closes the primary thread handle it gets back from
+    CreateProcess, so the threads are found through a Toolhelp snapshot.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class _ThreadEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry)]
+    kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry)]
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    TH32CS_SNAPTHREAD = 0x00000004
+    THREAD_SUSPEND_RESUME = 0x0002
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        return False
+    resumed = 0
+    try:
+        entry = _ThreadEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        more = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.th32OwnerProcessID == pid:
+                thread = kernel32.OpenThread(THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                if thread:
+                    if kernel32.ResumeThread(thread) != 0xFFFFFFFF:
+                        resumed += 1
+                    kernel32.CloseHandle(thread)
+            more = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return resumed > 0
+
+
 def _kill_process_tree(
     proc: "subprocess.Popen", job: "Optional[_WindowsJob]" = None
 ) -> None:
@@ -176,29 +234,33 @@ def _kill_process_tree(
     holding the output pipes, so a flash tool's real worker outlived the
     timeout and the reader threads never saw EOF.
     """
-    try:
-        if _IS_WINDOWS:
-            # Both, in this order. taskkill /T follows parent links, so while
-            # the launcher lives it reaches workers spawned before the job
-            # assignment; the job then reaches workers whose launcher has
-            # already exited, which taskkill /T cannot. Terminating the job
-            # first would kill the launcher and cut the links taskkill needs.
-            if proc.poll() is None:
+    # Each step is attempted on its own: one that fails (taskkill blocked by
+    # policy, say) must not skip the others.
+    if _IS_WINDOWS:
+        # The job holds the child from its first instruction (it is started
+        # suspended and assigned before it runs), so it reaches every
+        # descendant, including workers whose launcher has already exited.
+        # taskkill /T covers the fallback where no job could be made.
+        if job is not None:
+            job.terminate()
+        if proc.poll() is None:
+            try:
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                     capture_output=True,
                     timeout=10,
                     check=False,
                 )
-            if job is not None:
-                job.terminate()
-        else:
+            except (OSError, subprocess.SubprocessError):
+                pass
+    else:
+        try:
             # start_new_session made the child a group leader, so its pid
             # is the group id; descendants stay in the group unless they
             # deliberately leave it.
             os.killpg(proc.pid, signal.SIGKILL)
-    except (OSError, subprocess.SubprocessError):
-        pass
+        except OSError:
+            pass
     try:
         proc.kill()
     except OSError:
@@ -226,11 +288,15 @@ class SubprocessRunner:
         start = time.monotonic()
         timed_out = False
 
-        group_kwargs: Dict[str, Any] = (
-            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
-            if _IS_WINDOWS
-            else {"start_new_session": True}
-        )
+        job = _WindowsJob() if _IS_WINDOWS else None
+        if _IS_WINDOWS:
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+            if job is not None and job.available:
+                # Held until it is in the job; see _WindowsJob.
+                flags |= _CREATE_SUSPENDED
+            group_kwargs: Dict[str, Any] = {"creationflags": flags}
+        else:
+            group_kwargs = {"start_new_session": True}
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -246,9 +312,18 @@ class SubprocessRunner:
             raise FileNotFoundError(
                 f"External process executable not found: {request.file_name!r}"
             ) from exc
-        job = _WindowsJob() if _IS_WINDOWS else None
-        if job is not None:
+        if job is not None and job.available:
             job.assign(proc)
+            # Resumed whether or not the assignment took: a child left
+            # suspended would only ever time out. Without the job, the kill
+            # path falls back to taskkill /T.
+            if not _resume_process(proc.pid):
+                _kill_process_tree(proc, job)
+                job.close()
+                raise OSError(
+                    f"Could not resume {request.file_name!r} after starting it "
+                    "suspended; it was terminated."
+                )
 
         stdout_thread = threading.Thread(
             target=_pump_stream,
