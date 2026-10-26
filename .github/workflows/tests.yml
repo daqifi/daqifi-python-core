@@ -7,8 +7,9 @@
 #
 # ⛔ PULL REQUESTS ARE TESTED AT THEIR MERGE REF. On a pull_request event,
 # actions/checkout checks out refs/pull/<N>/merge: the PR branch merged into the
-# CURRENT base. A branch-head run goes stale the moment main moves; the merge
-# ref is what would actually land.
+# base as it stood when the run started. A branch-head run never saw main's
+# newer commits at all. The merge ref is only as fresh as the run, though: if
+# main moves afterwards, re-run the check before merging.
 #
 # ⭐ THE MATRIX IS THE POINT, not a nicety. setup.py advertises
 # python_requires=">=3.9", and a Requires-Python claim is the one kind of claim
