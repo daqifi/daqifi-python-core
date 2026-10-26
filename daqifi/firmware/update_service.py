@@ -1217,6 +1217,14 @@ class DefaultFirmwareUpdateService:
         if not present:
             self._target_port_seen_gone = True
         elif self._target_port_seen_gone:
+            if (
+                self._target_usb_location is not None
+                and serial_port_location(self._target_port_name)
+                != self._target_usb_location
+            ):
+                # Linux reuses ttyACM names: the node that came back belongs
+                # to a board on another port, not to ours.
+                return
             raise RuntimeError(
                 f"{self._target_port_name} came back as the application after "
                 "FORceBoot instead of entering the bootloader; this device "

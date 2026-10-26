@@ -972,6 +972,44 @@ class TestUpdateFirmwareFailureModes:
         assert "came back as the application" in str(exc_info.value.__cause__)
         assert hid.writes == []
 
+    def test_reused_tty_name_on_another_usb_port_is_not_a_return(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding (round 6): another CDC board took the freed
+        # /dev/ttyACM0 while ours sat in its bootloader on port 1-2.
+        import daqifi.firmware.update_service as update_service
+
+        listings = iter([frozenset()])
+        monkeypatch.setattr(
+            update_service,
+            "_list_serial_port_names",
+            lambda: next(listings, frozenset({"/dev/ttyACM0"})),
+        )
+        tty_locations = iter(["1-2"])  # at FORceBoot: ours; afterwards: B's
+        monkeypatch.setattr(
+            update_service, "serial_port_location", lambda port: next(tty_locations, "1-4")
+        )
+        monkeypatch.setattr(update_service, "hid_device_location", lambda path: "1-2")
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        ours = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw0", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [], [ours]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+
     def test_port_still_listed_before_the_reset_lands_is_not_a_return(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
