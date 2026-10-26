@@ -34,7 +34,11 @@ concurrency:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    # ⛔ NOT ubuntu-latest. That label moved to Ubuntu 26.04, and
+    # actions/python-versions publishes no 3.9 build for 26.04 (3.9 is EOL), so
+    # the 3.9 leg failed at setup-python -- measured on this PR's first run.
+    # 24.04 carries 3.9 through 3.13. Revisit when the 3.9 floor goes.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
