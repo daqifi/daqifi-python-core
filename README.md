@@ -339,7 +339,11 @@ so the service narrows the choice in two steps:
    enters its bootloader on another port during the wait is ignored.
 
 The service then opens the selected bootloader by device path, and
-refuses if more than one candidate remains.
+refuses if more than one candidate remains. If the board's own serial
+port drops after `FORceBoot` and then comes back, the board rebooted
+into its application, which is what a board built without the bootloader
+does. The update stops there rather than take whatever bootloader
+appears next.
 
 **Residual risk.** Step 2 is unavailable on Windows, on macOS, and under
 WSL2 + usbipd, where the virtual port can change when the board

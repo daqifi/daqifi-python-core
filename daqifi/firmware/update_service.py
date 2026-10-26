@@ -257,6 +257,20 @@ class _CancelledError(Exception):
     """Internal sentinel for cooperative cancellation."""
 
 
+def _list_serial_port_names() -> Optional[FrozenSet[str]]:
+    """Serial ports currently present, or None when they can't be listed.
+
+    None, not an empty set: a failed listing is no evidence that a port
+    disappeared.
+    """
+    try:
+        from serial.tools import list_ports
+
+        return frozenset(port.device for port in list_ports.comports())
+    except Exception:
+        return None
+
+
 class DefaultFirmwareUpdateService:
     """Default firmware update orchestrator (PIC32 + WiFi).
 
@@ -304,6 +318,8 @@ class DefaultFirmwareUpdateService:
         self._bootloader_poll_attempts = 0
         self._last_bootloader_enumeration_error: Optional[BaseException] = None
         self._preexisting_bootloaders: FrozenSet[Tuple[Any, Any]] = frozenset()
+        self._target_port_name: Optional[str] = None
+        self._target_port_seen_gone = False
         self._target_usb_location: Optional[str] = None
         self._rejected_by_location = 0
         self._closed = False
@@ -460,9 +476,13 @@ class DefaultFirmwareUpdateService:
                 self._preexisting_bootloaders = (
                     self._snapshot_bootloader_devices(deadline)
                 )
-                self._target_usb_location = serial_port_location(
-                    getattr(getattr(device, "transport", None), "port_name", None)
+                self._target_port_name = getattr(
+                    getattr(device, "transport", None), "port_name", None
                 )
+                self._target_usb_location = serial_port_location(
+                    self._target_port_name
+                )
+                self._target_port_seen_gone = False
                 device.send(scpi_commands.force_bootloader())
                 self._sleep_with_cancel(
                     self._options.post_force_boot_delay, deadline
@@ -1135,6 +1155,32 @@ class DefaultFirmwareUpdateService:
                 )
                 self._sleep_with_cancel(self._options.poll_interval, deadline)
 
+    def _raise_if_target_returned_to_application(self) -> None:
+        """Stop when the device rebooted back into its application.
+
+        A board without the bootloader treats FORceBoot as a plain reboot:
+        its serial port drops and comes back, and no bootloader of its own
+        ever appears. Any "new" bootloader seen after that belongs to some
+        other board, so the wait must not go on picking one. Requires the
+        port to have been seen gone first, so the window before the reset
+        lands is not mistaken for a return.
+        """
+        if not self._target_port_name:
+            return
+        ports = _list_serial_port_names()
+        if ports is None:
+            return
+        present = self._target_port_name in ports
+        if not present:
+            self._target_port_seen_gone = True
+        elif self._target_port_seen_gone:
+            raise RuntimeError(
+                f"{self._target_port_name} came back as the application after "
+                "FORceBoot instead of entering the bootloader; this device "
+                "does not appear to carry the PIC32 bootloader. Refusing to "
+                "select any other bootloader device."
+            )
+
     def _wait_for_bootloader_device(
         self, deadline: _Cancellation
     ) -> "HidDeviceInfo":
@@ -1177,6 +1223,8 @@ class DefaultFirmwareUpdateService:
                 for d in devices
                 if self._bootloader_identity(d) not in self._preexisting_bootloaders
             ]
+            self._raise_if_target_returned_to_application()
+
             # A new bootloader can still be another board that entered its
             # bootloader during the wait. Where both locations are known
             # (Linux, not usbip) the bootloader must sit on the USB port this
