@@ -106,7 +106,67 @@ def _build_command(request: "ExternalProcessRequest") -> Union[str, List[str]]:
     return [request.file_name] + _split_arguments(request.arguments)
 
 
-def _kill_process_tree(proc: "subprocess.Popen") -> None:
+class _WindowsJob:
+    """A Job Object that contains the child and everything it starts.
+
+    Windows has no process groups that outlive their leader: once a launcher
+    exits, ``taskkill /T`` can no longer find the workers it left behind, and
+    a flash worker would keep driving the device after a timeout. A job
+    contains every descendant regardless of who exited, and terminating it
+    kills them all. It is terminated only on timeout or interruption, like
+    the POSIX process group; closing it leaves a finished run's descendants
+    alone. Any failure leaves the job unset and the runner falls back to
+    ``taskkill /T``.
+
+    The child is assigned right after it starts, so anything it spawns in
+    that first instant escapes the job; ``taskkill /T`` still covers those
+    while the child is alive.
+    """
+
+    def __init__(self) -> None:
+        self._handle = None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+            kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+            handle = kernel32.CreateJobObjectW(None, None)
+            if not handle:
+                return
+            self._kernel32 = kernel32
+            self._handle = handle
+        except Exception:
+            self._handle = None
+
+    def assign(self, proc: "subprocess.Popen") -> None:
+        if self._handle is None:
+            return
+        process_handle = getattr(proc, "_handle", None)
+        if process_handle is None or not self._kernel32.AssignProcessToJobObject(
+            self._handle, int(process_handle)
+        ):
+            self.close()
+
+    def terminate(self) -> bool:
+        if self._handle is None:
+            return False
+        return bool(self._kernel32.TerminateJobObject(self._handle, 1))
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+
+def _kill_process_tree(
+    proc: "subprocess.Popen", job: "Optional[_WindowsJob]" = None
+) -> None:
     """Kill the process and everything it started (upstream:
     ``Process.Kill(entireProcessTree: true)``).
 
@@ -114,16 +174,18 @@ def _kill_process_tree(proc: "subprocess.Popen") -> None:
     holding the output pipes, so a flash tool's real worker outlived the
     timeout and the reader threads never saw EOF.
     """
-    if proc.poll() is not None and _IS_WINDOWS:
-        return
     try:
         if _IS_WINDOWS:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
+            # The job reaches workers whose launcher has already exited,
+            # which taskkill /T cannot.
+            terminated = job is not None and job.terminate()
+            if not terminated and proc.poll() is None:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
         else:
             # start_new_session made the child a group leader, so its pid
             # is the group id; descendants stay in the group unless they
@@ -178,6 +240,9 @@ class SubprocessRunner:
             raise FileNotFoundError(
                 f"External process executable not found: {request.file_name!r}"
             ) from exc
+        job = _WindowsJob() if _IS_WINDOWS else None
+        if job is not None:
+            job.assign(proc)
 
         stdout_thread = threading.Thread(
             target=_pump_stream,
@@ -209,15 +274,15 @@ class SubprocessRunner:
                     )
                 if stdout_thread.is_alive() or stderr_thread.is_alive():
                     timed_out = True
-                    _kill_process_tree(proc)
+                    _kill_process_tree(proc, job)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                _kill_process_tree(proc)
+                _kill_process_tree(proc, job)
                 exit_code = proc.wait()
         except BaseException:
             # KeyboardInterrupt and friends: the child is in its own
             # session/group and won't see the terminal's signal.
-            _kill_process_tree(proc)
+            _kill_process_tree(proc, job)
             raise
         finally:
             stdout_thread.join(timeout=2.0)
@@ -233,6 +298,8 @@ class SubprocessRunner:
                     proc.stdin.close()
                 except OSError:
                     pass
+            if job is not None:
+                job.close()
 
         duration = time.monotonic() - start
 

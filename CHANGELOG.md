@@ -45,8 +45,11 @@ aims to follow [Semantic Versioning](https://semver.org/).
   relative to its own directory; paths are made absolute first (#161).
 - `SubprocessRunner` killed only the direct child on timeout, so a
   descendant holding the pipes kept `run()` blocked; the whole process
-  tree is killed now, and a surviving descendant can no longer hang
-  cleanup (#161).
+  tree is killed now (a process group on POSIX, a Job Object on Windows,
+  which also reaches workers whose launcher has already exited), and a
+  surviving descendant can no longer hang cleanup. A run is complete only
+  when its output pipes close, so a descendant's late failure output is
+  captured (#161).
 - On Windows, a string argument list reached the child with literal quote
   characters; it is now passed through as the command line verbatim (#161).
 - `FirmwareVersion` aliases (`3.0.0b1`, `3.0.0beta1`, `3.0.0-beta.1`)

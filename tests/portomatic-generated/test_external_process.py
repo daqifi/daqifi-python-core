@@ -296,3 +296,54 @@ class TestDescendantOutput:
         )
         assert result.timed_out
         assert time.monotonic() - start < 5.0
+
+
+class TestWindowsTreeKill:
+    # Audit finding on #166 (round 2): once a launcher has exited,
+    # `taskkill /T` can't reach the workers it left holding the pipes. The
+    # job object can. Verified on a real Windows interpreter; this pins the
+    # order of the kill path on any host.
+
+    class _Proc:
+        pid = 4242
+
+        def __init__(self, exited):
+            self._exited = exited
+            self.killed = False
+
+        def poll(self):
+            return 0 if self._exited else None
+
+        def kill(self):
+            self.killed = True
+
+    class _Job:
+        def __init__(self, ok):
+            self._ok = ok
+            self.terminated = False
+
+        def terminate(self):
+            self.terminated = True
+            return self._ok
+
+    def test_job_reaches_workers_after_the_launcher_exited(self, monkeypatch):
+        from daqifi.firmware import external_process
+
+        calls = []
+        monkeypatch.setattr(external_process, "_IS_WINDOWS", True)
+        monkeypatch.setattr(external_process.subprocess, "run", lambda *a, **k: calls.append(a))
+        job = self._Job(ok=True)
+        external_process._kill_process_tree(self._Proc(exited=True), job)
+        assert job.terminated
+        assert calls == []
+
+    def test_taskkill_is_the_fallback_without_a_job(self, monkeypatch):
+        from daqifi.firmware import external_process
+
+        calls = []
+        monkeypatch.setattr(external_process, "_IS_WINDOWS", True)
+        monkeypatch.setattr(external_process.subprocess, "run", lambda *a, **k: calls.append(a[0]))
+        proc = self._Proc(exited=False)
+        external_process._kill_process_tree(proc, self._Job(ok=False))
+        assert calls == [["taskkill", "/F", "/T", "/PID", "4242"]]
+        assert proc.killed
