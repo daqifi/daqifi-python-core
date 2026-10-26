@@ -827,6 +827,41 @@ class TestUpdateFirmwareFailureModes:
         assert hid.writes == []
         assert not hid.is_connected
 
+    @pytest.mark.parametrize("later", ["1-4", None])
+    def test_location_that_passed_the_filter_is_the_one_checked_after_open(
+        self, monkeypatch: pytest.MonkeyPatch, later
+    ) -> None:
+        # Audit finding (round 5): selection re-read the location after the
+        # filter. If the node changed hands in between, the new board's port
+        # (or None, which skipped the check) became the expected one.
+        import daqifi.firmware.update_service as update_service
+
+        reads = iter(["1-2"])
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        monkeypatch.setattr(
+            update_service, "hid_device_location", lambda path: next(reads, later)
+        )
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        node = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw0", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [node]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert "between selection and open" in str(exc_info.value.__cause__)
+        assert hid.writes == []
+
     def test_new_bootloader_on_the_devices_usb_port_is_selected(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

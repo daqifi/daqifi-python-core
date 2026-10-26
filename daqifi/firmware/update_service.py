@@ -1127,12 +1127,17 @@ class DefaultFirmwareUpdateService:
         return self._hid_device_enumerator
 
     @staticmethod
-    def _bootloader_identity(device: "HidDeviceInfo") -> Tuple[Any, Any, Any]:
+    def _bootloader_identity(
+        device: "HidDeviceInfo", location: Optional[str]
+    ) -> Tuple[Any, Any, Any]:
         # The USB location is part of the identity because Linux reuses
         # hidraw node names: a pre-existing board that unplugs can free
         # /dev/hidraw0 for ours, and path alone would then filter ours out.
-        path = getattr(device, "device_path", None)
-        return (path, getattr(device, "serial_number", None), hid_device_location(path))
+        return (
+            getattr(device, "device_path", None),
+            getattr(device, "serial_number", None),
+            location,
+        )
 
     def _snapshot_bootloader_devices(
         self, deadline: _Cancellation
@@ -1152,7 +1157,12 @@ class DefaultFirmwareUpdateService:
                     self._options.bootloader_vendor_id,
                     self._options.bootloader_product_id,
                 )
-                return frozenset(self._bootloader_identity(d) for d in devices)
+                return frozenset(
+                    self._bootloader_identity(
+                        d, hid_device_location(getattr(d, "device_path", None))
+                    )
+                    for d in devices
+                )
             except Exception as exc:
                 self._last_bootloader_enumeration_error = exc
                 self._logger.debug(
@@ -1223,14 +1233,23 @@ class DefaultFirmwareUpdateService:
                 self._sleep_with_cancel(self._options.poll_interval, deadline)
                 continue
 
+            # Each candidate's USB location is read once per poll and that one
+            # reading is used throughout: re-reading it later could see a
+            # different board that has since taken over the same node.
+            located = [
+                (d, hid_device_location(getattr(d, "device_path", None)))
+                for d in devices
+            ]
+
             # Only a bootloader that appeared after FORceBoot can be the
             # device being updated. One that was already enumerated belongs
             # to another board, and taking it when it happens to be the only
             # candidate (ours still re-enumerating) would erase that board.
-            devices_list = [
-                d
-                for d in devices
-                if self._bootloader_identity(d) not in self._preexisting_bootloaders
+            located = [
+                (d, location)
+                for d, location in located
+                if self._bootloader_identity(d, location)
+                not in self._preexisting_bootloaders
             ]
             self._raise_if_target_returned_to_application()
 
@@ -1243,19 +1262,17 @@ class DefaultFirmwareUpdateService:
                 # A positive match only: a candidate whose location can't be
                 # read (e.g. a board attached over usbip) is not shown to be
                 # on our port, so it is not ours to erase.
-                on_other_ports = [
-                    d
-                    for d in devices_list
-                    if hid_device_location(getattr(d, "device_path", None))
-                    != self._target_usb_location
+                on_our_port = [
+                    (d, location)
+                    for d, location in located
+                    if location == self._target_usb_location
                 ]
-                self._rejected_by_location = len(on_other_ports)
-                devices_list = [d for d in devices_list if d not in on_other_ports]
-            if len(devices_list) == 1:
-                self._selected_bootloader_location = hid_device_location(
-                    getattr(devices_list[0], "device_path", None)
-                )
-                return devices_list[0]
+                self._rejected_by_location = len(located) - len(on_our_port)
+                located = on_our_port
+            devices_list = [d for d, _ in located]
+            if len(located) == 1:
+                self._selected_bootloader_location = located[0][1]
+                return located[0][0]
             if len(devices_list) > 1:
                 # Multiple bootloader-mode units appeared on the same
                 # workstation — refuse to pick one implicitly. The
