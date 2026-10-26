@@ -709,11 +709,78 @@ class TestUpdateFirmwareFailureModes:
         finally:
             os.remove(hex_path)
 
-        assert "on a USB port other than this device's (1-2)" in str(
+        assert "not shown to be on this device's USB port (1-2)" in str(
             exc_info.value.__cause__
         )
         assert hid._connect_calls == 0
         assert hid.writes == []
+
+    def test_new_bootloader_with_unknown_location_is_not_selected_when_ours_is_known(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding (round 3): a board attached over usbip has no
+        # readable location; "unknown" was accepted as a match.
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        monkeypatch.setattr(update_service, "hid_device_location", lambda path: None)
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        usbip_board = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw2", None, "Bootloader")
+        options = _fast_options()
+        options.waiting_for_bootloader_timeout = 0.2
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[]] + [[usbip_board]] * 200),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+            options,
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException):
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert hid._connect_calls == 0
+        assert hid.writes == []
+
+    def test_reused_hidraw_node_on_our_port_is_not_mistaken_for_the_old_board(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding (round 3): board B held /dev/hidraw0 at the snapshot,
+        # then unplugged; ours re-enumerated on the freed node.
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        locations = iter(["1-4"])  # snapshot sees B's port; later polls see ours
+        monkeypatch.setattr(
+            update_service, "hid_device_location", lambda path: next(locations, "1-2")
+        )
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        node = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw0", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[node], [], [node]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+        assert hid.connected_path == "/dev/hidraw0"
 
     def test_new_bootloader_on_the_devices_usb_port_is_selected(
         self, monkeypatch: pytest.MonkeyPatch

@@ -321,7 +321,7 @@ class DefaultFirmwareUpdateService:
         self._last_reported_percent = 0.0
         self._bootloader_poll_attempts = 0
         self._last_bootloader_enumeration_error: Optional[BaseException] = None
-        self._preexisting_bootloaders: FrozenSet[Tuple[Any, Any]] = frozenset()
+        self._preexisting_bootloaders: FrozenSet[Tuple[Any, Any, Any]] = frozenset()
         self._target_port_name: Optional[str] = None
         self._target_port_seen_gone = False
         self._target_usb_location: Optional[str] = None
@@ -1125,15 +1125,16 @@ class DefaultFirmwareUpdateService:
         return self._hid_device_enumerator
 
     @staticmethod
-    def _bootloader_identity(device: "HidDeviceInfo") -> Tuple[Any, Any]:
-        return (
-            getattr(device, "device_path", None),
-            getattr(device, "serial_number", None),
-        )
+    def _bootloader_identity(device: "HidDeviceInfo") -> Tuple[Any, Any, Any]:
+        # The USB location is part of the identity because Linux reuses
+        # hidraw node names: a pre-existing board that unplugs can free
+        # /dev/hidraw0 for ours, and path alone would then filter ours out.
+        path = getattr(device, "device_path", None)
+        return (path, getattr(device, "serial_number", None), hid_device_location(path))
 
     def _snapshot_bootloader_devices(
         self, deadline: _Cancellation
-    ) -> FrozenSet[Tuple[Any, Any]]:
+    ) -> FrozenSet[Tuple[Any, Any, Any]]:
         """Identities of the bootloaders enumerated before FORceBoot.
 
         Retries transient enumeration errors until the deadline, then
@@ -1237,11 +1238,14 @@ class DefaultFirmwareUpdateService:
             # device's serial port used. Where either is unknown, only the
             # snapshot above protects the selection.
             if self._target_usb_location is not None:
+                # A positive match only: a candidate whose location can't be
+                # read (e.g. a board attached over usbip) is not shown to be
+                # on our port, so it is not ours to erase.
                 on_other_ports = [
                     d
                     for d in devices_list
                     if hid_device_location(getattr(d, "device_path", None))
-                    not in (None, self._target_usb_location)
+                    != self._target_usb_location
                 ]
                 self._rejected_by_location = len(on_other_ports)
                 devices_list = [d for d in devices_list if d not in on_other_ports]
@@ -1653,7 +1657,7 @@ class DefaultFirmwareUpdateService:
         if self._rejected_by_location:
             details += (
                 f" Ignored {self._rejected_by_location} bootloader device(s) "
-                "on a USB port other than this device's "
+                "not shown to be on this device's USB port "
                 f"({self._target_usb_location})."
             )
         if self._preexisting_bootloaders:
