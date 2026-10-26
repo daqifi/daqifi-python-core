@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -277,6 +278,38 @@ class TestServiceAsyncSurface:
             svc.invalidate_cache()
             asyncio.run(svc.get_latest_release())
         assert len(calls) == 2
+
+    def test_concurrent_misses_work_across_event_loops(self):
+        # One service, driven by two separate asyncio.run() calls, each with
+        # two callers racing a cache miss so the cache lock is contended. An
+        # asyncio.Lock binds to the loop it is first contended on (3.10+) or
+        # created on (3.9), so a lock built once in __init__ raised in the
+        # second loop -- and on 3.9 the constructor itself raised once a
+        # previous asyncio.run() had cleared the current loop.
+        asyncio.run(asyncio.sleep(0))
+        svc = GitHubFirmwareDownloadService()
+        calls = []
+
+        def slow_fetch(api_url, user_agent):
+            calls.append(api_url)
+            time.sleep(0.05)
+            return _RELEASES_FIXTURE
+
+        async def two_racing_callers():
+            return await asyncio.gather(
+                svc.get_latest_release(), svc.get_latest_release()
+            )
+
+        with mock.patch(
+            "daqifi.firmware.github_download_service._fetch_releases_from_api",
+            slow_fetch,
+        ):
+            first = asyncio.run(two_racing_callers())
+            svc.invalidate_cache()
+            second = asyncio.run(two_racing_callers())
+
+        assert len(calls) == 2  # one fetch per loop; the racer waited
+        assert all(r is not None for r in first + second)
 
     def test_download_firmware_by_tag_returns_none_for_missing_tag(self):
         svc = GitHubFirmwareDownloadService()

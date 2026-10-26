@@ -647,7 +647,76 @@ class TestUpdateFirmwareFailureModes:
 # ---- update_wifi_module --------------------------------------------------
 
 
+_FAKE_CMD_EXE = "/fake/bin/cmd.exe"
+
+
 class TestUpdateWifiModule:
+    @pytest.fixture(autouse=True)
+    def _pin_cmd_exe_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The default tool is winc_flash_tool.cmd, which the service wraps in
+        # cmd.exe found via shutil.which. The process runner here is a fake,
+        # so nothing is executed -- but without this pin the lookup reads the
+        # host PATH, and these tests passed only where cmd.exe happened to be
+        # on it (Windows, WSL with interop) and failed on a plain Linux CI
+        # runner. Pinned, every host takes the same branch.
+        real_which = shutil.which
+
+        def _which(name, *args, **kwargs):
+            if name == "cmd.exe":
+                return _FAKE_CMD_EXE
+            return real_which(name, *args, **kwargs)
+
+        monkeypatch.setattr(shutil, "which", _which)
+
+    def test_cmd_tool_is_wrapped_in_cmd_exe(self) -> None:
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        assert runner.last_request is not None
+        assert runner.last_request.file_name == _FAKE_CMD_EXE
+        assert runner.last_request.arguments[0] == "/c"
+        assert "winc_flash_tool.cmd" in runner.last_request.arguments[1]
+
+    def test_when_cmd_exe_missing_throws_file_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(shutil, "which", lambda name, *a, **k: None)
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+        assert "cmd.exe" in str(exc_info.value.__cause__)
+        assert runner.last_request is None
+
     def test_happy_path_sends_expected_commands_and_reports_progress(
         self,
     ) -> None:

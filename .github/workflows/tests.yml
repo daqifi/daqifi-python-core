@@ -1,0 +1,103 @@
+# Hardware-free test suite, on every pull request and every push to main.
+#
+# Closes the gap recorded in #156: before this workflow every PR merged with
+# zero status checks, and tests/test_dependency_declarations.py -- whose whole
+# purpose is to catch a dependency drift nobody is looking for -- only ran when
+# someone remembered to run it.
+#
+# ⛔ PULL REQUESTS ARE TESTED AT THEIR MERGE REF. On a pull_request event,
+# actions/checkout checks out refs/pull/<N>/merge: the PR branch merged into the
+# base as it stood when the run started. A branch-head run never saw main's
+# newer commits at all. The merge ref is only as fresh as the run, though: if
+# main moves afterwards, re-run the check before merging.
+#
+# ⭐ THE MATRIX IS THE POINT, not a nicety. setup.py advertises
+# python_requires=">=3.9", and a Requires-Python claim is the one kind of claim
+# a single-interpreter job structurally cannot check. Each leg does a real
+# `pip install .`, so a dependency with no candidate for that interpreter fails
+# the install step rather than shipping.
+
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    # ⛔ NOT ubuntu-latest. That label moved to Ubuntu 26.04, and
+    # actions/python-versions publishes no 3.9 build for 26.04 (3.9 is EOL), so
+    # the 3.9 leg failed at setup-python -- measured on this PR's first run.
+    # 24.04 carries 3.9 through 3.13. Revisit when the 3.9 floor goes.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # ⛔ grpcio-tools IS PINNED BECAUSE THE DRIFT TEST DEPENDS ON ITS PROTOC.
+      # tests/portomatic-generated/test_regenerate_protobuf.py regenerates the
+      # bindings and compares them to the checked-in *_pb2.py. It strips the
+      # banner lines but NOT the ValidateProtobufRuntimeVersion(6, 31, 1, ...)
+      # call, so a grpcio-tools that bundles a different protoc fails it. An
+      # unpinned install resolves to whichever release still fits protobuf<7.0
+      # (1.84.1 needs protobuf>=7.35.1, so the resolver backtracks), which is
+      # not a choice anyone made. 1.78.0 emits the 6.31.1 stamp the bindings
+      # carry and ships wheels for cp39 through cp314. When the bindings are
+      # regenerated with a newer grpcio-tools, raise this pin with them.
+      #
+      # pandas is installed so test_sample_buffer's DataFrame test runs instead
+      # of skipping.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pytest pytest-asyncio pyyaml pandas "grpcio-tools==1.78.0"
+
+      # ⚠ Both exclusions, on purpose: see the comment above the markers in
+      # pyproject.toml. The path catches hardware files that carry no marker;
+      # the marker catches hardware tests that live outside that path.
+      - name: Test
+        run: >
+          python -m pytest
+          --ignore=tests/integration/hardware
+          -m "not hardware"
+          -rs
+          --junitxml=pytest-results.xml
+
+      # ⛔ AN UNEXPECTED SKIP FAILS THE JOB. A test that skips because its
+      # dependency was not installed looks exactly like a pass in the summary
+      # line -- the drift test skips without grpcio-tools, for one. The only
+      # skips allowed here are the device smoke tests, which need a board this
+      # runner does not have.
+      - name: Check skips
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          ALLOWED = ("tests.integration.test_device_smoke",)
+          unexpected = [
+              f"{case.get('classname')}::{case.get('name')}: {skip.get('message')}"
+              for case in ET.parse("pytest-results.xml").iter("testcase")
+              for skip in case.findall("skipped")
+              if not case.get("classname", "").startswith(ALLOWED)
+          ]
+          if unexpected:
+              raise SystemExit("unexpected skips:\n  " + "\n  ".join(unexpected))
+          print("no unexpected skips")
+          PY

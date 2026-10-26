@@ -32,7 +32,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .download_service import (
     FirmwareDownloadService,
@@ -95,8 +95,13 @@ class GitHubFirmwareDownloadService(FirmwareDownloadService):
         # miss don't both fire the GitHub API request — risks
         # rate-limit pressure. The second caller awaits the first's
         # in-flight fetch and uses its result (Qodo PR 17 pass 4 #3).
-        self._firmware_cache_lock = asyncio.Lock()
-        self._wifi_cache_lock = asyncio.Lock()
+        #
+        # ⛔ Created lazily, per running loop -- see _cache_lock. An
+        # asyncio.Lock built here bound to the wrong loop: on 3.9 the
+        # constructor raised outright once an earlier asyncio.run() had
+        # cleared the current loop, and on 3.10+ the lock raised "bound to a
+        # different event loop" when contended in a second asyncio.run().
+        self._cache_locks: Dict[str, Tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
 
     # ---- public Protocol surface ------------------------------------------
 
@@ -242,14 +247,23 @@ class GitHubFirmwareDownloadService(FirmwareDownloadService):
 
     # ---- internal helpers -------------------------------------------------
 
+    def _cache_lock(self, name: str) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        entry = self._cache_locks.get(name)
+        if entry is None or entry[0] is not loop:
+            entry = (loop, asyncio.Lock())
+            self._cache_locks[name] = entry
+        return entry[1]
+
     async def _get_firmware_releases(self) -> List[dict]:
         return await self._get_releases_cached(
-            self._firmware_cache, self._firmware_api_url, self._firmware_cache_lock,
+            self._firmware_cache, self._firmware_api_url,
+            self._cache_lock("firmware"),
         )
 
     async def _get_wifi_releases(self) -> List[dict]:
         return await self._get_releases_cached(
-            self._wifi_cache, self._wifi_api_url, self._wifi_cache_lock,
+            self._wifi_cache, self._wifi_api_url, self._cache_lock("wifi"),
         )
 
     async def _get_releases_cached(
