@@ -119,8 +119,10 @@ class _WindowsJob:
     ``taskkill /T``.
 
     The child is assigned right after it starts, so anything it spawns in
-    that first instant escapes the job; ``taskkill /T`` still covers those
-    while the child is alive.
+    that first instant is outside the job. ``taskkill /T`` runs first on
+    timeout and covers those while the child is still alive; a worker
+    spawned in that instant by a launcher that has also exited before the
+    timeout is beyond both (``subprocess`` cannot start a child suspended).
     """
 
     def __init__(self) -> None:
@@ -176,16 +178,20 @@ def _kill_process_tree(
     """
     try:
         if _IS_WINDOWS:
-            # The job reaches workers whose launcher has already exited,
-            # which taskkill /T cannot.
-            terminated = job is not None and job.terminate()
-            if not terminated and proc.poll() is None:
+            # Both, in this order. taskkill /T follows parent links, so while
+            # the launcher lives it reaches workers spawned before the job
+            # assignment; the job then reaches workers whose launcher has
+            # already exited, which taskkill /T cannot. Terminating the job
+            # first would kill the launcher and cut the links taskkill needs.
+            if proc.poll() is None:
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                     capture_output=True,
                     timeout=10,
                     check=False,
                 )
+            if job is not None:
+                job.terminate()
         else:
             # start_new_session made the child a group leader, so its pid
             # is the group id; descendants stay in the group unless they
