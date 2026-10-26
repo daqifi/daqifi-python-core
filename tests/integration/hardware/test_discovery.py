@@ -11,8 +11,8 @@ Covers two distinct discovery surfaces:
 WiFi tests must filter by serial number — multiple DAQiFi units may
 exist on the LAN, and we have to identify *our* unit so a test running
 in one agent's session doesn't accidentally claim another agent's
-device. Override the expected SN with ``DAQIFI_TEST_WIFI_SN``;
-otherwise the default points at this rig's COM7 unit.
+device. The expected SN is read from the board on ``device_info``'s
+port; ``DAQIFI_TEST_WIFI_SN`` overrides it (decimal or hex).
 """
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ from daqifi.device_finders import (
     SerialDeviceFinder,
     WiFiDeviceFinder,
 )
+from daqifi._internal.serial_identity import serial_number_matches
+from daqifi.device import NyquistDevice
 from daqifi.device_finders import DeviceInfo as FinderDeviceInfo
 from daqifi.discovery import (
     BoardVariant,
@@ -39,11 +41,27 @@ from daqifi.discovery import (
 # ---- Helpers ---------------------------------------------------------------
 
 
-def _expected_wifi_sn() -> str:
-    """Serial number of the DAQiFi unit this agent's tests own."""
-    return os.environ.get(
-        "DAQIFI_TEST_WIFI_SN", "9090603604263365351"
-    )
+def _expected_wifi_sn(device_info: DiscoveryDeviceInfo) -> str:
+    """Serial number of the DAQiFi unit this agent's tests own.
+
+    Read from the board itself over USB, then disconnected before any WiFi
+    probe. This used to default to one specific board's serial, so on every
+    other bench the WiFi test skipped -- with a message blaming AP mode.
+    """
+    override = os.environ.get("DAQIFI_TEST_WIFI_SN")
+    if override:
+        return override
+    dev = NyquistDevice.connect(device_info)
+    try:
+        sn = dev.metadata.serial_number
+    finally:
+        dev.disconnect()
+    if not sn or sn == "0":
+        pytest.skip(
+            f"could not read the serial number of the board on "
+            f"{device_info.port!r}; set DAQIFI_TEST_WIFI_SN to its serial."
+        )
+    return sn
 
 
 # ---- DeviceFinder (serial-only, IDN-based) ---------------------------------
@@ -70,7 +88,7 @@ def test_device_finder_get_serial_ports_returns_list(
 def test_device_finder_discover_finds_real_device(
     device_info: DiscoveryDeviceInfo,
 ) -> None:
-    """``DeviceFinder.discover()`` must return at least our COM7 unit."""
+    """``DeviceFinder.discover()`` must return at least our unit."""
     devices = DeviceFinder.discover()
     assert isinstance(devices, list)
     assert len(devices) >= 1
@@ -258,7 +276,7 @@ def test_wifi_device_finder_filters_to_our_sn(
     ``discover()`` returns nothing even when the device is reachable on
     the LAN (#72). Set ``DAQIFI_DEVICE_LAN_IP`` to the device's IP
     address to bypass UDP and probe via TCP directly."""
-    expected_sn = _expected_wifi_sn()
+    expected_sn = _expected_wifi_sn(device_info)
     finder = WiFiDeviceFinder()
     lan_ip = os.environ.get("DAQIFI_DEVICE_LAN_IP")
     try:
@@ -274,7 +292,10 @@ def test_wifi_device_finder_filters_to_our_sn(
     finally:
         finder.close()
 
-    matches = [r for r in results if r.serial_number == expected_sn]
+    matches = [
+        r for r in results
+        if serial_number_matches(expected_sn, r.serial_number)
+    ]
     if not matches:
         wsl2_hint = ""
         try:
@@ -291,8 +312,8 @@ def test_wifi_device_finder_filters_to_our_sn(
             f"our device (SN={expected_sn}) not present in WiFi discovery; "
             f"got {len(results)} DAQiFi unit(s): "
             f"{[r.serial_number for r in results]!r}. "
-            f"Device may be in self-hosted (AP) mode rather than "
-            f"client mode.{wsl2_hint}"
+            f"If none is ours, the device may not be associated to this "
+            f"LAN (AP mode, or a different network).{wsl2_hint}"
         )
     # If we're here, our SN was found exactly once (de-dupe is the
     # finder's job).

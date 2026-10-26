@@ -41,7 +41,7 @@ script:
 | Env var                           | Purpose                                          |
 |-----------------------------------|--------------------------------------------------|
 | `DAQIFI_DEVICE_PORT`              | Serial port (e.g. `/dev/ttyACM<N>` or `COM<N>`)  |
-| `DAQIFI_EXPECTED_SERIAL_NUMBER`   | Your device's protobuf SN — gates `device_reset` |
+| `DAQIFI_EXPECTED_SERIAL_NUMBER`   | Your device's SN, decimal or hex — gates `device_reset` |
 | `DAQIFI_DEVICE_HOST`              | LAN IP (only for WiFi-mode scripts)              |
 | `WIFI_SSID` / `WIFI_PASSWORD`     | For YAML config interpolation                    |
 | `DAQIFI_DEVICE_AP_SSID`           | Device's AP-mode SSID (for restore_ssid)         |

@@ -44,6 +44,10 @@ import serial  # noqa: E402  pyserial
 
 from daqifi._internal import scpi, scpi_commands  # noqa: E402
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage  # noqa: E402
+from daqifi._internal.serial_identity import (  # noqa: E402
+    describe_serial_number,
+    serial_number_matches,
+)
 from daqifi.communication import CompositeMessageParser, StreamMessageConsumer  # noqa: E402
 from daqifi.devices import DaqifiDeviceFactory  # noqa: E402
 
@@ -71,9 +75,9 @@ def _verify_device_identity(port: str, expected_sn: Optional[str]) -> str:
             f"could not read serial number from {port}; "
             "device may be in a non-responsive state"
         )
-    if expected_sn and sn != expected_sn:
+    if expected_sn and not serial_number_matches(expected_sn, sn):
         raise RuntimeError(
-            f"device on {port} has SN={sn!r}, but "
+            f"device on {port} has SN={describe_serial_number(sn)}, but "
             f"DAQIFI_BENCHMARK_EXPECTED_SN={expected_sn!r} — refusing "
             "to drive an unintended unit"
         )

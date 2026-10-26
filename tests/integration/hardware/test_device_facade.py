@@ -35,6 +35,10 @@ from typing import Iterator
 import pytest
 
 from daqifi import PowerState
+from daqifi._internal.serial_identity import (
+    describe_serial_number,
+    serial_number_matches,
+)
 from daqifi.device import NyquistDevice
 from daqifi.discovery import BoardVariant, DeviceInfo
 
@@ -255,11 +259,12 @@ def test_reset_returns_to_clean_baseline(
             "doesn't reply to SYSInfoPB? would land here — verify your "
             "unit reports a non-empty SN with `dev.refresh_metadata()`."
         )
-    if actual_sn != expected_sn:
+    if not serial_number_matches(expected_sn, actual_sn):
         pytest.fail(
             f"Device SN mismatch — refusing to send *RST. "
             f"DAQIFI_EXPECTED_SERIAL_NUMBER={expected_sn!r} but "
-            f"DAQIFI_DEVICE_PORT points at a unit with SN {actual_sn!r}. "
+            f"DAQIFI_DEVICE_PORT points at a unit with SN "
+            f"{describe_serial_number(actual_sn)}. "
             f"Detach the wrong unit or update the env var."
         )
 

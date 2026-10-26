@@ -368,6 +368,10 @@ def _assert_expected_device(scpi):
     can wipe another agent's in-flight test state.
     """
     import os
+    from daqifi._internal.serial_identity import (
+        describe_serial_number,
+        serial_number_matches,
+    )
     expected = os.environ.get("DAQIFI_EXPECTED_SERIAL_NUMBER")
     if expected:
         try:
@@ -377,10 +381,11 @@ def _assert_expected_device(scpi):
                 f"Refusing destructive harness op: couldn't read "
                 f"metadata.serial_number to verify identity ({e})."
             )
-        if str(actual) != str(expected):
+        if not serial_number_matches(expected, actual):
             raise RuntimeError(
                 f"Refusing destructive harness op: connected device SN "
-                f"{actual!r} != expected {expected!r}. Set "
+                f"{describe_serial_number(actual)} != expected "
+                f"{expected!r}. Set "
                 f"DAQIFI_EXPECTED_SERIAL_NUMBER to the right unit or "
                 f"detach the other(s)."
             )

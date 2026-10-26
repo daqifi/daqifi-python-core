@@ -44,6 +44,10 @@ from typing import Iterator
 import pytest
 
 from daqifi._internal import scpi_commands
+from daqifi._internal.serial_identity import (
+    describe_serial_number,
+    serial_number_matches,
+)
 from daqifi.devices import DaqifiDeviceFactory, DaqifiStreamingDevice
 from daqifi.discovery import DeviceInfo
 from daqifi.enums import WifiMode, WifiSecurityType
@@ -272,10 +276,11 @@ def test_update_network_configuration_round_trip(
             "your unit's SN (see .claude/hardware-rig.md)"
         )
     actual_sn = dev.metadata.serial_number
-    if actual_sn != expected_sn:
+    if not serial_number_matches(expected_sn, actual_sn):
         pytest.fail(
             f"Device identity mismatch: expected SN {expected_sn!r}, "
-            f"got {actual_sn!r}. Refusing to run destructive test on "
+            f"got {describe_serial_number(actual_sn)}. Refusing to run "
+            f"destructive test on "
             f"a different unit."
         )
 

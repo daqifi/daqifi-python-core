@@ -81,10 +81,18 @@ Before code issues `*RST`, changes Wi-Fi credentials, wipes SD files, or
 flashes firmware, gate it on the expected serial number:
 
 ```python
+from daqifi._internal.serial_identity import serial_number_matches
+
 expected = os.environ["DAQIFI_EXPECTED_SERIAL_NUMBER"]
-if dev.metadata.serial_number != expected:
+if not serial_number_matches(expected, dev.metadata.serial_number):
     raise RuntimeError("Refusing destructive op on an unexpected device")
 ```
+
+The same serial comes in two spellings. `dev.metadata.serial_number` is
+**decimal**, while `*IDN?` and `SYST:SERialNUMber?` report it in **hex**. A
+plain `!=` against a hex value refuses the correct board, so the suite's gates
+use `serial_number_matches`, which accepts either form. Their refusal messages
+show the connected board's serial in both forms.
 
 ### Running the hardware suite
 
@@ -94,8 +102,38 @@ DAQIFI_DEVICE_PORT=/dev/ttyACM<N> DAQIFI_DEVICE_REQUIRED=1 \
     python -m pytest tests/integration/hardware/ -v
 ```
 
+`DAQIFI_EXPECTED_SERIAL_NUMBER` may be decimal or hex.
+
 Wi-Fi round-trip tests read `DAQIFI_TEST_WIFI_SSID` and
 `DAQIFI_TEST_WIFI_PASSWORD` from the environment; a gitignored `.env` works.
+The Wi-Fi discovery test reads the expected serial from the board on
+`DAQIFI_DEVICE_PORT`; set `DAQIFI_TEST_WIFI_SN` only to override it.
+
+### Several boards on one bench
+
+**Always set `DAQIFI_DEVICE_PORT`.** Without it, the suite falls back to
+`DeviceFinder.discover_first()`, which binds the first DAQiFi it finds, and
+that may be another unit. The serial gates protect destructive tests, but
+read-only tests would quietly run against the wrong board.
+
+**Check that the port reached the interpreter.** An environment prefix in a
+WSL shell (`DAQIFI_DEVICE_PORT=COMx python.exe -m pytest ...`) does **not**
+reach a Windows `python.exe` unless the variable is listed in `WSLENV`. The
+forced port is then silently unset, and discovery picks a board for you.
+Verify it from the same interpreter that runs the suite:
+
+```bash
+python.exe -c "import os; print(os.environ.get('DAQIFI_DEVICE_PORT'))"
+```
+
+If that prints `None`, append the variables to `WSLENV` rather than
+replacing it, since other tools may already use it:
+
+```bash
+export WSLENV="$WSLENV:DAQIFI_DEVICE_PORT:DAQIFI_EXPECTED_SERIAL_NUMBER"
+```
+
+Or set the variables in a Windows shell instead.
 
 **WSL2:** attach the device with `usbipd attach --wsl --busid <X-Y>`. After a
 `*RST` or reboot it does not re-attach on its own; set

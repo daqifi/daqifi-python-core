@@ -22,12 +22,17 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+import warnings
 from pathlib import Path
 from typing import Callable, Optional
 
 import pytest
 
 from daqifi._internal.comm import SerialInterface
+from daqifi._internal.serial_identity import (
+    describe_serial_number,
+    serial_number_matches,
+)
 from daqifi.devices import DaqifiDeviceFactory
 from daqifi.discovery import DeviceFinder, DeviceInfo
 
@@ -89,8 +94,8 @@ def wait_for_device_back(
         pytest.skip(
             "DAQIFI_EXPECTED_SERIAL_NUMBER not set; can't safely "
             "reconnect after device disruption — refusing to bind to "
-            "an arbitrary unit. Set this to your unit's SN "
-            "(see .claude/hardware-rig.md)."
+            "an arbitrary unit. Set this to your unit's SN, decimal "
+            "or the hex *IDN? reports (see .claude/hardware-rig.md)."
         )
 
     def _quick_port_has_daqifi(port: str) -> bool:
@@ -148,7 +153,17 @@ def wait_for_device_back(
             while time.monotonic() < sn_deadline:
                 sn = probe.metadata.serial_number
                 if sn:
-                    return sn == expected_sn
+                    if serial_number_matches(expected_sn, sn):
+                        return True
+                    # Without this the caller only sees None and skips as
+                    # "didn't return on USB", hiding a serial mismatch.
+                    warnings.warn(
+                        f"DAQiFi on {port} has SN "
+                        f"{describe_serial_number(sn)}, not "
+                        f"DAQIFI_EXPECTED_SERIAL_NUMBER={expected_sn!r}; "
+                        f"not binding to it."
+                    )
+                    return False
                 time.sleep(0.05)
             return False
         except Exception:
