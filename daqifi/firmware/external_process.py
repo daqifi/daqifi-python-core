@@ -309,9 +309,16 @@ class SubprocessRunner:
                 **group_kwargs,
             )
         except FileNotFoundError as exc:
+            if job is not None:
+                job.close()
             raise FileNotFoundError(
                 f"External process executable not found: {request.file_name!r}"
             ) from exc
+        except BaseException:
+            # The job handle is a raw kernel handle with no finalizer.
+            if job is not None:
+                job.close()
+            raise
         if job is not None and job.available:
             job.assign(proc)
             # Resumed whether or not the assignment took: a child left

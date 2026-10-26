@@ -385,3 +385,28 @@ class TestWindowsTreeKill:
         external_process._kill_process_tree(proc, None)
         assert calls == [["taskkill", "/F", "/T", "/PID", "4242"]]
         assert proc.killed
+
+    @pytest.mark.parametrize("error", [FileNotFoundError("nope"), PermissionError("denied")])
+    def test_job_is_closed_when_the_child_fails_to_start(self, monkeypatch, error):
+        # Audit finding on #166 (round 5): a failed launch leaked the job's
+        # kernel handle, one per retry.
+        from daqifi.firmware import external_process
+
+        closed = []
+
+        class _FakeJob:
+            available = True
+
+            def close(self):
+                closed.append(True)
+
+        def _fail(*a, **k):
+            raise error
+
+        monkeypatch.setattr(external_process, "_IS_WINDOWS", True)
+        monkeypatch.setattr(external_process, "_WindowsJob", _FakeJob)
+        monkeypatch.setattr(external_process.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+        monkeypatch.setattr(external_process.subprocess, "Popen", _fail)
+        with pytest.raises(type(error)):
+            SubprocessRunner().run(ExternalProcessRequest(file_name="flash.exe"))
+        assert closed == [True]
