@@ -261,6 +261,16 @@ class _CancelledError(Exception):
     """Internal sentinel for cooperative cancellation."""
 
 
+def _anchor_to_cwd(path: str) -> str:
+    """Prefix a relative path with the working directory, nothing more.
+
+    Not os.path.abspath: that also collapses ``..`` textually, and through
+    a symlink ``link/../x`` names a different directory than ``x`` next to
+    the link, so the tool could run from the wrong bundle.
+    """
+    return path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+
+
 def _list_serial_port_names() -> Optional[FrozenSet[str]]:
     """Serial ports currently present, or None when they can't be listed.
 
@@ -967,8 +977,8 @@ class DefaultFirmwareUpdateService:
         # Absolute before anything else: the tool runs with its own directory
         # as the working directory, so a relative tool or firmware path would
         # be resolved against that directory instead of the caller's.
-        firmware_path = os.path.abspath(firmware_path)
-        tool_path = os.path.abspath(self._resolve_wifi_tool_path(firmware_path))
+        firmware_path = _anchor_to_cwd(firmware_path)
+        tool_path = _anchor_to_cwd(self._resolve_wifi_tool_path(firmware_path))
         port = self._resolve_wifi_port(device)
 
         tool_arguments = self._options.wifi_flash_tool_arguments_template

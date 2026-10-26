@@ -1259,6 +1259,21 @@ class TestUpdateWifiModule:
         assert device.sent_commands == []
         assert runner.last_request is None
 
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks")
+    def test_dotdot_through_a_symlink_keeps_the_os_meaning(self, tmp_path) -> None:
+        # Audit finding on #166 (round 7): os.path.abspath collapsed
+        # "link/../bundle" textually, naming a different bundle than the OS.
+        from daqifi.firmware.update_service import _anchor_to_cwd
+
+        real = tmp_path / "releases" / "current"
+        real.mkdir(parents=True)
+        link = tmp_path / "srv" / "selected"
+        link.parent.mkdir()
+        link.symlink_to(real)
+        dotted = os.path.join(str(link), "..", "bundle")
+        assert _anchor_to_cwd(dotted) == dotted
+        assert os.path.realpath(_anchor_to_cwd(dotted)) == str(tmp_path / "releases" / "bundle")
+
     def test_relative_firmware_path_is_made_absolute(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

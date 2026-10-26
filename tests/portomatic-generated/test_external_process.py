@@ -442,3 +442,66 @@ def test_child_is_reaped_when_the_wait_is_interrupted(monkeypatch):
         )
     assert kept.value is not None
     assert started[0].returncode is not None  # reaped
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX threads/signals")
+class TestSetupInsideCleanup:
+    # Audit finding on #166 (round 7): an interrupt or a failed thread start
+    # between Popen and the cleanup scope left the child running.
+
+    def test_failed_reader_start_kills_and_reaps_the_child(self, monkeypatch):
+        import subprocess as sp
+        import threading as th
+
+        from daqifi.firmware import external_process
+
+        spawned = []
+        real_popen = sp.Popen
+
+        class _RecordingPopen(real_popen):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                spawned.append(self)
+
+        def _no_threads(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(external_process.subprocess, "Popen", _RecordingPopen)
+        monkeypatch.setattr(th.Thread, "start", _no_threads)
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            SubprocessRunner().run(
+                ExternalProcessRequest(
+                    file_name=sys.executable,
+                    arguments=["-c", "import time; time.sleep(60)"],
+                    timeout_seconds=30,
+                )
+            )
+        assert spawned[0].returncode is not None
+        assert spawned[0].stdout.closed and spawned[0].stderr.closed
+
+    def test_escaped_worker_output_after_return_reaches_nobody(self):
+        # Audit finding on #166 (round 7): after a timeout, a worker outside
+        # the process group kept firing the caller's progress callback.
+        import time
+
+        seen = []
+        script = (
+            "import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c',"
+            " 'import time\\nfor i in range(100):\\n    print(i, flush=True); time.sleep(0.1)'],"
+            " start_new_session=True)\n"
+        )
+        result = SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable,
+                arguments=["-c", script],
+                timeout_seconds=0.5,
+                on_standard_output_line=seen.append,
+            )
+        )
+        assert result.timed_out
+        count_at_return = len(seen)
+        lines_at_return = len(result.standard_output_lines)
+        time.sleep(1.0)
+        assert len(seen) == count_at_return
+        assert lines_at_return == len(result.standard_output_lines)

@@ -319,35 +319,42 @@ class SubprocessRunner:
             if job is not None:
                 job.close()
             raise
-        if job is not None and job.available:
-            job.assign(proc)
-            # Resumed whether or not the assignment took: a child left
-            # suspended would only ever time out. Without the job, the kill
-            # path falls back to taskkill /T.
-            if not _resume_process(proc.pid):
-                _kill_process_tree(proc, job)
-                job.close()
-                raise OSError(
-                    f"Could not resume {request.file_name!r} after starting it "
-                    "suspended; it was terminated."
-                )
-
-        stdout_thread = threading.Thread(
-            target=_pump_stream,
-            args=(proc.stdout, stdout_lines, request.on_standard_output_line, request.standard_input_response_factory, proc.stdin),
-            daemon=True,
-        )
-        stderr_thread = threading.Thread(
-            target=_pump_stream,
-            args=(proc.stderr, stderr_lines, request.on_standard_error_line, None, None),
-            daemon=True,
-        )
-        stdout_thread.start()
-        stderr_thread.start()
-
+        # Everything after Popen sits inside one cleanup scope: an interrupt
+        # or a failed thread start in between would otherwise leave the
+        # child running (it is in its own session and won't see a terminal
+        # signal) with its pipes open.
+        delivering = threading.Event()
+        delivering.set()
+        threads: List[threading.Thread] = []
         timeout = request.timeout_seconds
         deadline = None if timeout is None else start + timeout
+        exit_code: Optional[int] = None
         try:
+            if job is not None and job.available:
+                job.assign(proc)
+                # Resumed whether or not the assignment took: a child left
+                # suspended would only ever time out. Without the job, the
+                # kill path falls back to taskkill /T.
+                if not _resume_process(proc.pid):
+                    raise OSError(
+                        f"Could not resume {request.file_name!r} after starting "
+                        "it suspended; it was terminated."
+                    )
+
+            stdout_thread = threading.Thread(
+                target=_pump_stream,
+                args=(proc.stdout, stdout_lines, request.on_standard_output_line, request.standard_input_response_factory, proc.stdin, delivering),
+                daemon=True,
+            )
+            stderr_thread = threading.Thread(
+                target=_pump_stream,
+                args=(proc.stderr, stderr_lines, request.on_standard_error_line, None, None, delivering),
+                daemon=True,
+            )
+            for thread in (stdout_thread, stderr_thread):
+                thread.start()
+                threads.append(thread)
+
             try:
                 exit_code = proc.wait(timeout=timeout)
                 # Done means the output is done too, as with .NET's
@@ -355,12 +362,12 @@ class SubprocessRunner:
                 # still be writing (a launcher that exits while its worker
                 # flashes and reports). Its output decides success, so wait
                 # for EOF within the same budget.
-                for thread in (stdout_thread, stderr_thread):
+                for thread in threads:
                     thread.join(
                         None if deadline is None
                         else max(0.0, deadline - time.monotonic())
                     )
-                if stdout_thread.is_alive() or stderr_thread.is_alive():
+                if any(thread.is_alive() for thread in threads):
                     timed_out = True
                     _kill_process_tree(proc, job)
             except subprocess.TimeoutExpired:
@@ -368,9 +375,8 @@ class SubprocessRunner:
                 _kill_process_tree(proc, job)
                 exit_code = proc.wait()
         except BaseException:
-            # KeyboardInterrupt and friends: the child is in its own
-            # session/group and won't see the terminal's signal. Reap it
-            # too, or a caller holding on to the exception keeps a zombie.
+            # Interrupted, or setup failed: kill the tree and reap the child,
+            # or a caller holding on to the exception keeps a zombie.
             _kill_process_tree(proc, job)
             try:
                 proc.wait(timeout=5)
@@ -378,19 +384,32 @@ class SubprocessRunner:
                 pass
             raise
         finally:
-            stdout_thread.join(timeout=2.0)
-            stderr_thread.join(timeout=2.0)
+            for thread in threads:
+                thread.join(timeout=2.0)
+            # Whatever a surviving reader sees from here on belongs to a run
+            # that has already returned: it is discarded, not appended to
+            # the result or handed to the caller's callbacks.
+            delivering.clear()
+            stdout_alive = bool(threads) and threads[0].is_alive()
             # The pump threads close their own streams at EOF. One still
             # alive is blocked on a pipe a descendant outside the process
             # group holds; closing that stream from here would block behind
             # it, which is how run() used to hang past its timeout. Leave it
             # to the daemon thread. stdin is written by the stdout pump, so
-            # it is only safe to close once that thread is done.
-            if proc.stdin is not None and not stdout_thread.is_alive():
+            # it is only safe to close once that thread is done (or never
+            # started).
+            if proc.stdin is not None and not stdout_alive:
                 try:
                     proc.stdin.close()
                 except OSError:
                     pass
+            if not threads:
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
             if job is not None:
                 job.close()
 
@@ -411,12 +430,19 @@ def _pump_stream(
     callback: Optional[Callable[[str], None]],
     response_factory: Optional[Callable[[str], Optional[str]]],
     stdin,
+    delivering: threading.Event,
 ) -> None:
-    """Read `stream` line-by-line, capture into `sink`, and fire callbacks."""
+    """Read `stream` line-by-line, capture into `sink`, and fire callbacks.
+
+    Lines read after `delivering` is cleared (the run has returned) are
+    drained and dropped.
+    """
     if stream is None:
         return
     try:
         for raw_line in stream:
+            if not delivering.is_set():
+                continue
             line = raw_line.rstrip("\r\n")
             sink.append(line)
             if callback is not None:
