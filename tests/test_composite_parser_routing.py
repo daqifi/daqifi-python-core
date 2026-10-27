@@ -16,9 +16,12 @@ def _feed(chunks):
     out = []
     for chunk in chunks:
         buffer += chunk
-        messages, consumed = parser.parse_messages(bytes(buffer))
-        out += [m.data for m in messages]
-        del buffer[:consumed]
+        while buffer:  # as the stream consumer does: parse until no progress
+            messages, consumed = parser.parse_messages(bytes(buffer))
+            out += [m.data for m in messages]
+            del buffer[:consumed]
+            if not messages and not consumed:
+                break
     return out
 
 
@@ -90,3 +93,19 @@ def test_a_blank_line_before_a_frame_does_not_strand_it() -> None:
 
 def test_a_utf8_text_line_is_kept_whole() -> None:
     assert _feed(["µV\r\n".encode("utf-8")]) == ["µV"]
+
+
+# Audit round 2 on #177: a lenient protobuf decode must not override text.
+
+def test_a_numeric_reply_after_a_blank_line_stays_text() -> None:
+    assert _feed([b"\r\n0,0,0,0,00\r\n"]) == ["0,0,0,0,00"]
+
+
+def test_a_text_reply_before_frames_in_one_read_is_kept() -> None:
+    out = _feed([b"0\r\n" + bytes([2, 0x08, 0x01]) * 20])
+    assert out[0] == "0"
+    assert [m.msg_time_stamp for m in out[1:]] == [1] * 20
+
+
+def test_a_tab_prefixed_line_stays_text() -> None:
+    assert _feed([b"\t123456789\r\n"]) == ["\t123456789"]

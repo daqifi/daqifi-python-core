@@ -423,6 +423,19 @@ def _is_likely_protobuf_data(data: bytes) -> bool:
     return False
 
 
+def _frames_tile(data: bytes, frame_count: int) -> bool:
+    """True if ``data`` is exactly ``frame_count`` length-prefixed frames
+    back to back from its first byte, with nothing skipped or left over."""
+    position, frames = 0, 0
+    while position < len(data):
+        length, prefix_bytes, _ = _try_read_length_prefix(data[position:])
+        if length is None or length <= 0:
+            return False
+        position += prefix_bytes + length
+        frames += 1
+    return position == len(data) and frames == frame_count
+
+
 class CompositeMessageParser:
     """Parser that auto-routes between text (SCPI) and binary (protobuf).
 
@@ -478,13 +491,16 @@ class CompositeMessageParser:
                 return wrapped, consumed
             wrapped, consumed = self._try_text(data)
             return (wrapped, consumed) if wrapped or consumed else ([], 0)
-        # Uncertain: a decoded protobuf frame wins (a binary frame sent to
-        # the line parser is destroyed, e.g. one ending in CR LF), then the
-        # text parser with its progress (a blank line, a UTF-8 line such as
-        # "µV"), and only then the protobuf parser's resync progress, so a
-        # buffer of garbage still drains.
+        # Uncertain: protobuf frames win only when they tile the buffer
+        # exactly from its first byte (a binary frame sent to the line parser
+        # is destroyed, e.g. one ending in CR LF). The protobuf parser is
+        # lenient: after skipping bytes, or with bytes left over, it can
+        # "decode" text (b"\r\n0,0,0,0,00\r\n", b"\t123456789\r\n") or skip a
+        # reply to reach frames behind it. Otherwise the text parser with
+        # its progress (a blank line, a UTF-8 line such as "µV"), and only
+        # then the protobuf parser's resync progress, so garbage drains.
         pb_wrapped, pb_consumed = self._try_protobuf(data)
-        if pb_wrapped:
+        if pb_wrapped and pb_consumed == len(data) and _frames_tile(data, len(pb_wrapped)):
             return pb_wrapped, pb_consumed
         wrapped, consumed = self._try_text(data)
         if wrapped or consumed:
