@@ -2057,7 +2057,9 @@ def _cmd_exe_arguments(
     # syntax ("&" in a path runs what follows it), and caret escapes would
     # arrive literally inside the arguments it does quote.
     unsafe_chars = _CMD_ALWAYS_UNSAFE if native_windows else _CMD_METACHARACTERS
-    for name, value in (("port", port), ("firmware path", firmware_path)):
+    for name, value in (
+        ("tool name", script), ("port", port), ("firmware path", firmware_path)
+    ):
         unsafe = sorted(set(value) & unsafe_chars)
         if unsafe:
             raise ValueError(
@@ -2097,6 +2099,7 @@ def _split_windows_template(template: str) -> List[str]:
     lexer.whitespace_split = True
     lexer.escape = ""
     lexer.quotes = '"'  # an apostrophe is an ordinary character on Windows
+    lexer.commenters = ""  # and "#" is a legal filename character
     return list(lexer)
 
 

@@ -1513,6 +1513,25 @@ class TestUpdateWifiModule:
 
         assert _cmd_exe_arguments("t.cmd", template, "P1", r"C:\fw", native_windows=False) == ["/c", "t.cmd"] + expected
 
+    @pytest.mark.parametrize("native", [True, False])
+    def test_script_name_is_checked_like_the_other_values(self, native) -> None:
+        # Audit finding on #166 (round 14): under WSL "flash&calc.exe&rem.cmd"
+        # ran calc.exe; the script name wasn't validated.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        bad = "flash%TEMP%.cmd" if native else "flash&calc.exe&rem.cmd"
+        with pytest.raises(ValueError, match="tool name"):
+            _cmd_exe_arguments(bad, "/p {port}", "P1", r"C:\fw", native_windows=native)
+
+    def test_hash_in_a_template_path_is_not_a_comment(self) -> None:
+        # Audit finding on #166 (round 14): shlex's default "#" comment
+        # truncated C:\fw#1\image.bin and dropped the rest of the template.
+        from daqifi.firmware.update_service import _split_windows_template
+
+        assert _split_windows_template(r"/p {port} /i C:\fw#1\image.bin /w") == [
+            "/p", "{port}", "/i", r"C:\fw#1\image.bin", "/w",
+        ]
+
     def test_script_name_with_whitespace_is_refused_under_wsl(self) -> None:
         # Audit finding on #166 (round 12): WSL quotes it first, and cmd.exe
         # /c then strips the leading quote.
