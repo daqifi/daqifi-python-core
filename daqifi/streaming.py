@@ -512,11 +512,15 @@ class StreamManager:
     def _ends_inside_console_prefix(data: bytes, echo_line: bytes) -> bool:
         """True if ``data`` stops part-way through the echo line or the
         prompt that may lead the START reply."""
-        prompt = b"DAQIFI> "
         rest = data[len(echo_line):] if data.startswith(echo_line) else data
         if rest is data and data and echo_line.startswith(data) and data != echo_line:
             return True
-        return bool(rest) and prompt.startswith(rest) and rest != prompt
+        # Either prompt form, still arriving: "DAQIFI> " (the firmware's) or a
+        # prompt line "DAQIFI>\r\n" split after its CR.
+        return bool(rest) and any(
+            prompt.startswith(rest) and rest != prompt
+            for prompt in (b"DAQIFI> ", b"DAQIFI>\r\n")
+        )
 
     def stop(self):
         """
@@ -801,6 +805,9 @@ class StreamManager:
                 ch_pattern = re.findall(r'(?:ain|ch)(\d+)_ts', line)
                 if ch_pattern:
                     self._channels = [int(ch) for ch in ch_pattern]
+                    # Keep the buffer's channel list in step: exports
+                    # (to_dict/to_csv/to_dataframe) read it.
+                    self._buffer.channels = list(self._channels)
                     print(f"CSV Column Headers detected: Enabled channels = {self._channels}")
                 return None
 

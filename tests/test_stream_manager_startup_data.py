@@ -215,3 +215,37 @@ def test_a_prompt_split_across_the_start_read_does_not_corrupt_the_frames() -> N
     samples = stream.read(2, timeout=1.0)
     stream.stop()
     assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+# Audit round 5 on #180.
+
+def test_a_crlf_prompt_split_after_its_cr_does_not_corrupt_the_frames() -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _FakeSerial(enabled_mask=1, on_start=b"DAQIFI>\r")
+    original_write = fake.write
+
+    def write(data):
+        n = original_write(data)
+        if b"START" in data.upper():
+            def tail():
+                with fake.lock:
+                    fake.rx += b"\n" + frame * 2
+            threading.Timer(0.3, tail).start()
+        return n
+
+    fake.write = write
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+def test_the_buffer_follows_the_channels_named_by_the_csv_header() -> None:
+    header = b"# Timestamp Tick Rate: 1000 Hz\nain3_ts,ain3_val\n5000,2345\n"
+    stream = _manager(_FakeSerial(enabled_mask=0b1000, on_start=header), channels=[0], sample_rate=10, format=2)
+    stream.start()
+    sample = stream.read(1, timeout=1.0)[0]
+    stream.stop()
+    assert stream.buffer.channels == [3]
+    assert "channel_3" in stream.buffer.to_dict()
