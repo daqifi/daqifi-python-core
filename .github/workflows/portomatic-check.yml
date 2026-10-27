@@ -81,14 +81,22 @@ jobs:
           pip install -U pip
           pip install "git+https://x-access-token:${GH_TOKEN}@github.com/daqifi/portomatic@main"
 
+      # Values from ${{ }} expressions reach the scripts through env:, never
+      # inline: an inlined value is pasted into the script text, and a " #"
+      # in a plain YAML scalar even starts a comment (the skip step's echo
+      # was cut to `echo "Issue` that way, failing every run that found the
+      # issue already open). GITHUB_* values come from the runner's env.
       - name: Resolve baseline
         id: resolve
+        env:
+          REQUESTED_BASELINE: ${{ inputs.baseline || vars.PORTOMATIC_BASELINE || '' }}
+          DOWNSTREAM_DIR: ${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}
         run: |
-          BASELINE="${{ inputs.baseline || vars.PORTOMATIC_BASELINE || '' }}"
+          BASELINE="$REQUESTED_BASELINE"
           if [ -z "$BASELINE" ]; then
-            STATE="downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}/.portomatic/sync_state.yaml"
+            STATE="downstream/$DOWNSTREAM_DIR/.portomatic/sync_state.yaml"
             if [ -f "$STATE" ]; then
-              BASELINE=$(python -c "import yaml; print(yaml.safe_load(open('$STATE')).get('last_synced_upstream_sha') or '')")
+              BASELINE=$(STATE="$STATE" python -c "import os, yaml; print(yaml.safe_load(open(os.environ['STATE'])).get('last_synced_upstream_sha') or '')")
             fi
           fi
           if [ -z "$BASELINE" ]; then
@@ -100,10 +108,12 @@ jobs:
       - name: Run check
         id: check
         working-directory: downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}
+        env:
+          BASELINE: ${{ steps.resolve.outputs.baseline }}
         run: |
           portomatic check \
-            --upstream "${{ github.workspace }}/upstream" \
-            --baseline "${{ steps.resolve.outputs.baseline }}" \
+            --upstream "$GITHUB_WORKSPACE/upstream" \
+            --baseline "$BASELINE" \
             --json > /tmp/portomatic-output.txt
           cat /tmp/portomatic-output.txt
           # --json prints "wrote report/plan" lines before the JSON object.
@@ -114,6 +124,8 @@ jobs:
 
       - name: Parse summary
         id: summary
+        env:
+          DOWNSTREAM_DIR: ${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}
         run: |
           ACTIONABLE=$(jq -r '.actionable' /tmp/portomatic-summary.json)
           UPSTREAM_SHA=$(jq -r '.upstream_sha' /tmp/portomatic-summary.json)
@@ -124,7 +136,7 @@ jobs:
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
           # Normalised: upload-artifact refuses a path containing "./".
           REPORT_PATH=$(python -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' \
-            "downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}/$REPORT")
+            "downstream/$DOWNSTREAM_DIR/$REPORT")
           echo "report=$REPORT_PATH" >> "$GITHUB_OUTPUT"
           echo "actionable_count=$ACTIONABLE_COUNT" >> "$GITHUB_OUTPUT"
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
@@ -139,18 +151,21 @@ jobs:
 
       - name: Skip if no actionable drift
         if: steps.summary.outputs.actionable != 'true'
+        env:
+          TOTAL: ${{ steps.summary.outputs.total }}
         run: |
-          echo "No actionable drift (semantic / api-shape / new-feature). Total file-touches: ${{ steps.summary.outputs.total }}."
+          echo "No actionable drift (semantic / api-shape / new-feature). Total file-touches: $TOTAL."
 
       - name: Check for existing issue for this upstream sha
         if: steps.summary.outputs.actionable == 'true'
         id: dedup
         env:
           GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.summary.outputs.upstream_sha }}
         run: |
-          SHA_SHORT=$(echo "${{ steps.summary.outputs.upstream_sha }}" | cut -c1-7)
+          SHA_SHORT=$(printf '%s' "$UPSTREAM_SHA" | cut -c1-7)
           TITLE="portomatic: upstream drift @ $SHA_SHORT"
-          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
           echo "existing=$EXISTING" >> "$GITHUB_OUTPUT"
 
@@ -158,38 +173,50 @@ jobs:
         if: steps.summary.outputs.actionable == 'true' && steps.dedup.outputs.existing == ''
         env:
           GH_TOKEN: ${{ github.token }}
+          ACTIONABLE_COUNT: ${{ steps.summary.outputs.actionable_count }}
+          TOTAL: ${{ steps.summary.outputs.total }}
+          UPSTREAM_REPO: ${{ vars.PORTOMATIC_UPSTREAM_REPO }}
+          UPSTREAM_SHA: ${{ steps.summary.outputs.upstream_sha }}
+          BASELINE: ${{ steps.resolve.outputs.baseline }}
+          REPORT: ${{ steps.summary.outputs.report }}
+          TITLE: ${{ steps.dedup.outputs.title }}
         run: |
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           BODY=$(mktemp)
           {
-            echo "**${{ steps.summary.outputs.actionable_count }}** actionable file-touch(es) of **${{ steps.summary.outputs.total }}** total."
+            echo "**$ACTIONABLE_COUNT** actionable file-touch(es) of **$TOTAL** total."
             echo ""
-            echo "Upstream: \`${{ vars.PORTOMATIC_UPSTREAM_REPO }}@${{ steps.summary.outputs.upstream_sha }}\`"
-            echo "Baseline: \`${{ steps.resolve.outputs.baseline }}\`"
+            echo "Upstream: \`$UPSTREAM_REPO@$UPSTREAM_SHA\`"
+            echo "Baseline: \`$BASELINE\`"
             echo ""
             # An issue body is capped at 65536 characters; a long drift report
             # (hundreds of file-touches) is cut and the full one is attached
             # to the run.
-            head -c 50000 "${{ steps.summary.outputs.report }}"
-            if [ "$(wc -c < "${{ steps.summary.outputs.report }}")" -gt 50000 ]; then
+            head -c 50000 "$REPORT"
+            if [ "$(wc -c < "$REPORT")" -gt 50000 ]; then
               echo ""
               echo ""
-              echo "_Report truncated. Full report: the \`portomatic-change-report\` artifact of [this run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})._"
+              echo "_Report truncated. Full report: the \`portomatic-change-report\` artifact of [this run]($RUN_URL)._"
             fi
             echo ""
             echo "---"
-            echo "_Generated by portomatic-check on \`${{ github.sha }}\`. To absorb: run \`/portomatic-plan\` then \`/portomatic-apply\` locally._"
+            echo "_Generated by portomatic-check on \`$GITHUB_SHA\`. To absorb: run \`/portomatic-plan\` then \`/portomatic-apply\` locally._"
           } > "$BODY"
           # --force: create the labels if missing, leave them as they are otherwise.
-          gh label create portomatic --repo "${{ github.repository }}" --force \
+          gh label create portomatic --repo "$GITHUB_REPOSITORY" --force \
             --description "Upstream port tracking (portomatic)" >/dev/null
-          gh label create upstream-drift --repo "${{ github.repository }}" --force \
+          gh label create upstream-drift --repo "$GITHUB_REPOSITORY" --force \
             --description "daqifi-core changes not yet ported" >/dev/null
           gh issue create \
-            --repo "${{ github.repository }}" \
-            --title "${{ steps.dedup.outputs.title }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
             --label "portomatic,upstream-drift" \
             --body-file "$BODY"
 
       - name: Skip — issue already exists
         if: steps.summary.outputs.actionable == 'true' && steps.dedup.outputs.existing != ''
-        run: echo "Issue #${{ steps.dedup.outputs.existing }} already covers upstream sha ${{ steps.summary.outputs.upstream_sha }}; not opening a duplicate."
+        env:
+          EXISTING: ${{ steps.dedup.outputs.existing }}
+          UPSTREAM_SHA: ${{ steps.summary.outputs.upstream_sha }}
+        run: |
+          echo "Issue #$EXISTING already covers upstream sha $UPSTREAM_SHA; not opening a duplicate."
