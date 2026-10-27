@@ -258,6 +258,10 @@ class StreamManager:
         self._dispatch_last_sample_ts: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        # Whether the device has been sent START and not yet STOP: stop()
+        # must still send STOP after a callback error moved the state to
+        # ERROR, or the board keeps streaming.
+        self._device_streaming = False
         self._read_buffer = ""  # Buffer for partial data (JSON/CSV)
         self._tick_rate_hz = None  # Tick rate from metadata header (for timestamp conversion)
         # Protobuf decode state. Lazily initialised on the first
@@ -315,6 +319,14 @@ class StreamManager:
         """
         if self._state == StreamState.RUNNING:
             raise RuntimeError("Streaming already started")
+        if self._thread is not None and self._thread.is_alive():
+            # A previous session's worker outlived stop()'s join (a callback
+            # still running); a second worker would read the same port and
+            # parser buffer.
+            raise RuntimeError(
+                "The previous streaming thread is still running (its callback "
+                "has not returned); wait for it before starting again."
+            )
 
         self._callback = callback
         self._stop_event.clear()
@@ -359,6 +371,9 @@ class StreamManager:
             # Send SCPI command to start streaming with frequency parameter
             # Don't issue any other commands during streaming (only STReam:STOP allowed)
             start_cmd = f"{scpi.Streaming.START} {self._sample_rate}"
+            # Set before sending: if the send fails midway the device may
+            # still have started, and a later stop() should send STOP.
+            self._device_streaming = True
             response = self._comm.send_command(start_cmd, delay=0.2)
 
             # Validate the START response before transitioning to RUNNING.
@@ -409,20 +424,26 @@ class StreamManager:
             time.sleep(10)
             stream.stop()
         """
-        if self._state != StreamState.RUNNING:
+        if self._state != StreamState.RUNNING and not self._device_streaming:
             return
 
         # Signal thread to stop
         self._stop_event.set()
 
-        # Wait for thread to finish
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+        # Wait for the worker, unless this is the worker (stop() called
+        # from the callback): it ends once the callback returns. A worker
+        # still alive after the join keeps its reference, so start() can
+        # refuse to run a second one beside it.
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+            if not thread.is_alive():
+                self._thread = None
 
         try:
             # Send SCPI command to stop streaming
             self._comm.send_command(scpi.Streaming.STOP)
+            self._device_streaming = False
             self._state = StreamState.STOPPED
         except Exception as e:
             self._state = StreamState.ERROR
@@ -911,8 +932,9 @@ class StreamManager:
 
                 time.sleep(1.0 / self._sample_rate)
 
-            except Exception as e:
-                print(f"Streaming error: {e}")
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Streaming error")
                 self._state = StreamState.ERROR
                 break
 

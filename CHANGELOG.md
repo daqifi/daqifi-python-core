@@ -25,6 +25,13 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- `StreamManager.stop()` returned without sending STOP once a callback
+  exception had moved the state to ERROR, leaving the board streaming; it
+  forgot a worker still running after its 2 s join, so a restart ran two
+  readers on one port; and called from inside the callback it tried to
+  join its own thread and never sent STOP. stop() now sends STOP whenever
+  the device was started, doesn't join from the worker itself, and
+  start() refuses while a previous worker is still running (#162).
 - The HID error messages told users to `pip install hid`, which is a
   different library with an incompatible API (`hid.Device`); the code
   needs the PyPI `hidapi` package (`hid.device()`). With the wrong package
