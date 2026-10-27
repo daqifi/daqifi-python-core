@@ -96,3 +96,46 @@ def test_bogus_prefix_before_captured_frames_does_not_hold_the_stream() -> None:
 def test_bogus_prefix_before_sample_frames_does_not_hold_the_stream() -> None:
     out = _feed([bytes([0xFE, 0x0A]), _SAMPLE, _SAMPLE])
     assert [m.msg_time_stamp for m in out] == [7, 7]
+
+
+# Audit round 4 on #172: a bogus prefix the SD reads waited on must not take
+# the complete frames behind it down at the end of the log.
+_SAMPLE_ADC = bytes.fromhex("100807120c020406080a0c0e1012141618")  # blind-leg repro
+
+
+def _filler(target: int) -> bytes:
+    """Complete frames (timestamp 5) adding up to exactly ``target`` bytes."""
+    small = DaqifiOutMessage(msg_time_stamp=5).SerializeToString()
+    small_frame = _VarintBytes(len(small)) + small
+    for n in range(0, 64):
+        body = DaqifiOutMessage(msg_time_stamp=5, device_pn="x" * n).SerializeToString()
+        pad = _VarintBytes(len(body)) + body
+        if (target - len(pad)) % len(small_frame) == 0:
+            filler = small_frame * ((target - len(pad)) // len(small_frame)) + pad
+            assert len(filler) == target
+            return filler
+    raise AssertionError("no exact filler")
+
+
+def test_bogus_prefix_still_waiting_at_end_of_log_does_not_drop_frames() -> None:
+    # The cases where a read ends right after the bogus prefix, which the
+    # reader waited on (main skipped it there and kept the samples). When
+    # the prefix and the next byte share a read, main drops them too; that
+    # is pre-existing and unchanged.
+    for sample in (_SAMPLE, _SAMPLE_ADC):
+        log = bytes([0xFE, 0x0A]) + sample * 2
+        messages = _read_all_messages(io.BytesIO(log), SdCardParseOptions(buffer_size=2))
+        assert [m.msg_time_stamp for m in messages] == [7, 7]
+
+        filler = _filler(SdCardParseOptions().buffer_size - 2)
+        messages = _read_all_messages(
+            io.BytesIO(filler + bytes([0xFE, 0x0A]) + sample * 2), SdCardParseOptions()
+        )
+        assert [m.msg_time_stamp for m in messages if m.msg_time_stamp == 7] == [7, 7]
+
+
+def test_a_truncated_last_frame_is_dropped_without_losing_earlier_ones() -> None:
+    log = _SAMPLE * 2 + _big_frame()[:-10]
+    messages = _read_all_messages(io.BytesIO(log), SdCardParseOptions(buffer_size=11))
+    assert [m.msg_time_stamp for m in messages][:2] == [7, 7]
+    assert not any(_is_big(m) for m in messages)

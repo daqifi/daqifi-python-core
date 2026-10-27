@@ -58,7 +58,7 @@ from typing import (
     runtime_checkable,
 )
 
-from daqifi.communication import ProtobufMessageParser
+from daqifi.communication import ProtobufMessageParser, _try_read_length_prefix
 from daqifi.enums import SdCardLogFormat
 
 
@@ -1170,6 +1170,11 @@ def _read_all_messages(
     messages: List[Any] = []
     carry = b""
     total_bytes_read = 0
+    # Offset (in parsed bytes) of the head of `carry`, and the heads that
+    # were a bare length prefix when a read ended: the parser waited on
+    # those instead of applying its gap gate.
+    carry_offset = 0
+    waited_on: set = set()
     try:
         total_bytes = os.fstat(stream.fileno()).st_size
     except (AttributeError, OSError):
@@ -1210,6 +1215,10 @@ def _read_all_messages(
             messages.append(inbound.data)
 
         carry = combined[consumed:] if consumed < len(combined) else b""
+        carry_offset += consumed
+        length, prefix_bytes, _ = _try_read_length_prefix(carry)
+        if length is not None and prefix_bytes == len(carry):
+            waited_on.add(carry_offset)
 
         if options.progress is not None:
             options.progress(
@@ -1220,18 +1229,31 @@ def _read_all_messages(
                 )
             )
 
-    if carry:
-        parsed, _ = parser.parse_messages(carry)
+    # End of the log. A frame still incomplete at the head of what is left
+    # never will be. If the reads above waited on its bare prefix, it was a
+    # bogus one: skip a byte as the gap gate would have done and parse on,
+    # so the complete frames behind it are kept. Any other incomplete head
+    # is a truncated last frame and is dropped, as before; stepping into
+    # its payload could only produce junk frames.
+    report_tail = bool(carry)
+    while carry:
+        parsed, consumed = parser.parse_messages(carry)
         for inbound in parsed:
             messages.append(inbound.data)
-        if options.progress is not None:
-            options.progress(
-                SdCardParseProgress(
-                    bytes_read=total_bytes_read,
-                    total_bytes=total_bytes,
-                    messages_read=len(messages),
-                )
+        if consumed == 0:
+            if carry_offset not in waited_on:
+                break
+            consumed = 1
+        carry = carry[consumed:]
+        carry_offset += consumed
+    if report_tail and options.progress is not None:
+        options.progress(
+            SdCardParseProgress(
+                bytes_read=total_bytes_read,
+                total_bytes=total_bytes,
+                messages_read=len(messages),
             )
+        )
 
     return messages
 
