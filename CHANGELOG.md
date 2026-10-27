@@ -28,11 +28,11 @@ aims to follow [Semantic Versioning](https://semver.org/).
 - `CompositeMessageParser` sent a protobuf frame ending in CR LF (for
   example a digital mask of 0x0A0D) to the text parser, losing it and the
   frames before it in the same buffer, and a SCPI reply split across reads
-  lost its first byte to the protobuf fallback. Routing now follows
-  upstream (daqifi-core #457/#810): line endings don't count as text, null
-  density decides before any text-shaped edge, uncertain buffers try
-  protobuf first, and the fallback parser's consumption counts only when
-  it produced a message (#164).
+  lost its first byte to the protobuf fallback. A trailing line ending is
+  no longer a text signal (as upstream, daqifi-core #810); an uncertain
+  buffer is tried as protobuf first but only a decoded frame counts; and
+  the protobuf fallback after the text parser counts only with a frame
+  (#164).
 - The HID error messages told users to `pip install hid`, which is a
   different library with an incompatible API (`hid.Device`); the code
   needs the PyPI `hidapi` package (`hid.device()`). With the wrong package

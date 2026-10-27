@@ -61,3 +61,32 @@ def test_a_null_heavy_status_frame_with_an_echoed_command_routes_to_protobuf() -
     frame = _frame(device_sn=0, analog_in_data=[0] * 40, device_pn="Nq1")
     out = _feed([frame + b"\r\n"])
     assert any(getattr(m, "device_pn", None) == "Nq1" for m in out)
+
+
+# Audit round 1 on #177: the routing change must not break what the existing
+# heuristics got right.
+
+def test_a_binary_frame_with_an_embedded_crlf_and_some_nulls_stays_protobuf() -> None:
+    frame = bytes.fromhex("210820120d00000d0a2828282828282828282a024142320220204020482050325828")
+    out = _feed([frame])
+    assert len(out) == 1 and out[0].msg_time_stamp == 32
+
+
+def test_a_mostly_printable_analog_frame_with_tabs_stays_protobuf() -> None:
+    frame = _frame(
+        msg_time_stamp=1,
+        analog_in_data_float=[0] + [2.1446077823638916] * 15,
+        digital_data=b"\r\n",
+        device_status=1,
+    )
+    out = _feed([frame])
+    assert len(out) == 1 and len(out[0].analog_in_data_float) == 16
+
+
+def test_a_blank_line_before_a_frame_does_not_strand_it() -> None:
+    out = _feed([b"\r\n", bytes([2, 0x08, 0x01])])
+    assert [m.msg_time_stamp for m in out] == [1]
+
+
+def test_a_utf8_text_line_is_kept_whole() -> None:
+    assert _feed(["µV\r\n".encode("utf-8")]) == ["µV"]
