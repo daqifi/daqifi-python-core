@@ -80,7 +80,7 @@ __all__ = [
 # upstream `AnalogChannel` / `DigitalChannel` exist to mirror the data
 # the device exposes, not to drive I/O.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass
@@ -1717,6 +1717,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
     _SD_DOWNLOAD_BUFFER_BYTES = 16 * 1024
     # Idle wait between empty serial reads while accumulating raw bytes.
     _SD_DOWNLOAD_POLL_INTERVAL_S = 0.01
+    # Without a listed size, how long the line must stay quiet after an
+    # end-of-file marker before it is taken as the end of the file rather
+    # than the marker text inside it.
+    _SD_DOWNLOAD_END_SETTLE_S = 0.25
     # Hard cap for the raw-text capture path (LIST? / DELete responses).
     # A normal SD-card listing on a Nyquist is well under 8 KiB; 512 KiB
     # leaves plenty of slack while bounding memory if a noisy stream
@@ -1810,6 +1814,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
         Use :meth:`start_sd_card_logging` for the full Protocol flow."""
         self.send(scpi_commands.enable_storage_sd())
         self._is_logging_to_sd = True
+        self._forget_sd_card_sizes()
+
+    def _forget_sd_card_sizes(self) -> None:
+        # Logging can grow a listed file, so the listed sizes stop being a
+        # safe download length; they come back with the next listing.
+        self._sd_card_files = [replace(f, size=None) for f in self._sd_card_files]
 
     def disable_sd_card_logging(self) -> None:
         """Low-level helper — disable the SD storage SCPI module only.
@@ -2032,6 +2042,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             raise
 
         self._is_logging_to_sd = True
+        self._forget_sd_card_sizes()
         self._is_streaming = True
         self._set_state(DeviceState.Streaming)
 
@@ -2197,6 +2208,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         file_name: str,
         destination_stream: IO[bytes],
         progress: Optional[Callable[[SdCardTransferProgress], None]] = None,
+        expected_size: Optional[int] = None,
     ) -> SdCardDownloadResult:
         """Stream a file from the SD card into ``destination_stream``.
 
@@ -2210,6 +2222,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         ``destination_stream`` is any binary-writable file-like object
         (``.write(bytes) -> int``).
+
+        ``expected_size`` is the file's size; when omitted, the size from
+        the last SD listing is used if it has one. With a size the
+        download must be exactly that long and end with the marker, or it
+        raises, and the result has ``size_verified=True``. Without one the
+        marker alone ends it and ``size_verified`` is False.
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
@@ -2226,6 +2244,15 @@ class DaqifiStreamingDevice(DaqifiDevice):
         _validate_sd_card_file_name(file_name)
         if self._is_logging_to_sd:
             raise RuntimeError("Cannot download files while logging to SD card.")
+        if expected_size is None:
+            expected_size = next(
+                (f.size for f in self._sd_card_files if f.file_name == file_name), None
+            )
+        elif (
+            not isinstance(expected_size, int) or isinstance(expected_size, bool)
+            or expected_size < 0
+        ):
+            raise ValueError(f"expected_size must be a non-negative int (got {expected_size!r})")
 
         self.send(scpi_commands.stop_streaming())
         self._is_streaming = False
@@ -2239,6 +2266,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     destination_stream,
                     file_name,
                     progress,
+                    expected_size,
                 ),
                 pre_capture=lambda: (
                     self.prepare_sd_interface(),
@@ -2258,6 +2286,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             file_name=file_name,
             file_size=bytes_written,
             duration=elapsed,
+            size_verified=expected_size is not None,
         )
 
     def download_sd_card_file_to_temp(

@@ -266,13 +266,18 @@ def parse_sd_card_file_list(lines: Iterable[str]) -> List["SdCardFileInfo"]:
             continue
         if upper.startswith("**ERROR") or upper.startswith("ERROR"):
             continue
-        # Some firmwares append "<path> <size>" — keep the first whitespace token.
+        # The firmware lists "<path> <size>" (sd_card_manager.c) — the
+        # first whitespace token is the path, a decimal second one the size.
+        size: Optional[int] = None
         token_end = -1
         for sep in (" ", "\t"):
             idx = line.find(sep)
             if idx > 0 and (token_end < 0 or idx < token_end):
                 token_end = idx
         if token_end > 0:
+            rest = line[token_end:].split()
+            if len(rest) == 1 and rest[0].isascii() and rest[0].isdigit():
+                size = int(rest[0])
             line = line[:token_end]
         if line.lower().startswith(_DAQIFI_DIR_PREFIX):
             line = line[len(_DAQIFI_DIR_PREFIX):]
@@ -282,7 +287,7 @@ def parse_sd_card_file_list(lines: Iterable[str]) -> List["SdCardFileInfo"]:
         if any(ord(c) < 0x20 or ord(c) == 0x7F for c in file_name):
             continue
         out.append(
-            SdCardFileInfo(file_name, _try_parse_log_filename_date(file_name))
+            SdCardFileInfo(file_name, _try_parse_log_filename_date(file_name), size)
         )
     return out
 
@@ -292,11 +297,13 @@ class SdCardFileInfo:
     """One file on the device SD card.
 
     `created_date` is parsed from the filename when available; `None`
-    if the parser couldn't extract it.
+    if the parser couldn't extract it. `size` is the byte count the
+    listing reported, `None` if it gave none.
     """
 
     file_name: str
     created_date: Optional[datetime] = None
+    size: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.file_name is None:
@@ -486,9 +493,16 @@ class SdCardFileReceiver:
         file_name: str,
         progress: Optional[Callable[[SdCardTransferProgress], None]] = None,
         timeout_s: Optional[float] = None,
+        expected_size: Optional[int] = None,
     ) -> int:
         """Read until the EOF marker, write everything before it to
         ``destination_stream``, and return the total bytes written.
+
+        With ``expected_size`` (from the SD listing) exactly that many
+        bytes are the file, even if they contain the marker, and the
+        marker must follow them directly; anything else raises
+        ``IOError``. Without it the first marker ends the file, so a file
+        containing the marker text is cut short there (#163).
 
         Args:
             destination_stream: a writable stream (must accept
@@ -501,6 +515,7 @@ class SdCardFileReceiver:
             timeout_s: wall-clock cap. Defaults to 30 minutes (matches
                 upstream). ``None`` uses the default; pass an
                 explicit value to override.
+            expected_size: the file's size, if known.
 
         Returns:
             Total bytes written to ``destination_stream`` (the EOF
@@ -512,6 +527,8 @@ class SdCardFileReceiver:
             TimeoutError: if the marker isn't received within
                 ``timeout_s`` OR the source stream is closed before
                 the marker arrives.
+            IOError: if ``expected_size`` bytes aren't followed by the
+                marker.
 
         Read-loop strategy:
             Two source-stream shapes are supported. If the source
@@ -547,6 +564,11 @@ class SdCardFileReceiver:
                 f"timeout_s must be a positive finite number (got {effective_timeout!r})"
             )
 
+        if expected_size is not None and (
+            not isinstance(expected_size, int) or isinstance(expected_size, bool)
+            or expected_size < 0
+        ):
+            raise ValueError(f"expected_size must be a non-negative int (got {expected_size!r})")
         marker_len = len(END_OF_FILE_MARKER)
         deadline = time.monotonic() + effective_timeout
         has_in_waiting = hasattr(self._source, "in_waiting")
@@ -598,6 +620,26 @@ class SdCardFileReceiver:
                     )
 
             chunk_bytes = bytes(chunk)
+            if expected_size is not None:
+                remaining = expected_size - total_bytes
+                if remaining > 0:
+                    body = chunk_bytes[:remaining]
+                    _write_all(destination_stream, body, deadline)
+                    total_bytes += len(body)
+                    chunk_bytes = chunk_bytes[remaining:]
+                    _emit_transfer_progress(progress, total_bytes, file_name)
+                if total_bytes == expected_size:
+                    trailing.extend(chunk_bytes)
+                    if len(trailing) >= marker_len:
+                        if bytes(trailing[:marker_len]) != END_OF_FILE_MARKER:
+                            raise IOError(
+                                f"SD card file {file_name!r}: {expected_size} bytes "
+                                "received but no end-of-file marker after them; the "
+                                "file is longer than listed or the transfer is corrupt."
+                            )
+                        self._leftover = bytes(trailing[marker_len:])
+                        return total_bytes
+                continue
             found, position = _find_eof_marker(trailing, chunk_bytes)
             if found:
                 # ``position`` is in the virtual [trailing + chunk] view.
@@ -734,12 +776,17 @@ class SdCardDownloadResult:
     is ``None`` when the file was streamed to a caller-provided buffer
     (no on-disk artifact); set when the convenience overload writes to
     a temporary file.
+
+    ``size_verified`` is True when the download was checked against the
+    size the SD listing reported. False means the end was found only by
+    the end-of-file marker, so a transfer cut short can't be ruled out.
     """
 
     file_name: str
     file_size: int
     duration: timedelta
     file_path: Optional[str] = None
+    size_verified: bool = False
 
 
 @runtime_checkable
