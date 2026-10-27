@@ -632,3 +632,116 @@ def test_read_to_end_returns_the_data_before_the_peer_closed():
     finally:
         transport.disconnect()
         server.close()
+
+
+def test_a_tcp_reset_is_raised_and_reported_not_taken_as_a_clean_end():
+    # Audit finding on #167 (round 9): a reset after partial data was
+    # returned as a complete read, with no loss reported.
+    import struct
+
+    import pytest
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    sent = threading.Event()
+
+    def _send_then_reset():
+        conn, _ = server.accept()
+        conn.sendall(b"partial")
+        sent.wait(5)
+        time.sleep(0.2)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        conn.close()  # RST
+
+    threading.Thread(target=_send_then_reset, daemon=True).start()
+    transport = TcpStreamTransport("127.0.0.1", server.getsockname()[1])
+    transport.connect()
+    try:
+        first = b""
+        while not first:
+            try:
+                first = transport.stream.read(64)
+            except socket.timeout:
+                pass
+        assert first == b"partial"
+        sent.set()
+        with pytest.raises(ConnectionResetError):
+            transport.stream.read()
+        assert not transport.is_connected
+    finally:
+        transport.disconnect()
+        server.close()
+
+
+def test_readline_and_readlines_end_cleanly_at_the_peer_close():
+    # Audit finding on #167 (round 9): inherited line readers lost what
+    # they had gathered when EOF was signalled with an exception.
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(2)
+
+    def _serve(payloads):
+        for payload in payloads:
+            conn, _ = server.accept()
+            conn.sendall(payload[:3])
+            time.sleep(0.7)  # spans a read window
+            conn.sendall(payload[3:])
+            conn.shutdown(socket.SHUT_RDWR)
+            conn.close()
+
+    threading.Thread(target=_serve, args=([b"abcdef", b"ab\r\ncd\r\nef"],), daemon=True).start()
+    port = server.getsockname()[1]
+    try:
+        transport = TcpStreamTransport("127.0.0.1", port)
+        transport.connect()
+        assert transport.stream.readline() == b"abcdef"
+        transport.disconnect()
+        transport = TcpStreamTransport("127.0.0.1", port)
+        transport.connect()
+        assert transport.stream.readlines() == [b"ab\r\n", b"cd\r\n", b"ef"]
+        transport.disconnect()
+    finally:
+        server.close()
+
+
+def test_connect_whose_consumer_was_taken_over_leaves_the_newer_session(monkeypatch):
+    # Audit finding on #167 (round 9): a delayed loss disposed connect()'s
+    # unstarted consumer and a Lost handler reconnected; the outer call's
+    # start() then failed and its cleanup tore down the newer session.
+    import daqifi.devices as devices
+
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    real_start = devices.StreamMessageConsumer.start
+    outer = threading.current_thread()
+    taken_over = []
+
+    def _start(self, *a, **k):
+        if threading.current_thread() is outer and not taken_over:
+            taken_over.append(True)
+            # What the loss handler and a Lost subscriber would do here.
+            self.close()
+            fake._accepted.clear()
+            threading.Thread(target=fake._serve, daemon=True).start()
+            transport.disconnect()
+            device.connect()
+            fake.wait_accepted()
+            raise RuntimeError("StreamMessageConsumer has been closed")
+        return real_start(self, *a, **k)
+
+    monkeypatch.setattr(devices.StreamMessageConsumer, "start", _start)
+    try:
+        device.connect()
+        assert taken_over == [True]
+        assert transport.is_connected
+        assert device.status == ConnectionStatus.Connected
+        assert device._consumer is not None and device._consumer.is_running
+        received = []
+        device._consumer.add_message_received(received.append)
+        fake.send_frame()
+        assert _wait_until(lambda: len(received) == 1)
+    finally:
+        monkeypatch.setattr(devices.StreamMessageConsumer, "start", real_start)
+        device.disconnect()
+        fake.close()

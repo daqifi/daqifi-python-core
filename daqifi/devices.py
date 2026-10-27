@@ -312,6 +312,9 @@ class DaqifiDevice:
         self._raise_if_disposed()
         self._set_status(ConnectionStatus.Connecting)
         self._set_state(DeviceState.Connecting)
+        # The transport session this call connected, once it has; lets the
+        # failure path tell its own connection from a newer one.
+        connected_session: Optional[int] = None
 
         try:
             # Refuse to connect without a transport. Previously this
@@ -325,6 +328,7 @@ class DaqifiDevice:
                 )
             self._transport.connect(retry_options=retry_options)
             session = getattr(self._transport, "session", None)
+            connected_session = session
             # Capture the stream once and validate it. A transport
             # that returns None from `.stream` after a successful
             # `.connect()` is broken — surface it now rather than
@@ -384,7 +388,17 @@ class DaqifiDevice:
                 except Exception:
                     pass
                 return
-            consumer.start()
+            try:
+                consumer.start()
+            except Exception:
+                # The loss handler (a delayed loss of the stream reused
+                # above) may have disposed this consumer before it
+                # started; whatever replaced it is not ours to undo.
+                with self._state_lock:
+                    taken_over = self._consumer is not consumer
+                if taken_over:
+                    return
+                raise
 
             # Only if this connection is still the current one, and its
             # stream still alive: the loss handler (on the reader thread)
@@ -413,21 +427,22 @@ class DaqifiDevice:
             # constructed so the transport doesn't leak file
             # descriptors and the consumer thread doesn't keep
             # spinning on a dead stream (Qodo PR 17 pass 13 #2).
-            if self._consumer is not None:
+            # Unless a newer connection exists (a nested connect() from a
+            # status handler): that one is not this call's to tear down.
+            with self._state_lock:
+                superseded = connected_session is not None and (
+                    getattr(self._transport, "session", None) != connected_session
+                )
+                stale_consumer = None if superseded else self._consumer
+                if stale_consumer is not None:
+                    self._consumer = None
+            if superseded:
+                raise
+            if stale_consumer is not None:
                 # close() alone doesn't join the daemon thread, so
                 # stop it first — same pattern as disconnect() and
                 # the reconnect path (Qodo PR 17 pass 34 #1).
-                try:
-                    stopped = self._consumer.stop_safely()
-                    if stopped is False:
-                        self._consumer.stop()
-                except Exception:
-                    pass
-                try:
-                    self._consumer.close()
-                except Exception:
-                    pass
-                self._consumer = None
+                self._discard_consumer(stale_consumer)
             if self._transport is not None:
                 try:
                     self._transport.disconnect()

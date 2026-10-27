@@ -122,36 +122,60 @@ class _SocketStream(io.RawIOBase):
 
     def readinto(self, buffer) -> int:  # type: ignore[override]
         if self.peer_closed:
-            raise ConnectionResetError("The device closed the TCP connection.")
+            return 0
         with selectors.DefaultSelector() as selector:
             selector.register(self._sock, selectors.EVENT_READ)
             if not selector.select(self._read_timeout):
                 raise socket.timeout("timed out")
-        received = self._sock.recv_into(buffer)
+        try:
+            received = self._sock.recv_into(buffer)
+        except OSError:
+            # A reset or other socket failure ends the connection too; it
+            # is reported, and the error itself still reaches the caller.
+            self._mark_peer_closed()
+            raise
         if received == 0 and len(buffer) > 0:
-            self.peer_closed = True
-            self._on_peer_closed(self)
-            raise ConnectionResetError("The device closed the TCP connection.")
+            # End of stream, returned the standard way (a 0-byte read) so
+            # file methods (read(), readline(), ...) end cleanly; the
+            # report above runs first, so a device's consumer is already
+            # told to stop by the time it sees the empty read.
+            self._mark_peer_closed()
         return received
 
-    def readall(self) -> bytes:
-        """Everything until the peer closes, like a blocking socket file.
+    def _mark_peer_closed(self) -> None:
+        if not self.peer_closed:
+            self.peer_closed = True
+            self._on_peer_closed(self)
 
-        The inherited version stops at the first exception, so the EOF
-        signal would throw away the data it had already gathered.
-        """
+    def readall(self) -> bytes:
+        """Everything until the peer closes, like a blocking socket file
+        (the read windows' timeouts are waited through, not raised)."""
         chunks = []
         while True:
             try:
                 chunk = self.read(65536)
             except socket.timeout:
                 continue
-            except ConnectionResetError:
-                # The close is reported (by readinto); later reads raise.
-                return b"".join(chunks)
             if not chunk:
                 return b"".join(chunks)
             chunks.append(chunk)
+
+    def readline(self, size: Optional[int] = -1) -> bytes:  # type: ignore[override]
+        """A line, waiting through read windows like a blocking socket
+        file; the inherited version would drop a partial line on the
+        first window that timed out."""
+        line = bytearray()
+        while size is None or size < 0 or len(line) < size:
+            try:
+                byte = self.read(1)
+            except socket.timeout:
+                continue
+            if not byte:
+                break
+            line += byte
+            if byte == b"\n":
+                break
+        return bytes(line)
 
     def write(self, data) -> int:  # type: ignore[override]
         self._sock.sendall(data)
