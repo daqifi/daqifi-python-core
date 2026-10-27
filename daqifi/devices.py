@@ -221,22 +221,7 @@ def _exclusive_sd_operation(method):
                 f"{method.__name__} cannot run inside another exchange on the "
                 "same device (for example from a setup_action callback)."
             )
-        consumer = self._consumer
-        on_consumer_thread = consumer is not None and (
-            threading.current_thread() is getattr(consumer, "_thread", None)
-        )
-        if on_consumer_thread:
-            # From a message-received callback: the lock's holder may be
-            # waiting for this very thread to stop the consumer, so waiting
-            # here would stall both and leave the consumer dead.
-            if not self._text_exchange_lock.acquire(blocking=False):
-                raise RuntimeError(
-                    f"{method.__name__} cannot run from a message-received "
-                    "callback while another exchange is in progress on the "
-                    "same device; call it from another thread."
-                )
-        else:
-            self._text_exchange_lock.acquire()
+        self._acquire_text_exchange_lock(method.__name__)
         try:
             self._text_exchange_lock_owner = tid
             self._sd_operation_owner = tid
@@ -741,6 +726,26 @@ class DaqifiDevice:
                 "not yet implemented."
             )
 
+    def _acquire_text_exchange_lock(self, operation: str) -> None:
+        """Take the text-exchange lock; from the consumer thread, only if free.
+
+        From a message-received callback the lock's holder may be waiting
+        for this very thread to stop the consumer: waiting here would stall
+        both, the stop would time out and the consumer would be left dead.
+        """
+        consumer = self._consumer
+        if consumer is not None and (
+            threading.current_thread() is getattr(consumer, "_thread", None)
+        ):
+            if not self._text_exchange_lock.acquire(blocking=False):
+                raise RuntimeError(
+                    f"{operation} cannot run from a message-received callback "
+                    "while another exchange is in progress on the same "
+                    "device; call it from another thread."
+                )
+        else:
+            self._text_exchange_lock.acquire()
+
     def execute_text_command(
         self,
         setup_action: Callable[[], None],
@@ -810,7 +815,8 @@ class DaqifiDevice:
                 "do not call it from inside a setup_action callback."
             )
 
-        with self._text_exchange_lock:
+        self._acquire_text_exchange_lock("execute_text_command")
+        try:
             # All validation happens INSIDE the lock to close the
             # TOCTOU window: a competing thread can call disconnect()
             # (which clears self._consumer / self._transport without
@@ -824,6 +830,8 @@ class DaqifiDevice:
                 )
             finally:
                 self._text_exchange_lock_owner = None
+        finally:
+            self._text_exchange_lock.release()
 
     def _execute_text_command_locked(
         self,

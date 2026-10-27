@@ -106,11 +106,13 @@ def test_an_sd_operation_from_a_setup_action_is_refused() -> None:
     assert errors and "cannot run inside another exchange" in errors[0]
 
 
-def test_an_sd_operation_from_a_callback_does_not_stall_a_running_exchange() -> None:
-    # Audit finding on #176 (round 1): a message callback calling an SD
-    # operation blocked on the lock while its holder waited for that same
-    # consumer thread to stop; the stop timed out and the consumer was left
-    # dead. On the consumer thread the operation now refuses at once.
+@pytest.mark.parametrize("call", ["sd_operation", "text_command"])
+def test_an_exchange_from_a_callback_does_not_stall_a_running_sd_operation(call) -> None:
+    # Audit findings on #176 (rounds 1-2): a message callback calling an SD
+    # operation, or execute_text_command, blocked on the lock while its
+    # holder waited for that same consumer thread to stop; the stop timed
+    # out and the consumer was left dead. On the consumer thread the
+    # exchange now refuses at once.
     device = _fakes._make_device_with_serial_facade({b"SD:LIST?": _LISTING})
     stream = device._transport.stream
     in_callback = threading.Event()
@@ -123,7 +125,10 @@ def test_an_sd_operation_from_a_callback_does_not_stall_a_running_exchange() -> 
         in_callback.set()
         go.wait(5)
         try:
-            device.start_sd_card_logging("capture.bin")
+            if call == "sd_operation":
+                device.start_sd_card_logging("capture.bin")
+            else:
+                device.execute_text_command(lambda: None, 10, 10)
             outcome.append("ran")
         except RuntimeError as exc:
             outcome.append(str(exc))
