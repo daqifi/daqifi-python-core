@@ -391,24 +391,28 @@ def _write_all(stream: Any, data: bytes, deadline: Optional[float] = None) -> No
     ``BufferedWriter``/``BytesIO`` always take everything, but a raw
     stream's ``write`` returns how much it took, and that return value was
     ignored, so a short write lost the rest (#163). ``None`` (a non-blocking
-    raw stream that couldn't write) is retried, but only until ``deadline``
-    (``time.monotonic()`` value): a sink that never drains must not hold a
-    download, and the exchange lock with it, past its timeout.
+    raw stream that couldn't write) is retried. Every retry, after a short
+    write as well as after ``None``, stops at ``deadline``
+    (``time.monotonic()`` value): a sink that drains slowly or not at all
+    must not hold a download, and the exchange lock with it, past its
+    timeout.
     """
     view = memoryview(data)
     while view:
         written = stream.write(view)
-        if written is None:
-            if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError(
-                    "The download destination accepted no data before the "
-                    "download's deadline."
-                )
-            time.sleep(0.001)
-            continue
-        if written <= 0:
+        if written is not None and written <= 0:
             raise OSError(f"write accepted {written} bytes; destination is not writable")
-        view = view[written:]
+        if written is not None:
+            view = view[written:]
+            if not view:
+                return
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(
+                "The download destination did not accept all the data before "
+                "the download's deadline."
+            )
+        if written is None:
+            time.sleep(0.001)
 
 
 
