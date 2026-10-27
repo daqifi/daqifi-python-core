@@ -1277,9 +1277,20 @@ class TestSeveralBoardsAttached:
         message = self._assert_refused_before_anything_was_sent(service, device, hid)
         assert "TEST-PORT-2" in message
 
-    def test_application_usb_ids_are_validated(self) -> None:
+    @pytest.mark.parametrize("bad", [0x10000, -1, 0.1, True])
+    def test_application_usb_ids_are_validated(self, bad) -> None:
         with pytest.raises(ValueError, match="application_product_id"):
-            FirmwareUpdateServiceOptions(application_product_id=0x10000).validate()
+            FirmwareUpdateServiceOptions(application_product_id=bad).validate()
+
+    def test_positional_options_keep_their_meaning(self) -> None:
+        # Audit finding on #168 (round 2): the new fields were inserted
+        # after the bootloader IDs, so FirmwareUpdateServiceOptions(0x04D8,
+        # 0x003C, 0.1) set application_vendor_id=0.1 instead of poll_interval.
+        options = FirmwareUpdateServiceOptions(0x04D8, 0x003C, 0.1, 20.0, 45.0)
+        assert options.poll_interval == 0.1
+        assert options.preparing_device_timeout == 20.0
+        assert options.waiting_for_bootloader_timeout == 45.0
+        assert (options.application_vendor_id, options.application_product_id) == (0x04D8, 0xF794)
 
 
 class TestUpdateWifiModule:
