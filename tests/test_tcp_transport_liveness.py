@@ -835,3 +835,25 @@ def test_concurrent_connects_leave_the_consumer_on_the_transports_socket(monkeyp
         server.close()
         for conn in conns:
             conn.close()
+
+
+def test_connection_lost_during_a_text_command_does_not_restart_the_reader():
+    # Audit finding on #167 (round 13): the text exchange's cleanup
+    # restarted the protobuf reader after the peer closed, and it then
+    # polled the dead stream indefinitely.
+    from daqifi._internal.comm import ScpiMessage
+
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    try:
+        protobuf_consumer = device._consumer
+        result = device.execute_text_command(
+            lambda: fake.conn.shutdown(socket.SHUT_RDWR), 500, 200
+        )
+        assert result == []
+        assert device.status == ConnectionStatus.Lost
+        time.sleep(0.3)
+        assert not protobuf_consumer.is_running
+    finally:
+        device.disconnect()
+        fake.close()

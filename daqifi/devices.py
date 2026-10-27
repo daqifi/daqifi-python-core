@@ -853,9 +853,15 @@ class DaqifiDevice:
                 except Exception:
                     pass
         finally:
-            # Always restart the protobuf consumer so streaming
-            # resumes — even if setup_action raised.
-            if was_running:
+            # Restart the protobuf consumer so streaming resumes — even if
+            # setup_action raised — unless the connection was lost during
+            # the exchange: the stream is dead, and a restarted reader
+            # would just poll it.
+            if (
+                was_running
+                and self._status == ConnectionStatus.Connected
+                and not getattr(stream, "peer_closed", False)
+            ):
                 try:
                     self._consumer.start()
                 except Exception:
