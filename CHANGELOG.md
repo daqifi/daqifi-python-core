@@ -25,6 +25,22 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- `get_sd_card_files()` ended an active SD logging session (it stops the
+  stream and hands the bus back to LAN); it now refuses while logging, as
+  delete and download do. `request_sd_card_file_list()` keeps a session
+  running (#163).
+- After a JSON or CSV SD logging session the device's stream format, one
+  global setting shared with the live stream, stayed non-protobuf, so live
+  streaming decoded nothing; `stop_sd_card_logging()` restores protobuf
+  (#163).
+- SD downloads lost leading CR/LF bytes of the file: they were stripped
+  whether or not a prompt followed. Only CR/LF before a prompt are dropped
+  now (#163).
+- SD downloads ignored the destination's `write()` return value, so a raw
+  stream that took only part of a chunk lost the rest; writes are now
+  completed (#163).
+- The text-command SD listing kept a `DAQIFI> ` prompt sharing a line with
+  the first file name, so that file came out as `DAQIFI>` (#163).
 - `StreamManager.stop()` returned without sending STOP once a callback
   exception had moved the state to ERROR, leaving the board streaming; it
   forgot a worker still running after its 2 s join, so a restart ran two

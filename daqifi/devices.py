@@ -48,6 +48,7 @@ from .enums import SdCardLogFormat, WifiMode, WifiSecurityType
 from .exceptions import DeviceUnresponsiveError
 from .network import NetworkConfiguration
 from .protocol import ProtobufProtocolHandler
+from .sdcard import _write_all
 from .sdcard import (
     END_OF_FILE_MARKER,
     SdCardDownloadResult,
@@ -198,6 +199,26 @@ class _LifecycleGate:
             self._holder.inside = False
             self._lock.release()
         return True
+
+def _strip_prompt_prefixes(lines: Sequence[str]) -> List[str]:
+    """Drop a ``DAQIFI>`` prompt from the head of each reply line.
+
+    The text-command path kept "DAQIFI> log_a.bin" whole, so the first file
+    of a listing came out as "DAQIFI>" (#163). Same handling as the raw
+    capture path: a prompt-only line is dropped, the rest of a line kept.
+    """
+    out: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("DAQIFI>"):
+            stripped = stripped[len("DAQIFI>"):].lstrip()
+            if not stripped:
+                continue
+            out.append(stripped)
+        else:
+            out.append(line)
+    return out
+
 
 def _exclusive_sd_operation(method):
     """Run an SD-card operation entirely inside the text-exchange lock.
@@ -1827,6 +1848,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         # generic SCPI error) BEFORE handing to the parser, so callers
         # get a typed exception instead of an empty list. Mirrors
         # upstream daqifi-core PR #182.
+        lines = _strip_prompt_prefixes(lines)
         throw_if_sd_card_list_error(lines)
         self._sd_card_files = parse_sd_card_file_list(lines)
 
@@ -2009,6 +2031,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         # Re-enable LAN — start_sd_card_logging disabled it.
         self.send(scpi_commands.enable_network_lan())
+        # The stream format is one global setting on the device, shared with
+        # the live stream, and a JSON/CSV session changed it; the library's
+        # live path decodes protobuf only (#163).
+        self.send(scpi_commands.set_protobuf_stream_format())
         self._is_logging_to_sd = False
 
     @_exclusive_sd_operation
@@ -2108,6 +2134,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 "SD card operations require a USB/serial connection. "
                 "The SD card and WiFi/LAN share the SPI bus, so SD "
                 "operations cannot be performed over a network connection."
+            )
+        if self._is_logging_to_sd:
+            # Listing stops the stream and hands the bus back to LAN, which
+            # would end the recording; a call that looks read-only must not
+            # (#163). request_sd_card_file_list keeps a session running.
+            raise RuntimeError(
+                "Cannot list files with get_sd_card_files while logging to the "
+                "SD card; stop logging first, or use request_sd_card_file_list."
             )
 
         self.send(scpi_commands.stop_streaming())
@@ -2395,11 +2429,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
             corrupted the file in that case.
             """
             b = bytes(buf)
-            # Firmware sometimes precedes the prompt with CR/LF.
-            b = b.lstrip(b"\r\n")
+            # Firmware sometimes precedes the prompt with CR/LF; those are
+            # dropped only together with a prompt. A file starting with
+            # 0x0A or 0x0D keeps them (#163).
+            lead = b[: len(b) - len(b.lstrip(b"\r\n"))]
+            rest = b[len(lead):]
             for prompt in (b"DAQIFI> ", b"DAQIFI>"):
-                if b.startswith(prompt):
-                    return b[len(prompt):]
+                if rest.startswith(prompt):
+                    return rest[len(prompt):]
             return b
 
         while True:
@@ -2445,7 +2482,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             if eof_idx >= 0:
                 payload = combined[:eof_idx]
                 if payload:
-                    destination_stream.write(payload)
+                    _write_all(destination_stream, payload)
                     bytes_written += len(payload)
                 if progress is not None:
                     progress(SdCardTransferProgress(bytes_written, file_name))
@@ -2453,7 +2490,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
             if len(combined) > marker_len:
                 writable = combined[: len(combined) - marker_len]
-                destination_stream.write(writable)
+                _write_all(destination_stream, writable)
                 bytes_written += len(writable)
                 trailing = bytearray(combined[len(combined) - marker_len:])
             else:

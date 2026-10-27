@@ -385,6 +385,26 @@ class SdCardTransferProgress:
     file_name: str
 
 
+def _write_all(stream: Any, data: bytes) -> None:
+    """Write all of ``data``: a raw sink may accept only part per call.
+
+    ``BufferedWriter``/``BytesIO`` always take everything, but a raw
+    stream's ``write`` returns how much it took, and that return value was
+    ignored, so a short write lost the rest (#163). ``None`` (a non-blocking
+    raw stream that couldn't write) is retried.
+    """
+    view = memoryview(data)
+    while view:
+        written = stream.write(view)
+        if written is None:
+            time.sleep(0.001)
+            continue
+        if written <= 0:
+            raise OSError(f"write accepted {written} bytes; destination is not writable")
+        view = view[written:]
+
+
+
 class SdCardFileReceiver:
     """Receives raw bytes from a transport stream during an SD-card
     file download, accumulating into a destination stream and
@@ -582,17 +602,17 @@ class SdCardFileReceiver:
                     # Marker started inside the trailing buffer — only
                     # write the part of trailing before the marker.
                     if position > 0:
-                        destination_stream.write(bytes(trailing[:position]))
+                        _write_all(destination_stream, bytes(trailing[:position]))
                         total_bytes += position
                 else:
                     # Marker started inside the new chunk — write all
                     # of trailing + the part of chunk before the marker.
                     if trailing:
-                        destination_stream.write(bytes(trailing))
+                        _write_all(destination_stream, bytes(trailing))
                         total_bytes += len(trailing)
                     marker_start_in_chunk = position - len(trailing)
                     if marker_start_in_chunk > 0:
-                        destination_stream.write(chunk_bytes[:marker_start_in_chunk])
+                        _write_all(destination_stream, chunk_bytes[:marker_start_in_chunk])
                         total_bytes += marker_start_in_chunk
                 # Capture any bytes after the marker for the caller.
                 if 0 <= marker_end_in_chunk < len(chunk_bytes):
@@ -611,11 +631,11 @@ class SdCardFileReceiver:
                 if safe_count > 0:
                     from_trailing = min(safe_count, len(trailing))
                     if from_trailing > 0:
-                        destination_stream.write(bytes(trailing[:from_trailing]))
+                        _write_all(destination_stream, bytes(trailing[:from_trailing]))
                         total_bytes += from_trailing
                     from_new = safe_count - from_trailing
                     if from_new > 0:
-                        destination_stream.write(chunk_bytes[:from_new])
+                        _write_all(destination_stream, chunk_bytes[:from_new])
                         total_bytes += from_new
                 # Rebuild trailing window: last marker_len bytes of
                 # the combined [trailing + chunk] sequence.
