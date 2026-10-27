@@ -191,6 +191,12 @@ class SampleBuffer:
         return pd.DataFrame(data)
 
 
+# Prompt forms that may lead the START reply, longest first so a prompt line
+# is taken with its CR LF as a unit: the firmware's "DAQIFI> " (microrl
+# _PROMPT_DEFAULT), and the same on a line of its own.
+_CONSOLE_PROMPTS = (b"DAQIFI> \r\n", b"DAQIFI>\r\n", b"DAQIFI> ", b"DAQIFI>")
+
+
 class StreamManager:
     """
     Manages data streaming from Nyquist device.
@@ -369,6 +375,11 @@ class StreamManager:
             # channel list the caller asked for.
             self._device_channels = [bit for bit in range(mask.bit_length()) if mask >> bit & 1]
             enabled_count = len(self._device_channels)
+            if not self._channels:
+                # No selection means every enabled channel; record them so
+                # .channels and the buffer's exports name what samples carry.
+                self._channels = list(self._device_channels)
+                self._buffer.channels = list(self._device_channels)
             if enabled_count == 0:
                 raise ConfigurationError(
                     "No ADC channels enabled. Enable at least one channel before streaming.\n"
@@ -490,7 +501,7 @@ class StreamManager:
         # _PROMPT_DEFAULT, no line ending). A prompt on a line of its own
         # loses its CR LF with it, as a unit: never a bare CR or LF, which
         # can be a protobuf frame's length byte.
-        for prompt in (b"DAQIFI> ", b"DAQIFI>\r\n", b"DAQIFI>"):
+        for prompt in _CONSOLE_PROMPTS:
             if head.startswith(prompt):
                 head = head[len(prompt):]
                 break
@@ -518,8 +529,7 @@ class StreamManager:
         # Either prompt form, still arriving: "DAQIFI> " (the firmware's) or a
         # prompt line "DAQIFI>\r\n" split after its CR.
         return bool(rest) and any(
-            prompt.startswith(rest) and rest != prompt
-            for prompt in (b"DAQIFI> ", b"DAQIFI>\r\n")
+            prompt.startswith(rest) and rest != prompt for prompt in _CONSOLE_PROMPTS
         )
 
     def stop(self):

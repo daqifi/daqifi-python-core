@@ -179,7 +179,7 @@ def test_a_start_rejection_after_blank_or_prompt_lines_is_detected(lead) -> None
 
 # Audit round 3 on #180.
 
-@pytest.mark.parametrize("prompt", [b"DAQIFI> ", b"DAQIFI>\r\n"])
+@pytest.mark.parametrize("prompt", [b"DAQIFI> ", b"DAQIFI>\r\n", b"DAQIFI> \r\n"])
 def test_a_prompt_before_the_first_frames_does_not_corrupt_them(prompt) -> None:
     frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
     fake = _FakeSerial(enabled_mask=1, on_start=prompt + frame * 2)
@@ -249,3 +249,16 @@ def test_the_buffer_follows_the_channels_named_by_the_csv_header() -> None:
     stream.stop()
     assert stream.buffer.channels == [3]
     assert "channel_3" in stream.buffer.to_dict()
+
+
+# Audit round 6 on #180.
+
+def test_an_empty_selection_names_the_device_channels_for_exports() -> None:
+    frame = _frame(msg_time_stamp=1, analog_in_data_float=[1.5])
+    stream = _manager(_FakeSerial(enabled_mask=0b1000, on_start=frame), channels=[], sample_rate=10, format=0)
+    stream.start()
+    sample = stream.read(1, timeout=1.0)[0]
+    stream.stop()
+    assert sample.channels == {3: 1.5}
+    assert stream.channels == [3] and stream.buffer.channels == [3]
+    assert stream.buffer.to_dict()["channel_3"] == [1.5]
