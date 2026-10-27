@@ -745,3 +745,60 @@ def test_connect_whose_consumer_was_taken_over_leaves_the_newer_session(monkeypa
         monkeypatch.setattr(devices.StreamMessageConsumer, "start", real_start)
         device.disconnect()
         fake.close()
+
+
+def test_older_connect_steps_aside_for_a_nested_one_on_the_same_session(monkeypatch):
+    # Audit finding on #167 (round 10): with both calls on the same
+    # transport session, the session check could not tell them apart, and
+    # the older outer connect() replaced the nested call's consumer.
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    real_session = type(transport).session
+    outer = threading.current_thread()
+    nested = {}
+
+    def _session_pausing_once(self):
+        value = real_session.fget(self)
+        if threading.current_thread() is outer and not nested:
+            nested["started"] = True
+
+            def _nested_connect():
+                device.connect()
+                nested["consumer"] = device._consumer
+
+            worker = threading.Thread(target=_nested_connect)
+            worker.start()
+            worker.join(5)
+        return value
+
+    monkeypatch.setattr(type(transport), "session", property(_session_pausing_once))
+    try:
+        device.connect()
+        monkeypatch.setattr(type(transport), "session", real_session)
+        assert nested.get("consumer") is not None
+        assert transport.session == 1  # one session throughout
+        assert device._consumer is nested["consumer"]
+        assert device._consumer.is_running
+        received = []
+        device._consumer.add_message_received(received.append)
+        fake.send_frame()
+        assert _wait_until(lambda: len(received) == 1)
+    finally:
+        monkeypatch.setattr(type(transport), "session", real_session)
+        device.disconnect()
+        fake.close()
+
+
+def test_stream_write_returns_bytes_written_not_items():
+    # Audit finding on #167 (round 10).
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    threading.Thread(target=lambda: server.accept(), daemon=True).start()
+    transport = TcpStreamTransport("127.0.0.1", server.getsockname()[1])
+    transport.connect()
+    try:
+        assert transport.stream.write(memoryview(b"ABCDEFGH").cast("I")) == 8
+    finally:
+        transport.disconnect()
+        server.close()

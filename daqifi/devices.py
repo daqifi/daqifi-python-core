@@ -215,6 +215,11 @@ class DaqifiDevice:
         # status handlers can freely wait on other threads.
         self._state_lock = threading.Lock()
         self._transport_session: Optional[int] = None
+        # Number of the most recently started connect(); only the newest
+        # call may claim or publish the device's consumer, so an older one
+        # overtaken by a nested reconnect (say, from a Lost handler) steps
+        # aside even when both ended up on the same transport session.
+        self._connect_generation = 0
         self._text_exchange_lock_owner: Optional[int] = None
 
         if transport is not None:
@@ -312,9 +317,13 @@ class DaqifiDevice:
         self._raise_if_disposed()
         self._set_status(ConnectionStatus.Connecting)
         self._set_state(DeviceState.Connecting)
-        # The transport session this call connected, once it has; lets the
-        # failure path tell its own connection from a newer one.
+        # The transport session this call connected, once it has, and the
+        # call's generation; together they tell this call's connection
+        # from a newer one.
         connected_session: Optional[int] = None
+        with self._state_lock:
+            self._connect_generation += 1
+            generation = self._connect_generation
 
         try:
             # Refuse to connect without a transport. Previously this
@@ -356,7 +365,10 @@ class DaqifiDevice:
                 # Superseded already? A nested connect() may have replaced
                 # this call's connection since transport.connect() above;
                 # the consumer now installed is that newer one's.
-                if getattr(self._transport, "session", None) != session:
+                if (
+                    generation != self._connect_generation
+                    or getattr(self._transport, "session", None) != session
+                ):
                     return
                 old_consumer = self._consumer
                 self._consumer = None
@@ -373,12 +385,17 @@ class DaqifiDevice:
                 ProtobufMessageParser(message_factory=self._message_factory),
             )
             with self._state_lock:
-                superseded = self._consumer is not None or (
-                    getattr(self._transport, "session", None) != session
+                superseded = (
+                    generation != self._connect_generation
+                    or self._consumer is not None
+                    or getattr(self._transport, "session", None) != session
                 )
                 if not superseded:
                     self._consumer = consumer
                     self._transport_session = session
+                    # A fresh consumer has no message handlers yet; the
+                    # caller's initialize() must register them again.
+                    self._is_initialized = False
             if superseded:
                 # A nested connect() (from a status handler, during the
                 # teardown above) already established a newer connection;
@@ -430,8 +447,9 @@ class DaqifiDevice:
             # Unless a newer connection exists (a nested connect() from a
             # status handler): that one is not this call's to tear down.
             with self._state_lock:
-                superseded = connected_session is not None and (
-                    getattr(self._transport, "session", None) != connected_session
+                superseded = generation != self._connect_generation or (
+                    connected_session is not None
+                    and getattr(self._transport, "session", None) != connected_session
                 )
                 stale_consumer = None if superseded else self._consumer
                 if stale_consumer is not None:

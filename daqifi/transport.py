@@ -179,7 +179,9 @@ class _SocketStream(io.RawIOBase):
 
     def write(self, data) -> int:  # type: ignore[override]
         self._sock.sendall(data)
-        return len(data)
+        # Bytes, not elements: len() of a multi-byte-item buffer counts
+        # items, and a caller resuming from it would resend data.
+        return memoryview(data).nbytes
 
     def close(self) -> None:
         # The transport owns the socket and closes it; drop this view's
