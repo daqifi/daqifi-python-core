@@ -11,6 +11,9 @@
 #     PORTOMATIC_UPSTREAM_REF    optional, defaults to "main"
 #     PORTOMATIC_BASELINE        optional, defaults to sync_state.last_synced or HEAD~10
 #     PORTOMATIC_DOWNSTREAM_DIR  optional, defaults to "." (repo root)
+#   Secrets (Settings → Secrets and variables → Actions → Secrets):
+#     PORTOMATIC_READ_TOKEN      a token that can read the private
+#                                daqifi/portomatic repo (read-only contents)
 #
 # Required permissions: issues:write, contents:read.
 
@@ -33,6 +36,22 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      - name: Check configuration
+        # Without the variable, actions/checkout would check out this repo as
+        # the "upstream" and the check would compare it with itself.
+        env:
+          UPSTREAM_REPO: ${{ vars.PORTOMATIC_UPSTREAM_REPO }}
+          HAS_READ_TOKEN: ${{ secrets.PORTOMATIC_READ_TOKEN != '' }}
+        run: |
+          if [ -z "$UPSTREAM_REPO" ]; then
+            echo "::error::Repository variable PORTOMATIC_UPSTREAM_REPO is not set (e.g. daqifi/daqifi-core)."
+            exit 1
+          fi
+          if [ "$HAS_READ_TOKEN" != "true" ]; then
+            echo "::error::Secret PORTOMATIC_READ_TOKEN is not set; it is needed to install the private portomatic package."
+            exit 1
+          fi
+
       - name: Checkout downstream (this repo)
         uses: actions/checkout@v4
         with:
@@ -52,12 +71,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install portomatic
-        # portomatic lives in the daqifi org as a private repo. The workflow's
-        # GITHUB_TOKEN can read it as long as portomatic's repo Settings →
-        # Actions → Access policy allows daqifi-python-core (or all daqifi
-        # repos). If pip clone returns 403, that's the access policy missing.
+        # portomatic is a private repo in the daqifi org. The workflow's
+        # GITHUB_TOKEN can only read this repository, so cloning it failed
+        # with "repository not found", and no access-policy setting changes
+        # that. A separate read-only token is used instead.
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PORTOMATIC_READ_TOKEN }}
         run: |
           pip install -U pip
           pip install "git+https://x-access-token:${GH_TOKEN}@github.com/daqifi/portomatic@main"
@@ -85,8 +104,13 @@ jobs:
           portomatic check \
             --upstream "${{ github.workspace }}/upstream" \
             --baseline "${{ steps.resolve.outputs.baseline }}" \
-            --json > /tmp/portomatic-summary.json
-          cat /tmp/portomatic-summary.json
+            --json > /tmp/portomatic-output.txt
+          cat /tmp/portomatic-output.txt
+          # --json prints "wrote report/plan" lines before the JSON object.
+          python - <<'PY'
+          text = open("/tmp/portomatic-output.txt").read()
+          open("/tmp/portomatic-summary.json", "w").write(text[text.index("{"):])
+          PY
 
       - name: Parse summary
         id: summary
@@ -98,9 +122,20 @@ jobs:
           TOTAL=$(jq -r '.total' /tmp/portomatic-summary.json)
           echo "actionable=$ACTIONABLE" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
-          echo "report=downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}/$REPORT" >> "$GITHUB_OUTPUT"
+          # Normalised: upload-artifact refuses a path containing "./".
+          REPORT_PATH=$(python -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' \
+            "downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}/$REPORT")
+          echo "report=$REPORT_PATH" >> "$GITHUB_OUTPUT"
           echo "actionable_count=$ACTIONABLE_COUNT" >> "$GITHUB_OUTPUT"
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the change report
+        if: always() && steps.summary.outputs.report != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: portomatic-change-report
+          path: ${{ steps.summary.outputs.report }}
+          if-no-files-found: ignore
 
       - name: Skip if no actionable drift
         if: steps.summary.outputs.actionable != 'true'
@@ -131,11 +166,24 @@ jobs:
             echo "Upstream: \`${{ vars.PORTOMATIC_UPSTREAM_REPO }}@${{ steps.summary.outputs.upstream_sha }}\`"
             echo "Baseline: \`${{ steps.resolve.outputs.baseline }}\`"
             echo ""
-            cat "${{ steps.summary.outputs.report }}"
+            # An issue body is capped at 65536 characters; a long drift report
+            # (hundreds of file-touches) is cut and the full one is attached
+            # to the run.
+            head -c 50000 "${{ steps.summary.outputs.report }}"
+            if [ "$(wc -c < "${{ steps.summary.outputs.report }}")" -gt 50000 ]; then
+              echo ""
+              echo ""
+              echo "_Report truncated. Full report: the \`portomatic-change-report\` artifact of [this run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})._"
+            fi
             echo ""
             echo "---"
             echo "_Generated by portomatic-check on \`${{ github.sha }}\`. To absorb: run \`/portomatic-plan\` then \`/portomatic-apply\` locally._"
           } > "$BODY"
+          # --force: create the labels if missing, leave them as they are otherwise.
+          gh label create portomatic --repo "${{ github.repository }}" --force \
+            --description "Upstream port tracking (portomatic)" >/dev/null
+          gh label create upstream-drift --repo "${{ github.repository }}" --force \
+            --description "daqifi-core changes not yet ported" >/dev/null
           gh issue create \
             --repo "${{ github.repository }}" \
             --title "${{ steps.dedup.outputs.title }}" \

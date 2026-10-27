@@ -1,0 +1,86 @@
+schema_version: 1
+slug: daqifi-core-to-daqifi-python-core
+upstream_root: ../daqifi-core
+downstream_root: .
+upstream_lang: csharp
+downstream_lang: python
+arch: free
+adapters:
+- csharp
+- python
+verifiers:
+  required: []
+  optional: []
+firmware: null
+hil:
+  transport: serial
+  port_env_var: PORTOMATIC_HIL_PORT
+  required: false
+  suites_glob: testing/suites/*.yaml
+tickets:
+  enabled: true
+  hub_repo: DAQiFi/daqifi-python-core
+  labels:
+  - portomatic
+  milestone_pattern: upstream-{sha7}
+  title_pattern: '[{classification}] {file}'
+port_conventions:
+- upstream_pattern: IDisposable / Dispose()
+  downstream_idiom: '`close()` method, optionally pair with `__enter__`/`__exit__`
+    for context-manager protocol'
+- upstream_pattern: IEnumerable<T>
+  downstream_idiom: '`typing.Iterable[T]` (or `Iterator[T]` if you also need `next()`
+    semantics)'
+- upstream_pattern: event EventHandler<T>
+  downstream_idiom: 'Single event: `Callable[[T], None]` callback slot OR `add_<event>`/`remove_<event>`
+    if subscribers > 1. Multiple events on same interface: prefix add/remove with
+    the event name (e.g. `add_message_received`, `remove_message_received`) and keep
+    callback lists per-event. Mirror this pattern across all events on the same Protocol/class
+    for consistency.'
+- upstream_pattern: Task<T> (async)
+  downstream_idiom: '`Awaitable[T]` if the project uses asyncio; sync return otherwise
+    (note divergence in shard)'
+- upstream_pattern: public interface IFoo
+  downstream_idiom: '`typing.Protocol` (structural) when there are existing or planned
+    conformers; otherwise omit and rely on duck typing'
+- upstream_pattern: Stream
+  downstream_idiom: "`typing.IO[bytes]` (or `BinaryIO`) \u2014 file-like objects with\
+    \ read/write"
+- upstream_pattern: TimeSpan
+  downstream_idiom: '`float` (seconds) or `datetime.timedelta` if duration arithmetic
+    is needed'
+- upstream_pattern: DateTime / DateTimeOffset
+  downstream_idiom: '`datetime.datetime` (use `datetime.now(timezone.utc)` for UTC
+    equivalent of `DateTime.UtcNow`)'
+- upstream_pattern: Exception (base type or unspecified subtype)
+  downstream_idiom: "Choice depends on direction (#64): **raised** errors \u2192 `Exception`\
+    \ or specific subtype (never raise BaseException). **caught/stored** errors (event-args\
+    \ fields, error callbacks, `except` blocks that need to surface anything including\
+    \ KeyboardInterrupt/SystemExit) \u2192 `BaseException`. Match upstream semantic\
+    \ intent \u2014 `Exception?` field that stores any caught error \u2192 `Optional[BaseException]`;\
+    \ method that raises a validation error \u2192 raise `Exception` subtype."
+- upstream_pattern: ArgumentException / ArgumentNullException
+  downstream_idiom: '`ValueError` (or `TypeError` for type-mismatch cases)'
+- upstream_pattern: InvalidOperationException
+  downstream_idiom: '`RuntimeError` (or a domain-specific exception when the project
+    defines one)'
+- upstream_pattern: NotImplementedException / NotSupportedException
+  downstream_idiom: '`NotImplementedError`'
+- upstream_pattern: EventArgs subclass
+  downstream_idiom: '`@dataclass` carrying the event payload (frozen if the event
+    payload is read-only)'
+- upstream_pattern: Guid
+  downstream_idiom: '`uuid.UUID`'
+- upstream_pattern: static <Type> Foo => new() {...} (read-only static property of
+    mutable type)
+  downstream_idiom: "`@classmethod` factory: `def fast(cls) -> 'Foo': return cls(...)`.\
+    \ Each call returns a fresh instance \u2014 module-level singletons would share\
+    \ mutable state across callers. Use this whenever the C# property reads `=> new()\
+    \ {...}` (each access constructs a new object), even if the type's fields look\
+    \ immutable."
+- upstream_pattern: Transitive un-ported type (referenced inside a referenced type)
+  downstream_idiom: "Shallow-stub: type the field/parameter as the closest available\
+    \ concrete type (the generic T parameter, `Any`, or a Protocol with the bare-minimum\
+    \ signature). Add a TODO comment citing the upstream type. Don't recursively port\
+    \ \u2014 that's a separate plan step."
+created_at: '2026-04-18T22:31:37.947469Z'
