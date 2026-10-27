@@ -2117,3 +2117,7 @@ class TestDisconnectedDevice:
             shutil.rmtree(firmware_dir, ignore_errors=True)
 
         assert exc_info.value.failed_state == FirmwareUpdateState.PREPARING_DEVICE
+        # Reported as disconnected on every host: building the request first
+        # failed on CI runners without cmd.exe, at IDLE, before the check.
+        assert "must be connected" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []

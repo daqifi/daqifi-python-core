@@ -730,13 +730,6 @@ class DefaultFirmwareUpdateService:
                 return
             _check_cancel(cancel_event)
 
-            # Built before the device is switched into WiFi-update mode, so
-            # an unresolvable port, tool or cmd.exe fails while the device
-            # is still untouched.
-            request = self._build_wifi_process_request(
-                device, firmware_path, progress
-            )
-
             self._transition_to_state(
                 FirmwareUpdateState.PREPARING_DEVICE,
                 "Preparing device for WiFi module update.",
@@ -748,6 +741,15 @@ class DefaultFirmwareUpdateService:
                 self._current_operation,
                 0,
                 total_bytes,
+            )
+
+            # Built before the device is switched into WiFi-update mode, so
+            # an unresolvable port, tool or cmd.exe fails while the device
+            # is still untouched. A disconnected device is reported as such
+            # first, whatever the host can or can't run.
+            _ensure_device_connected(device)
+            request = self._build_wifi_process_request(
+                device, firmware_path, progress
             )
 
             def _prepare(deadline: _Cancellation) -> None:
