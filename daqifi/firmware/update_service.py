@@ -1027,21 +1027,25 @@ class DefaultFirmwareUpdateService:
         template = self._options.wifi_flash_tool_arguments_template
 
         executable_path = tool_path
-        # Split first, then put each value into its argument whole: nothing
-        # substituted is parsed again, so quotes or apostrophes in a value
-        # (or the template's own quotes around a placeholder) can't change
-        # where arguments start and end. A list reaches a POSIX program as
-        # argv, and a Windows one through list2cmdline (C-runtime quoting).
-        executable_arguments: Any = _substitute_placeholders(
-            _split_windows_template(template)
-            if os.name == "nt"
-            else _split_posix_template(template),
-            port,
-            firmware_path,
-        )
-
+        executable_arguments: Any
         extension = os.path.splitext(tool_path)[1].lower()
-        if extension in (".cmd", ".bat"):
+        if extension not in (".cmd", ".bat"):
+            # Split first, then put each value into its argument whole:
+            # nothing substituted is parsed again, so quotes or apostrophes
+            # in a value (or the template's own quotes around a placeholder)
+            # can't change where arguments start and end. A list reaches a
+            # POSIX program as argv, and a Windows one through list2cmdline
+            # (C-runtime quoting). A .cmd template is always split by
+            # Windows rules, below: it is a Windows command line on any host,
+            # where an apostrophe is an ordinary character.
+            executable_arguments = _substitute_placeholders(
+                _split_windows_template(template)
+                if os.name == "nt"
+                else _split_posix_template(template),
+                port,
+                firmware_path,
+            )
+        else:
             cmd_exe = shutil.which("cmd.exe")
             if cmd_exe is None:
                 raise FileNotFoundError(

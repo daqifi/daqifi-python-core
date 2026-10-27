@@ -1834,6 +1834,40 @@ class TestUpdateWifiModule:
             "t.cmd", r'/p {port} /i "C:\a&b"', "P1", r"C:\fw", native_windows=True
         )
 
+    @pytest.mark.skipif(os.name == "nt", reason="the POSIX split is what failed")
+    @pytest.mark.parametrize("template,tail", [
+        (r"/p {port} /i C:\O'Brien\image.bin", ["/i", r"C:\O'Brien\image.bin"]),
+        (r'/p {port} /i "C:\firmware\"', ["/i", "C:\\firmware\\"]),
+    ])
+    def test_a_cmd_template_is_split_by_windows_rules_through_the_request_builder(
+        self, template, tail
+    ) -> None:
+        # Audit finding on #166 (round 17): the request builder POSIX-split
+        # the template before looking at the tool type, so under WSL a legal
+        # .cmd template with an apostrophe or a quoted trailing backslash
+        # raised "No closing quotation" before reaching _cmd_exe_arguments.
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_arguments_template = template
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        arguments = runner.last_request.arguments
+        assert arguments[:4] == ["/d", "/v:off", "/c", "winc_flash_tool.cmd"]
+        assert arguments[4] == "/p" and arguments[-2:] == tail
+
     def test_a_placeholder_the_template_quoted_is_quoted_once_on_native_windows(self) -> None:
         # Audit finding on #166 (round 16): '/i "{firmwarePath}"' became
         # ""C:\fw&calc.exe&rem"", the quote pairs cancelled and cmd.exe ran
