@@ -363,66 +363,46 @@ class _MessageTypeHint:
 def _detect_message_type(data: bytes) -> int:
     """Heuristic: choose between text and protobuf parsing for ``data``.
 
-    Sample the first 512 bytes rather than scanning the whole buffer.
-    The full-buffer pure-Python loop turns into an O(n²) per-dispatch
-    cost as the buffer grows; a 512-byte prefix is enough to make the
-    text-vs-protobuf decision because a protobuf frame's length-prefix
-    + payload header already lands inside that window (Qodo PR 17 pass
-    48 #1).
+    Port of upstream ``DetectMessageType`` after daqifi-core #457/#810.
+    CR, LF and TAB are framing, not content, so they don't count towards
+    the printable ratio; null density is tested before any text-shaped
+    edge; and a trailing line ending is no longer a text signal at all: a
+    binary frame can end in CRLF (a digital mask of 0x0A0D, or a status
+    reply the firmware terminates with one).
+
+    Samples the first 512 bytes rather than scanning the whole buffer: the
+    full-buffer pure-Python loop is O(n²) per dispatch as the buffer grows,
+    and 512 bytes already hold a protobuf frame's prefix and header (Qodo
+    PR 17 pass 48 #1).
     """
     if len(data) == 0:
         return _MessageTypeHint.UNCERTAIN
-
     sample = data[:512]
-    sample_len = len(sample)
-
-    printable = sum(1 for b in sample if 32 <= b <= 126)
-    if printable / sample_len > 0.8:
+    content = [b for b in sample if b not in (0x0D, 0x0A, 0x09)]
+    printable_ratio = (
+        sum(1 for b in content if 32 <= b <= 126) / len(content) if content else 0.0
+    )
+    null_ratio = sample.count(0) / len(sample)
+    if printable_ratio > 0.8:
         return _MessageTypeHint.LIKELY_TEXT
-
-    if sample_len > 3 and _is_likely_text_command(sample):
-        return _MessageTypeHint.LIKELY_TEXT
-
-    null_ratio = sum(1 for b in sample if b == 0) / sample_len
     if null_ratio > 0.1:
         return _MessageTypeHint.LIKELY_PROTOBUF
-
-    if null_ratio > 0.05 and _is_likely_protobuf_data(sample):
-        return _MessageTypeHint.LIKELY_PROTOBUF
-
+    if len(sample) > 3 and printable_ratio > 0.5 and _starts_with_scpi_marker(sample):
+        return _MessageTypeHint.LIKELY_TEXT
     return _MessageTypeHint.UNCERTAIN
 
 
-def _is_likely_text_command(data: bytes) -> bool:
-    # Decoding only the first 10 bytes (vs the full buffer) is enough
-    # for the prefix tests, and the line-ending check is cheaper as a
-    # raw byte compare. Avoids allocating a full str for every framing
-    # decision in the hot path (Qodo PR 17 pass 29 #2).
+def _starts_with_scpi_marker(data: bytes) -> bool:
+    # SCPI keywords are case-insensitive; `*` is literal (Qodo PR 17 pass
+    # 30 #2). Only the first 10 bytes are decoded (pass 29 #2).
     head = data[:10].decode("ascii", errors="ignore")
     head_upper = head.upper()
-    # SCPI commands are case-insensitive — match on head_upper for
-    # SYST/CONF/READ. `*` is literal (only standard form), so test
-    # against `head` directly (Qodo PR 17 pass 30 #2).
     return (
         head.startswith("*")
         or head_upper.startswith("SYST")
         or head_upper.startswith("CONF")
         or head_upper.startswith("READ")
-        or data.endswith(b"\r\n")
-        or data.endswith(b"\n")
     )
-
-
-def _is_likely_protobuf_data(data: bytes) -> bool:
-    if len(data) < 2:
-        return False
-    # Look for a plausible varint field tag in the first few bytes:
-    # wire type (low 3 bits) <= 5 and field number (high bits) > 0.
-    for i in range(min(len(data) - 1, 5)):
-        b = data[i]
-        if (b & 0x07) <= 5 and (b >> 3) > 0:
-            return True
-    return False
 
 
 class CompositeMessageParser:
@@ -461,34 +441,27 @@ class CompositeMessageParser:
         if len(data) == 0:
             return [], 0
 
-        hint = _detect_message_type(data)
-
-        # Critical: return whenever EITHER messages OR consumed > 0.
-        # A parser may legitimately advance through ignorable bytes
-        # (blank lines, malformed prefixes) without producing a
-        # message; dropping that progress causes the consumer's
-        # buffer to grow without bound (Qodo PR 17 pass 6 #1).
-        if hint == _MessageTypeHint.LIKELY_PROTOBUF:
-            wrapped, consumed = self._try_protobuf(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        if hint == _MessageTypeHint.LIKELY_TEXT:
-            wrapped, consumed = self._try_text(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        # Heuristics uncertain or first attempt failed -- try the other.
-        if hint != _MessageTypeHint.LIKELY_TEXT:
-            wrapped, consumed = self._try_text(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        if hint != _MessageTypeHint.LIKELY_PROTOBUF:
-            wrapped, consumed = self._try_protobuf(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
+        # Likely text goes to the text parser first; everything else,
+        # uncertain included, to the protobuf parser first (upstream
+        # #457): routing a binary frame to the line parser destroys it.
+        if _detect_message_type(data) == _MessageTypeHint.LIKELY_TEXT:
+            first, second = self._try_text, self._try_protobuf
+        else:
+            first, second = self._try_protobuf, self._try_text
+        # The preferred parser's progress counts even without a message: it
+        # may be skipping bytes it can ignore (blank lines, malformed
+        # prefixes), and dropping that progress grows the consumer's buffer
+        # without bound (Qodo PR 17 pass 6 #1).
+        wrapped, consumed = first(data)
+        if wrapped or consumed:
+            return wrapped, consumed
+        # The fallback's only with a message. Its "progress" through bytes
+        # that aren't its format is destruction: the protobuf parser
+        # resyncing over the start of a SCPI reply split across reads
+        # (b'0,' then b'"No error"\r\n') ate its first byte.
+        wrapped, consumed = second(data)
+        if wrapped:
+            return wrapped, consumed
         return [], 0
 
     def _try_text(self, data: bytes) -> Tuple[List[ObjectInboundMessage], int]:
