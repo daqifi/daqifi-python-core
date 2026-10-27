@@ -66,3 +66,12 @@ def test_a_truncated_last_sample_is_dropped_not_fatal() -> None:
     data = b'{"ts":1,"ai":[{"ch":0, "val":1}]}\n{\n"ts":2,\n"ai":[\n{"ch":0'
     samples = list(_parse(data).samples)
     assert [s.analog_values for s in samples] == [(1.0,)]
+
+
+@pytest.mark.parametrize("bad", [b'{"ts":1,"ai":1}', b'{"ts":1,"di":{"val":3}}', b'{"ts":1,"ai":[1]}'])
+def test_a_malformed_sample_is_skipped_not_fatal(bad) -> None:
+    # Audit finding on #183 (round 1): a malformed container raised and the
+    # whole parse aborted; the valid sample after it was never returned.
+    data = bad + b'\n{"ts":2,"analog":[3]}\n'
+    samples = list(_parse(data).samples)
+    assert [s.analog_values for s in samples] == [(3.0,)]

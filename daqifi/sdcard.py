@@ -2001,6 +2001,17 @@ def _json_meta(obj: Any) -> Optional[dict]:
 def _try_parse_json_sample(
     obj: Any,
 ) -> Optional[Tuple[int, List[float], Optional[List[int]], int]]:
+    """See _parse_json_sample; None for anything malformed, so one bad
+    record is skipped instead of aborting the whole log."""
+    try:
+        return _parse_json_sample(obj)
+    except Exception:
+        return None
+
+
+def _parse_json_sample(
+    obj: Any,
+) -> Optional[Tuple[int, List[float], Optional[List[int]], int]]:
     """``(timestamp, analog_values, channels, digital_data)`` from one sample
     object, or None if it isn't one.
 
@@ -2019,7 +2030,11 @@ def _try_parse_json_sample(
     digital_data = 0
     if "ai" in obj or "di" in obj:
         channels = []
-        for entry in obj.get("ai") or []:
+        ai = obj.get("ai") or []
+        di = obj.get("di") or []
+        if not isinstance(ai, list) or not isinstance(di, list):
+            return None
+        for entry in ai:
             if not isinstance(entry, dict):
                 return None
             ch, val = entry.get("ch"), entry.get("val")
@@ -2030,9 +2045,8 @@ def _try_parse_json_sample(
                 return None
             channels.append(ch)
             analog_values.append(float(val))
-        digital = obj.get("di") or []
-        if digital:
-            last = digital[-1]  # the latest port state in this period
+        if di:
+            last = di[-1]  # the latest port state in this period
             val = last.get("val") if isinstance(last, dict) else None
             if isinstance(val, int) and not isinstance(val, bool):
                 digital_data = val & 0xFFFFFFFF
