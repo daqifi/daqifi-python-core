@@ -151,3 +151,27 @@ def test_an_echo_terminator_does_not_take_a_frame_length_byte_of_0x0a() -> None:
     samples = stream.read(2, timeout=1.0)
     stream.stop()
     assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+# Audit round 2 on #180.
+
+def test_an_echo_before_a_partial_first_frame_keeps_the_frame() -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _FakeSerial(enabled_mask=1, on_start=frame[:-1], echo=True)
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    with fake.lock:
+        fake.rx += frame[-1:] + frame
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+@pytest.mark.parametrize("lead", [b"\r\n", b"DAQIFI>\r\n", b"DAQIFI> \r\n\r\n"])
+def test_a_start_rejection_after_blank_or_prompt_lines_is_detected(lead) -> None:
+    from daqifi.exceptions import CommandError
+
+    fake = _FakeSerial(on_start=lead + b'**ERROR: -113,"Undefined header"\r\n')
+    stream = _manager(fake, channels=[0], sample_rate=10, format=2)
+    with pytest.raises(CommandError, match="rejected"):
+        stream.start()
