@@ -175,3 +175,16 @@ def test_a_start_rejection_after_blank_or_prompt_lines_is_detected(lead) -> None
     stream = _manager(fake, channels=[0], sample_rate=10, format=2)
     with pytest.raises(CommandError, match="rejected"):
         stream.start()
+
+
+# Audit round 3 on #180.
+
+@pytest.mark.parametrize("prompt", [b"DAQIFI> ", b"DAQIFI>\r\n"])
+def test_a_prompt_before_the_first_frames_does_not_corrupt_them(prompt) -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _FakeSerial(enabled_mask=1, on_start=prompt + frame * 2)
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]

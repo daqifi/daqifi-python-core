@@ -445,7 +445,11 @@ class StreamManager:
         echo = start_cmd.encode("ascii") + b"\r\n"
         if head.startswith(echo):
             head = head[len(echo):]
-        for prompt in (b"DAQIFI> ", b"DAQIFI>"):
+        # The firmware prompt is exactly "DAQIFI> " (microrl
+        # _PROMPT_DEFAULT, no line ending). A prompt on a line of its own
+        # loses its CR LF with it, as a unit: never a bare CR or LF, which
+        # can be a protobuf frame's length byte.
+        for prompt in (b"DAQIFI> ", b"DAQIFI>\r\n", b"DAQIFI>"):
             if head.startswith(prompt):
                 head = head[len(prompt):]
                 break
