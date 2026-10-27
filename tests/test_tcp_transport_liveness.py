@@ -857,3 +857,18 @@ def test_connection_lost_during_a_text_command_does_not_restart_the_reader():
     finally:
         device.disconnect()
         fake.close()
+
+
+def test_reader_stops_even_when_a_failed_send_already_marked_the_device_lost():
+    # Audit finding on #167 (round 14): send() failing first set Lost, so
+    # the reader's later EOF report was ignored and it kept polling.
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    try:
+        consumer = device._consumer
+        device._set_status(ConnectionStatus.Lost)  # what a failed send() does
+        fake.conn.shutdown(socket.SHUT_RDWR)
+        assert _wait_until(lambda: not consumer.is_running)
+    finally:
+        device.disconnect()
+        fake.close()

@@ -1439,12 +1439,15 @@ class DaqifiDevice:
                 return
             if args.session is not None and args.session != self._transport_session:
                 return
-            if self._status != ConnectionStatus.Connected:
-                return
             consumer = self._consumer
-            self._is_initialized = False
-            evt = self._change_status(ConnectionStatus.Lost)
-            self._state = DeviceState.Error
+            evt = None
+            if self._status == ConnectionStatus.Connected:
+                self._is_initialized = False
+                evt = self._change_status(ConnectionStatus.Lost)
+                self._state = DeviceState.Error
+            # Otherwise the status is already decided (a failed send() set
+            # Lost, or connect() is still running and checks its stream),
+            # but the reader on the dead stream is stopped all the same.
         # Stop the reader spinning on a dead stream; the consumer object stays
         # for the next connect()/disconnect() to dispose of. stop_safely only
         # sets the flag when called from the reader's own thread.
