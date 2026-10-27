@@ -2477,6 +2477,31 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 else:
                     continue
 
+            if expected_size is not None:
+                # Exact length known from the listing: the file is exactly
+                # that many bytes, whatever they contain (the end-of-file
+                # token may occur inside it), and the marker must follow
+                # directly. Anything else is an error, not a success (#163).
+                data = bytes(chunk)
+                remaining = expected_size - bytes_written
+                if remaining > 0:
+                    body = data[:remaining]
+                    _write_all(destination_stream, body)
+                    bytes_written += len(body)
+                    data = data[remaining:]
+                    if progress is not None:
+                        progress(SdCardTransferProgress(bytes_written, file_name))
+                if bytes_written == expected_size:
+                    trailing.extend(data)
+                    if len(trailing) >= marker_len:
+                        if bytes(trailing[:marker_len]) != marker:
+                            raise IOError(
+                                f"SD card file {file_name!r}: {expected_size} bytes "
+                                "received but no end-of-file marker after them; the "
+                                "file is longer than listed or the transfer is corrupt."
+                            )
+                        return bytes_written
+                continue
             combined = bytes(trailing) + bytes(chunk)
             eof_idx = combined.find(marker)
             if eof_idx >= 0:
