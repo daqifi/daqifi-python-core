@@ -221,7 +221,23 @@ def _exclusive_sd_operation(method):
                 f"{method.__name__} cannot run inside another exchange on the "
                 "same device (for example from a setup_action callback)."
             )
-        with self._text_exchange_lock:
+        consumer = self._consumer
+        on_consumer_thread = consumer is not None and (
+            threading.current_thread() is getattr(consumer, "_thread", None)
+        )
+        if on_consumer_thread:
+            # From a message-received callback: the lock's holder may be
+            # waiting for this very thread to stop the consumer, so waiting
+            # here would stall both and leave the consumer dead.
+            if not self._text_exchange_lock.acquire(blocking=False):
+                raise RuntimeError(
+                    f"{method.__name__} cannot run from a message-received "
+                    "callback while another exchange is in progress on the "
+                    "same device; call it from another thread."
+                )
+        else:
+            self._text_exchange_lock.acquire()
+        try:
             self._text_exchange_lock_owner = tid
             self._sd_operation_owner = tid
             try:
@@ -234,6 +250,8 @@ def _exclusive_sd_operation(method):
             finally:
                 self._sd_operation_owner = None
                 self._text_exchange_lock_owner = None
+        finally:
+            self._text_exchange_lock.release()
 
     return wrapper
 

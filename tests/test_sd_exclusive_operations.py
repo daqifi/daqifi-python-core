@@ -104,3 +104,42 @@ def test_an_sd_operation_from_a_setup_action_is_refused() -> None:
 
     device.execute_text_command(setup, response_timeout_ms=200, completion_timeout_ms=50)
     assert errors and "cannot run inside another exchange" in errors[0]
+
+
+def test_an_sd_operation_from_a_callback_does_not_stall_a_running_exchange() -> None:
+    # Audit finding on #176 (round 1): a message callback calling an SD
+    # operation blocked on the lock while its holder waited for that same
+    # consumer thread to stop; the stop timed out and the consumer was left
+    # dead. On the consumer thread the operation now refuses at once.
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": _LISTING})
+    stream = device._transport.stream
+    in_callback = threading.Event()
+    go = threading.Event()
+    outcome = []
+
+    def on_message(_args):
+        if outcome:
+            return
+        in_callback.set()
+        go.wait(5)
+        try:
+            device.start_sd_card_logging("capture.bin")
+            outcome.append("ran")
+        except RuntimeError as exc:
+            outcome.append(str(exc))
+
+    device._consumer.add_message_received(on_message)
+    stream.feed(bytes([2, 0x08, 0x07]))  # one protobuf frame: msg_time_stamp=7
+    assert in_callback.wait(5)
+
+    listing = {}
+    lister = threading.Thread(target=lambda: listing.update(r=device.get_sd_card_files()))
+    lister.start()
+    time.sleep(0.2)  # the listing holds the lock and is stopping the consumer
+    go.set()
+    lister.join(15)
+
+    assert not lister.is_alive()
+    assert outcome and "message-received callback" in outcome[0]
+    assert [f.file_name for f in listing["r"]] == ["log_a.bin", "log_b.bin"]
+    assert device._consumer.is_running
