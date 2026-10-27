@@ -13,6 +13,7 @@ thread that delivers parsed protobuf messages via callback.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import queue
@@ -198,6 +199,48 @@ class _LifecycleGate:
             self._lock.release()
         return True
 
+def _exclusive_sd_operation(method):
+    """Run an SD-card operation entirely inside the text-exchange lock.
+
+    SD operations hand the shared SPI bus to the SD card, run one or more
+    exchanges, and hand it back to LAN. Another exchange interleaved with
+    that (a second SD call on another thread, say) switches the bus under
+    it or reads its reply off the same stream: a listing consumed a
+    download's end-of-file marker, so the download hung and its file was
+    truncated (#164 item 6). Holding the lock across the bus switch and the
+    restore, as upstream does since daqifi-core #406/#417, makes each SD
+    operation one exchange. execute_text_command calls inside it run under
+    the lock already held.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: "DaqifiDevice", *args: Any, **kwargs: Any) -> Any:
+        tid = threading.get_ident()
+        if self._text_exchange_lock_owner == tid:
+            raise RuntimeError(
+                f"{method.__name__} cannot run inside another exchange on the "
+                "same device (for example from a setup_action callback)."
+            )
+        self._acquire_text_exchange_lock(method.__name__)
+        try:
+            self._text_exchange_lock_owner = tid
+            self._sd_operation_owner = tid
+            try:
+                if self._disposed or self._is_disconnecting:
+                    raise RuntimeError(
+                        f"{method.__name__} cannot run while the device is "
+                        "disconnecting or disposed."
+                    )
+                return method(self, *args, **kwargs)
+            finally:
+                self._sd_operation_owner = None
+                self._text_exchange_lock_owner = None
+        finally:
+            self._text_exchange_lock.release()
+
+    return wrapper
+
+
 class DaqifiDevice:
     """Base device implementation.
 
@@ -271,6 +314,10 @@ class DaqifiDevice:
         # aside even when both ended up on the same transport session.
         self._connect_generation = 0
         self._text_exchange_lock_owner: Optional[int] = None
+        # Thread running an _exclusive_sd_operation (it holds the lock), and
+        # whether one of its text exchanges is in progress.
+        self._sd_operation_owner: Optional[int] = None
+        self._sd_text_exchange_active = False
 
         if transport is not None:
             transport.add_status_changed(self._on_transport_status_changed)
@@ -679,6 +726,26 @@ class DaqifiDevice:
                 "not yet implemented."
             )
 
+    def _acquire_text_exchange_lock(self, operation: str) -> None:
+        """Take the text-exchange lock; from the consumer thread, only if free.
+
+        From a message-received callback the lock's holder may be waiting
+        for this very thread to stop the consumer: waiting here would stall
+        both, the stop would time out and the consumer would be left dead.
+        """
+        consumer = self._consumer
+        if consumer is not None and (
+            threading.current_thread() is getattr(consumer, "_thread", None)
+        ):
+            if not self._text_exchange_lock.acquire(blocking=False):
+                raise RuntimeError(
+                    f"{operation} cannot run from a message-received callback "
+                    "while another exchange is in progress on the same "
+                    "device; call it from another thread."
+                )
+        else:
+            self._text_exchange_lock.acquire()
+
     def execute_text_command(
         self,
         setup_action: Callable[[], None],
@@ -724,6 +791,19 @@ class DaqifiDevice:
             nothing within ``response_timeout_ms``.
         """
         tid = threading.get_ident()
+        if (
+            self._sd_operation_owner == tid
+            and self._text_exchange_lock_owner == tid
+            and not self._sd_text_exchange_active
+        ):
+            # Inside an SD operation, which already holds the lock.
+            self._sd_text_exchange_active = True
+            try:
+                return self._execute_text_command_locked(
+                    setup_action, response_timeout_ms, completion_timeout_ms
+                )
+            finally:
+                self._sd_text_exchange_active = False
         if self._text_exchange_lock_owner == tid:
             # Re-entrant call from inside a setup_action callback.
             # Surfacing as RuntimeError instead of letting Lock.acquire
@@ -735,7 +815,8 @@ class DaqifiDevice:
                 "do not call it from inside a setup_action callback."
             )
 
-        with self._text_exchange_lock:
+        self._acquire_text_exchange_lock("execute_text_command")
+        try:
             # All validation happens INSIDE the lock to close the
             # TOCTOU window: a competing thread can call disconnect()
             # (which clears self._consumer / self._transport without
@@ -749,6 +830,8 @@ class DaqifiDevice:
                 )
             finally:
                 self._text_exchange_lock_owner = None
+        finally:
+            self._text_exchange_lock.release()
 
     def _execute_text_command_locked(
         self,
@@ -1693,6 +1776,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
     def set_sd_logging_file_name(self, file_name: str) -> None:
         self.send(scpi_commands.set_sd_logging_file_name(file_name))
 
+    @_exclusive_sd_operation
     def request_sd_card_file_list(self) -> None:
         """Issue ``SD:LIST?`` and populate :attr:`sd_card_files` with the
         parsed result.
@@ -1746,6 +1830,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         throw_if_sd_card_list_error(lines)
         self._sd_card_files = parse_sd_card_file_list(lines)
 
+    @_exclusive_sd_operation
     def get_sd_logging_state(self) -> bool:
         """Query the device's current SD-logging state via ``SD:LOG?``.
 
@@ -1827,6 +1912,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         :meth:`delete_sd_card_file`, which validates + re-LISTs."""
         self.send(scpi_commands.delete_sd_file(file_name))
 
+    @_exclusive_sd_operation
     def start_sd_card_logging(
         self,
         file_name: Optional[str] = None,
@@ -1904,6 +1990,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._is_streaming = True
         self._set_state(DeviceState.Streaming)
 
+    @_exclusive_sd_operation
     def stop_sd_card_logging(self) -> None:
         """Stop the active SD-card logging session and restore LAN."""
         if not self.is_connected:
@@ -1924,6 +2011,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.enable_network_lan())
         self._is_logging_to_sd = False
 
+    @_exclusive_sd_operation
     def delete_sd_card_file(self, file_name: str) -> None:
         """Delete ``file_name`` from the SD card and refresh the cache.
 
@@ -1974,6 +2062,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         throw_if_sd_card_list_error(lines)
         self._sd_card_files = parse_sd_card_file_list(lines)
 
+    @_exclusive_sd_operation
     def format_sd_card(self) -> None:
         """Erase the entire SD card.
 
@@ -2009,6 +2098,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 except Exception:
                     pass
 
+    @_exclusive_sd_operation
     def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
         """Fetch + return the SD-card file listing (and refresh the cache)."""
         if not self.is_connected:
@@ -2044,6 +2134,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._sd_card_files = files
         return tuple(files)
 
+    @_exclusive_sd_operation
     def download_sd_card_file(
         self,
         file_name: str,
