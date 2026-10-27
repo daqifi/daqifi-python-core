@@ -74,3 +74,34 @@ def test_sd_log_with_a_read_boundary_after_the_prefix_keeps_the_frame() -> None:
     messages = _read_all_messages(io.BytesIO(filler + _big_frame()), SdCardParseOptions())
 
     assert any(_is_big(m) for m in messages)
+
+
+# Audit round 2 on #172: waiting on a bare prefix let a bogus one hold the
+# stream when the next real frame's length byte passes the field-tag check.
+
+_CAPTURED = bytes.fromhex("1208c6ecd8e3041201002a020000aa0202ffff")  # firmware capture
+_SAMPLE = bytes.fromhex("1008071a0c0000803f0000004000004040")  # timestamp 7, 3 floats
+
+
+def test_bogus_prefix_before_captured_frames_recovers() -> None:
+    out = _feed([bytes([0xFF, 0x1F])] + [_CAPTURED] * 10)
+    assert len(out) >= 9  # at most the first frame is held back
+
+
+def test_bogus_prefix_before_sample_frames_recovers_within_two_frames() -> None:
+    out = _feed([bytes([0xFE, 0x0A]), _SAMPLE, _SAMPLE, _SAMPLE])
+    assert [m.msg_time_stamp for m in out] == [7, 7, 7]
+
+
+def test_one_frame_after_a_bogus_prefix_is_not_enough_to_skip() -> None:
+    # A single parseable frame can sit inside a genuine partial's payload;
+    # two back to back to the end of the buffer are required.
+    parser = ProtobufMessageParser(DaqifiOutMessage.FromString)
+    assert parser.parse_messages(bytes([0xFE, 0x0A]) + _SAMPLE) == ([], 0)
+
+
+def test_a_large_frame_split_at_any_offset_is_never_skipped() -> None:
+    frame = _big_frame()
+    for cut in range(1, len(frame)):
+        out = _feed([frame[:cut], frame[cut:]])
+        assert len(out) == 1 and _is_big(out[0]), f"lost at cut {cut}"

@@ -30,7 +30,10 @@ aims to follow [Semantic Versioning](https://semver.org/).
   decoded as junk frames. A large status frame over WiFi could hit it,
   and an SD log whose 64 KiB read boundary landed there failed every
   time. With no body byte yet the parser now waits; the field-tag check
-  still rejects garbage once a byte arrives (#164).
+  still rejects garbage once a byte arrives, and a bogus prefix followed
+  by two or more complete frames running to the end of the buffer is
+  skipped, so it can't hold the stream until its declared length arrives
+  (#164).
 - The HID error messages told users to `pip install hid`, which is a
   different library with an incompatible API (`hid.Device`); the code
   needs the PyPI `hidapi` package (`hid.device()`). With the wrong package
