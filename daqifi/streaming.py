@@ -406,7 +406,12 @@ class StreamManager:
                 try:
                     worker.start()
                 except BaseException:
-                    self._thread = None  # never started (thread quota)
+                    # Forget it only if it really never started (a thread
+                    # quota): an interrupt can land inside start() after
+                    # the worker is already running, and a forgotten live
+                    # worker would let a restart add a second one.
+                    if worker.ident is None or not worker.is_alive():
+                        self._thread = None
                     raise
 
         except Exception as e:

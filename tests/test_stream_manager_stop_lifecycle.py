@@ -187,3 +187,29 @@ def test_the_worker_reference_is_published_before_the_worker_runs(monkeypatch) -
     monkeypatch.undo()
     stream.stop()
     assert seen and seen[0] is True
+
+
+def test_an_interrupt_inside_thread_start_keeps_a_live_worker(monkeypatch) -> None:
+    # Audit finding on #178 (round 4): KeyboardInterrupt delivered inside
+    # Thread.start() after the worker had launched cleared the reference,
+    # so stop() couldn't join it and a restart added a second worker.
+    stream, fake = _manager()
+    release = threading.Event()
+    real_start = threading.Thread.start
+
+    def interrupted_start(thread):
+        real_start(thread)  # the worker is running...
+        raise KeyboardInterrupt  # ...when the interrupt lands
+
+    monkeypatch.setattr(threading.Thread, "start", interrupted_start)
+    with pytest.raises(KeyboardInterrupt):
+        stream.start(callback=lambda sample: release.wait(10))
+    monkeypatch.undo()
+    worker = stream._thread
+    assert worker is not None and worker.is_alive()
+    stream.stop()  # the audit's sequence: stop, then restart, worker still busy
+    assert not fake.streaming
+    with pytest.raises(RuntimeError, match="previous streaming thread"):
+        stream.start(callback=lambda sample: None)
+    release.set()
+    _wait(lambda: not worker.is_alive())
