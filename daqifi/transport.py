@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import logging
+import selectors
 import socket
 import threading
 import time
@@ -76,6 +77,63 @@ def _validate_usb_identifier(value: int, name: str) -> None:
 # ---- TcpStreamTransport ------------------------------------------------------
 
 
+class _SocketStream(io.RawIOBase):
+    """The TCP transport's stream: a socket with bounded reads.
+
+    Port of upstream daqifi-core #384 and #403, for Python's socket API:
+
+    * A read waits at most ``read_timeout`` seconds and then raises
+      ``socket.timeout``, which the consumer treats as an idle window. A
+      reader that blocked forever could not be stopped, so every text
+      exchange over TCP left the protobuf consumer dead (its restart
+      found the old thread still alive). ``socket.makefile`` can't be
+      used for this: after one timeout it refuses all further reads.
+    * End of stream (the device closed the connection: reboot, Wi-Fi
+      drop) is reported to the transport, which declares the connection
+      lost, and every read from then on raises ``ConnectionResetError``.
+      It used to read as an endless run of empty, "idle" reads.
+    """
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        read_timeout: float,
+        on_peer_closed: Callable[[], None],
+    ) -> None:
+        super().__init__()
+        self._sock = sock
+        self._read_timeout = read_timeout
+        self._on_peer_closed = on_peer_closed
+        self._peer_closed = False
+
+    def readable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
+
+    def readinto(self, buffer) -> int:  # type: ignore[override]
+        if self._peer_closed:
+            raise ConnectionResetError("The device closed the TCP connection.")
+        with selectors.DefaultSelector() as selector:
+            selector.register(self._sock, selectors.EVENT_READ)
+            if not selector.select(self._read_timeout):
+                raise socket.timeout("timed out")
+        received = self._sock.recv_into(buffer)
+        if received == 0 and len(buffer) > 0:
+            self._peer_closed = True
+            self._on_peer_closed()
+            raise ConnectionResetError("The device closed the TCP connection.")
+        return received
+
+    def write(self, data) -> int:  # type: ignore[override]
+        self._sock.sendall(data)
+        return len(data)
+
+
 class TcpStreamTransport:
     """TCP implementation of :class:`StreamTransport` Protocol.
 
@@ -87,12 +145,18 @@ class TcpStreamTransport:
     hostname; hostname resolution happens at :meth:`connect` time.
     """
 
+    # Bound on a single read once connected (upstream
+    # OperationalReceiveTimeoutMs = 500): short enough that a consumer
+    # thread parked in a read can always be stopped promptly.
+    OPERATIONAL_READ_TIMEOUT_S = 0.5
+
     def __init__(self, host: str, port: int) -> None:
         self._host = host
         self._port = port
         self._socket: Optional[socket.socket] = None
         self._stream: Optional[IO[bytes]] = None
         self._disposed = False
+        self._closing = False
         self._status_handlers: List[Callable[[TransportStatusEventArgs], None]] = []
 
     @property
@@ -121,6 +185,8 @@ class TcpStreamTransport:
         if self._socket is None or self._stream is None:
             return False
         if getattr(self._stream, "closed", False):
+            return False
+        if getattr(self._stream, "_peer_closed", False):
             return False
         try:
             return self._socket.fileno() != -1
@@ -176,18 +242,20 @@ class TcpStreamTransport:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(options.connection_timeout)
                 sock.connect((self._host, self._port))
-                # Switch off the connect-timeout so blocking reads can
-                # use socket.makefile's default semantics. We rely on
-                # `disconnect()` calling `socket.shutdown(SHUT_RDWR)`
-                # to interrupt any blocked `stream.read()` in the
-                # consumer thread — that's the "wakeup" mechanism for
-                # graceful stop without paying a per-iteration timeout.
+                # Reads are bounded by _SocketStream (selector wait), not
+                # by a socket timeout, so the socket itself goes back to
+                # blocking for sends.
                 sock.settimeout(None)
                 self._socket = sock
                 # Hand-off complete; subsequent failure paths should
                 # close via self._socket, not the local `sock`.
                 sock = None
-                self._stream = self._socket.makefile("rwb", buffering=0)
+                self._closing = False
+                self._stream = _SocketStream(  # type: ignore[assignment]
+                    self._socket,
+                    self.OPERATIONAL_READ_TIMEOUT_S,
+                    self._on_peer_closed,
+                )
                 self._notify_status(True, None)
                 return
             except Exception as exc:
@@ -244,6 +312,9 @@ class TcpStreamTransport:
         # stream.close doesn't prevent socket.close from running and
         # leaking the file descriptor (Qodo PR 17 pass 10 #3).
         disconnect_error: Optional[BaseException] = None
+        # Our own shutdown below reads as end-of-stream to the consumer;
+        # this keeps that from being reported as the device going away.
+        self._closing = True
 
         # Shutdown both halves of the socket BEFORE closing it.
         # This wakes any consumer thread blocked in `stream.read()`
@@ -288,6 +359,21 @@ class TcpStreamTransport:
             # Per upstream Dispose(): swallow disconnect errors.
             pass
         self._disposed = True
+
+    def _on_peer_closed(self) -> None:
+        """The device closed the connection (seen by a reader as EOF)."""
+        if self._closing:
+            return
+        self._closing = True
+        error = ConnectionResetError("The device closed the TCP connection.")
+        # Not on the reading thread: status handlers stop the consumer,
+        # and that thread is the consumer's own.
+        threading.Thread(
+            target=self._notify_status,
+            args=(False, error),
+            name="daqifi-tcp-peer-closed",
+            daemon=True,
+        ).start()
 
     def _notify_status(self, is_connected: bool, error: Optional[BaseException]) -> None:
         _notify(

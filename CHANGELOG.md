@@ -19,6 +19,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - Package homepage URL pointed at a repository that does not exist.
+- Over TCP, every `execute_text_command` left the protobuf consumer
+  stopped (its reader was blocked in a socket read and could not be
+  restarted), so no stream frame was dispatched again until reconnect.
+  TCP reads are now bounded to 0.5 s, as upstream does (#164).
+- A device closing its TCP connection (reboot, Wi-Fi drop) went
+  unnoticed: the session stayed "connected" and the reader spun on empty
+  reads. End of stream now marks the transport disconnected, raises a
+  status event, and the device reports `ConnectionStatus.Lost` (#164).
 
 ## [0.1.0]
 
