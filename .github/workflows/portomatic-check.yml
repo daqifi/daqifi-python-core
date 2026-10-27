@@ -11,6 +11,9 @@
 #     PORTOMATIC_UPSTREAM_REF    optional, defaults to "main"
 #     PORTOMATIC_BASELINE        optional, defaults to sync_state.last_synced or HEAD~10
 #     PORTOMATIC_DOWNSTREAM_DIR  optional, defaults to "." (repo root)
+#   Secrets (Settings → Secrets and variables → Actions → Secrets):
+#     PORTOMATIC_READ_TOKEN      a token that can read the private
+#                                daqifi/portomatic repo (read-only contents)
 #
 # Required permissions: issues:write, contents:read.
 
@@ -33,6 +36,22 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      - name: Check configuration
+        # Without the variable, actions/checkout would check out this repo as
+        # the "upstream" and the check would compare it with itself.
+        env:
+          UPSTREAM_REPO: ${{ vars.PORTOMATIC_UPSTREAM_REPO }}
+          HAS_READ_TOKEN: ${{ secrets.PORTOMATIC_READ_TOKEN != '' }}
+        run: |
+          if [ -z "$UPSTREAM_REPO" ]; then
+            echo "::error::Repository variable PORTOMATIC_UPSTREAM_REPO is not set (e.g. daqifi/daqifi-core)."
+            exit 1
+          fi
+          if [ "$HAS_READ_TOKEN" != "true" ]; then
+            echo "::error::Secret PORTOMATIC_READ_TOKEN is not set; it is needed to install the private portomatic package."
+            exit 1
+          fi
+
       - name: Checkout downstream (this repo)
         uses: actions/checkout@v4
         with:
@@ -52,12 +71,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install portomatic
-        # portomatic lives in the daqifi org as a private repo. The workflow's
-        # GITHUB_TOKEN can read it as long as portomatic's repo Settings →
-        # Actions → Access policy allows daqifi-python-core (or all daqifi
-        # repos). If pip clone returns 403, that's the access policy missing.
+        # portomatic is a private repo in the daqifi org. The workflow's
+        # GITHUB_TOKEN can only read this repository, so cloning it failed
+        # with "repository not found", and no access-policy setting changes
+        # that. A separate read-only token is used instead.
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PORTOMATIC_READ_TOKEN }}
         run: |
           pip install -U pip
           pip install "git+https://x-access-token:${GH_TOKEN}@github.com/daqifi/portomatic@main"
