@@ -17,7 +17,7 @@ from typing import List, Optional, Sequence
 import pytest
 
 from daqifi.enums import FirmwareUpdateState
-from daqifi.firmware.bootloader import BootloaderProtocol
+from daqifi.firmware.bootloader import BootloaderProtocol, Pic32BootloaderProtocol
 from daqifi.firmware.external_process import (
     ExternalProcessRequest,
     ExternalProcessResult,
@@ -89,8 +89,10 @@ class _FakeHidTransport:
         vendor_id: int,
         product_id: int,
         serial_number: Optional[str] = None,
+        device_path=None,
     ) -> None:
         self._connect_calls += 1
+        self.connected_path = device_path
         self.is_connected = True
 
     def write(self, data: bytes) -> None:
@@ -126,14 +128,18 @@ class _FakeHidEnumerator:
 
 
 class _ThrowingHidEnumerator:
-    def __init__(self, exception: BaseException) -> None:
+    def __init__(self, exception: BaseException, succeed_first: int = 0) -> None:
         self._exception = exception
+        self._successes_left = succeed_first
 
     def enumerate(
         self,
         vendor_id: Optional[int] = None,
         product_id: Optional[int] = None,
     ) -> Sequence[HidDeviceInfo]:
+        if self._successes_left > 0:
+            self._successes_left -= 1
+            return []
         raise self._exception
 
 
@@ -513,7 +519,7 @@ class TestUpdateFirmwareFailureModes:
         hid.enqueue_read(bytes([0x01, 0x10]))  # verify version
 
         info = HidDeviceInfo(0x04D8, 0x003C, "path-1", "SN-1", "Bootloader")
-        enumerator = _FakeHidEnumerator([[info]])
+        enumerator = _FakeHidEnumerator([[], [info]])
         protocol = _FakeBootloaderProtocol(
             [bytes([0xA1, 0x01]), bytes([0xA1, 0x02])]
         )
@@ -539,8 +545,10 @@ class TestUpdateFirmwareFailureModes:
     ) -> None:
         device = _FakeStreamingDevice("fake-port-3")
         hid = _FakeHidTransport()
+        # The pre-FORceBoot snapshot succeeds; the failure under test is in
+        # the wait for the bootloader that follows.
         enumerator = _ThrowingHidEnumerator(
-            RuntimeError("HID backend unavailable.")
+            RuntimeError("HID backend unavailable."), succeed_first=1
         )
         # Tight WaitingForBootloader timeout so the retry loop exits
         # quickly into the timeout path.
@@ -586,7 +594,7 @@ class TestUpdateFirmwareFailureModes:
         hid = _FakeHidTransport()
         info_a = HidDeviceInfo(0x04D8, 0x003C, "path-a", "SN-A", "Bootloader")
         info_b = HidDeviceInfo(0x04D8, 0x003C, "path-b", "SN-B", "Bootloader")
-        enumerator = _FakeHidEnumerator([[info_a, info_b]])
+        enumerator = _FakeHidEnumerator([[], [info_a, info_b]])
 
         service = _build_pic32_service(
             hid,
@@ -607,6 +615,489 @@ class TestUpdateFirmwareFailureModes:
         assert "Multiple HID bootloader devices detected" in str(exc.__cause__)
         assert "SN-A" in str(exc.__cause__)
         assert "SN-B" in str(exc.__cause__)
+
+    def test_bootloader_already_enumerated_before_force_boot_is_never_selected(
+        self,
+    ) -> None:
+        # Audit finding: board B was already in its bootloader, and ours had
+        # not re-enumerated by the first poll. B was the only candidate, so
+        # the service connected to it and erased it.
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        other = HidDeviceInfo(0x04D8, 0x003C, "path-b", "SN-B", "Bootloader")
+        enumerator = _FakeHidEnumerator([[other]] * 200)
+        options = _fast_options()
+        options.waiting_for_bootloader_timeout = 0.2
+
+        service = _build_pic32_service(
+            hid, enumerator, _FakeBootloaderProtocol([bytes([0xA1])]), options
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert exc_info.value.failed_state == FirmwareUpdateState.WAITING_FOR_BOOTLOADER
+        assert "already enumerated before FORceBoot" in str(exc_info.value.__cause__)
+        assert hid._connect_calls == 0
+        assert hid.writes == []
+
+    def test_bootloader_that_appears_after_force_boot_is_selected(self) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        connected_serials: List[Optional[str]] = []
+
+        class _RecordingHid(_FakeHidTransport):
+            def connect(self, vendor_id, product_id, serial_number=None, device_path=None):
+                connected_serials.append(serial_number)
+                super().connect(vendor_id, product_id, serial_number, device_path)
+
+        hid = _RecordingHid()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        other = HidDeviceInfo(0x04D8, 0x003C, "path-b", "SN-B", "Bootloader")
+        ours = HidDeviceInfo(0x04D8, 0x003C, "path-a", "SN-A", "Bootloader")
+        enumerator = _FakeHidEnumerator([[other], [other], [other, ours]])
+
+        service = _build_pic32_service(
+            hid, enumerator, _FakeBootloaderProtocol([bytes([0xA1])])
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+        assert connected_serials == ["SN-A"]
+        assert hid.connected_path == "path-a"
+
+    def test_new_bootloader_on_another_usb_port_is_never_selected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Another board entering its bootloader during the wait is "new" to
+        # the snapshot; where USB locations are known it is refused.
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        monkeypatch.setattr(
+            update_service,
+            "hid_device_location",
+            lambda path: {"path-b": "1-4", "path-a": "1-2"}.get(path),
+        )
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        other = HidDeviceInfo(0x04D8, 0x003C, "path-b", None, "Bootloader")
+        options = _fast_options()
+        options.waiting_for_bootloader_timeout = 0.2
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[]] + [[other]] * 200),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+            options,
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert "not shown to be on this device's USB port (1-2)" in str(
+            exc_info.value.__cause__
+        )
+        assert hid._connect_calls == 0
+        assert hid.writes == []
+
+    def test_new_bootloader_with_unknown_location_is_not_selected_when_ours_is_known(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding (round 3): a board attached over usbip has no
+        # readable location; "unknown" was accepted as a match.
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        monkeypatch.setattr(update_service, "hid_device_location", lambda path: None)
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        usbip_board = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw2", None, "Bootloader")
+        options = _fast_options()
+        options.waiting_for_bootloader_timeout = 0.2
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[]] + [[usbip_board]] * 200),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+            options,
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException):
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert hid._connect_calls == 0
+        assert hid.writes == []
+
+    def test_reused_hidraw_node_on_our_port_is_not_mistaken_for_the_old_board(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding (round 3): board B held /dev/hidraw0 at the snapshot,
+        # then unplugged; ours re-enumerated on the freed node.
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        locations = iter(["1-4"])  # snapshot sees B's port; later polls see ours
+        monkeypatch.setattr(
+            update_service, "hid_device_location", lambda path: next(locations, "1-2")
+        )
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        node = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw0", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[node], [], [node]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+        assert hid.connected_path == "/dev/hidraw0"
+
+    def test_node_handed_to_another_board_before_open_is_refused_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding (round 4): ours was selected at /dev/hidraw0 on port
+        # 1-2, vanished before the open, and board B on 1-4 took the node.
+        # Opening by path alone would have erased B.
+        import daqifi.firmware.update_service as update_service
+
+        swapped = {"done": False}
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        monkeypatch.setattr(
+            update_service,
+            "hid_device_location",
+            lambda path: "1-4" if swapped["done"] else "1-2",
+        )
+
+        class _SwappingHid(_FakeHidTransport):
+            def connect(self, vendor_id, product_id, serial_number=None, device_path=None):
+                swapped["done"] = True
+                super().connect(vendor_id, product_id, serial_number, device_path)
+
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _SwappingHid()
+        node = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw0", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [node]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert exc_info.value.failed_state == FirmwareUpdateState.CONNECTING
+        assert "between selection and open" in str(exc_info.value.__cause__)
+        assert hid._connect_calls == 1
+        assert hid.writes == []
+        assert not hid.is_connected
+
+    @pytest.mark.parametrize("later", ["1-4", None])
+    def test_location_that_passed_the_filter_is_the_one_checked_after_open(
+        self, monkeypatch: pytest.MonkeyPatch, later
+    ) -> None:
+        # Audit finding (round 5): selection re-read the location after the
+        # filter. If the node changed hands in between, the new board's port
+        # (or None, which skipped the check) became the expected one.
+        import daqifi.firmware.update_service as update_service
+
+        reads = iter(["1-2"])
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        monkeypatch.setattr(
+            update_service, "hid_device_location", lambda path: next(reads, later)
+        )
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        node = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw0", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [node]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert "between selection and open" in str(exc_info.value.__cause__)
+        assert hid.writes == []
+
+    def test_new_bootloader_on_the_devices_usb_port_is_selected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: "1-2")
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        monkeypatch.setattr(
+            update_service,
+            "hid_device_location",
+            lambda path: {"path-b": "1-4", "path-a": "1-2"}.get(path),
+        )
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        other = HidDeviceInfo(0x04D8, 0x003C, "path-b", None, "Bootloader")
+        ours = HidDeviceInfo(0x04D8, 0x003C, "path-a", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [other, ours]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+        assert hid.connected_path == "path-a"
+
+    def test_device_that_reboots_into_its_application_stops_the_wait(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A board without the bootloader treats FORceBoot as a reboot: its
+        # port drops and returns, and its own bootloader never appears. A
+        # bootloader that shows up afterwards is another board's, even when
+        # it is the only new one.
+        import daqifi.firmware.update_service as update_service
+
+        listings = iter([frozenset(), frozenset({"/dev/ttyACM0"})])
+        monkeypatch.setattr(
+            update_service,
+            "_list_serial_port_names",
+            lambda: next(listings, frozenset({"/dev/ttyACM0"})),
+        )
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: None)
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        foreign = HidDeviceInfo(0x04D8, 0x003C, "path-x", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [], [foreign]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert exc_info.value.failed_state == FirmwareUpdateState.WAITING_FOR_BOOTLOADER
+        assert "came back as the application" in str(exc_info.value.__cause__)
+        assert hid._connect_calls == 0
+        assert hid.writes == []
+
+    def test_return_to_application_is_seen_through_a_by_id_alias(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        # Port listings name the node (/dev/ttyACM0); the device may have
+        # been opened through a /dev/serial/by-id alias.
+        import daqifi.firmware.update_service as update_service
+
+        node = tmp_path / "ttyACM0"
+        node.write_text("")
+        alias = tmp_path / "usb-DAQiFi-if00"
+        alias.symlink_to(node)
+        listings = iter([frozenset(), frozenset({str(node)})])
+        monkeypatch.setattr(
+            update_service,
+            "_list_serial_port_names",
+            lambda: next(listings, frozenset({str(node)})),
+        )
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: None)
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": str(alias)})()
+        hid = _FakeHidTransport()
+        foreign = HidDeviceInfo(0x04D8, 0x003C, "path-x", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [], [foreign]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert "came back as the application" in str(exc_info.value.__cause__)
+        assert hid.writes == []
+
+    def test_reused_tty_name_on_another_usb_port_is_not_a_return(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding (round 6): another CDC board took the freed
+        # /dev/ttyACM0 while ours sat in its bootloader on port 1-2.
+        import daqifi.firmware.update_service as update_service
+
+        listings = iter([frozenset()])
+        monkeypatch.setattr(
+            update_service,
+            "_list_serial_port_names",
+            lambda: next(listings, frozenset({"/dev/ttyACM0"})),
+        )
+        tty_locations = iter(["1-2"])  # at FORceBoot: ours; afterwards: B's
+        monkeypatch.setattr(
+            update_service, "serial_port_location", lambda port: next(tty_locations, "1-4")
+        )
+        monkeypatch.setattr(update_service, "hid_device_location", lambda path: "1-2")
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        ours = HidDeviceInfo(0x04D8, 0x003C, "/dev/hidraw0", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [], [ours]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+
+    def test_port_still_listed_before_the_reset_lands_is_not_a_return(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import daqifi.firmware.update_service as update_service
+
+        listings = iter([frozenset({"/dev/ttyACM0"}), None, frozenset()])
+        monkeypatch.setattr(
+            update_service, "_list_serial_port_names", lambda: next(listings, frozenset())
+        )
+        monkeypatch.setattr(update_service, "serial_port_location", lambda port: None)
+        device = _FakeStreamingDevice("fake-port-3")
+        device.transport = type("T", (), {"port_name": "/dev/ttyACM0"})()
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        ours = HidDeviceInfo(0x04D8, 0x003C, "path-a", None, "Bootloader")
+        service = _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([[], [], [], [ours]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+
+    def test_when_enumeration_fails_before_force_boot_nothing_is_sent(
+        self,
+    ) -> None:
+        # Without the pre-FORceBoot snapshot a stray bootloader can't be told
+        # apart from ours, so the update stops before touching the device.
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        enumerator = _ThrowingHidEnumerator(RuntimeError("HID backend unavailable."))
+        options = _fast_options()
+        options.preparing_device_timeout = 0.2
+
+        service = DefaultFirmwareUpdateService(
+            hid_transport=hid,
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=_FakeExternalProcessRunner(),
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=enumerator,
+            options=options,
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert exc_info.value.failed_state == FirmwareUpdateState.PREPARING_DEVICE
+        assert device.sent_commands == []
+        assert hid.writes == []
+
+    def test_image_without_data_records_is_refused_before_any_device_io(
+        self,
+    ) -> None:
+        # Audit finding: with the real protocol, an EOF-only image passed the
+        # byte-count check; the service erased flash and reported COMPLETE.
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=hid,
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=_FakeExternalProcessRunner(),
+            bootloader_protocol=Pic32BootloaderProtocol(),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        fd, hex_path = tempfile.mkstemp(suffix=".hex")
+        with os.fdopen(fd, "w") as handle:
+            handle.write(":00000001FF\n")
+        try:
+            with pytest.raises(ValueError, match="no data records"):
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+
+        assert device.sent_commands == []
+        assert hid.writes == []
 
     def test_rejects_empty_hex_file_path(self) -> None:
         service = _build_pic32_service(
@@ -1022,7 +1513,7 @@ class TestStateMachine:
         info = HidDeviceInfo(0x04D8, 0x003C, "path-1", "SN-1", "Bootloader")
         service = _build_pic32_service(
             hid,
-            _FakeHidEnumerator([[info]]),
+            _FakeHidEnumerator([[], [info]]),
             _FakeBootloaderProtocol([bytes([0xA1])]),
         )
 
@@ -1052,7 +1543,7 @@ class TestStateMachine:
         info = HidDeviceInfo(0x04D8, 0x003C, "path-1", "SN-1", "Bootloader")
         service = _build_pic32_service(
             hid,
-            _FakeHidEnumerator([[info], [info]]),
+            _FakeHidEnumerator([[], [info], [], [info]]),
             _FakeBootloaderProtocol([bytes([0xA1])]),
         )
 

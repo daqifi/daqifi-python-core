@@ -247,3 +247,49 @@ class TestHexParsingEdgeCases:
         result = self.parser.parse_hex_records([":020000041d00DD"])
         assert len(result) == 1
         assert result[0][4] == 0x1D
+
+
+class TestRecordLengthValidation:
+    # Audit findings: a record whose declared byte count disagrees with what
+    # it carries can still sum to zero, and the update then erased flash
+    # before discovering the image was malformed.
+
+    @pytest.mark.parametrize("method", ["parse_hex_records", "parse_records"])
+    def test_data_record_shorter_than_declared_is_rejected(self, method):
+        lines = [":020000041D00DD", ":10000000F0", ":00000001FF"]
+        with pytest.raises(ValueError, match="declares 16 data byte"):
+            getattr(IntelHexParser(), method)(lines)
+
+    @pytest.mark.parametrize("method", ["parse_hex_records", "parse_records"])
+    def test_address_record_without_its_address_is_rejected(self, method):
+        # Used to be accepted with the checksum byte read as the address.
+        with pytest.raises(ValueError, match="declares 2 data byte"):
+            getattr(IntelHexParser(), method)([":02000004FA", ":00000001FF"])
+
+    def test_record_longer_than_declared_is_rejected(self):
+        with pytest.raises(ValueError, match="declares 1 data byte"):
+            IntelHexParser().parse_hex_records([":01000000AABB9A", ":00000001FF"])
+
+
+class TestProtectedRangeOverlap:
+    @pytest.mark.parametrize("method", ["parse_hex_records", "parse_records"])
+    def test_record_running_into_the_range_is_refused(self, method):
+        # Audit finding: only the start address was checked, so this record
+        # (0x1D000000-0x1D00000F) kept 8 protected bytes and flashed them.
+        parser = IntelHexParser(0x1D000008, 0x1D000010)
+        lines = [
+            ":020000041D00DD",
+            ":10000000AABBCCDDEEFF00112233445566778899F8",
+            ":00000001FF",
+        ]
+        with pytest.raises(ValueError, match="runs into the protected range"):
+            getattr(parser, method)(lines)
+
+    def test_record_ending_just_before_the_range_is_kept(self):
+        parser = IntelHexParser(0x1D000010, 0x1D000020)
+        lines = [
+            ":020000041D00DD",
+            ":10000000AABBCCDDEEFF00112233445566778899F8",
+            ":00000001FF",
+        ]
+        assert len(parser.parse_hex_records(lines)) == 3

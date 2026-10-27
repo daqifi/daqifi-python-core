@@ -22,7 +22,7 @@ import socket
 import threading
 import time
 from datetime import timedelta
-from typing import IO, Callable, List, Optional, Tuple
+from typing import IO, Callable, List, Optional, Tuple, Union
 
 import serial
 
@@ -360,6 +360,11 @@ class SerialStreamTransport:
     def stream(self) -> Optional[IO[bytes]]:
         self._raise_if_disposed()
         return self._serial  # type: ignore[return-value]
+
+    @property
+    def port_name(self) -> str:
+        """The serial port this transport opens (e.g. ``COM3``, ``/dev/ttyACM0``)."""
+        return self._port_name
 
     @property
     def is_connected(self) -> bool:
@@ -722,6 +727,14 @@ class UdpTransport:
 # ---- HidLibraryTransport -----------------------------------------------------
 
 
+def _hid_path_key(path: Union[str, bytes, None]) -> Optional[str]:
+    # hidapi hands out bytes paths; HidApiPlatform stores them as str.
+    # Compare one form so a caller passing either still matches.
+    if isinstance(path, bytes):
+        return path.decode("utf-8", "replace")
+    return path
+
+
 class HidLibraryTransport:
     """HID transport backed by an injectable :class:`HidPlatform`.
 
@@ -798,7 +811,16 @@ class HidLibraryTransport:
         vendor_id: int,
         product_id: int,
         serial_number: Optional[str] = None,
+        device_path: Optional[Union[str, bytes]] = None,
     ) -> None:
+        """Open the matching HID device.
+
+        ``device_path`` (from a prior enumeration) selects exactly that
+        device. Without it the first match by path order is opened, which
+        is ambiguous when identical devices share VID/PID and report no
+        serial string, as PIC32 bootloaders do (port of upstream
+        ``ConnectByPathAsync``, daqifi-core #275).
+        """
         self._raise_if_disposed()
         _validate_usb_identifier(vendor_id, "vendor_id")
         _validate_usb_identifier(product_id, "product_id")
@@ -817,16 +839,19 @@ class HidLibraryTransport:
                     serial_filter is None
                     or (d.serial_number or "").strip().lower() == serial_filter.lower()
                 )
+                and (
+                    device_path is None
+                    or _hid_path_key(d.device_path) == _hid_path_key(device_path)
+                )
             ]
             candidates.sort(key=lambda d: d.device_path)
 
             if not candidates:
-                target = (
-                    f"VID=0x{vendor_id:04X}, PID=0x{product_id:04X}"
-                    if serial_filter is None
-                    else f"VID=0x{vendor_id:04X}, PID=0x{product_id:04X}, "
-                         f"Serial={serial_filter}"
-                )
+                target = f"VID=0x{vendor_id:04X}, PID=0x{product_id:04X}"
+                if serial_filter is not None:
+                    target += f", Serial={serial_filter}"
+                if device_path is not None:
+                    target += f", Path={device_path!r}"
                 raise IOError(f"No HID device found for {target}.")
 
             chosen = candidates[0]

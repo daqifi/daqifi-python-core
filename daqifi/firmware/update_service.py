@@ -42,14 +42,21 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    FrozenSet,
     Iterable,
     List,
     Optional,
     Protocol,
     Sequence,
+    Tuple,
     runtime_checkable,
 )
 
+from daqifi._internal.usb_location import (
+    canonical_port_name,
+    hid_device_location,
+    serial_port_location,
+)
 from daqifi.enums import FirmwareUpdateState
 from daqifi.firmware.bootloader import (
     BootloaderProtocol,
@@ -254,6 +261,20 @@ class _CancelledError(Exception):
     """Internal sentinel for cooperative cancellation."""
 
 
+def _list_serial_port_names() -> Optional[FrozenSet[str]]:
+    """Serial ports currently present, or None when they can't be listed.
+
+    None, not an empty set: a failed listing is no evidence that a port
+    disappeared.
+    """
+    try:
+        from serial.tools import list_ports
+
+        return frozenset(port.device for port in list_ports.comports())
+    except Exception:
+        return None
+
+
 class DefaultFirmwareUpdateService:
     """Default firmware update orchestrator (PIC32 + WiFi).
 
@@ -300,6 +321,12 @@ class DefaultFirmwareUpdateService:
         self._last_reported_percent = 0.0
         self._bootloader_poll_attempts = 0
         self._last_bootloader_enumeration_error: Optional[BaseException] = None
+        self._preexisting_bootloaders: FrozenSet[Tuple[Any, Any, Any]] = frozenset()
+        self._target_port_name: Optional[str] = None
+        self._target_port_seen_gone = False
+        self._target_usb_location: Optional[str] = None
+        self._selected_bootloader_location: Optional[str] = None
+        self._rejected_by_location = 0
         self._closed = False
 
     # -- public API ------------------------------------------------------
@@ -447,6 +474,21 @@ class DefaultFirmwareUpdateService:
                     device.stop_streaming()
                 from daqifi._internal import scpi_commands
 
+                # Taken before FORceBoot so the wait below can tell this
+                # device's bootloader from one that was already enumerated,
+                # and (where the OS exposes it) bind it to this device's
+                # physical USB port.
+                self._preexisting_bootloaders = (
+                    self._snapshot_bootloader_devices(deadline)
+                )
+                self._target_port_name = getattr(
+                    getattr(device, "transport", None), "port_name", None
+                )
+                self._target_usb_location = serial_port_location(
+                    self._target_port_name
+                )
+                self._target_port_seen_gone = False
+                self._selected_bootloader_location = None
                 device.send(scpi_commands.force_bootloader())
                 self._sleep_with_cancel(
                     self._options.post_force_boot_delay, deadline
@@ -1077,15 +1119,99 @@ class DefaultFirmwareUpdateService:
             lines = handle.read().splitlines()
         return list(self._bootloader_protocol.parse_hex_file(lines))
 
+    def _bootloader_enumerator(self) -> "HidDeviceEnumerator":
+        from daqifi._internal.hid_enumerator import HidLibraryDeviceEnumerator
+
+        if self._hid_device_enumerator is None:
+            self._hid_device_enumerator = HidLibraryDeviceEnumerator()
+        return self._hid_device_enumerator
+
+    @staticmethod
+    def _bootloader_identity(
+        device: "HidDeviceInfo", location: Optional[str]
+    ) -> Tuple[Any, Any, Any]:
+        # The USB location is part of the identity because Linux reuses
+        # hidraw node names: a pre-existing board that unplugs can free
+        # /dev/hidraw0 for ours, and path alone would then filter ours out.
+        return (
+            getattr(device, "device_path", None),
+            getattr(device, "serial_number", None),
+            location,
+        )
+
+    def _snapshot_bootloader_devices(
+        self, deadline: _Cancellation
+    ) -> FrozenSet[Tuple[Any, Any, Any]]:
+        """Identities of the bootloaders enumerated before FORceBoot.
+
+        Retries transient enumeration errors until the deadline, then
+        raises: without the snapshot, a board that was already sitting in
+        its bootloader is indistinguishable from the one being updated.
+        Nothing has been sent to the device yet, so failing here is safe.
+        """
+        enumerator = self._bootloader_enumerator()
+        while True:
+            deadline.check()
+            try:
+                devices = enumerator.enumerate(
+                    self._options.bootloader_vendor_id,
+                    self._options.bootloader_product_id,
+                )
+                return frozenset(
+                    self._bootloader_identity(
+                        d, hid_device_location(getattr(d, "device_path", None))
+                    )
+                    for d in devices
+                )
+            except Exception as exc:
+                self._last_bootloader_enumeration_error = exc
+                self._logger.debug(
+                    "HID enumeration failed before FORceBoot; will retry "
+                    "until timeout: %s",
+                    exc,
+                )
+                self._sleep_with_cancel(self._options.poll_interval, deadline)
+
+    def _raise_if_target_returned_to_application(self) -> None:
+        """Stop when the device rebooted back into its application.
+
+        A board without the bootloader treats FORceBoot as a plain reboot:
+        its serial port drops and comes back, and no bootloader of its own
+        ever appears. Any "new" bootloader seen after that belongs to some
+        other board, so the wait must not go on picking one. Requires the
+        port to have been seen gone first, so the window before the reset
+        lands is not mistaken for a return.
+        """
+        if not self._target_port_name:
+            return
+        ports = _list_serial_port_names()
+        if ports is None:
+            return
+        # Re-resolved each poll: a by-id alias dangles while the device is
+        # gone and points at its node again once it is back.
+        present = canonical_port_name(self._target_port_name) in ports
+        if not present:
+            self._target_port_seen_gone = True
+        elif self._target_port_seen_gone:
+            if (
+                self._target_usb_location is not None
+                and serial_port_location(self._target_port_name)
+                != self._target_usb_location
+            ):
+                # Linux reuses ttyACM names: the node that came back belongs
+                # to a board on another port, not to ours.
+                return
+            raise RuntimeError(
+                f"{self._target_port_name} came back as the application after "
+                "FORceBoot instead of entering the bootloader; this device "
+                "does not appear to carry the PIC32 bootloader. Refusing to "
+                "select any other bootloader device."
+            )
+
     def _wait_for_bootloader_device(
         self, deadline: _Cancellation
     ) -> "HidDeviceInfo":
-        from daqifi._internal.hid_enumerator import HidLibraryDeviceEnumerator
-
-        enumerator = self._hid_device_enumerator
-        if enumerator is None:
-            enumerator = HidLibraryDeviceEnumerator()
-            self._hid_device_enumerator = enumerator
+        enumerator = self._bootloader_enumerator()
 
         while True:
             deadline.check()
@@ -1115,11 +1241,48 @@ class DefaultFirmwareUpdateService:
                 self._sleep_with_cancel(self._options.poll_interval, deadline)
                 continue
 
-            devices_list = list(devices)
-            if len(devices_list) == 1:
-                return devices_list[0]
+            # Each candidate's USB location is read once per poll and that one
+            # reading is used throughout: re-reading it later could see a
+            # different board that has since taken over the same node.
+            located = [
+                (d, hid_device_location(getattr(d, "device_path", None)))
+                for d in devices
+            ]
+
+            # Only a bootloader that appeared after FORceBoot can be the
+            # device being updated. One that was already enumerated belongs
+            # to another board, and taking it when it happens to be the only
+            # candidate (ours still re-enumerating) would erase that board.
+            located = [
+                (d, location)
+                for d, location in located
+                if self._bootloader_identity(d, location)
+                not in self._preexisting_bootloaders
+            ]
+            self._raise_if_target_returned_to_application()
+
+            # A new bootloader can still be another board that entered its
+            # bootloader during the wait. Where both locations are known
+            # (Linux, not usbip) the bootloader must sit on the USB port this
+            # device's serial port used. Where either is unknown, only the
+            # snapshot above protects the selection.
+            if self._target_usb_location is not None:
+                # A positive match only: a candidate whose location can't be
+                # read (e.g. a board attached over usbip) is not shown to be
+                # on our port, so it is not ours to erase.
+                on_our_port = [
+                    (d, location)
+                    for d, location in located
+                    if location == self._target_usb_location
+                ]
+                self._rejected_by_location = len(located) - len(on_our_port)
+                located = on_our_port
+            devices_list = [d for d, _ in located]
+            if len(located) == 1:
+                self._selected_bootloader_location = located[0][1]
+                return located[0][0]
             if len(devices_list) > 1:
-                # Multiple bootloader-mode units enumerated on the same
+                # Multiple bootloader-mode units appeared on the same
                 # workstation — refuse to pick one implicitly. The
                 # caller should narrow the field (e.g. detach all but
                 # the target unit via usbipd, or extend this Service to
@@ -1145,11 +1308,30 @@ class DefaultFirmwareUpdateService:
         def _attempt() -> None:
             if self._hid_transport.is_connected:
                 self._hid_transport.disconnect()
+            # By path: bootloaders report no serial string, so connecting by
+            # VID/PID/serial alone could open a different board than the
+            # one selected above.
             self._hid_transport.connect(
                 self._options.bootloader_vendor_id,
                 self._options.bootloader_product_id,
                 bootloader_device.serial_number,
+                device_path=bootloader_device.device_path,
             )
+            # Checked after the open, against the device now behind the
+            # handle: if ours vanished between selection and open, Linux can
+            # hand its hidraw node to another board, and the path alone would
+            # open that board. A node swapped after the open leaves this
+            # handle on the departed device, where I/O fails.
+            expected = self._selected_bootloader_location
+            if expected is not None:
+                actual = hid_device_location(bootloader_device.device_path)
+                if actual != expected:
+                    self._hid_transport.disconnect()
+                    raise _WrongBootloaderError(
+                        f"{bootloader_device.device_path!r} moved from USB port "
+                        f"{expected} to {actual} between selection and open; "
+                        "refusing to program a different board."
+                    )
 
         self._execute_with_retry(
             "connect HID bootloader",
@@ -1517,6 +1699,18 @@ class DefaultFirmwareUpdateService:
             f"PID=0x{self._options.bootloader_product_id:04X} after "
             f"{self._bootloader_poll_attempts} poll attempt(s)."
         )
+        if self._rejected_by_location:
+            details += (
+                f" Ignored {self._rejected_by_location} bootloader device(s) "
+                "not shown to be on this device's USB port "
+                f"({self._target_usb_location})."
+            )
+        if self._preexisting_bootloaders:
+            details += (
+                f" Ignored {len(self._preexisting_bootloaders)} bootloader "
+                "device(s) already enumerated before FORceBoot (another "
+                "board); detach it to update this one."
+            )
 
         if self._last_bootloader_enumeration_error is None:
             return f"{message} {details}"
@@ -1719,6 +1913,10 @@ def _ensure_device_connected(device: Any) -> None:
         raise RuntimeError(
             "Device must be connected before starting firmware update."
         )
+
+
+class _WrongBootloaderError(Exception):
+    """The opened bootloader is not the one selected. Never retried."""
 
 
 def _is_transient_hid_error(exc: BaseException) -> bool:
