@@ -35,7 +35,9 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import threading
 import time
 from typing import (
@@ -50,6 +52,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    Union,
     runtime_checkable,
 )
 
@@ -260,6 +263,16 @@ class _Cancellation:
 
 class _CancelledError(Exception):
     """Internal sentinel for cooperative cancellation."""
+
+
+def _anchor_to_cwd(path: str) -> str:
+    """Prefix a relative path with the working directory, nothing more.
+
+    Not os.path.abspath: that also collapses ``..`` textually, and through
+    a symlink ``link/../x`` names a different directory than ``x`` next to
+    the link, so the tool could run from the wrong bundle.
+    """
+    return path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
 
 
 def _list_serial_port_names() -> Optional[FrozenSet[str]]:
@@ -768,6 +781,15 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
             )
 
+            # Built before the device is switched into WiFi-update mode, so
+            # an unresolvable port, tool or cmd.exe fails while the device
+            # is still untouched. A disconnected device is reported as such
+            # first, whatever the host can or can't run.
+            _ensure_device_connected(device)
+            request = self._build_wifi_process_request(
+                device, firmware_path, progress
+            )
+
             def _prepare(deadline: _Cancellation) -> None:
                 _ensure_device_connected(device)
                 if device.is_streaming:
@@ -800,9 +822,6 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
             )
 
-            request = self._build_wifi_process_request(
-                device, firmware_path, progress
-            )
             # Cap the external process's own timeout to the remaining
             # state deadline so the process can't outlive the
             # PROGRAMMING state timeout (the deadline.check() inside
@@ -998,20 +1017,40 @@ class DefaultFirmwareUpdateService:
         firmware_path: str,
         progress: _PROGRESS_CALLBACK,
     ) -> ExternalProcessRequest:
-        tool_path = self._resolve_wifi_tool_path(firmware_path)
+        # Absolute before anything else: the tool runs with its own directory
+        # as the working directory, so a relative tool or firmware path would
+        # be resolved against that directory instead of the caller's.
+        firmware_path = _anchor_to_cwd(firmware_path)
+        tool_path = _anchor_to_cwd(self._resolve_wifi_tool_path(firmware_path))
         port = self._resolve_wifi_port(device)
 
-        tool_arguments = self._options.wifi_flash_tool_arguments_template
-        tool_arguments = tool_arguments.replace("{port}", _quote_argument(port))
-        tool_arguments = tool_arguments.replace(
-            "{firmwarePath}", _quote_argument(firmware_path)
-        )
+        template = self._options.wifi_flash_tool_arguments_template
 
         executable_path = tool_path
-        executable_arguments: Any = tool_arguments
-
+        executable_arguments: Any
         extension = os.path.splitext(tool_path)[1].lower()
-        if extension in (".cmd", ".bat"):
+        # The template is split by the rules of the program that will parse
+        # it, then each value goes into its argument whole, so nothing
+        # substituted is parsed again:
+        #   .cmd/.bat (any host)        cmd.exe rules, see _cmd_exe_arguments
+        #   Windows program (native, or .exe/.com under WSL)
+        #                               C-runtime rules; passed as a list,
+        #                               which list2cmdline (native) or WSL
+        #                               turns back into a C-runtime line
+        #   POSIX program               shlex; passed as a list (argv)
+        if extension in (".exe", ".com") or (
+            _is_native_windows() and extension not in (".cmd", ".bat")
+        ):
+            executable_arguments = _substitute_placeholders(
+                _split_crt_template(template),
+                port,
+                _path_for_windows_tool(firmware_path),
+            )
+        elif extension not in (".cmd", ".bat"):
+            executable_arguments = _substitute_placeholders(
+                _split_posix_template(template), port, firmware_path
+            )
+        else:
             cmd_exe = shutil.which("cmd.exe")
             if cmd_exe is None:
                 raise FileNotFoundError(
@@ -1020,17 +1059,28 @@ class DefaultFirmwareUpdateService:
                     "Windows or WSL with Windows interop enabled."
                 )
             executable_path = cmd_exe
-            # cmd.exe parses ONE command-line string after /c. Build that
-            # string explicitly and pass it as a single list element so
-            # quoting is applied exactly once: subprocess.list2cmdline
-            # wraps the whole element, cmd.exe strips the outer quotes,
-            # and the inner _quote_argument-protected pieces survive
-            # untouched. Splitting tool_arguments + relying on list2cmdline
-            # to re-encode each piece risks double-quoting on Windows.
-            command = (
-                f"{_quote_argument(tool_path)} {tool_arguments}"
-            ).strip()
-            executable_arguments = ["/c", command]
+            # The script is named relative to the working directory set
+            # below (WSL translates that for the Windows process), and Linux
+            # paths in its arguments are translated: WSL hands arguments to
+            # Windows programs as-is.
+            if _path_for_windows_tool(os.path.dirname(tool_path)).startswith("\\\\"):
+                # cmd.exe refuses a UNC path (\\server\share, or the
+                # \\wsl.localhost\... path WSL gives a Linux-filesystem
+                # directory) as its working directory, so the script could
+                # not be found once the device is already in update mode.
+                raise FileNotFoundError(
+                    f"WiFi flash tool {tool_path!r} is on a network or Linux "
+                    "filesystem path, which cmd.exe cannot use as its working "
+                    "directory. Put the WiFi firmware bundle on a local Windows "
+                    "drive (under WSL, e.g. under /mnt/c/)."
+                )
+            executable_arguments = _cmd_exe_arguments(
+                os.path.basename(tool_path),
+                template,
+                port,
+                _path_for_windows_tool(firmware_path),
+                native_windows=_is_native_windows(),
+            )
 
         progress_state = {"last_process_percent": 0}
         progress_lock = threading.Lock()
@@ -1142,6 +1192,22 @@ class DefaultFirmwareUpdateService:
         if override and override.strip():
             return override
 
+        # The serial port the device is connected through, not its display
+        # name: DaqifiDeviceFactory names every device "DaqifiDevice" by
+        # default, which the flash tool would be handed as its port.
+        transport = getattr(device, "transport", None)
+        port_name = getattr(transport, "port_name", None)
+        if port_name and str(port_name).strip():
+            return str(port_name)
+        if transport is not None:
+            raise RuntimeError(
+                "The device is not connected over a serial port, so the WiFi "
+                "flash tool's port is unknown; set "
+                "FirmwareUpdateServiceOptions.wifi_port_override."
+            )
+
+        # Duck-typed devices with no transport keep the old contract: their
+        # name is their port.
         name = getattr(device, "name", None)
         if name and str(name).strip():
             return str(name)
@@ -2040,32 +2106,280 @@ def _build_recovery_guidance(state: FirmwareUpdateState) -> str:
     )
 
 
-def _quote_argument(value: str) -> str:
-    """Quote a single argument so it survives shell-style parsing.
 
-    Windows ``cmd.exe`` does NOT honour ``\\"`` as an escape — embedded
-    double quotes have to be doubled (``""``). POSIX shells do the
-    opposite. Pick the right rule based on ``os.name`` so the WiFi
-    flash tool gets correctly-quoted paths regardless of host platform.
+def _cmd_exe_arguments(
+    script: str,
+    template: str,
+    port: str,
+    firmware_path: str,
+    *,
+    native_windows: bool,
+) -> Union[str, List[str]]:
+    """Arguments for ``cmd.exe`` running the WiFi flash script.
 
-    On Windows we **always** wrap the value in quotes (when non-empty)
-    so cmd.exe metacharacters like ``& | > < ^ ( ) % !`` cannot be
-    interpreted as command syntax. A port-override or firmware-path
-    string sourced from configuration could contain any of those, and
-    cmd.exe would otherwise treat e.g. ``foo&bar`` as ``foo`` followed
-    by command ``bar``.
+    Native Windows: one verbatim command line (SubprocessRunner passes a
+    string through untouched there). ``/s`` strips exactly the outer quote
+    pair, so the quoted pieces inside reach the script intact, and quoting
+    every piece keeps cmd.exe metacharacters in configured values from being
+    read as command syntax. A list would go through list2cmdline, which
+    escapes inner quotes as ``\\"``; cmd.exe does not honour that, and the
+    script was "not recognized".
+
+    WSL: WSL rebuilds the Windows command line from argv the same way, so
+    the arguments go separately and unquoted, and WSL quotes the ones with
+    spaces itself.
+    """
+    # Neither host can pass these safely. cmd.exe expands %VAR% even inside
+    # double quotes, so a path containing a literal %NAME% would reach the
+    # tool as a different path; and a value containing a double quote can't
+    # be quoted for cmd.exe at all. Under WSL, which leaves arguments without
+    # whitespace unquoted, the other metacharacters would run as command
+    # syntax ("&" in a path runs what follows it), and caret escapes would
+    # arrive literally inside the arguments it does quote.
+    unsafe_chars = _CMD_ALWAYS_UNSAFE if native_windows else _CMD_METACHARACTERS
+    for name, value in (
+        ("tool name", script), ("port", port), ("firmware path", firmware_path)
+    ):
+        unsafe = sorted(set(value) & unsafe_chars)
+        if unsafe:
+            raise ValueError(
+                f"The WiFi flash {name} {value!r} contains {''.join(unsafe)!r}, "
+                "which cmd.exe would interpret. Use a path or port name "
+                "without cmd.exe special characters."
+            )
+    literal_text = template.replace("{port}", "").replace("{firmwarePath}", "")
+    if native_windows and "%" in literal_text:
+        # Quotes in the template survive into the line, so its own
+        # metacharacters stay as written; %VAR% expands regardless.
+        raise ValueError(
+            f"The WiFi flash arguments template {template!r} contains '%', "
+            "which cmd.exe would interpret."
+        )
+    if native_windows:
+        # The template's own quotes are consumed by the split and each
+        # argument is quoted once, whole, so a placeholder the template had
+        # already quoted can't end up between two quote pairs, leaving its
+        # value's metacharacters bare.
+        written = _split_windows_template(template)
+        filled = _substitute_placeholders(written, port, firmware_path)
+        tool_arguments = " ".join(
+            _quote_cmd_token(value, bool(_PLACEHOLDER.search(token)))
+            for token, value in zip(written, filled)
+        )
+        command = f"{_quote_windows_argument(script)} {tool_arguments}".strip()
+        # /v:off: with delayed expansion enabled in the registry, !VAR! would
+        # expand inside the quotes as %VAR% does.
+        return f'/d /v:off /s /c "{command}"'
+    if any(ch.isspace() for ch in script):
+        # WSL would quote it first, and cmd.exe /c strips a leading quote
+        # when the line holds more than one quoted argument.
+        raise ValueError(
+            f"WiFi flash tool name {script!r} contains whitespace, which "
+            "cmd.exe cannot run reliably when started from WSL; rename it."
+        )
+    tokens = _substitute_placeholders(
+        _split_windows_template(template), port, firmware_path
+    )
+    for token in tokens:
+        # The split removes a quoted literal's quotes, and WSL re-quotes only
+        # tokens with whitespace, so "C:\fw&calc.exe&rem\x" from the
+        # template itself would reach cmd.exe bare.
+        unsafe = sorted(set(token) & _CMD_METACHARACTERS)
+        if unsafe:
+            raise ValueError(
+                f"The WiFi flash arguments template {template!r} yields the "
+                f"argument {token!r}, containing {''.join(unsafe)!r}, which "
+                "cmd.exe would interpret when started from WSL."
+            )
+    return ["/d", "/v:off", "/c", script] + tokens
+
+
+_PLACEHOLDER = re.compile(r"\{port\}|\{firmwarePath\}")
+
+
+def _substitute_placeholders(
+    tokens: List[str], port: str, firmware_path: str
+) -> List[str]:
+    """Fill the placeholders in already-split arguments, in one pass, so a
+    value that itself contains ``{firmwarePath}`` is not substituted again."""
+    values = {"{port}": port, "{firmwarePath}": firmware_path}
+    return [_PLACEHOLDER.sub(lambda m: values[m.group(0)], t) for t in tokens]
+
+
+def _is_native_windows() -> bool:
+    return os.name == "nt"
+
+
+def _split_crt_template(template: str) -> List[str]:
+    """Split an arguments template the way the C runtime splits a command line.
+
+    The rules a Windows program applies to its own command line (MSVC CRT,
+    as CommandLineToArgvW): whitespace separates arguments outside quotes;
+    2n backslashes before a quote give n backslashes and the quote toggles
+    quoting, 2n+1 give n backslashes and a literal quote; other backslashes
+    are literal; "" inside quotes is a literal quote. Unlike shlex it never
+    fails: an unclosed quote runs to the end.
+    """
+    arguments: List[str] = []
+    current: List[str] = []
+    in_argument = in_quotes = False
+    i, n = 0, len(template)
+    while i < n:
+        ch = template[i]
+        if ch == "\\":
+            j = i
+            while j < n and template[j] == "\\":
+                j += 1
+            run = j - i
+            in_argument = True
+            if j < n and template[j] == '"':
+                current.append("\\" * (run // 2))
+                if run % 2:
+                    current.append('"')
+                    j += 1
+            else:
+                current.append("\\" * run)
+            i = j
+        elif ch == '"':
+            in_argument = True
+            if in_quotes and i + 1 < n and template[i + 1] == '"':
+                current.append('"')
+                i += 2
+            else:
+                in_quotes = not in_quotes
+                i += 1
+        elif ch in " \t" and not in_quotes:
+            if in_argument:
+                arguments.append("".join(current))
+                current, in_argument = [], False
+            i += 1
+        else:
+            current.append(ch)
+            in_argument = True
+            i += 1
+    if in_argument:
+        arguments.append("".join(current))
+    return arguments
+
+
+def _split_posix_template(template: str) -> List[str]:
+    """Split an arguments template the way a POSIX shell reads it.
+
+    Raises ValueError for an unbalanced quote, while the request is still
+    being built, before the device is switched into update mode.
+    """
+    try:
+        return shlex.split(template)
+    except ValueError as exc:
+        raise ValueError(
+            f"WiFi flash arguments template {template!r} can't be split: {exc}"
+        ) from exc
+
+
+def _quote_cmd_token(token: str, had_placeholder: bool) -> str:
+    """One argument for the native cmd.exe line.
+
+    Values are always quoted, so cmd.exe metacharacters in them stay
+    literal; a template literal is quoted only when it needs it, so a
+    switch such as ``/p`` reaches the script exactly as written.
+    """
+    if had_placeholder or not token or any(
+        ch.isspace() or ch in "&|<>^()" for ch in token
+    ):
+        return _quote_windows_argument(token)
+    return token
+
+
+def _split_windows_template(template: str) -> List[str]:
+    """Split a .cmd/.bat arguments template the way cmd.exe reads it.
+
+    Double quotes group words (``"C:\\Firmware Files\\image.bin"`` is one
+    argument, without its quotes), backslashes, apostrophes and ``#`` are
+    ordinary characters, and outside quotes ``^`` escapes the next character
+    (``A^&B`` is ``A&B``; inside quotes ``^`` is literal). Plain
+    ``str.split`` kept the quotes and broke the argument in two; POSIX
+    ``shlex`` ate the backslashes, and kept ``^`` so the script got ``^&``.
+    An unclosed quote is refused while the request is built.
+    """
+    arguments: List[str] = []
+    current: List[str] = []
+    in_argument = in_quotes = False
+    i, n = 0, len(template)
+    while i < n:
+        ch = template[i]
+        if ch == '"':
+            in_argument = True
+            in_quotes = not in_quotes
+        elif in_quotes:
+            current.append(ch)
+        elif ch == "^":
+            in_argument = True
+            if i + 1 < n:
+                i += 1
+                current.append(template[i])
+        elif ch in " \t":
+            if in_argument:
+                arguments.append("".join(current))
+                current, in_argument = [], False
+        else:
+            current.append(ch)
+            in_argument = True
+        i += 1
+    if in_quotes:
+        raise ValueError(
+            f"WiFi flash arguments template {template!r} can't be split: "
+            "No closing quotation"
+        )
+    if in_argument:
+        arguments.append("".join(current))
+    return arguments
+
+
+_CMD_ALWAYS_UNSAFE = frozenset('%"')
+_CMD_METACHARACTERS = frozenset('&|<>^%!"')
+
+
+
+def _quote_windows_argument(value: str) -> str:
+    """Quote for a Windows/cmd.exe command line, whatever the host.
+
+    Always quoted, so cmd.exe metacharacters (``& | > < ^ ( )``) in a
+    configured value can't be read as command syntax. Quoting does not stop
+    ``%VAR%`` expansion, and a double quote can't be embedded reliably;
+    callers refuse values containing either (see _cmd_exe_arguments).
     """
     if value is None or value == "":
         return '""'
+    return '"' + value.replace('"', '""') + '"'
 
-    if os.name == "nt":
-        # Always-quote on Windows to neutralise cmd.exe metacharacters.
-        return '"' + value.replace('"', '""') + '"'
 
-    if any(ch in value for ch in (" ", "\t", '"')):
-        escaped = value.replace('"', r'\"')
-        return f'"{escaped}"'
-    return value
+def _running_under_wsl() -> bool:
+    try:
+        with open("/proc/sys/kernel/osrelease") as handle:
+            return "microsoft" in handle.read().lower()
+    except OSError:
+        return False
+
+
+def _path_for_windows_tool(path: str) -> str:
+    """A Linux path as a Windows program under WSL can open it (``wslpath -w``).
+
+    Unchanged off WSL, for relative paths, or if the translation fails.
+    """
+    if not path.startswith("/") or not _running_under_wsl():
+        return path
+    try:
+        result = subprocess.run(
+            ["wslpath", "-w", path],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return path
+    translated = result.stdout.strip()
+    return translated if result.returncode == 0 and translated else path
 
 
 def _try_parse_wifi_tool_percent(line: str) -> Optional[int]:

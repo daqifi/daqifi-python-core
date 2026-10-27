@@ -234,3 +234,20 @@ def test_lt_against_non_firmware_version_returns_not_implemented():
         # because __lt__ returns NotImplemented and str's reverse op
         # also doesn't know FirmwareVersion.
         _ = v < "3.2.0"
+
+
+@pytest.mark.parametrize("left,right", [
+    ("3.0.0b1", "3.0.0beta1"),
+    ("3.0.0b1", "3.0.0-beta.1"),
+    ("3.0.0a2", "3.0.0alpha2"),
+    ("3.0.0rc1", "3.0.0releasecandidate1"),
+])
+def test_label_aliases_are_equal_and_neither_is_greater(left, right):
+    """Audit finding: aliases had equal sort keys but unequal dataclass
+    fields, so total_ordering derived a > b AND b > a, and compare() said
+    1 in both directions — offering installed firmware as an update."""
+    a, b = FirmwareVersion.parse(left), FirmwareVersion.parse(right)
+    assert a == b
+    assert hash(a) == hash(b)
+    assert not a > b and not b > a
+    assert compare(left, right) == 0 and compare(right, left) == 0
