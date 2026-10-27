@@ -944,12 +944,12 @@ def _scale_raw_analog_values(
         # The value's channel number, where the format names it (CSV), else
         # its position (protobuf packs enabled channels in order).
         ch = channels[position] if channels is not None and position < len(channels) else position
-        cal_m, cal_b = (cal[ch] if cal is not None and ch < len(cal) else (1.0, 0.0))
+        cal_m, cal_b = (cal[ch] if cal is not None and 0 <= ch < len(cal) else (1.0, 0.0))
         rng = (
-            port_range[ch] if port_range is not None and ch < len(port_range) else 1.0
+            port_range[ch] if port_range is not None and 0 <= ch < len(port_range) else 1.0
         )
         scale_m = (
-            int_scale[ch] if int_scale is not None and ch < len(int_scale) else 1.0
+            int_scale[ch] if int_scale is not None and 0 <= ch < len(int_scale) else 1.0
         )
         normalized = raw / resolution
         out.append((normalized * rng * cal_m + cal_b) * scale_m)
@@ -2039,7 +2039,7 @@ def _parse_json_sample(
                 return None
             ch, val = entry.get("ch"), entry.get("val")
             if (
-                not isinstance(ch, int) or isinstance(ch, bool)
+                not isinstance(ch, int) or isinstance(ch, bool) or ch < 0
                 or isinstance(val, bool) or not isinstance(val, (int, float))
             ):
                 return None

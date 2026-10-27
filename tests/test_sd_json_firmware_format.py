@@ -75,3 +75,18 @@ def test_a_malformed_sample_is_skipped_not_fatal(bad) -> None:
     data = bad + b'\n{"ts":2,"analog":[3]}\n'
     samples = list(_parse(data).samples)
     assert [s.analog_values for s in samples] == [(3.0,)]
+
+
+def test_a_negative_channel_number_is_skipped_not_fatal() -> None:
+    # Audit finding on #183 (round 2): ch -2 passed validation and indexed
+    # the calibration tuple from the end, raising IndexError outside the
+    # malformed-record handler and losing the samples after it.
+    data = b'{"ts":1,"ai":[{"ch":-2,"val":50}]}\n{"ts":2,"ai":[{"ch":0,"val":50}]}\n'
+    options = SdCardParseOptions(
+        configuration_override=SdCardDeviceConfiguration(
+            analog_port_count=1, digital_port_count=0, timestamp_frequency=1000,
+            resolution=100, calibration_values=((1.0, 0.0),),
+        )
+    )
+    samples = list(_parse(data, options).samples)
+    assert len(samples) == 1 and samples[0].analog_values == pytest.approx((0.5,))
