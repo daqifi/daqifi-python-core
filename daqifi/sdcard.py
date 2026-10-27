@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -553,7 +554,12 @@ class SdCardFileReceiver:
                 # BytesIO/SpooledTemporaryFile/etc — empty read is
                 # unambiguous EOF (no in-band "still open but idle"
                 # state), so treat as stream-closed.
-                chunk = self._source.read(self._buffer_size)
+                try:
+                    chunk = self._source.read(self._buffer_size)
+                except socket.timeout:
+                    # A TCP stream's bounded read found nothing yet; the
+                    # deadline above decides when to give up.
+                    continue
                 if not chunk:
                     raise TimeoutError(
                         f"Transport stream closed before receiving the EOF "
