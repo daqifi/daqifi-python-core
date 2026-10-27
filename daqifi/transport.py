@@ -134,6 +134,25 @@ class _SocketStream(io.RawIOBase):
             raise ConnectionResetError("The device closed the TCP connection.")
         return received
 
+    def readall(self) -> bytes:
+        """Everything until the peer closes, like a blocking socket file.
+
+        The inherited version stops at the first exception, so the EOF
+        signal would throw away the data it had already gathered.
+        """
+        chunks = []
+        while True:
+            try:
+                chunk = self.read(65536)
+            except socket.timeout:
+                continue
+            except ConnectionResetError:
+                # The close is reported (by readinto); later reads raise.
+                return b"".join(chunks)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+
     def write(self, data) -> int:  # type: ignore[override]
         self._sock.sendall(data)
         return len(data)

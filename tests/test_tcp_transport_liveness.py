@@ -606,3 +606,29 @@ def test_nested_reconnect_before_the_outer_claims_the_old_consumer(monkeypatch):
         monkeypatch.setattr(type(transport), "session", real_session)
         device.disconnect()
         fake.close()
+
+
+def test_read_to_end_returns_the_data_before_the_peer_closed():
+    # Audit finding on #167 (round 8): read() with no size gathered the
+    # data, then the EOF signal aborted it and the data was lost.
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def _send_and_close():
+        conn, _ = server.accept()
+        conn.sendall(b"abc")
+        time.sleep(0.7)  # spans a read window
+        conn.sendall(b"def")
+        conn.shutdown(socket.SHUT_RDWR)
+        conn.close()
+
+    threading.Thread(target=_send_and_close, daemon=True).start()
+    transport = TcpStreamTransport("127.0.0.1", server.getsockname()[1])
+    transport.connect()
+    try:
+        assert transport.stream.read() == b"abcdef"
+        assert not transport.is_connected
+    finally:
+        transport.disconnect()
+        server.close()
