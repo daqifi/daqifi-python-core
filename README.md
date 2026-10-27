@@ -330,11 +330,18 @@ opts.validate()                                # raises ValueError on misconfig
 A PIC32 update reboots the board into its HID bootloader
 (`SYSTem:FORceBoot`) and then has to find that bootloader among every
 HID device with the same VID/PID. Bootloaders report no serial number,
-so the service narrows the choice in two steps:
+so the service first makes sure the choice is trivial, then narrows it:
 
-1. **Snapshot.** Bootloaders already enumerated before `FORceBoot`
+1. **One board.** Before sending anything, the service counts the DAQiFi
+   boards on USB: serial ports with the application's VID/PID
+   (`application_vendor_id`/`application_product_id`, 04D8:F794) plus
+   bootloaders already enumerated. With more than one, the update is
+   refused with a message listing them. Disconnect every board except
+   the one being updated, including any left in bootloader mode, and
+   retry. A board reached over WiFi only isn't on USB and isn't counted.
+2. **Snapshot.** Bootloaders already enumerated before `FORceBoot`
    belong to other boards and are never selected.
-2. **USB port.** On Linux, a bootloader must appear on the same physical
+3. **USB port.** On Linux, a bootloader must appear on the same physical
    USB port as the board's serial port, read from sysfs. A board that
    enters its bootloader on another port during the wait is ignored.
 
@@ -345,13 +352,14 @@ into its application, which is what a board built without the bootloader
 does. The update stops there rather than take whatever bootloader
 appears next.
 
-**Residual risk.** Step 2 is unavailable on Windows, on macOS, and under
-WSL2 + usbipd, where the virtual port can change when the board
-re-attaches. There, a *different* board entering its bootloader in the
-seconds between `FORceBoot` and enumeration is indistinguishable from
-the target. On a shared multi-board host, take the bench lock (or
-otherwise make sure no other board is being flashed) for the duration
-of an update.
+**Residual risk.** Step 1 runs once, at the start. A second board
+plugged in (or attached over usbipd) *during* the update isn't caught by
+it. Step 3 is unavailable on Windows, on macOS, and under WSL2 + usbipd,
+where the virtual port can change when the board re-attaches. There, a
+board that arrives and enters its bootloader in the seconds between
+`FORceBoot` and enumeration is indistinguishable from the target. Don't
+connect other boards while an update runs; on a shared multi-board host,
+take the bench lock for the duration of an update.
 
 ### Multi-NIC WiFi Discovery
 

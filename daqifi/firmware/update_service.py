@@ -275,6 +275,23 @@ def _list_serial_port_names() -> Optional[FrozenSet[str]]:
         return None
 
 
+def _list_usb_serial_ports(
+    vendor_id: int, product_id: int
+) -> Optional[List[str]]:
+    """Serial ports of USB devices with this VID/PID, or None when they
+    can't be listed."""
+    try:
+        from serial.tools import list_ports
+
+        return sorted(
+            port.device
+            for port in list_ports.comports()
+            if port.vid == vendor_id and port.pid == product_id
+        )
+    except Exception:
+        return None
+
+
 class DefaultFirmwareUpdateService:
     """Default firmware update orchestrator (PIC32 + WiFi).
 
@@ -470,8 +487,6 @@ class DefaultFirmwareUpdateService:
 
             def _prepare(deadline: _Cancellation) -> None:
                 _ensure_device_connected(device)
-                if device.is_streaming:
-                    device.stop_streaming()
                 from daqifi._internal import scpi_commands
 
                 # Taken before FORceBoot so the wait below can tell this
@@ -481,6 +496,9 @@ class DefaultFirmwareUpdateService:
                 self._preexisting_bootloaders = (
                     self._snapshot_bootloader_devices(deadline)
                 )
+                self._refuse_if_several_boards_attached()
+                if device.is_streaming:
+                    device.stop_streaming()
                 self._target_port_name = getattr(
                     getattr(device, "transport", None), "port_name", None
                 )
@@ -1171,6 +1189,39 @@ class DefaultFirmwareUpdateService:
                     exc,
                 )
                 self._sleep_with_cancel(self._options.poll_interval, deadline)
+
+    def _refuse_if_several_boards_attached(self) -> None:
+        """Refuse to start while more than one DAQiFi board is on USB.
+
+        Where the bootloader can't be bound to the board's USB port (Windows,
+        macOS, WSL2 + usbipd), another board entering its bootloader during
+        the wait looks the same as ours, so an update only starts with one
+        board attached. Nothing has been sent to the device yet. A board
+        plugged in after this check is not caught (see the README).
+        """
+        bootloaders = len(self._preexisting_bootloaders)
+        applications = _list_usb_serial_ports(
+            self._options.application_vendor_id,
+            self._options.application_product_id,
+        )
+        if applications is None:
+            self._logger.warning(
+                "Could not list serial ports; the check for other DAQiFi "
+                "boards covers only bootloader-mode boards."
+            )
+            applications = []
+        if len(applications) + bootloaders <= 1:
+            return
+        found = list(applications)
+        if bootloaders:
+            found.append(f"{bootloaders} in bootloader mode")
+        raise RuntimeError(
+            f"{len(applications) + bootloaders} DAQiFi boards are connected "
+            f"over USB ({', '.join(found)}). A PIC32 update needs exactly one: "
+            "with several attached, another board's bootloader could be "
+            "flashed instead. Disconnect every board except the one being "
+            "updated, including any left in bootloader mode, then retry."
+        )
 
     def _raise_if_target_returned_to_application(self) -> None:
         """Stop when the device rebooted back into its application.

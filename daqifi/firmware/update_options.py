@@ -39,6 +39,10 @@ class FirmwareUpdateServiceOptions:
     # USB identifiers ------------------------------------------------------
     bootloader_vendor_id: int = 0x04D8
     bootloader_product_id: int = 0x003C
+    # The board in its application, a USB CDC serial port; used to refuse an
+    # update while several boards are attached.
+    application_vendor_id: int = 0x04D8
+    application_product_id: int = 0xF794
 
     # Polling --------------------------------------------------------------
     poll_interval: float = 0.250  # 250 ms
@@ -162,6 +166,13 @@ class FirmwareUpdateServiceOptions:
                 f"bootloader_product_id must be in range 0..65535 "
                 f"(got {self.bootloader_product_id})."
             )
+
+        for field_name in ("application_vendor_id", "application_product_id"):
+            value = getattr(self, field_name)
+            if not (0 <= value <= 0xFFFF):
+                raise ValueError(
+                    f"{field_name} must be in range 0..65535 (got {value})."
+                )
 
         name = self.wifi_flash_tool_file_name
         if not name or not name.strip():

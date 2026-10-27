@@ -326,6 +326,16 @@ def _build_pic32_service(
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_application_ports_on_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The several-boards refusal lists the host's real serial ports; a board
+    # plugged into the machine running the suite would otherwise refuse
+    # every update test. Tests of the refusal override this.
+    import daqifi.firmware.update_service as update_service
+
+    monkeypatch.setattr(update_service, "_list_usb_serial_ports", lambda vid, pid: [])
+
+
 # ---- Construction validation --------------------------------------------
 
 
@@ -1139,6 +1149,91 @@ class TestUpdateFirmwareFailureModes:
 
 
 _FAKE_CMD_EXE = "/fake/bin/cmd.exe"
+
+
+class TestSeveralBoardsAttached:
+    # Operator ruling 2026-10-27 (4=C): with more than one DAQiFi board on
+    # USB at the start, a PIC32 update refuses before sending anything; a
+    # single board goes ahead.
+
+    @staticmethod
+    def _service(hid, bootloaders_before, monkeypatch, application_ports):
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(
+            update_service, "_list_usb_serial_ports",
+            lambda vid, pid: application_ports
+            if (vid, pid) == (0x04D8, 0xF794) else [],
+        )
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        ours = HidDeviceInfo(0x04D8, 0x003C, "path-a", None, "Bootloader")
+        return _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([bootloaders_before, bootloaders_before + [ours]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+    def _assert_refused_before_anything_was_sent(self, service, device, hid) -> str:
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+        assert exc_info.value.failed_state == FirmwareUpdateState.PREPARING_DEVICE
+        assert device.sent_commands == []
+        assert hid._connect_calls == 0
+        return str(exc_info.value.__cause__)
+
+    def test_two_boards_in_their_application_are_refused(self, monkeypatch) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        service = self._service(hid, [], monkeypatch, ["TEST-PORT-1", "TEST-PORT-2"])
+
+        message = self._assert_refused_before_anything_was_sent(service, device, hid)
+        assert "2 DAQiFi boards" in message
+        assert "TEST-PORT-1" in message and "TEST-PORT-2" in message
+        assert "Disconnect every board except the one being updated" in message
+
+    def test_a_board_left_in_bootloader_mode_counts(self, monkeypatch) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        stale = HidDeviceInfo(0x04D8, 0x003C, "path-x", None, "Bootloader")
+        service = self._service(hid, [stale], monkeypatch, ["TEST-PORT-1"])
+
+        message = self._assert_refused_before_anything_was_sent(service, device, hid)
+        assert "1 in bootloader mode" in message
+
+    def test_a_single_board_goes_ahead(self, monkeypatch) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        service = self._service(hid, [], monkeypatch, ["TEST-PORT-1"])
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+        assert hid.connected_path == "path-a"
+
+    def test_an_unlistable_serial_bus_still_counts_bootloaders(self, monkeypatch) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        stale = [
+            HidDeviceInfo(0x04D8, 0x003C, "path-x", None, "Bootloader"),
+            HidDeviceInfo(0x04D8, 0x003C, "path-y", None, "Bootloader"),
+        ]
+        service = self._service(hid, stale, monkeypatch, None)
+
+        message = self._assert_refused_before_anything_was_sent(service, device, hid)
+        assert "2 in bootloader mode" in message
+
+    def test_application_usb_ids_are_validated(self) -> None:
+        with pytest.raises(ValueError, match="application_product_id"):
+            FirmwareUpdateServiceOptions(application_product_id=0x10000).validate()
 
 
 class TestUpdateWifiModule:
