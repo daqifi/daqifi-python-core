@@ -1161,14 +1161,13 @@ class _HidConnectedDevice:
 
     @classmethod
     def open_default(cls, info: HidDeviceInfo) -> "_HidConnectedDevice":
-        try:
-            import hid  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise ImportError(
-                "HID transport requires the 'hid' package "
-                "(`pip install hid`). Pass a custom HidPlatform with an "
-                "open_device(info) method to avoid this dependency."
-            ) from exc
+        from daqifi._internal.hid_enumerator import import_hidapi
+
+        hid = import_hidapi(
+            "HID transport",
+            "Pass a custom HidPlatform with an open_device(info) method to "
+            "avoid this dependency.",
+        )
         handle = hid.device()
         # OS-provided HID paths can contain non-UTF-8 bytes on Linux
         # (filesystem-encoded). `surrogateescape` round-trips those

@@ -14,12 +14,23 @@ aims to follow [Semantic Versioning](https://semver.org/).
   enumerated device; `SerialStreamTransport.port_name` (#161).
 
 ### Changed
+- A PIC32 update now refuses to start while more than one DAQiFi board is
+  connected over USB (application serial ports with 04D8:F794, plus boards
+  already in bootloader mode), and says to disconnect the others; it also
+  refuses when serial ports can't be listed. With one board it goes ahead. A board plugged in during the update is not caught.
+  New options `application_vendor_id` / `application_product_id` (#161).
 - `python_requires` raised to `>=3.9`, forced by the protobuf runtime floor
   of the generated bindings (#155).
 - `requirements.txt` now lists the full runtime set (pyserial, protobuf,
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- The HID error messages told users to `pip install hid`, which is a
+  different library with an incompatible API (`hid.Device`); the code
+  needs the PyPI `hidapi` package (`hid.device()`). With the wrong package
+  installed, bootloader enumeration silently found nothing and opening a
+  device raised `AttributeError`. Both now raise an `ImportError` naming
+  `hidapi`, and a `daqifi[hid]` extra installs it.
 - Package homepage URL pointed at a repository that does not exist.
 - PIC32 firmware update could erase a different board: a bootloader that was
   already enumerated before `SYSTem:FORceBoot` is no longer accepted; on Linux

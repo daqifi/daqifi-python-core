@@ -94,6 +94,12 @@ class FirmwareUpdateServiceOptions:
     post_reconnect_readiness_timeout: float = 30.0
     post_reconnect_readiness_retry_delay: float = 0.5  # 500 ms
 
+    # The board in its application, a USB CDC serial port; used to refuse an
+    # update while several boards are attached. Last, so positional
+    # construction of the fields above keeps its meaning.
+    application_vendor_id: int = 0x04D8
+    application_product_id: int = 0xF794
+
     # ------------------------------------------------------------------
     # Lookup helpers
     # ------------------------------------------------------------------
@@ -162,6 +168,17 @@ class FirmwareUpdateServiceOptions:
                 f"bootloader_product_id must be in range 0..65535 "
                 f"(got {self.bootloader_product_id})."
             )
+
+        for field_name in ("application_vendor_id", "application_product_id"):
+            value = getattr(self, field_name)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not (0 <= value <= 0xFFFF)
+            ):
+                raise ValueError(
+                    f"{field_name} must be in range 0..65535 (got {value})."
+                )
 
         name = self.wifi_flash_tool_file_name
         if not name or not name.strip():

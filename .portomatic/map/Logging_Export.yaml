@@ -1,5 +1,5 @@
 schema_version: 1
-shard: Logging.Export
+shard: Logging_Export
 upstream_root: src/Daqifi.Core/Logging/Export
 downstream_root: daqifi
 last_synced_upstream_sha: 26b19fe48e3191ccacdc90540f492043c0df6a4e
