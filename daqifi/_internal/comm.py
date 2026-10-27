@@ -32,6 +32,9 @@ class TransportStatusEventArgs:
     is_connected: bool
     connection_info: str
     error: Optional[BaseException] = None
+    # Which connection the event is about, for transports that number them
+    # (TcpStreamTransport.session). None means "the current one".
+    session: Optional[int] = None
 
 
 @dataclass

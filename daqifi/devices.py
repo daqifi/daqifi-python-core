@@ -177,6 +177,7 @@ class DaqifiDevice:
         self._transport = transport
         self._message_factory = message_factory or _default_message_factory
         self._status = ConnectionStatus.Disconnected
+        self._transport_session: Optional[int] = None
         self._state = DeviceState.Disconnected
         self._metadata = DeviceMetadata()
         self._channels: List[Any] = []
@@ -317,6 +318,7 @@ class DaqifiDevice:
                     "a transport-backed stream."
                 )
             self._transport.connect(retry_options=retry_options)
+            self._transport_session = getattr(self._transport, "session", None)
             # Capture the stream once and validate it. A transport
             # that returns None from `.stream` after a successful
             # `.connect()` is broken — surface it now rather than
@@ -1273,6 +1275,11 @@ class DaqifiDevice:
         if args.is_connected:
             return
         if self._is_disconnecting:
+            return
+        # A loss reported for a connection that has since been replaced
+        # (delivered late, e.g. behind a slow handler): tearing down now
+        # would kill the new session.
+        if args.session is not None and args.session != self._transport_session:
             return
         # Transport dropped unexpectedly: tear down the consumer so a
         # daemon thread doesn't keep spinning on a dead stream after

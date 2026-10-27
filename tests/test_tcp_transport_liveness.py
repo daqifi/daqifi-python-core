@@ -144,3 +144,46 @@ def test_own_disconnect_is_not_reported_as_the_device_going_away():
         assert device.status == ConnectionStatus.Disconnected
     finally:
         fake.close()
+
+
+def test_late_loss_event_does_not_tear_down_a_reconnected_session():
+    # Audit finding on #167 (round 1): a handler registered before the
+    # device blocked on the loss event; the device reconnected meanwhile,
+    # and the stale event then stopped the NEW consumer.
+    fake = _FakeDevice()
+    transport = TcpStreamTransport("127.0.0.1", fake.port)
+    release = threading.Event()
+    blocked = threading.Event()
+
+    def _slow_handler(args):
+        if args.error is not None and not args.is_connected:
+            blocked.set()
+            release.wait(5)
+
+    transport.add_status_changed(_slow_handler)
+    device = DaqifiDevice("fake", transport=transport, message_factory=lambda b: bytes(b))
+    device.connect()
+    fake.wait_accepted()
+    second = None
+    try:
+        first_conn = fake.conn
+        fake._accepted.clear()
+        threading.Thread(target=fake._serve, daemon=True).start()
+        first_conn.shutdown(socket.SHUT_RDWR)
+        assert blocked.wait(3)
+        device.disconnect()
+        device.connect()
+        fake.wait_accepted()
+        second = fake.conn
+        release.set()
+        time.sleep(0.5)
+        assert device.status == ConnectionStatus.Connected
+        assert device._consumer is not None and device._consumer.is_running
+        received = []
+        device._consumer.add_message_received(received.append)
+        fake.send_frame()
+        assert _wait_until(lambda: len(received) == 1)
+    finally:
+        release.set()
+        device.disconnect()
+        fake.close()

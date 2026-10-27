@@ -157,6 +157,9 @@ class TcpStreamTransport:
         self._stream: Optional[IO[bytes]] = None
         self._disposed = False
         self._closing = False
+        # Bumped on every successful connect, so a peer-close event raised
+        # for one connection can be recognised as stale by a later one.
+        self._session = 0
         self._status_handlers: List[Callable[[TransportStatusEventArgs], None]] = []
 
     @property
@@ -251,10 +254,12 @@ class TcpStreamTransport:
                 # close via self._socket, not the local `sock`.
                 sock = None
                 self._closing = False
+                self._session += 1
+                session = self._session
                 self._stream = _SocketStream(  # type: ignore[assignment]
                     self._socket,
                     self.OPERATIONAL_READ_TIMEOUT_S,
-                    self._on_peer_closed,
+                    lambda: self._on_peer_closed(session),
                 )
                 self._notify_status(True, None)
                 return
@@ -360,28 +365,47 @@ class TcpStreamTransport:
             pass
         self._disposed = True
 
-    def _on_peer_closed(self) -> None:
-        """The device closed the connection (seen by a reader as EOF)."""
-        if self._closing:
+    def _on_peer_closed(self, session: int) -> None:
+        """The device closed connection `session` (seen by a reader as EOF)."""
+        if self._closing or session != self._session:
             return
         self._closing = True
         error = ConnectionResetError("The device closed the TCP connection.")
+
+        def _notify_if_current() -> None:
+            # Raised for one connection; a reconnect in the meantime makes
+            # it stale, and delivering it would tear the new session down.
+            # The event also names its session, so a subscriber reached
+            # only after a reconnect (behind a slow handler) can tell.
+            if session == self._session:
+                self._notify_status(False, error, session)
+
         # Not on the reading thread: status handlers stop the consumer,
         # and that thread is the consumer's own.
         threading.Thread(
-            target=self._notify_status,
-            args=(False, error),
+            target=_notify_if_current,
             name="daqifi-tcp-peer-closed",
             daemon=True,
         ).start()
 
-    def _notify_status(self, is_connected: bool, error: Optional[BaseException]) -> None:
+    @property
+    def session(self) -> int:
+        """Number of the current connection; increases on every connect."""
+        return self._session
+
+    def _notify_status(
+        self,
+        is_connected: bool,
+        error: Optional[BaseException],
+        session: Optional[int] = None,
+    ) -> None:
         _notify(
             self._status_handlers,
             TransportStatusEventArgs(
                 is_connected=is_connected,
                 connection_info=self.connection_info,
                 error=error,
+                session=session,
             ),
         )
 
