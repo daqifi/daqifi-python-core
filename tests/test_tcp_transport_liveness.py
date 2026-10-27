@@ -487,3 +487,71 @@ def test_a_slow_subscriber_does_not_let_others_receive_a_stale_connected():
         release.set()
         device.disconnect()
         fake.close()
+
+
+def test_nested_reconnect_from_a_loss_handler_survives_the_outer_connect():
+    # Audit finding on #167 (round 6): an outer connect() tore down
+    # self._consumer by name, closing the consumer a Lost handler's nested
+    # connect() had just installed, and then went onto the dead stream.
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    nested_done = threading.Event()
+
+    def _on_status(args):
+        if args.status == ConnectionStatus.Lost and not nested_done.is_set():
+            fake._accepted.clear()
+            threading.Thread(target=fake._serve, daemon=True).start()
+            device.connect()
+            nested_done.set()
+
+    device.add_status_changed(_on_status)
+    old_consumer = device._consumer
+    real_stop = old_consumer.stop_safely
+
+    def _peer_closes_during_outer_stop(*a, **k):
+        if threading.current_thread() is not old_consumer._thread and not nested_done.is_set():
+            fake.conn.shutdown(socket.SHUT_RDWR)
+            assert nested_done.wait(5)
+        return real_stop(*a, **k)
+
+    old_consumer.stop_safely = _peer_closes_during_outer_stop
+    try:
+        device.connect()
+        fake.wait_accepted()
+        time.sleep(0.3)
+        assert transport.is_connected
+        assert device.status == ConnectionStatus.Connected
+        assert device._consumer is not None and device._consumer.is_running
+        received = []
+        device._consumer.add_message_received(received.append)
+        fake.send_frame()
+        assert _wait_until(lambda: len(received) == 1)
+    finally:
+        device.disconnect()
+        fake.close()
+
+
+def test_closing_the_stream_does_not_leak_the_socket_across_a_reconnect():
+    # Audit finding on #167 (round 6): with its stream closed, the transport
+    # replaced the socket on reconnect without closing the old one.
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(5)
+    accepted = []
+    threading.Thread(
+        target=lambda: [accepted.append(server.accept()[0]) for _ in range(2)],
+        daemon=True,
+    ).start()
+    transport = TcpStreamTransport("127.0.0.1", server.getsockname()[1])
+    try:
+        transport.connect()
+        first_socket = transport._socket
+        transport.stream.close()
+        transport.connect()
+        transport.disconnect()
+        assert first_socket.fileno() == -1
+    finally:
+        transport.disconnect()
+        server.close()
+        for conn in accepted:
+            conn.close()

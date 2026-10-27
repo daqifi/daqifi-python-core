@@ -342,32 +342,17 @@ class DaqifiDevice:
             # background reads would fail forever (Qodo PR 17
             # pass 11 #1). The factory call is cheap; the
             # caller's `initialize()` re-registers handlers.
-            if self._consumer is not None:
-                # Unregister the message callback BEFORE stopping
-                # the consumer so an in-flight message can't be
-                # delivered to the old _on_inbound_message after
-                # the device starts rebuilding state for the new
-                # session (Qodo PR 17 pass 42 #1).
-                try:
-                    self._consumer.remove_message_received(self._on_inbound_message)
-                except Exception:
-                    pass
-                # Stop the daemon thread before closing — close()
-                # alone doesn't join the thread, so a reconnect
-                # would leak a zombie reader spinning on the OLD
-                # closed stream until process exit (Qodo PR 17
-                # pass 29 #3, mirroring disconnect()'s sequence).
-                try:
-                    stopped = self._consumer.stop_safely()
-                    if stopped is False:
-                        self._consumer.stop()
-                except Exception:
-                    pass
-                try:
-                    self._consumer.close()
-                except Exception:
-                    pass
+            # Claimed under the lock and torn down by reference: while it
+            # stops, a status handler may already have run a nested
+            # connect(), and its consumer must not be the one closed here.
+            # Unregistering before stopping keeps an in-flight message from
+            # reaching the old session (Qodo PR 17 pass 42 #1); stopping
+            # before closing avoids a zombie reader (pass 29 #3).
+            with self._state_lock:
+                old_consumer = self._consumer
                 self._consumer = None
+            if old_consumer is not None:
+                self._discard_consumer(old_consumer)
 
             # Default factory decodes bytes into a real
             # `DaqifiOutMessage` (see ``_default_message_factory``).
@@ -379,8 +364,21 @@ class DaqifiDevice:
                 ProtobufMessageParser(message_factory=self._message_factory),
             )
             with self._state_lock:
-                self._consumer = consumer
-                self._transport_session = session
+                superseded = self._consumer is not None or (
+                    getattr(self._transport, "session", None) != session
+                )
+                if not superseded:
+                    self._consumer = consumer
+                    self._transport_session = session
+            if superseded:
+                # A nested connect() (from a status handler, during the
+                # teardown above) already established a newer connection;
+                # this call's stream belongs to the one it replaced.
+                try:
+                    consumer.close()
+                except Exception:
+                    pass
+                return
             consumer.start()
 
             # Only if this connection is still the current one, and its

@@ -138,6 +138,12 @@ class _SocketStream(io.RawIOBase):
         self._sock.sendall(data)
         return len(data)
 
+    def close(self) -> None:
+        # The transport owns the socket and closes it; drop this view's
+        # reference so a closed stream doesn't keep the socket alive.
+        super().close()
+        self._sock = None  # type: ignore[assignment]
+
 
 class TcpStreamTransport:
     """TCP implementation of :class:`StreamTransport` Protocol.
@@ -238,6 +244,11 @@ class TcpStreamTransport:
         options = retry_options or ConnectionRetryOptions.no_retry()
         max_attempts = options.max_attempts if options.enabled else 1
         last_exc: Optional[BaseException] = None
+
+        # A previous connection that is no longer "connected" (its stream
+        # closed, or the peer hung up) may still hold its socket; replacing
+        # it without closing would leak one descriptor per reconnect.
+        self._release_stale_connection()
 
         for attempt in range(1, max_attempts + 1):
             # Track the locally-created socket separately from
@@ -373,6 +384,19 @@ class TcpStreamTransport:
             # Per upstream Dispose(): swallow disconnect errors.
             pass
         self._disposed = True
+
+    def _release_stale_connection(self) -> None:
+        stream, sock = self._stream, self._socket
+        self._stream = None
+        self._socket = None
+        if isinstance(stream, _SocketStream):
+            stream.loss_reported = True  # our close, not the device's
+        for closable in (stream, sock):
+            if closable is not None:
+                try:
+                    closable.close()
+                except Exception:
+                    pass
 
     def _on_peer_closed(self, stream: "_SocketStream") -> None:
         """The device closed `stream`'s connection (its reader saw EOF).
