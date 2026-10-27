@@ -33,6 +33,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   buffer is tried as protobuf first but only a decoded frame counts; and
   the protobuf fallback after the text parser counts only with a frame
   (#164).
+- SD-card operations on one device could interleave across threads: a raw
+  capture (list, delete, download) didn't take the text-exchange lock, so a
+  listing could switch the SPI bus under a download and read its reply off
+  the same stream, which left the download hung and its file truncated.
+  Every SD operation that switches the bus (list, delete, download, format,
+  start/stop logging, the logging-state query) now runs inside that lock,
+  including the restore of the LAN interface, as upstream does since
+  daqifi-core #406/#417 (#164).
 - The HID error messages told users to `pip install hid`, which is a
   different library with an incompatible API (`hid.Device`); the code
   needs the PyPI `hidapi` package (`hid.device()`). With the wrong package
