@@ -25,6 +25,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- SD logs: consecutive frames with the same timestamp were merged even when
+  each carried its own analog data, keeping only the first frame's values;
+  only complementary frames (the firmware's separate analog and digital
+  messages for one period) are merged now (#163).
+- SD CSV logs: calibration was looked up by column position, but the
+  firmware writes only enabled channels (`ain7_ts,ain7_val`), so a sparse
+  log was scaled with the wrong channel's coefficients; it now follows the
+  channel number in the column name (#163).
 - `StreamManager.stop()` returned without sending STOP once a callback
   exception had moved the state to ERROR, leaving the board streaming; it
   forgot a worker still running after its 2 s join, so a restart ran two
