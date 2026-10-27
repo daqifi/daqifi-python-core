@@ -287,11 +287,17 @@ class ProtobufMessageParser:
                 # that masquerades as "parser hung": device LED blinking,
                 # buffer growing, zero messages parsed.
                 #
-                # A field-tag gate protects the wait path from garbage
+                # Two recovery gates protect the wait path from garbage
                 # while leaving real partial frames intact (mirrors
                 # upstream PR #173):
                 #
-                #    When at least one body byte is
+                #  1. Gap gate: a declared length more than
+                #     `_MAX_PARTIAL_FRAME_GAP_BYTES` beyond the payload
+                #     bytes currently buffered is almost certainly
+                #     garbage. Real partials for streaming frames leave
+                #     gaps measured in hundreds of bytes, not kilobytes.
+                #
+                #  2. Field-tag gate: when at least one body byte is
                 #     available, peek at it. The first body byte of a
                 #     real DaqifiOutMessage is a protobuf field tag —
                 #     field_number >= 1 and wire_type in {0,1,2,5}. A
@@ -305,19 +311,28 @@ class ProtobufMessageParser:
                 # payload: only into bytes already identified as
                 # implausible.
                 available_body_bytes = len(remaining) - prefix_bytes
+                missing_payload = message_length - available_body_bytes
                 first_body_byte_is_garbage = (
                     available_body_bytes > 0
                     and not _is_plausible_field_tag_byte(remaining[prefix_bytes])
                 )
 
-                # With no body byte yet there is nothing to judge, so wait.
-                # Upstream also skips such a prefix when it declares more
-                # than 1 KiB missing, but a read can end right after a real
-                # frame's prefix: a 1.4 KB status frame, or an SD log whose
-                # 64 KiB read boundary lands there, was destroyed every time.
-                # A bogus prefix at the end of the buffer only waits for the
-                # next read, whose first byte the gate above then checks.
-                if first_body_byte_is_garbage:
+                # Apply the gap heuristic only when we have NO body bytes
+                # to validate yet. As soon as one body byte is available,
+                # the field-tag gate can decide on its own — gating on
+                # missing_payload at that point would corrupt legitimate
+                # large frames whose first chunk happens to land right
+                # at the prefix+1 boundary. (Qodo /agentic_review on PR
+                # #100 caught the original >1024 form; pass 3 /improve
+                # tightened from `<= 1` to `== 0` to handle the edge
+                # case at exactly one body byte. Same bug exists in
+                # upstream daqifi-core PR #173.)
+                gap_is_suspicious = (
+                    available_body_bytes == 0
+                    and missing_payload > _MAX_PARTIAL_FRAME_GAP_BYTES
+                )
+
+                if gap_is_suspicious or first_body_byte_is_garbage:
                     current_index += 1
                     consumed_bytes = current_index
                     continue
