@@ -421,28 +421,67 @@ class StreamManager:
         port.write((start_cmd + "\r").encode("ascii"))
         port.flush()
         time.sleep(0.2)
+        # As send_command: wait up to its timeout for the first bytes (a
+        # rejection can arrive after the 200 ms settle), then read until the
+        # line goes quiet.
         raw = bytearray()
-        deadline = time.monotonic() + 0.3  # as long as send_command read
+        timeout = getattr(self._comm, "timeout", 0.3)
+        if not isinstance(timeout, (int, float)):
+            timeout = 0.3
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             waiting = port.in_waiting
-            if not waiting:
-                break
-            raw.extend(port.read(waiting))
-            time.sleep(0.05)
+            if waiting:
+                raw.extend(port.read(waiting))
+                time.sleep(0.05)
+                if not port.in_waiting:
+                    break
+            else:
+                time.sleep(0.01)
         head = bytes(raw)
         echo = start_cmd.encode("ascii")
-        if head.startswith(echo):
-            head = head[len(echo):].lstrip(b"\r\n")
+        echoed = head.startswith(echo)
+        if echoed:
+            head = head[len(echo):]
         for prompt in (b"DAQIFI> ", b"DAQIFI>"):
             if head.startswith(prompt):
                 head = head[len(prompt):]
                 break
         if self._format == 0:
+            # The echo's line ending can't be told from a frame whose length
+            # byte is 0x0A or 0x0D: keep the cut whose frames run back to
+            # back from the first byte.
+            if echoed:
+                cuts = [n for n in (0, 1, 2) if head[:n] in (b"", b"\r", b"\n", b"\r\n")]
+                best = max(cuts, key=lambda n: (self._complete_frames_from_start(head[n:]), n))
+                head = head[best:]
             self._pb_buffer.extend(head)
         else:
+            if echoed:
+                head = head.lstrip(b"\r\n")
             self._read_buffer += head.decode("utf-8", errors="ignore")
         text = head.decode("ascii", errors="ignore")
         return text.splitlines()[0] if text.splitlines() else ""
+
+    @staticmethod
+    def _complete_frames_from_start(data: bytes) -> int:
+        """How many complete, decodable frames ``data`` holds back to back
+        from its first byte."""
+        from ._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+        from .communication import _try_read_length_prefix
+
+        position = count = 0
+        while position < len(data):
+            length, prefix_bytes, _ = _try_read_length_prefix(data[position:])
+            end = position + (prefix_bytes or 0) + (length or 0)
+            if not length or end > len(data):
+                break
+            try:
+                DaqifiOutMessage.FromString(bytes(data[position + prefix_bytes:end]))
+            except Exception:
+                break
+            position, count = end, count + 1
+        return count
 
     def stop(self):
         """

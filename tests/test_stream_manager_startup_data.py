@@ -15,13 +15,15 @@ from daqifi.streaming import StreamManager
 
 
 class _FakeSerial:
-    def __init__(self, enabled_mask=1, on_start=b""):
+    def __init__(self, enabled_mask=1, on_start=b"", echo=False, start_delay_s=0.0):
         self.is_open = True
         self.rx = bytearray()
         self.lock = threading.Lock()
         self.writes = []
         self.enabled_mask = enabled_mask
         self.on_start = on_start
+        self.echo = echo
+        self.start_delay_s = start_delay_s
 
     def write(self, data):
         command = data.decode().strip()
@@ -32,8 +34,17 @@ class _FakeSerial:
             elif command.startswith("SYSTem:ERRor?"):
                 self.rx += b'0,"No error"\r\n'
             elif "STREAM:START" in command.upper():
-                self.rx += self.on_start
+                if self.echo:
+                    self.rx += command.encode() + b"\r\n"
+                if self.start_delay_s:
+                    threading.Timer(self.start_delay_s, self._deliver_start).start()
+                else:
+                    self.rx += self.on_start
         return len(data)
+
+    def _deliver_start(self):
+        with self.lock:
+            self.rx += self.on_start
 
     def flush(self):
         pass
@@ -118,3 +129,25 @@ def test_analog_in_data_ts_is_an_offset_to_msg_time_stamp() -> None:
         DaqifiOutMessage(msg_time_stamp=100000, analog_in_data_float=[1.0], analog_in_data_ts=[5])
     )
     assert samples[0].timestamp == pytest.approx(100.005)
+
+
+# Audit round 1 on #180.
+
+def test_a_start_rejection_arriving_after_the_settle_delay_is_detected() -> None:
+    from daqifi.exceptions import CommandError
+
+    fake = _FakeSerial(on_start=b'**ERROR: -113,"Undefined header"\r\n', start_delay_s=0.25)
+    stream = _manager(fake, channels=[0], sample_rate=10, format=2)
+    with pytest.raises(CommandError, match="rejected"):
+        stream.start()
+
+
+def test_an_echo_terminator_does_not_take_a_frame_length_byte_of_0x0a() -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    assert frame[0] == 0x0A
+    fake = _FakeSerial(enabled_mask=1, on_start=frame * 2, echo=True)
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
