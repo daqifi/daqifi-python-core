@@ -56,6 +56,60 @@ aims to follow [Semantic Versioning](https://semver.org/).
   report are split into 16-byte records instead of failing after erase (#161).
 - Bootloader replies are now checked for framing, CRC, EOT and the command
   they answer; truncated or mismatched replies are no longer accepted (#161).
+- WiFi module flashing passed the device's display name (`DaqifiDevice` by
+  default) to the flash tool as its serial port; it now uses the serial
+  transport's port, and fails before entering WiFi-update mode when there
+  is none and no `wifi_port_override` (#161).
+- WiFi flashing with a relative firmware or tool path looked the tool up
+  relative to its own directory; paths are anchored to the caller's
+  working directory first (#161).
+- WiFi flashing through `winc_flash_tool.cmd` never ran on Windows: the
+  `cmd.exe` arguments went through `list2cmdline`, whose `\"` escapes
+  cmd.exe does not honour, so the script was "not recognized". Native
+  Windows now passes one verbatim `/d /s /c "..."` line; under WSL the
+  arguments go separately (WSL quotes them) and Linux paths are translated
+  with `wslpath -w` (#161).
+- The `cmd.exe` line now runs with `/v:off`, so `!NAME!` in a path is not
+  expanded where delayed expansion is on in the registry; under WSL the
+  arguments template's own literals are checked for cmd.exe
+  metacharacters like the substituted values, and on native Windows a `%`
+  in the template is refused (#161).
+- The WiFi flash arguments template is split into arguments before the
+  port and firmware path are put in, each as one whole argument, so a
+  value is never parsed again: an apostrophe inside a quoted
+  `"{firmwarePath}"` no longer fails after the device entered update
+  mode, a placeholder the template already quoted is quoted once on the
+  cmd.exe line (nested quotes left `&` in the path bare), and a native
+  tool's arguments go as a list (C-runtime quoting, so a path ending in a
+  backslash no longer swallows the next argument). An unbalanced template
+  is refused before update mode (#161).
+- The arguments template is split by the rules of the program that will
+  read it: cmd.exe rules for a `.cmd`/`.bat` script, C-runtime rules for a
+  Windows program (natively, or an `.exe`/`.com` started from WSL, whose
+  firmware path is translated with `wslpath -w`), and shlex for a POSIX
+  program. A native tool's `-c "print(\"done\")"` and a WSL `.exe`'s
+  `C:\fw\image.bin` were mangled before (#161).
+- A `.cmd` template's `^` escapes are consumed as cmd.exe does (`A^&B` is
+  `A&B`; inside quotes `^` stays literal); they were kept and then quoted,
+  so the script got `^&` (#161).
+- A Ctrl-C while `SubprocessRunner` was joining its output readers skipped
+  the rest of cleanup, so a descendant still holding stdout kept firing
+  the caller's callbacks after `run()` had raised. The cleanup now always
+  runs, and the interrupt is re-raised afterwards (#161).
+- README: a bootloader that has sat idle stops answering (Windows selective
+  suspend); the updater then stops before ERASE (#161).
+- `SubprocessRunner` killed only the direct child on timeout, so a
+  descendant holding the pipes kept `run()` blocked; the whole process
+  tree is killed now (a process group on POSIX, a Job Object on Windows,
+  which also reaches workers whose launcher has already exited), and a
+  surviving descendant can no longer hang cleanup. A run is complete only
+  when its output pipes close, so a descendant's late failure output is
+  captured (#161).
+- On Windows, a string argument list reached the child with literal quote
+  characters; it is now passed through as the command line verbatim (#161).
+- `FirmwareVersion` aliases (`3.0.0b1`, `3.0.0beta1`, `3.0.0-beta.1`)
+  compared as both greater than each other, so the update check offered
+  the installed firmware as an update (#161).
 - Over TCP, every `execute_text_command` left the protobuf consumer
   stopped (its reader was blocked in a socket read and could not be
   restarted), so no stream frame was dispatched again until reconnect.

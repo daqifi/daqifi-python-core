@@ -38,6 +38,16 @@ from daqifi._internal.comm import HidDeviceInfo
 pytestmark = pytest.mark.portomatic_generated
 
 
+@pytest.fixture(autouse=True)
+def _pin_not_wsl(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Under WSL the service translates paths for cmd.exe and refuses bundles
+    # on the Linux filesystem, which is where these tests' temp directories
+    # live. Pinned so every host takes the same branch; the WSL tests opt in.
+    import daqifi.firmware.update_service as update_service
+
+    monkeypatch.setattr(update_service, "_running_under_wsl", lambda: False)
+
+
 # ---- Fakes ---------------------------------------------------------------
 
 
@@ -1359,8 +1369,8 @@ class TestUpdateWifiModule:
 
         assert runner.last_request is not None
         assert runner.last_request.file_name == _FAKE_CMD_EXE
-        assert runner.last_request.arguments[0] == "/c"
-        assert "winc_flash_tool.cmd" in runner.last_request.arguments[1]
+        assert runner.last_request.arguments[:3] == ["/d", "/v:off", "/c"]
+        assert "winc_flash_tool.cmd" in runner.last_request.arguments[3]
 
     def test_when_cmd_exe_missing_throws_file_not_found(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1387,6 +1397,669 @@ class TestUpdateWifiModule:
         assert isinstance(exc_info.value.__cause__, FileNotFoundError)
         assert "cmd.exe" in str(exc_info.value.__cause__)
         assert runner.last_request is None
+        # Resolved before the device is switched into WiFi-update mode.
+        assert device.sent_commands == []
+        assert device.disconnect_calls == 0
+
+    def test_port_is_the_serial_transports_port_not_the_device_name(self) -> None:
+        # Audit finding: the factory names every device "DaqifiDevice", and
+        # that name was handed to the flash tool as its port.
+        device = _FakeStreamingDevice("DaqifiDevice")
+        device.transport = type("T", (), {"port_name": "TEST-PORT-7"})()
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        arguments = runner.last_request.arguments
+        flat = arguments if isinstance(arguments, str) else " ".join(arguments)
+        assert "TEST-PORT-7" in flat
+        assert "DaqifiDevice" not in flat
+
+    def test_device_without_a_serial_port_fails_before_update_mode(self) -> None:
+        device = _FakeStreamingDevice("DaqifiDevice")
+        device.transport = type("TcpLike", (), {})()
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        assert "wifi_port_override" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []
+        assert runner.last_request is None
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks")
+    def test_dotdot_through_a_symlink_keeps_the_os_meaning(self, tmp_path) -> None:
+        # Audit finding on #166 (round 7): os.path.abspath collapsed
+        # "link/../bundle" textually, naming a different bundle than the OS.
+        from daqifi.firmware.update_service import _anchor_to_cwd
+
+        real = tmp_path / "releases" / "current"
+        real.mkdir(parents=True)
+        link = tmp_path / "srv" / "selected"
+        link.parent.mkdir()
+        link.symlink_to(real)
+        dotted = os.path.join(str(link), "..", "bundle")
+        assert _anchor_to_cwd(dotted) == dotted
+        assert os.path.realpath(_anchor_to_cwd(dotted)) == str(tmp_path / "releases" / "bundle")
+
+    # ---- Argument matrix (audit rounds 15-18 on #166) ----------------------
+    # host x tool type -> template parser -> how the result is passed:
+    #   native Windows, .cmd/.bat  cmd rules      one "/d /v:off /s /c" string
+    #   native Windows, other      C-runtime      list (list2cmdline)
+    #   WSL,            .cmd/.bat  cmd rules      list, WSL quotes each argument
+    #   WSL,            .exe/.com  C-runtime      list, paths via wslpath -w
+    #   POSIX,          other      shlex          list (argv)
+    #   POSIX without cmd.exe, .cmd               refused before update mode
+    # Each cell runs through update_wifi_module, i.e. the request builder.
+
+    @staticmethod
+    def _matrix_request(monkeypatch, tmp_path, *, native, tool, template, fw_name="fw dir"):
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "_is_native_windows", lambda: native)
+        monkeypatch.setattr(
+            update_service, "_path_for_windows_tool",
+            lambda path: path if native or not path.startswith("/")
+            else "C:\\WSL" + path.replace("/", "\\"),
+        )
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_file_name = tool
+        options.wifi_flash_tool_arguments_template = template
+        options.wifi_port_override = "TESTPORT"
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+        firmware_dir = tmp_path / fw_name
+        firmware_dir.mkdir()
+        (firmware_dir / tool).write_text("")
+        return service, device, runner, str(firmware_dir)
+
+    def test_matrix_native_windows_cmd_is_one_verbatim_line(self, monkeypatch, tmp_path) -> None:
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=True, tool="winc_flash_tool.cmd",
+            template='/p {port} /i "{firmwarePath}" /w',
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == (
+            f'/d /v:off /s /c ""winc_flash_tool.cmd" /p "TESTPORT" /i "{fw}" /w"'
+        )
+
+    @pytest.mark.parametrize("template,expected", [
+        # Round 18: cmd rules kept the backslashes and mangled the escaped quotes.
+        (r'-c "print(\"flash complete\")" /p {port}', ["-c", 'print("flash complete")', "/p", "TESTPORT"]),
+        (r'/i "{firmwarePath}" /w', ["/i", "<fw>", "/w"]),
+        (r"/i C:\O'Brien\image.bin", ["/i", r"C:\O'Brien\image.bin"]),
+    ])
+    def test_matrix_native_windows_exe_uses_c_runtime_rules(
+        self, monkeypatch, tmp_path, template, expected
+    ) -> None:
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=True, tool="flash.exe", template=template,
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == [fw if a == "<fw>" else a for a in expected]
+
+    def test_matrix_native_windows_cmd_consumes_carets_outside_quotes(self, monkeypatch, tmp_path) -> None:
+        # Audit finding on #166 (round 19): "^" escapes were kept and then
+        # quoted, so the script got "^&". Checked on real cmd.exe: with this
+        # line %~2 is A&B, %~4 is C:\x^y (literal inside quotes), %~6 is A^B.
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=True, tool="winc_flash_tool.cmd",
+            template=r'/n A^&B /m "C:\x^y" /k A^^B /p {port}',
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == (
+            r'/d /v:off /s /c ""winc_flash_tool.cmd" /n "A&B" /m "C:\x^y" /k "A^B" /p "TESTPORT""'
+        )
+
+    def test_matrix_wsl_cmd_consumes_carets_and_refuses_what_they_escaped(self, monkeypatch, tmp_path) -> None:
+        # Under WSL the arguments reach cmd.exe bare, so an escaped "&" would
+        # run as syntax again: refused before update mode, like a literal one.
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="winc_flash_tool.cmd",
+            template=r"/n A^&B /p {port}", fw_name="fw",
+        )
+        with pytest.raises(FirmwareUpdateException) as exc_info:
+            service.update_wifi_module(device, fw)
+        assert "'A&B'" in str(exc_info.value.__cause__)
+        assert device.sent_commands == [] and runner.last_request is None
+
+    def test_matrix_wsl_cmd_is_a_list_split_by_cmd_rules(self, monkeypatch, tmp_path) -> None:
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="winc_flash_tool.cmd",
+            template=r"/p {port} /i C:\O'Brien\image.bin /k {firmwarePath}", fw_name="fw",
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == [
+            "/d", "/v:off", "/c", "winc_flash_tool.cmd", "/p", "TESTPORT",
+            "/i", r"C:\O'Brien\image.bin", "/k", "C:\\WSL" + fw.replace("/", "\\"),
+        ]
+
+    def test_matrix_wsl_exe_uses_c_runtime_rules_and_windows_paths(self, monkeypatch, tmp_path) -> None:
+        # A Windows program started from WSL parses its line with the C
+        # runtime; shlex would have eaten C:\fw's backslashes.
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="flash.exe",
+            template=r'-c "print(\"ok\")" /i "{firmwarePath}" /x C:\fw\image.bin',
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == [
+            "-c", 'print("ok")', "/i", "C:\\WSL" + fw.replace("/", "\\"), "/x", r"C:\fw\image.bin",
+        ]
+
+    def test_matrix_posix_program_uses_shlex(self, monkeypatch, tmp_path) -> None:
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="flash-tool",
+            template='--bundle "{firmwarePath}" --name "O\'Brien" --port={port}', fw_name="O'Brien fw",
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == [
+            "--bundle", fw, "--name", "O'Brien", "--port=TESTPORT",
+        ]
+
+    def test_matrix_cmd_without_cmd_exe_is_refused_before_update_mode(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setattr(shutil, "which", lambda name, *a, **k: None)
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="winc_flash_tool.cmd", template="/p {port}",
+        )
+        with pytest.raises(FirmwareUpdateException) as exc_info:
+            service.update_wifi_module(device, fw)
+        assert "cmd.exe was not found" in str(exc_info.value.__cause__)
+        assert device.sent_commands == [] and runner.last_request is None
+
+    @pytest.mark.parametrize("native,tool,template", [
+        (False, "winc_flash_tool.cmd", '/p "{port}'),
+        (True, "winc_flash_tool.cmd", '/p "{port}'),
+        (False, "flash-tool", "--bundle '{firmwarePath}"),
+    ])
+    def test_matrix_unsplittable_templates_are_refused_before_update_mode(
+        self, monkeypatch, tmp_path, native, tool, template
+    ) -> None:
+        # The C-runtime rules have no unsplittable input (an open quote runs
+        # to the end); cmd and shlex templates with an open quote are refused.
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=native, tool=tool, template=template,
+        )
+        with pytest.raises(FirmwareUpdateException) as exc_info:
+            service.update_wifi_module(device, fw)
+        assert "can't be split" in str(exc_info.value.__cause__)
+        assert device.sent_commands == [] and runner.last_request is None
+
+    @staticmethod
+    def _native_tool_request(firmware_dir: str, template: str):
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_file_name = "flash-tool"
+        options.wifi_flash_tool_arguments_template = template
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+        os.makedirs(firmware_dir, exist_ok=True)
+        with open(os.path.join(firmware_dir, "flash-tool"), "w") as handle:
+            handle.write("#!/bin/sh\n")
+        return service, device, runner
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX template split")
+    @pytest.mark.parametrize("template", ["--bundle {firmwarePath} /w", '--bundle "{firmwarePath}" /w'])
+    @pytest.mark.parametrize("name", ["O'Brien", "a b", 'q"x', "plain"])
+    def test_each_value_reaches_a_native_tool_as_one_argument(self, tmp_path, template, name) -> None:
+        # Audit findings on #166 (rounds 9 and 16): a quoted value was parsed
+        # again by the runner's split, and inside the template's own quotes
+        # an apostrophe raised "No closing quotation" after the device had
+        # entered update mode. The template is split first now.
+        firmware_dir = str(tmp_path / name)
+        service, device, runner = self._native_tool_request(firmware_dir, template)
+
+        service.update_wifi_module(device, firmware_dir)
+
+        assert runner.last_request.arguments == ["--bundle", firmware_dir, "/w"]
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX template split")
+    def test_unbalanced_template_fails_before_update_mode(self, tmp_path) -> None:
+        firmware_dir = str(tmp_path / "fw")
+        service, device, runner = self._native_tool_request(firmware_dir, '--bundle "{firmwarePath} /w')
+
+        with pytest.raises(FirmwareUpdateException) as exc_info:
+            service.update_wifi_module(device, firmware_dir)
+
+        assert "can't be split" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []
+        assert runner.last_request is None
+
+    def test_a_value_containing_a_placeholder_is_not_substituted_again(self) -> None:
+        from daqifi.firmware.update_service import _substitute_placeholders
+
+        assert _substitute_placeholders(
+            ["/p", "{port}", "/i", "{firmwarePath}"], "{firmwarePath}", r"C:\fw"
+        ) == ["/p", "{firmwarePath}", "/i", r"C:\fw"]
+
+    def test_relative_firmware_path_is_made_absolute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding: the tool runs with its own directory as cwd, so a
+        # relative tool path was looked up as bundle/bundle/<tool>.
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        parent, name = os.path.split(firmware_dir)
+        monkeypatch.chdir(parent)
+        try:
+            service.update_wifi_module(device, name)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        # The .cmd script is named relative to the working directory, which
+        # is absolute (cmd.exe under WSL can't open a Linux path argument).
+        arguments = runner.last_request.arguments
+        flat = arguments if isinstance(arguments, str) else " ".join(arguments)
+        assert "winc_flash_tool.cmd" in flat
+        assert firmware_dir not in flat
+        assert runner.last_request.working_directory == firmware_dir
+
+    def test_relative_path_to_a_native_tool_is_absolute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_file_name = "flash-tool"
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+
+        firmware_dir = _make_temp_directory()
+        with open(os.path.join(firmware_dir, "flash-tool"), "w") as handle:
+            handle.write("#!/bin/sh\n")
+        parent, name = os.path.split(firmware_dir)
+        monkeypatch.chdir(parent)
+        try:
+            service.update_wifi_module(device, name)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        assert runner.last_request.file_name == os.path.join(firmware_dir, "flash-tool")
+
+    def test_firmware_path_given_to_cmd_exe_is_translated_under_wsl(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding on #166 (round 10): WSL passes arguments to Windows
+        # programs untranslated, so cmd.exe got a Linux path it can't open.
+        import subprocess as sp
+
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "_running_under_wsl", lambda: True)
+        real_run = sp.run
+
+        def _wslpath(cmd, *a, **k):
+            if cmd[:2] == ["wslpath", "-w"]:
+                return sp.CompletedProcess(cmd, 0, stdout="C:\\fw\\bundle\n", stderr="")
+            return real_run(cmd, *a, **k)
+
+        monkeypatch.setattr(update_service.subprocess, "run", _wslpath)
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_arguments_template = "/p {port} /i {firmwarePath}"
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        arguments = runner.last_request.arguments
+        flat = arguments if isinstance(arguments, str) else " ".join(arguments)
+        assert "C:\\fw\\bundle" in flat
+        assert firmware_dir not in flat
+
+    def test_cmd_exe_line_on_native_windows_is_one_verbatim_string(self) -> None:
+        # Verified on a real Windows interpreter: main's ["/c", command]
+        # went through list2cmdline, which escaped the inner quotes as \",
+        # and cmd.exe reported the script as "not recognized".
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        arguments = _cmd_exe_arguments(
+            "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}", "A&B", r"C:\fw dir",
+            native_windows=True,
+        )
+        assert arguments == r'/d /v:off /s /c ""winc_flash_tool.cmd" /p "A&B" /i "C:\fw dir""'
+
+    @pytest.mark.parametrize("bad", [r"C:\fw&calc.exe&rem", r"C:\fw|x", r"C:\%PATH%", "PORT^1"])
+    def test_cmd_metacharacters_are_refused_under_wsl(self, bad) -> None:
+        # Audit finding on #166 (round 11): WSL leaves an argument without
+        # whitespace unquoted, so "&" in a path ran what followed as a command.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        with pytest.raises(ValueError, match="cmd.exe"):
+            _cmd_exe_arguments(
+                "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}",
+                bad if bad.startswith("PORT") else "PORT1",
+                bad if not bad.startswith("PORT") else r"C:\fw",
+                native_windows=False,
+            )
+
+    def test_program_files_x86_is_allowed_under_wsl(self) -> None:
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        assert _cmd_exe_arguments(
+            "t.cmd", "/i {firmwarePath}", "P", r"C:\Program Files (x86)\fw",
+            native_windows=False,
+        )[-1] == r"C:\Program Files (x86)\fw"
+
+    def test_bundle_on_the_linux_filesystem_is_refused_under_wsl_before_update_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding on #166 (round 11): cmd.exe rejects the UNC working
+        # directory WSL gives a Linux-filesystem bundle, so the script was
+        # not found after the device had entered update mode.
+        import daqifi.firmware.update_service as update_service
+
+        if os.name == "nt":
+            pytest.skip("WSL-only path")
+        monkeypatch.setattr(
+            update_service,
+            "_path_for_windows_tool",
+            lambda path: "\\\\wsl.localhost\\Ubuntu" + path.replace("/", "\\"),
+        )
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        assert "Windows drive" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []
+        assert runner.last_request is None
+
+    @pytest.mark.parametrize("native", [True, False])
+    def test_percent_and_double_quote_are_refused_on_every_host(self, native) -> None:
+        # Audit finding on #166 (round 12): cmd.exe expands %VAR% even inside
+        # quotes, so a literal %USERNAME% in a path reached the tool changed.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        for bad in (r"C:\fw\%USERNAME%", 'C:\\fw"x'):
+            with pytest.raises(ValueError, match="cmd.exe"):
+                _cmd_exe_arguments(
+                    "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}", "P", bad,
+                    native_windows=native,
+                )
+
+    def test_ampersand_stays_allowed_and_quoted_on_native_windows(self) -> None:
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        assert '"A&B"' in _cmd_exe_arguments(
+            "t.cmd", "/p {port}", "A&B", r"C:\fw", native_windows=True
+        )
+
+    def test_literal_windows_paths_in_the_template_keep_backslashes_under_wsl(self) -> None:
+        # Audit finding on #166 (round 12): POSIX shlex turned
+        # C:\firmware\image.bin into C:firmwareimage.bin.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        arguments = _cmd_exe_arguments(
+            "t.cmd", r"/p {port} /i C:\firmware\image.bin", "P1", r"C:\fw",
+            native_windows=False,
+        )
+        assert arguments[-1] == r"C:\firmware\image.bin"
+
+    @pytest.mark.parametrize("template,expected", [
+        (r'/p {port} /i "C:\Firmware Files\image.bin" /w', ["/p", "P1", "/i", r"C:\Firmware Files\image.bin", "/w"]),
+        (r"/p {port} /i C:\firmware\image.bin", ["/p", "P1", "/i", r"C:\firmware\image.bin"]),
+        (r"/p {port} /n O'Brien", ["/p", "P1", "/n", "O'Brien"]),
+    ])
+    def test_template_is_split_like_a_windows_command_line_under_wsl(self, template, expected) -> None:
+        # Audit finding on #166 (round 13): str.split kept a quoted literal's
+        # quotes and broke it in two; WSL then escaped the quotes.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        assert _cmd_exe_arguments("t.cmd", template, "P1", r"C:\fw", native_windows=False) == ["/d", "/v:off", "/c", "t.cmd"] + expected
+
+    @pytest.mark.parametrize("native", [True, False])
+    def test_script_name_is_checked_like_the_other_values(self, native) -> None:
+        # Audit finding on #166 (round 14): under WSL "flash&calc.exe&rem.cmd"
+        # ran calc.exe; the script name wasn't validated.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        bad = "flash%TEMP%.cmd" if native else "flash&calc.exe&rem.cmd"
+        with pytest.raises(ValueError, match="tool name"):
+            _cmd_exe_arguments(bad, "/p {port}", "P1", r"C:\fw", native_windows=native)
+
+    def test_hash_in_a_template_path_is_not_a_comment(self) -> None:
+        # Audit finding on #166 (round 14): shlex's default "#" comment
+        # truncated C:\fw#1\image.bin and dropped the rest of the template.
+        from daqifi.firmware.update_service import _split_windows_template
+
+        assert _split_windows_template(r"/p {port} /i C:\fw#1\image.bin /w") == [
+            "/p", "{port}", "/i", r"C:\fw#1\image.bin", "/w",
+        ]
+
+    def test_script_name_with_whitespace_is_refused_under_wsl(self) -> None:
+        # Audit finding on #166 (round 12): WSL quotes it first, and cmd.exe
+        # /c then strips the leading quote.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        with pytest.raises(ValueError, match="whitespace"):
+            _cmd_exe_arguments("flash tool.cmd", "/p {port}", "P1", r"C:\fw", native_windows=False)
+        assert _cmd_exe_arguments(
+            "flash tool.cmd", "/p {port}", "P1", r"C:\fw", native_windows=True
+        ).startswith('/d /v:off /s /c ""flash tool.cmd"')
+
+    def test_unc_bundle_is_refused_on_native_windows_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding on #166 (round 12): \\server\share is a UNC working
+        # directory cmd.exe refuses on any host.
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(
+            update_service, "_path_for_windows_tool", lambda path: r"\\server\share\bundle"
+        )
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+        assert "local Windows drive" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []
+
+    def test_cmd_exe_arguments_under_wsl_are_separate_and_unquoted(self) -> None:
+        # Verified under real WSL interop: quotes inside an argument reach
+        # cmd.exe as \", so WSL must do the quoting.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        arguments = _cmd_exe_arguments(
+            "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}", "PORT 1", r"C:\fw dir",
+            native_windows=False,
+        )
+        assert arguments == ["/d", "/v:off", "/c", "winc_flash_tool.cmd", "/p", "PORT 1", "/i", r"C:\fw dir"]
+
+    @pytest.mark.parametrize("template", [
+        r'/p {port} /i "C:\fw&calc.exe&rem\image.bin" /w',
+        r"/p {port} /i C:\fw|x /w",
+        r"/p {port} /k %TEMP%",
+    ])
+    def test_template_literals_are_checked_for_metacharacters_under_wsl(self, template) -> None:
+        # Audit finding on #166 (round 15): the split removed a quoted
+        # literal's quotes and WSL left it bare, so "&" in the template ran
+        # calc.exe; only the substituted values were checked.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        with pytest.raises(ValueError, match="template"):
+            _cmd_exe_arguments("t.cmd", template, "P1", r"C:\fw", native_windows=False)
+
+    def test_percent_in_the_template_is_refused_on_native_windows(self) -> None:
+        # Quoting doesn't stop %VAR% expansion in the template's own text.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        with pytest.raises(ValueError, match="template"):
+            _cmd_exe_arguments(
+                "t.cmd", r'/p {port} /i "C:\%USERNAME%\fw"', "P1", r"C:\fw",
+                native_windows=True,
+            )
+        # A quoted "&" in the template stays quoted in the verbatim line.
+        assert '"C:\\a&b"' in _cmd_exe_arguments(
+            "t.cmd", r'/p {port} /i "C:\a&b"', "P1", r"C:\fw", native_windows=True
+        )
+
+    @pytest.mark.skipif(os.name == "nt", reason="the POSIX split is what failed")
+    @pytest.mark.parametrize("template,tail", [
+        (r"/p {port} /i C:\O'Brien\image.bin", ["/i", r"C:\O'Brien\image.bin"]),
+        (r'/p {port} /i "C:\firmware\"', ["/i", "C:\\firmware\\"]),
+    ])
+    def test_a_cmd_template_is_split_by_windows_rules_through_the_request_builder(
+        self, template, tail
+    ) -> None:
+        # Audit finding on #166 (round 17): the request builder POSIX-split
+        # the template before looking at the tool type, so under WSL a legal
+        # .cmd template with an apostrophe or a quoted trailing backslash
+        # raised "No closing quotation" before reaching _cmd_exe_arguments.
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_arguments_template = template
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+
+        arguments = runner.last_request.arguments
+        assert arguments[:4] == ["/d", "/v:off", "/c", "winc_flash_tool.cmd"]
+        assert arguments[4] == "/p" and arguments[-2:] == tail
+
+    def test_a_placeholder_the_template_quoted_is_quoted_once_on_native_windows(self) -> None:
+        # Audit finding on #166 (round 16): '/i "{firmwarePath}"' became
+        # ""C:\fw&calc.exe&rem"", the quote pairs cancelled and cmd.exe ran
+        # calc.exe. Checked on real cmd.exe: the script gets the path intact.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        assert _cmd_exe_arguments(
+            "t.cmd", '/p {port} /i "{firmwarePath}" /w', "P1", r"C:\fw&calc.exe&rem",
+            native_windows=True,
+        ) == r'/d /v:off /s /c ""t.cmd" /p "P1" /i "C:\fw&calc.exe&rem" /w"'
+
+    def test_cmd_exe_disables_delayed_expansion_on_every_host(self) -> None:
+        # Audit finding on #166 (round 15): with EnableDelayedExpansion set in
+        # the registry, !BUILD! in a quoted path expanded. Verified on real
+        # cmd.exe: /v:on /d /s /c passed C:\fw\other, /v:on /d /v:off /s /c
+        # passed C:\fw\!BUILD!.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        native = _cmd_exe_arguments(
+            "t.cmd", "/i {firmwarePath}", "P1", r"C:\fw\!BUILD!", native_windows=True
+        )
+        assert native.startswith("/d /v:off /s /c ")
+        assert r'"C:\fw\!BUILD!"' in native
+        assert _cmd_exe_arguments(
+            "t.cmd", "/i {firmwarePath}", "P1", r"C:\fw", native_windows=False
+        )[:3] == ["/d", "/v:off", "/c"]
+
+    @pytest.mark.parametrize("value", ["C:\\bundle\\", 'a"b', 'a\\"b', "C:\\a b\\x\\", ""])
+    def test_native_windows_tool_arguments_go_as_a_list(self, value) -> None:
+        # Audit finding on #166 (round 15): "C:\bundle\" ended in \", which a
+        # C-runtime program reads as an escaped quote, swallowing the next
+        # flag. On Windows the arguments are now a list, which the runner
+        # joins with list2cmdline (the C-runtime rules); checked on real
+        # Windows that sys.argv round-trips each value and the next "/w".
+        from daqifi.firmware.update_service import (
+            _split_windows_template,
+            _substitute_placeholders,
+        )
+
+        assert _substitute_placeholders(
+            _split_windows_template('/i "{firmwarePath}" /w'), "P1", value
+        ) == ["/i", value, "/w"]
 
     def test_happy_path_sends_expected_commands_and_reports_progress(
         self,
@@ -1808,3 +2481,7 @@ class TestDisconnectedDevice:
             shutil.rmtree(firmware_dir, ignore_errors=True)
 
         assert exc_info.value.failed_state == FirmwareUpdateState.PREPARING_DEVICE
+        # Reported as disconnected on every host: building the request first
+        # failed on CI runners without cmd.exe, at IDLE, before the check.
+        assert "must be connected" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []
