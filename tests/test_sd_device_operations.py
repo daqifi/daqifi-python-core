@@ -91,3 +91,37 @@ def test_the_text_listing_keeps_a_file_named_after_the_prompt() -> None:
     )
     device.request_sd_card_file_list()
     assert [f.file_name for f in device.sd_card_files] == ["log_a.bin", "log_b.bin"]
+
+
+class _NeverDrains:
+    def write(self, data):
+        return None  # a non-blocking raw sink whose reader never drains
+
+
+def test_a_sink_that_never_drains_fails_at_the_receive_deadline() -> None:
+    # Audit finding on #182 (round 1): _write_all retried None forever,
+    # bypassing the receive timeout.
+    import time
+
+    from daqifi.sdcard import SdCardFileReceiver
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        SdCardFileReceiver(io.BytesIO(b"abc" + END_OF_FILE_MARKER)).receive(
+            _NeverDrains(), "log.bin", timeout_s=0.05
+        )
+    assert time.monotonic() - start < 2.0
+
+
+def test_a_device_download_into_a_sink_that_never_drains_times_out(monkeypatch) -> None:
+    import time
+
+    device = _fakes._make_device_with_serial_facade(
+        {b"SD:GET": b"DAQIFI> abcdefgh" + END_OF_FILE_MARKER}
+    )
+    monkeypatch.setattr(type(device), "_SD_DOWNLOAD_TIMEOUT_S", 0.2)
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        device.download_sd_card_file("log.bin", _NeverDrains())
+    assert time.monotonic() - start < 5.0
+    assert not device._text_exchange_lock.locked()
