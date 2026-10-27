@@ -335,8 +335,10 @@ so the service first makes sure the choice is trivial, then narrows it:
 1. **One board.** Before sending anything, the service counts the DAQiFi
    boards on USB: serial ports with the application's VID/PID
    (`application_vendor_id`/`application_product_id`, 04D8:F794) plus
-   bootloaders already enumerated. With more than one, the update is
-   refused with a message listing them. Disconnect every board except
+   bootloaders already enumerated. Serial ports are listed before and
+   after the bootloader scan, so a board switching modes in between is
+   still counted. With more than one board, or when serial ports can't be
+   listed at all, the update is refused with a message saying why. Disconnect every board except
    the one being updated, including any left in bootloader mode, and
    retry. A board reached over WiFi only isn't on USB and isn't counted.
 2. **Snapshot.** Bootloaders already enumerated before `FORceBoot`
@@ -354,7 +356,8 @@ appears next.
 
 **Residual risk.** Step 1 runs once, at the start. A second board
 plugged in (or attached over usbipd) *during* the update isn't caught by
-it. Step 3 is unavailable on Windows, on macOS, and under WSL2 + usbipd,
+it, nor is one that is mid-reboot (visible neither as a serial port nor
+as a bootloader) at the moment of the check. Step 3 is unavailable on Windows, on macOS, and under WSL2 + usbipd,
 where the virtual port can change when the board re-attaches. There, a
 board that arrives and enters its bootloader in the seconds between
 `FORceBoot` and enumeration is indistinguishable from the target. Don't

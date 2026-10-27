@@ -16,8 +16,8 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ### Changed
 - A PIC32 update now refuses to start while more than one DAQiFi board is
   connected over USB (application serial ports with 04D8:F794, plus boards
-  already in bootloader mode), and says to disconnect the others; with one
-  board it goes ahead. A board plugged in during the update is not caught.
+  already in bootloader mode), and says to disconnect the others; it also
+  refuses when serial ports can't be listed. With one board it goes ahead. A board plugged in during the update is not caught.
   New options `application_vendor_id` / `application_product_id` (#161).
 - `python_requires` raised to `>=3.9`, forced by the protobuf runtime floor
   of the generated bindings (#155).

@@ -48,6 +48,7 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
+    Set,
     Tuple,
     runtime_checkable,
 )
@@ -492,11 +493,15 @@ class DefaultFirmwareUpdateService:
                 # Taken before FORceBoot so the wait below can tell this
                 # device's bootloader from one that was already enumerated,
                 # and (where the OS exposes it) bind it to this device's
-                # physical USB port.
+                # physical USB port. The serial ports are listed on both
+                # sides of it: a board switching from its application to its
+                # bootloader between two scans would otherwise be in neither.
+                applications = self._list_application_ports(deadline)
                 self._preexisting_bootloaders = (
                     self._snapshot_bootloader_devices(deadline)
                 )
-                self._refuse_if_several_boards_attached()
+                applications |= self._list_application_ports(deadline)
+                self._refuse_if_several_boards_attached(applications)
                 if device.is_streaming:
                     device.stop_streaming()
                 self._target_port_name = getattr(
@@ -1190,29 +1195,44 @@ class DefaultFirmwareUpdateService:
                 )
                 self._sleep_with_cancel(self._options.poll_interval, deadline)
 
-    def _refuse_if_several_boards_attached(self) -> None:
+    def _list_application_ports(self, deadline: _Cancellation) -> Set[str]:
+        """Serial ports of DAQiFi boards in their application.
+
+        Retried briefly, then refused: a listing that failed can't show that
+        only one board is attached.
+        """
+        for attempt in range(3):
+            deadline.check()
+            ports = _list_usb_serial_ports(
+                self._options.application_vendor_id,
+                self._options.application_product_id,
+            )
+            if ports is not None:
+                return set(ports)
+            if attempt < 2:
+                self._sleep_with_cancel(self._options.poll_interval, deadline)
+        raise RuntimeError(
+            "Could not list serial ports to check that only one DAQiFi board "
+            "is connected; refusing to start the update. Check that pyserial "
+            "can enumerate ports on this host, then retry."
+        )
+
+    def _refuse_if_several_boards_attached(self, applications: Set[str]) -> None:
         """Refuse to start while more than one DAQiFi board is on USB.
 
         Where the bootloader can't be bound to the board's USB port (Windows,
         macOS, WSL2 + usbipd), another board entering its bootloader during
         the wait looks the same as ours, so an update only starts with one
         board attached. Nothing has been sent to the device yet. A board
-        plugged in after this check is not caught (see the README).
+        plugged in, or still re-enumerating, at the time of this check is
+        not caught (see the README). A board seen both as an application
+        port and as a bootloader counts twice, which only errs towards
+        refusing.
         """
         bootloaders = len(self._preexisting_bootloaders)
-        applications = _list_usb_serial_ports(
-            self._options.application_vendor_id,
-            self._options.application_product_id,
-        )
-        if applications is None:
-            self._logger.warning(
-                "Could not list serial ports; the check for other DAQiFi "
-                "boards covers only bootloader-mode boards."
-            )
-            applications = []
         if len(applications) + bootloaders <= 1:
             return
-        found = list(applications)
+        found = sorted(applications)
         if bootloaders:
             found.append(f"{bootloaders} in bootloader mode")
         raise RuntimeError(
