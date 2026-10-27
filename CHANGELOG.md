@@ -75,6 +75,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   tool's arguments go as a list (C-runtime quoting, so a path ending in a
   backslash no longer swallows the next argument). An unbalanced template
   is refused before update mode (#161).
+- The arguments template is split by the rules of the program that will
+  read it: cmd.exe rules for a `.cmd`/`.bat` script, C-runtime rules for a
+  Windows program (natively, or an `.exe`/`.com` started from WSL, whose
+  firmware path is translated with `wslpath -w`), and shlex for a POSIX
+  program. A native tool's `-c "print(\"done\")"` and a WSL `.exe`'s
+  `C:\fw\image.bin` were mangled before (#161).
 - `SubprocessRunner` killed only the direct child on timeout, so a
   descendant holding the pipes kept `run()` blocked; the whole process
   tree is killed now (a process group on POSIX, a Job Object on Windows,

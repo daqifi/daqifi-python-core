@@ -1466,6 +1466,131 @@ class TestUpdateWifiModule:
         assert _anchor_to_cwd(dotted) == dotted
         assert os.path.realpath(_anchor_to_cwd(dotted)) == str(tmp_path / "releases" / "bundle")
 
+    # ---- Argument matrix (audit rounds 15-18 on #166) ----------------------
+    # host x tool type -> template parser -> how the result is passed:
+    #   native Windows, .cmd/.bat  cmd rules      one "/d /v:off /s /c" string
+    #   native Windows, other      C-runtime      list (list2cmdline)
+    #   WSL,            .cmd/.bat  cmd rules      list, WSL quotes each argument
+    #   WSL,            .exe/.com  C-runtime      list, paths via wslpath -w
+    #   POSIX,          other      shlex          list (argv)
+    #   POSIX without cmd.exe, .cmd               refused before update mode
+    # Each cell runs through update_wifi_module, i.e. the request builder.
+
+    @staticmethod
+    def _matrix_request(monkeypatch, tmp_path, *, native, tool, template, fw_name="fw dir"):
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service, "_is_native_windows", lambda: native)
+        monkeypatch.setattr(
+            update_service, "_path_for_windows_tool",
+            lambda path: path if native or not path.startswith("/")
+            else "C:\\WSL" + path.replace("/", "\\"),
+        )
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_file_name = tool
+        options.wifi_flash_tool_arguments_template = template
+        options.wifi_port_override = "TESTPORT"
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+        firmware_dir = tmp_path / fw_name
+        firmware_dir.mkdir()
+        (firmware_dir / tool).write_text("")
+        return service, device, runner, str(firmware_dir)
+
+    def test_matrix_native_windows_cmd_is_one_verbatim_line(self, monkeypatch, tmp_path) -> None:
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=True, tool="winc_flash_tool.cmd",
+            template='/p {port} /i "{firmwarePath}" /w',
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == (
+            f'/d /v:off /s /c ""winc_flash_tool.cmd" /p "TESTPORT" /i "{fw}" /w"'
+        )
+
+    @pytest.mark.parametrize("template,expected", [
+        # Round 18: cmd rules kept the backslashes and mangled the escaped quotes.
+        (r'-c "print(\"flash complete\")" /p {port}', ["-c", 'print("flash complete")', "/p", "TESTPORT"]),
+        (r'/i "{firmwarePath}" /w', ["/i", "<fw>", "/w"]),
+        (r"/i C:\O'Brien\image.bin", ["/i", r"C:\O'Brien\image.bin"]),
+    ])
+    def test_matrix_native_windows_exe_uses_c_runtime_rules(
+        self, monkeypatch, tmp_path, template, expected
+    ) -> None:
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=True, tool="flash.exe", template=template,
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == [fw if a == "<fw>" else a for a in expected]
+
+    def test_matrix_wsl_cmd_is_a_list_split_by_cmd_rules(self, monkeypatch, tmp_path) -> None:
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="winc_flash_tool.cmd",
+            template=r"/p {port} /i C:\O'Brien\image.bin /k {firmwarePath}", fw_name="fw",
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == [
+            "/d", "/v:off", "/c", "winc_flash_tool.cmd", "/p", "TESTPORT",
+            "/i", r"C:\O'Brien\image.bin", "/k", "C:\\WSL" + fw.replace("/", "\\"),
+        ]
+
+    def test_matrix_wsl_exe_uses_c_runtime_rules_and_windows_paths(self, monkeypatch, tmp_path) -> None:
+        # A Windows program started from WSL parses its line with the C
+        # runtime; shlex would have eaten C:\fw's backslashes.
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="flash.exe",
+            template=r'-c "print(\"ok\")" /i "{firmwarePath}" /x C:\fw\image.bin',
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == [
+            "-c", 'print("ok")', "/i", "C:\\WSL" + fw.replace("/", "\\"), "/x", r"C:\fw\image.bin",
+        ]
+
+    def test_matrix_posix_program_uses_shlex(self, monkeypatch, tmp_path) -> None:
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="flash-tool",
+            template='--bundle "{firmwarePath}" --name "O\'Brien" --port={port}', fw_name="O'Brien fw",
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == [
+            "--bundle", fw, "--name", "O'Brien", "--port=TESTPORT",
+        ]
+
+    def test_matrix_cmd_without_cmd_exe_is_refused_before_update_mode(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setattr(shutil, "which", lambda name, *a, **k: None)
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="winc_flash_tool.cmd", template="/p {port}",
+        )
+        with pytest.raises(FirmwareUpdateException) as exc_info:
+            service.update_wifi_module(device, fw)
+        assert "cmd.exe was not found" in str(exc_info.value.__cause__)
+        assert device.sent_commands == [] and runner.last_request is None
+
+    @pytest.mark.parametrize("native,tool,template", [
+        (False, "winc_flash_tool.cmd", '/p "{port}'),
+        (True, "winc_flash_tool.cmd", '/p "{port}'),
+        (False, "flash-tool", "--bundle '{firmwarePath}"),
+    ])
+    def test_matrix_unsplittable_templates_are_refused_before_update_mode(
+        self, monkeypatch, tmp_path, native, tool, template
+    ) -> None:
+        # The C-runtime rules have no unsplittable input (an open quote runs
+        # to the end); cmd and shlex templates with an open quote are refused.
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=native, tool=tool, template=template,
+        )
+        with pytest.raises(FirmwareUpdateException) as exc_info:
+            service.update_wifi_module(device, fw)
+        assert "can't be split" in str(exc_info.value.__cause__)
+        assert device.sent_commands == [] and runner.last_request is None
+
     @staticmethod
     def _native_tool_request(firmware_dir: str, template: str):
         device = _FakeStreamingDevice("fake-port-6")

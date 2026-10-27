@@ -1029,21 +1029,26 @@ class DefaultFirmwareUpdateService:
         executable_path = tool_path
         executable_arguments: Any
         extension = os.path.splitext(tool_path)[1].lower()
-        if extension not in (".cmd", ".bat"):
-            # Split first, then put each value into its argument whole:
-            # nothing substituted is parsed again, so quotes or apostrophes
-            # in a value (or the template's own quotes around a placeholder)
-            # can't change where arguments start and end. A list reaches a
-            # POSIX program as argv, and a Windows one through list2cmdline
-            # (C-runtime quoting). A .cmd template is always split by
-            # Windows rules, below: it is a Windows command line on any host,
-            # where an apostrophe is an ordinary character.
+        # The template is split by the rules of the program that will parse
+        # it, then each value goes into its argument whole, so nothing
+        # substituted is parsed again:
+        #   .cmd/.bat (any host)        cmd.exe rules, see _cmd_exe_arguments
+        #   Windows program (native, or .exe/.com under WSL)
+        #                               C-runtime rules; passed as a list,
+        #                               which list2cmdline (native) or WSL
+        #                               turns back into a C-runtime line
+        #   POSIX program               shlex; passed as a list (argv)
+        if extension in (".exe", ".com") or (
+            _is_native_windows() and extension not in (".cmd", ".bat")
+        ):
             executable_arguments = _substitute_placeholders(
-                _split_windows_template(template)
-                if os.name == "nt"
-                else _split_posix_template(template),
+                _split_crt_template(template),
                 port,
-                firmware_path,
+                _path_for_windows_tool(firmware_path),
+            )
+        elif extension not in (".cmd", ".bat"):
+            executable_arguments = _substitute_placeholders(
+                _split_posix_template(template), port, firmware_path
             )
         else:
             cmd_exe = shutil.which("cmd.exe")
@@ -1074,7 +1079,7 @@ class DefaultFirmwareUpdateService:
                 template,
                 port,
                 _path_for_windows_tool(firmware_path),
-                native_windows=os.name == "nt",
+                native_windows=_is_native_windows(),
             )
 
         progress_state = {"last_process_percent": 0}
@@ -2201,6 +2206,62 @@ def _substitute_placeholders(
     return [_PLACEHOLDER.sub(lambda m: values[m.group(0)], t) for t in tokens]
 
 
+def _is_native_windows() -> bool:
+    return os.name == "nt"
+
+
+def _split_crt_template(template: str) -> List[str]:
+    """Split an arguments template the way the C runtime splits a command line.
+
+    The rules a Windows program applies to its own command line (MSVC CRT,
+    as CommandLineToArgvW): whitespace separates arguments outside quotes;
+    2n backslashes before a quote give n backslashes and the quote toggles
+    quoting, 2n+1 give n backslashes and a literal quote; other backslashes
+    are literal; "" inside quotes is a literal quote. Unlike shlex it never
+    fails: an unclosed quote runs to the end.
+    """
+    arguments: List[str] = []
+    current: List[str] = []
+    in_argument = in_quotes = False
+    i, n = 0, len(template)
+    while i < n:
+        ch = template[i]
+        if ch == "\\":
+            j = i
+            while j < n and template[j] == "\\":
+                j += 1
+            run = j - i
+            in_argument = True
+            if j < n and template[j] == '"':
+                current.append("\\" * (run // 2))
+                if run % 2:
+                    current.append('"')
+                    j += 1
+            else:
+                current.append("\\" * run)
+            i = j
+        elif ch == '"':
+            in_argument = True
+            if in_quotes and i + 1 < n and template[i + 1] == '"':
+                current.append('"')
+                i += 2
+            else:
+                in_quotes = not in_quotes
+                i += 1
+        elif ch in " \t" and not in_quotes:
+            if in_argument:
+                arguments.append("".join(current))
+                current, in_argument = [], False
+            i += 1
+        else:
+            current.append(ch)
+            in_argument = True
+            i += 1
+    if in_argument:
+        arguments.append("".join(current))
+    return arguments
+
+
 def _split_posix_template(template: str) -> List[str]:
     """Split an arguments template the way a POSIX shell reads it.
 
@@ -2242,7 +2303,12 @@ def _split_windows_template(template: str) -> List[str]:
     lexer.escape = ""
     lexer.quotes = '"'  # an apostrophe is an ordinary character on Windows
     lexer.commenters = ""  # and "#" is a legal filename character
-    return list(lexer)
+    try:
+        return list(lexer)
+    except ValueError as exc:
+        raise ValueError(
+            f"WiFi flash arguments template {template!r} can't be split: {exc}"
+        ) from exc
 
 
 _CMD_ALWAYS_UNSAFE = frozenset('%"')
