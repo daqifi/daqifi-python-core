@@ -268,6 +268,9 @@ class StreamManager:
         # are O(chunk) instead of O(total) — at 50 kHz the bytes
         # path would copy the whole buffer on every poll.
         self._pb_buffer: bytearray = bytearray()
+        # Channels enabled on the device when streaming started (ascending),
+        # or None before the first start(). See _samples_from_pb_message.
+        self._device_channels: Optional[List[int]] = None
         self._pb_parser: Optional[ProtobufMessageParser] = None
         self._pending_pb_samples: Deque[Sample] = deque()
 
@@ -345,7 +348,12 @@ class StreamManager:
             # Verify at least one channel is enabled (firmware bug workaround)
             # Without this check, firmware crashes with TLB exception
             enabled_mask = self._comm.send_query("ENABle:VOLTage:DC?")
-            enabled_count = bin(int(enabled_mask)).count('1')
+            mask = int(enabled_mask)
+            # The channels the device will actually send, in ascending
+            # order: a protobuf frame's values follow this order, whatever
+            # channel list the caller asked for.
+            self._device_channels = [bit for bit in range(mask.bit_length()) if mask >> bit & 1]
+            enabled_count = len(self._device_channels)
             if enabled_count == 0:
                 raise ConfigurationError(
                     "No ADC channels enabled. Enable at least one channel before streaming.\n"
@@ -359,7 +367,7 @@ class StreamManager:
             # Send SCPI command to start streaming with frequency parameter
             # Don't issue any other commands during streaming (only STReam:STOP allowed)
             start_cmd = f"{scpi.Streaming.START} {self._sample_rate}"
-            response = self._comm.send_command(start_cmd, delay=0.2)
+            response = self._send_start(start_cmd)
 
             # Validate the START response before transitioning to RUNNING.
             # Without this, a device-side rejection (e.g. unknown command
@@ -374,7 +382,7 @@ class StreamManager:
             # scan over the whole buffer and false-positives on stream
             # payload that happens to include the word "ERROR" (Qodo
             # PR #6 pass 2 #1 — regression from the naïve guard above).
-            first_line = response.splitlines()[0] if response else ""
+            first_line = response
             if scpi.contains_scpi_error([first_line]):
                 raise CommandError(
                     f"Streaming START rejected by device: {first_line.strip()!r}"
@@ -399,6 +407,42 @@ class StreamManager:
             if isinstance(e, CommandError):
                 raise
             raise CommandError(f"Failed to start streaming: {e}") from e
+
+    def _send_start(self, start_cmd: str) -> str:
+        """Send START and hand everything that arrives with it to the stream.
+
+        ``send_command`` would read and discard those bytes: the CSV/JSON
+        metadata header (tick rate, column-to-channel mapping) and the first
+        protobuf frames. Only a leading echo of the command and the prompt
+        are dropped; the rest seeds the decode buffers. Returns the first
+        text line, for the START-rejection check.
+        """
+        port = self._comm._serial
+        port.write((start_cmd + "\r").encode("ascii"))
+        port.flush()
+        time.sleep(0.2)
+        raw = bytearray()
+        deadline = time.monotonic() + 0.3  # as long as send_command read
+        while time.monotonic() < deadline:
+            waiting = port.in_waiting
+            if not waiting:
+                break
+            raw.extend(port.read(waiting))
+            time.sleep(0.05)
+        head = bytes(raw)
+        echo = start_cmd.encode("ascii")
+        if head.startswith(echo):
+            head = head[len(echo):].lstrip(b"\r\n")
+        for prompt in (b"DAQIFI> ", b"DAQIFI>"):
+            if head.startswith(prompt):
+                head = head[len(prompt):]
+                break
+        if self._format == 0:
+            self._pb_buffer.extend(head)
+        else:
+            self._read_buffer += head.decode("utf-8", errors="ignore")
+        text = head.decode("ascii", errors="ignore")
+        return text.splitlines()[0] if text.splitlines() else ""
 
     def stop(self):
         """
@@ -861,10 +905,17 @@ class StreamManager:
             values = [float(v) for v in (
                 getattr(message, "analog_in_data", None) or []
             )]
-        if not values or not self._channels:
+        # A frame carries one value per channel ENABLED ON THE DEVICE, in
+        # ascending channel order. Mapping by the caller's list instead
+        # relabelled channel 1's data as channel 0 and doubled the apparent
+        # rate whenever the two differed (#162). The caller's list then
+        # selects which of those channels the sample keeps.
+        source = self._device_channels or self._channels
+        if not values or not source:
             return []
+        wanted = set(self._channels) if self._channels else set(source)
 
-        num_channels = len(self._channels)
+        num_channels = len(source)
         if len(values) % num_channels != 0:
             # Partial / misaligned frame — refuse to guess at the
             # per-channel split. The CSV/JSON paths silently drop
@@ -883,19 +934,16 @@ class StreamManager:
         batch_count = len(values) // num_channels
         for i in range(batch_count):
             block = values[i * num_channels : (i + 1) * num_channels]
-            raw_ts = (
-                per_sample_ts[i]
-                if i < len(per_sample_ts) else msg_ts
-            )
-            samples.append(
-                Sample(
-                    timestamp=_convert_ts(raw_ts),
-                    channels={
-                        ch: float(block[idx])
-                        for idx, ch in enumerate(self._channels)
-                    },
-                )
-            )
+            # analog_in_data_ts is an offset to msg_time_stamp
+            # (DaqifiOutMessage.proto, field 4), not an absolute time.
+            raw_ts = msg_ts + (per_sample_ts[i] if i < len(per_sample_ts) else 0)
+            channels = {
+                ch: float(block[idx])
+                for idx, ch in enumerate(source)
+                if ch in wanted
+            }
+            if channels:
+                samples.append(Sample(timestamp=_convert_ts(raw_ts), channels=channels))
         return samples
 
     def _streaming_thread(self):
