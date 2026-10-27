@@ -2507,7 +2507,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             if eof_idx >= 0:
                 payload = combined[:eof_idx]
                 if payload:
-                    _write_all(destination_stream, payload)
+                    _write_all(destination_stream, payload, total_deadline)
                     bytes_written += len(payload)
                 if progress is not None:
                     progress(SdCardTransferProgress(bytes_written, file_name))
@@ -2515,7 +2515,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
             if len(combined) > marker_len:
                 writable = combined[: len(combined) - marker_len]
-                _write_all(destination_stream, writable)
+                _write_all(destination_stream, writable, total_deadline)
                 bytes_written += len(writable)
                 trailing = bytearray(combined[len(combined) - marker_len:])
             else:

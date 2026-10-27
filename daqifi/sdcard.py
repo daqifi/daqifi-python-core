@@ -385,18 +385,25 @@ class SdCardTransferProgress:
     file_name: str
 
 
-def _write_all(stream: Any, data: bytes) -> None:
+def _write_all(stream: Any, data: bytes, deadline: Optional[float] = None) -> None:
     """Write all of ``data``: a raw sink may accept only part per call.
 
     ``BufferedWriter``/``BytesIO`` always take everything, but a raw
     stream's ``write`` returns how much it took, and that return value was
     ignored, so a short write lost the rest (#163). ``None`` (a non-blocking
-    raw stream that couldn't write) is retried.
+    raw stream that couldn't write) is retried, but only until ``deadline``
+    (``time.monotonic()`` value): a sink that never drains must not hold a
+    download, and the exchange lock with it, past its timeout.
     """
     view = memoryview(data)
     while view:
         written = stream.write(view)
         if written is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "The download destination accepted no data before the "
+                    "download's deadline."
+                )
             time.sleep(0.001)
             continue
         if written <= 0:
@@ -602,17 +609,17 @@ class SdCardFileReceiver:
                     # Marker started inside the trailing buffer — only
                     # write the part of trailing before the marker.
                     if position > 0:
-                        _write_all(destination_stream, bytes(trailing[:position]))
+                        _write_all(destination_stream, bytes(trailing[:position]), deadline)
                         total_bytes += position
                 else:
                     # Marker started inside the new chunk — write all
                     # of trailing + the part of chunk before the marker.
                     if trailing:
-                        _write_all(destination_stream, bytes(trailing))
+                        _write_all(destination_stream, bytes(trailing), deadline)
                         total_bytes += len(trailing)
                     marker_start_in_chunk = position - len(trailing)
                     if marker_start_in_chunk > 0:
-                        _write_all(destination_stream, chunk_bytes[:marker_start_in_chunk])
+                        _write_all(destination_stream, chunk_bytes[:marker_start_in_chunk], deadline)
                         total_bytes += marker_start_in_chunk
                 # Capture any bytes after the marker for the caller.
                 if 0 <= marker_end_in_chunk < len(chunk_bytes):
@@ -631,11 +638,11 @@ class SdCardFileReceiver:
                 if safe_count > 0:
                     from_trailing = min(safe_count, len(trailing))
                     if from_trailing > 0:
-                        _write_all(destination_stream, bytes(trailing[:from_trailing]))
+                        _write_all(destination_stream, bytes(trailing[:from_trailing]), deadline)
                         total_bytes += from_trailing
                     from_new = safe_count - from_trailing
                     if from_new > 0:
-                        _write_all(destination_stream, chunk_bytes[:from_new])
+                        _write_all(destination_stream, chunk_bytes[:from_new], deadline)
                         total_bytes += from_new
                 # Rebuild trailing window: last marker_len bytes of
                 # the combined [trailing + chunk] sequence.
