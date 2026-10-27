@@ -122,7 +122,10 @@ jobs:
           TOTAL=$(jq -r '.total' /tmp/portomatic-summary.json)
           echo "actionable=$ACTIONABLE" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
-          echo "report=downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}/$REPORT" >> "$GITHUB_OUTPUT"
+          # Normalised: upload-artifact refuses a path containing "./".
+          REPORT_PATH=$(python -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' \
+            "downstream/${{ vars.PORTOMATIC_DOWNSTREAM_DIR || '.' }}/$REPORT")
+          echo "report=$REPORT_PATH" >> "$GITHUB_OUTPUT"
           echo "actionable_count=$ACTIONABLE_COUNT" >> "$GITHUB_OUTPUT"
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
 
