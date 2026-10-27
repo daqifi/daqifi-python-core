@@ -9,7 +9,7 @@ import serial
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import IO, Any, Callable, Generic, List, Optional, Protocol, Sequence, Tuple, TypeVar, runtime_checkable
+from typing import IO, Any, Callable, Generic, List, Optional, Protocol, Sequence, Tuple, TypeVar, Union, runtime_checkable
 from enum import IntEnum
 import builtins
 
@@ -751,6 +751,7 @@ class HidTransport(Protocol):
         vendor_id: int,
         product_id: int,
         serial_number: Optional[str] = None,
+        device_path: Optional[Union[str, bytes]] = None,
     ) -> None:
         ...
 
