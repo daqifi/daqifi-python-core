@@ -222,12 +222,19 @@ def test_reconnect_during_a_loss_teardown_keeps_the_new_session():
 
         reconnect = threading.Thread(target=_reconnect)
         reconnect.start()
-        time.sleep(0.3)
-        release.set()
+        # The new connection completes while the old teardown is still
+        # stalled; only then does the old teardown resume.
         reconnect.join(10)
         assert not reconnect.is_alive()
         fake.wait_accepted()
+        release.set()
+        time.sleep(0.5)
         assert device.status == ConnectionStatus.Connected
+        # Audit finding (round 5): the old teardown's later state change
+        # overwrote the new connection's state.
+        from daqifi.devices import DeviceState
+
+        assert device.state == DeviceState.Connected
         assert device._consumer is not None and device._consumer is not old_consumer
         assert device._consumer.is_running
         received = []
@@ -418,3 +425,65 @@ def test_sd_download_over_tcp_tolerates_gaps_longer_than_a_read_window():
     finally:
         transport.disconnect()
         server.close()
+
+
+def test_reconnect_onto_a_stream_the_peer_just_closed_ends_lost():
+    # Audit finding on #167 (round 5): connect() on a connected device
+    # reuses the stream; if the peer closed it while the old consumer was
+    # stopping, a new consumer went onto the dead stream as "Connected".
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    old_consumer = device._consumer
+    real_stop = old_consumer.stop_safely
+
+    def _peer_closes_during_stop(*a, **k):
+        if threading.current_thread() is not old_consumer._thread:
+            fake.conn.shutdown(socket.SHUT_RDWR)
+            assert _wait_until(lambda: getattr(transport.stream, "peer_closed", False))
+            time.sleep(0.2)  # the old reader reports the loss
+        return real_stop(*a, **k)
+
+    old_consumer.stop_safely = _peer_closes_during_stop
+    try:
+        device.connect()
+        assert _wait_until(lambda: device.status == ConnectionStatus.Lost)
+        time.sleep(0.2)
+        assert device.status == ConnectionStatus.Lost
+        assert device._consumer is None
+    finally:
+        device.disconnect()
+        fake.close()
+
+
+def test_a_slow_subscriber_does_not_let_others_receive_a_stale_connected():
+    # Audit finding on #167 (round 5): the stale-event check ran once before
+    # the subscriber loop, so a second subscriber got Connected after Lost.
+    fake = _FakeDevice()
+    transport = TcpStreamTransport("127.0.0.1", fake.port)
+    device = DaqifiDevice("fake", transport=transport, message_factory=lambda b: bytes(b))
+    first_blocked = threading.Event()
+    release = threading.Event()
+    second = []
+
+    def _first(args):
+        if args.status == ConnectionStatus.Connected and not first_blocked.is_set():
+            first_blocked.set()
+            release.wait(5)
+
+    device.add_status_changed(_first)
+    device.add_status_changed(lambda args: second.append(args.status))
+    connecting = threading.Thread(target=device.connect, daemon=True)
+    connecting.start()
+    try:
+        assert first_blocked.wait(5)
+        fake.wait_accepted()
+        fake.conn.shutdown(socket.SHUT_RDWR)
+        assert _wait_until(lambda: ConnectionStatus.Lost in second)
+        release.set()
+        connecting.join(5)
+        assert second[-1] == ConnectionStatus.Lost
+        assert ConnectionStatus.Connected not in second[second.index(ConnectionStatus.Lost):]
+    finally:
+        release.set()
+        device.disconnect()
+        fake.close()

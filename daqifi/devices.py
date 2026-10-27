@@ -383,12 +383,28 @@ class DaqifiDevice:
                 self._transport_session = session
             consumer.start()
 
-            # Only if this connection is still the current one: the device
-            # may already have closed it (the loss handler runs on the
-            # reader thread just started), and "Connected" must not
-            # overwrite that "Lost".
-            if self._set_status(ConnectionStatus.Connected, if_consumer=consumer):
-                self._set_state(DeviceState.Connected)
+            # Only if this connection is still the current one, and its
+            # stream still alive: the loss handler (on the reader thread)
+            # may already have closed it, or the peer may have closed a
+            # stream reused from the previous connect(), and "Connected"
+            # must not overwrite that. Status and state change together.
+            if not self._set_status(
+                ConnectionStatus.Connected,
+                if_consumer=consumer,
+                if_stream_alive=stream,
+                state=DeviceState.Connected,
+            ):
+                self._discard_consumer(consumer)
+                with self._state_lock:
+                    if self._consumer is consumer:
+                        self._consumer = None
+                        self._transport_session = None
+                        evt = self._change_status(ConnectionStatus.Lost)
+                        self._state = DeviceState.Error
+                    else:
+                        evt = None
+                if evt is not None:
+                    self._deliver_status_event(evt)
         except Exception:
             # Setup failed mid-way. Tear down anything partially
             # constructed so the transport doesn't leak file
@@ -1304,29 +1320,34 @@ class DaqifiDevice:
             self._transport_session = None
             self._is_initialized = False
             evt = self._change_status(ConnectionStatus.Lost)
+            # With the status, under the lock: set later, it could land on
+            # a connection made while this teardown was still running.
+            self._state = DeviceState.Error
         # Transport dropped unexpectedly: tear down the consumer so a
         # daemon thread doesn't keep spinning on a dead stream after
         # the device looks "Lost" to callers (Qodo PR 17 pass 26 #1).
         # Outside the lock; stop_safely is safe from the consumer's own
         # thread, which is where a TCP peer-close is reported.
         if consumer is not None:
-            try:
-                consumer.remove_message_received(self._on_inbound_message)
-            except Exception:
-                pass
-            try:
-                stopped = consumer.stop_safely()
-                if stopped is False:
-                    consumer.stop()
-            except Exception:
-                pass
-            try:
-                consumer.close()
-            except Exception:
-                pass
-        self._set_state(DeviceState.Error)
+            self._discard_consumer(consumer)
         if evt is not None:
             self._deliver_status_event(evt)
+
+    def _discard_consumer(self, consumer: Any) -> None:
+        try:
+            consumer.remove_message_received(self._on_inbound_message)
+        except Exception:
+            pass
+        try:
+            stopped = consumer.stop_safely()
+            if stopped is False:
+                consumer.stop()
+        except Exception:
+            pass
+        try:
+            consumer.close()
+        except Exception:
+            pass
 
     # ---- helpers ----------------------------------------------------------
 
@@ -1334,13 +1355,25 @@ class DaqifiDevice:
         self,
         value: ConnectionStatus,
         if_consumer: Optional[Any] = None,
+        if_stream_alive: Optional[Any] = None,
+        state: Optional[DeviceState] = None,
     ) -> bool:
-        """Change the status and notify. With `if_consumer`, only while that
-        consumer is still the device's; returns False if it no longer is."""
+        """Change the status (and `state`, together) and notify.
+
+        With `if_consumer`, only while that consumer is still the device's;
+        with `if_stream_alive`, only while that stream has not seen the
+        peer close. Returns False, changing nothing, otherwise.
+        """
         with self._state_lock:
             if if_consumer is not None and self._consumer is not if_consumer:
                 return False
+            if if_stream_alive is not None and getattr(
+                if_stream_alive, "peer_closed", False
+            ):
+                return False
             evt = self._change_status(value)
+            if state is not None:
+                self._state = state
         if evt is not None:
             self._deliver_status_event(evt)
         return True
@@ -1357,9 +1390,11 @@ class DaqifiDevice:
         # two threads' events can arrive out of order. One that is no
         # longer true by now (a "Connected" overtaken by "Lost") is
         # dropped rather than leave subscribers with a stale status.
-        if evt.status != self._status:
-            return
+        # Checked before each subscriber, not once: the status can change
+        # while an earlier subscriber is still handling this event.
         for h in list(self._status_handlers):
+            if evt.status != self._status:
+                return
             try:
                 h(evt)
             except Exception:
