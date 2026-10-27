@@ -38,6 +38,7 @@ Includes the small value classes the parser surface needs:
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import socket
@@ -1983,7 +1984,13 @@ def _iter_json_objects(text: str) -> Iterator[Tuple[Any, int]]:
             break
         try:
             obj, end = decoder.raw_decode(text, position)
-        except ValueError:
+        except (ValueError, RecursionError) as error:
+            if isinstance(error, RecursionError):
+                # Nested too deep to decode: skip the whole run of opening
+                # brackets, or every "{" in it would recurse again.
+                while position < length and text[position] in "{[ \t\r\n":
+                    position += 1
+                position -= 1
             nxt = text.find("{", position + 1)
             if nxt < 0:
                 break
@@ -2040,7 +2047,7 @@ def _parse_json_sample(
             ch, val = entry.get("ch"), entry.get("val")
             if (
                 not isinstance(ch, int) or isinstance(ch, bool) or ch < 0
-                or isinstance(val, bool) or not isinstance(val, (int, float))
+                or not _is_finite_number(val)
             ):
                 return None
             channels.append(ch)
@@ -2055,13 +2062,21 @@ def _parse_json_sample(
     if not isinstance(analog_raw, list):
         return None
     for v in analog_raw:
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
+        if not _is_finite_number(v):
             return None
         analog_values.append(float(v))
     digital_raw = obj.get("digital")
     if isinstance(digital_raw, str) and digital_raw:
         digital_data = _parse_digital_hex_string(digital_raw)
     return ts_raw, analog_values, None, digital_data
+
+
+def _is_finite_number(value: Any) -> bool:
+    # JSON gives inf for 1e309 and accepts NaN/Infinity; neither converts
+    # to a raw count later, outside the malformed-record handler.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return isinstance(value, int) or math.isfinite(value)
 
 
 def _try_parse_json_line(line: str) -> Optional[Tuple[int, List[float], int]]:

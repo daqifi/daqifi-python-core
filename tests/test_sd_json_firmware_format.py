@@ -90,3 +90,26 @@ def test_a_negative_channel_number_is_skipped_not_fatal() -> None:
     )
     samples = list(_parse(data, options).samples)
     assert len(samples) == 1 and samples[0].analog_values == pytest.approx((0.5,))
+
+
+@pytest.mark.parametrize("bad", [b"1e309", b"-1e309", b"NaN", b"Infinity"])
+def test_a_non_finite_value_is_skipped_not_fatal(bad) -> None:
+    # Audit finding on #183 (round 3): inf passed validation, then int(inf)
+    # raised OverflowError outside the handler and ended the iterator.
+    data = b'{"ts":1,"ai":[{"ch":0,"val":' + bad + b'}]}\n{"ts":2,"ai":[{"ch":0,"val":3}]}\n'
+    samples = list(_parse(data).samples)
+    assert [s.analog_values for s in samples] == [(3.0,)]
+
+
+def test_a_non_finite_legacy_value_is_skipped_not_fatal() -> None:
+    samples = list(_parse(b'{"ts":1,"analog":[1e309]}\n{"ts":2,"analog":[3]}\n').samples)
+    assert [s.analog_values for s in samples] == [(3.0,)]
+
+
+def test_deeply_nested_json_is_skipped_not_fatal() -> None:
+    # Audit finding on #183 (round 3): raw_decode raised RecursionError,
+    # which the decoder loop didn't catch, so the whole parse aborted.
+    for opener, closer in ((b"[", b"]"), (b"{", b"}")):
+        data = opener * 10000 + b"0" + closer * 10000 + b'\n{"ts":2,"analog":[3]}\n'
+        samples = list(_parse(data).samples)
+        assert [s.analog_values for s in samples] == [(3.0,)]
