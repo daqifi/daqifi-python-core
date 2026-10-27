@@ -2078,13 +2078,26 @@ def _cmd_exe_arguments(
             f"WiFi flash tool name {script!r} contains whitespace, which "
             "cmd.exe cannot run reliably when started from WSL; rename it."
         )
-    # Split on whitespace only: a template's literal Windows paths keep their
-    # backslashes (shlex's POSIX rules would eat them).
     tokens = [
         token.replace("{port}", port).replace("{firmwarePath}", firmware_path)
-        for token in template.split()
+        for token in _split_windows_template(template)
     ]
     return ["/c", script] + tokens
+
+
+def _split_windows_template(template: str) -> List[str]:
+    """Split an arguments template the way a Windows command line reads it.
+
+    Double quotes group words (``"C:\\Firmware Files\\image.bin"`` is one
+    argument, without its quotes) and backslashes are literal path
+    separators. Plain ``str.split`` kept the quotes and broke the argument
+    in two; POSIX ``shlex`` ate the backslashes.
+    """
+    lexer = shlex.shlex(template, posix=True)
+    lexer.whitespace_split = True
+    lexer.escape = ""
+    lexer.quotes = '"'  # an apostrophe is an ordinary character on Windows
+    return list(lexer)
 
 
 _CMD_ALWAYS_UNSAFE = frozenset('%"')

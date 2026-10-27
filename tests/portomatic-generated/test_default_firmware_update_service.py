@@ -1501,6 +1501,18 @@ class TestUpdateWifiModule:
         )
         assert arguments[-1] == r"C:\firmware\image.bin"
 
+    @pytest.mark.parametrize("template,expected", [
+        (r'/p {port} /i "C:\Firmware Files\image.bin" /w', ["/p", "P1", "/i", r"C:\Firmware Files\image.bin", "/w"]),
+        (r"/p {port} /i C:\firmware\image.bin", ["/p", "P1", "/i", r"C:\firmware\image.bin"]),
+        (r"/p {port} /n O'Brien", ["/p", "P1", "/n", "O'Brien"]),
+    ])
+    def test_template_is_split_like_a_windows_command_line_under_wsl(self, template, expected) -> None:
+        # Audit finding on #166 (round 13): str.split kept a quoted literal's
+        # quotes and broke it in two; WSL then escaped the quotes.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        assert _cmd_exe_arguments("t.cmd", template, "P1", r"C:\fw", native_windows=False) == ["/c", "t.cmd"] + expected
+
     def test_script_name_with_whitespace_is_refused_under_wsl(self) -> None:
         # Audit finding on #166 (round 12): WSL quotes it first, and cmd.exe
         # /c then strips the leading quote.
