@@ -125,3 +125,26 @@ def test_a_device_download_into_a_sink_that_never_drains_times_out(monkeypatch) 
         device.download_sd_card_file("log.bin", _NeverDrains())
     assert time.monotonic() - start < 5.0
     assert not device._text_exchange_lock.locked()
+
+
+class _SlowOneByte:
+    def write(self, data):
+        import time
+
+        time.sleep(0.01)
+        return 1  # drains, but one byte per call
+
+
+def test_a_slowly_draining_sink_fails_at_the_receive_deadline() -> None:
+    # Audit finding on #182 (round 2): the deadline was checked only after
+    # None, so a sink that kept accepting one byte ran past it.
+    import time
+
+    from daqifi.sdcard import SdCardFileReceiver
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        SdCardFileReceiver(io.BytesIO(b"x" * 30 + END_OF_FILE_MARKER)).receive(
+            _SlowOneByte(), "log.bin", timeout_s=0.05
+        )
+    assert time.monotonic() - start < 0.25
