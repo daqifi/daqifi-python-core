@@ -399,8 +399,9 @@ class StreamManager:
 
             # Start background thread if callback provided
             if callback is not None:
-                self._thread = threading.Thread(target=self._streaming_thread, daemon=True)
-                self._thread.start()
+                worker = threading.Thread(target=self._streaming_thread, daemon=True)
+                worker.start()  # may fail (thread quota); then no worker is kept
+                self._thread = worker
 
         except Exception as e:
             self._state = StreamState.ERROR
@@ -435,10 +436,14 @@ class StreamManager:
         # still alive after the join keeps its reference, so start() can
         # refuse to run a second one beside it.
         thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
+        if (
+            thread is not None
+            and thread.ident is not None  # started
+            and thread is not threading.current_thread()
+        ):
             thread.join(timeout=2.0)
-            if not thread.is_alive():
-                self._thread = None
+        if thread is not None and not thread.is_alive():
+            self._thread = None
 
         try:
             # Send SCPI command to stop streaming

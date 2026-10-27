@@ -126,3 +126,22 @@ def test_stop_from_inside_the_callback_stops_the_device() -> None:
     assert not fake.streaming
     assert stream.state == StreamState.STOPPED
     assert _stops(fake) == 1
+
+
+def test_stop_sends_stop_when_the_worker_could_not_be_started(monkeypatch) -> None:
+    # Audit finding on #178 (round 2): Thread.start() failing (thread quota)
+    # after START reached the board left an unstarted thread behind, and
+    # stop()'s join raised "cannot join thread before it is started"
+    # before STOP was sent, on every attempt.
+    stream, fake = _manager()
+
+    def refuse(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", refuse)
+    with pytest.raises(Exception):
+        stream.start(callback=lambda sample: None)
+    monkeypatch.undo()
+    assert fake.streaming  # START reached the board
+    stream.stop()
+    assert _stops(fake) == 1 and not fake.streaming
