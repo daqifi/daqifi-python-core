@@ -2293,8 +2293,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self,
         file_name: str,
         progress: Optional[Callable[[SdCardTransferProgress], None]] = None,
+        expected_size: Optional[int] = None,
     ) -> SdCardDownloadResult:
-        """Download to a temporary on-disk file; the result carries the path."""
+        """Download to a temporary on-disk file; the result carries the path.
+        ``expected_size`` is as for :meth:`download_sd_card_file`."""
         # delete=False so the path stays valid for the caller after the
         # ``with`` block — the caller is responsible for cleanup.
         with tempfile.NamedTemporaryFile(
@@ -2306,7 +2308,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         try:
             with open(tmp_path, "wb") as out:
-                base = self.download_sd_card_file(file_name, out, progress)
+                base = self.download_sd_card_file(
+                    file_name, out, progress, expected_size=expected_size
+                )
         except Exception:
             try:
                 os.unlink(tmp_path)
@@ -2319,6 +2323,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             file_size=base.file_size,
             duration=base.duration,
             file_path=tmp_path,
+            size_verified=base.size_verified,
         )
 
     # ---- raw-capture helpers (consumer-pause pattern) --------------------
@@ -2502,6 +2507,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         last_data = start
         settle_s = self._SD_DOWNLOAD_END_SETTLE_S
+        # Last bytes taken as file content when the size is known: if they
+        # end in the marker and the line goes quiet, the transfer stopped
+        # short of the listed size.
+        body_tail = bytearray()
         while True:
             now = time.monotonic()
             if now >= total_deadline:
@@ -2530,6 +2539,17 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     if progress is not None:
                         progress(SdCardTransferProgress(bytes_written, file_name))
                     return bytes_written
+                if (
+                    expected_size is not None
+                    and bytes_written < expected_size
+                    and _ends_with_eof_marker(body_tail)
+                    and now - last_data >= settle_s
+                ):
+                    raise IOError(
+                        f"SD card file {file_name!r}: the transfer ended after "
+                        f"{bytes_written} of the listed {expected_size} bytes "
+                        "(short read)."
+                    )
                 if now >= idle_deadline:
                     short = (
                         f" (short read: {bytes_written} of {expected_size} bytes)"
@@ -2569,6 +2589,8 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     body = data[:remaining]
                     _write_all(destination_stream, body, total_deadline)
                     bytes_written += len(body)
+                    body_tail.extend(body)
+                    del body_tail[: max(0, len(body_tail) - marker_len - _EOF_TRAILER_MAX)]
                     data = data[remaining:]
                     if progress is not None:
                         progress(SdCardTransferProgress(bytes_written, file_name))
