@@ -154,6 +154,50 @@ def _default_message_factory(payload: bytes) -> Any:
 # ---- DaqifiDevice ------------------------------------------------------------
 
 
+
+class _LifecycleGate:
+    """Serializes connect() against disconnect() on one device.
+
+    Port of upstream daqifi-core ``LifecycleGate``. Two threads must never
+    drive the transport at once: both would find no consumer, both would
+    start one, and two readers on one stream corrupt its framing. So a
+    lifecycle call that finds the gate taken does not run alongside: a
+    connect waits ``connect_timeout`` and then raises (nothing was opened;
+    the caller can retry), a disconnect waits ``teardown_timeout`` and then
+    gives up (reported to the caller; the holder is left alone). Re-entry
+    from the same thread (a status handler calling disconnect() from inside
+    connect()) runs nested, as it always has.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._holder = threading.local()
+
+    def run(self, operation: Callable[[], None], timeout: float, fail: bool) -> bool:
+        if getattr(self._holder, "inside", False):
+            operation()
+            return True
+        if not self._lock.acquire(timeout=timeout):
+            if fail:
+                raise TimeoutError(
+                    f"Could not start connecting within {timeout:.1f}s because "
+                    "another connect or disconnect was still in progress. "
+                    "Nothing was opened; retry once it has finished."
+                )
+            _log.error(
+                "Could not take the connect/disconnect lock within %.1fs; "
+                "nothing was torn down (a connect is likely still in progress).",
+                timeout,
+            )
+            return False
+        self._holder.inside = True
+        try:
+            operation()
+        finally:
+            self._holder.inside = False
+            self._lock.release()
+        return True
+
 class DaqifiDevice:
     """Base device implementation.
 
@@ -164,6 +208,11 @@ class DaqifiDevice:
     Subclasses (e.g. :class:`DaqifiStreamingDevice`) layer
     domain-specific behaviour on top.
     """
+
+    # How long connect()/disconnect() wait for one another (upstream
+    # LifecycleLockTimeout / TeardownLockTimeout); see _LifecycleGate.
+    lifecycle_lock_timeout: float = 10.0
+    teardown_lock_timeout: float = 30.0
 
     def __init__(
         self,
@@ -208,6 +257,19 @@ class DaqifiDevice:
         # state), strictly better failure mode for debugging.
         # Mirrors the fix expected upstream in daqifi-core#186.
         self._text_exchange_lock = threading.Lock()
+        # Guards the consumer/session/status handoff between connect(),
+        # disconnect() and the transport-loss handler, which runs on the
+        # transport's reader thread. Held only for those few assignments:
+        # never across a callback, a transport call or a thread join, so
+        # status handlers can freely wait on other threads.
+        self._state_lock = threading.Lock()
+        self._lifecycle_gate = _LifecycleGate()
+        self._transport_session: Optional[int] = None
+        # Number of the most recently started connect(); only the newest
+        # call may claim or publish the device's consumer, so an older one
+        # overtaken by a nested reconnect (say, from a Lost handler) steps
+        # aside even when both ended up on the same transport session.
+        self._connect_generation = 0
         self._text_exchange_lock_owner: Optional[int] = None
 
         if transport is not None:
@@ -299,12 +361,34 @@ class DaqifiDevice:
     def connect(
         self, retry_options: Optional[ConnectionRetryOptions] = None,
     ) -> None:
+        """Open the transport and start the message consumer.
+
+        Raises ``TimeoutError`` if another connect()/disconnect() is still
+        in progress after ``lifecycle_lock_timeout`` seconds; nothing is
+        opened in that case.
+        """
+        self._lifecycle_gate.run(
+            lambda: self._connect_unsynchronized(retry_options),
+            self.lifecycle_lock_timeout,
+            fail=True,
+        )
+
+    def _connect_unsynchronized(
+        self, retry_options: Optional[ConnectionRetryOptions] = None,
+    ) -> None:
         # Accept retry_options so callers can request resilient
         # connection behavior here rather than only at the
         # transport layer (Qodo PR 17 pass 20 #1).
         self._raise_if_disposed()
         self._set_status(ConnectionStatus.Connecting)
         self._set_state(DeviceState.Connecting)
+        # The transport session this call connected, once it has, and the
+        # call's generation; together they tell this call's connection
+        # from a newer one.
+        connected_session: Optional[int] = None
+        with self._state_lock:
+            self._connect_generation += 1
+            generation = self._connect_generation
 
         try:
             # Refuse to connect without a transport. Previously this
@@ -317,6 +401,8 @@ class DaqifiDevice:
                     "a transport-backed stream."
                 )
             self._transport.connect(retry_options=retry_options)
+            session = getattr(self._transport, "session", None)
+            connected_session = session
             # Capture the stream once and validate it. A transport
             # that returns None from `.stream` after a successful
             # `.connect()` is broken — surface it now rather than
@@ -334,66 +420,112 @@ class DaqifiDevice:
             # background reads would fail forever (Qodo PR 17
             # pass 11 #1). The factory call is cheap; the
             # caller's `initialize()` re-registers handlers.
-            if self._consumer is not None:
-                # Unregister the message callback BEFORE stopping
-                # the consumer so an in-flight message can't be
-                # delivered to the old _on_inbound_message after
-                # the device starts rebuilding state for the new
-                # session (Qodo PR 17 pass 42 #1).
-                try:
-                    self._consumer.remove_message_received(self._on_inbound_message)
-                except Exception:
-                    pass
-                # Stop the daemon thread before closing — close()
-                # alone doesn't join the thread, so a reconnect
-                # would leak a zombie reader spinning on the OLD
-                # closed stream until process exit (Qodo PR 17
-                # pass 29 #3, mirroring disconnect()'s sequence).
-                try:
-                    stopped = self._consumer.stop_safely()
-                    if stopped is False:
-                        self._consumer.stop()
-                except Exception:
-                    pass
-                try:
-                    self._consumer.close()
-                except Exception:
-                    pass
+            # Claimed under the lock and torn down by reference: while it
+            # stops, a status handler may already have run a nested
+            # connect(), and its consumer must not be the one closed here.
+            # Unregistering before stopping keeps an in-flight message from
+            # reaching the old session (Qodo PR 17 pass 42 #1); stopping
+            # before closing avoids a zombie reader (pass 29 #3).
+            with self._state_lock:
+                # Superseded already? A nested connect() may have replaced
+                # this call's connection since transport.connect() above;
+                # the consumer now installed is that newer one's.
+                if (
+                    generation != self._connect_generation
+                    or getattr(self._transport, "session", None) != session
+                ):
+                    return
+                old_consumer = self._consumer
                 self._consumer = None
+            if old_consumer is not None:
+                self._discard_consumer(old_consumer)
 
             # Default factory decodes bytes into a real
             # `DaqifiOutMessage` (see ``_default_message_factory``).
             # Override per-device by passing ``message_factory``
             # to the constructor — useful for tests that want
             # raw-bytes passthrough or a custom proto class.
-            self._consumer = StreamMessageConsumer[Any](
+            consumer = StreamMessageConsumer[Any](
                 stream,
                 ProtobufMessageParser(message_factory=self._message_factory),
             )
-            self._consumer.start()
+            with self._state_lock:
+                superseded = (
+                    generation != self._connect_generation
+                    or self._consumer is not None
+                    or getattr(self._transport, "session", None) != session
+                )
+                if not superseded:
+                    self._consumer = consumer
+                    self._transport_session = session
+                    # A fresh consumer has no message handlers yet; the
+                    # caller's initialize() must register them again.
+                    self._is_initialized = False
+            if superseded:
+                # A nested connect() (from a status handler, during the
+                # teardown above) already established a newer connection;
+                # this call's stream belongs to the one it replaced.
+                try:
+                    consumer.close()
+                except Exception:
+                    pass
+                return
+            try:
+                consumer.start()
+            except Exception:
+                # The loss handler (a delayed loss of the stream reused
+                # above) may have disposed this consumer before it
+                # started; whatever replaced it is not ours to undo.
+                with self._state_lock:
+                    taken_over = self._consumer is not consumer
+                if taken_over:
+                    return
+                raise
 
-            self._set_status(ConnectionStatus.Connected)
-            self._set_state(DeviceState.Connected)
+            # Only if this connection is still the current one, and its
+            # stream still alive: the loss handler (on the reader thread)
+            # may already have closed it, or the peer may have closed a
+            # stream reused from the previous connect(), and "Connected"
+            # must not overwrite that. Status and state change together.
+            if not self._set_status(
+                ConnectionStatus.Connected,
+                if_consumer=consumer,
+                if_stream_alive=stream,
+                state=DeviceState.Connected,
+            ):
+                self._discard_consumer(consumer)
+                with self._state_lock:
+                    if self._consumer is consumer:
+                        self._consumer = None
+                        self._transport_session = None
+                        evt = self._change_status(ConnectionStatus.Lost)
+                        self._state = DeviceState.Error
+                    else:
+                        evt = None
+                if evt is not None:
+                    self._deliver_status_event(evt)
         except Exception:
             # Setup failed mid-way. Tear down anything partially
             # constructed so the transport doesn't leak file
             # descriptors and the consumer thread doesn't keep
             # spinning on a dead stream (Qodo PR 17 pass 13 #2).
-            if self._consumer is not None:
+            # Unless a newer connection exists (a nested connect() from a
+            # status handler): that one is not this call's to tear down.
+            with self._state_lock:
+                superseded = generation != self._connect_generation or (
+                    connected_session is not None
+                    and getattr(self._transport, "session", None) != connected_session
+                )
+                stale_consumer = None if superseded else self._consumer
+                if stale_consumer is not None:
+                    self._consumer = None
+            if superseded:
+                raise
+            if stale_consumer is not None:
                 # close() alone doesn't join the daemon thread, so
                 # stop it first — same pattern as disconnect() and
                 # the reconnect path (Qodo PR 17 pass 34 #1).
-                try:
-                    stopped = self._consumer.stop_safely()
-                    if stopped is False:
-                        self._consumer.stop()
-                except Exception:
-                    pass
-                try:
-                    self._consumer.close()
-                except Exception:
-                    pass
-                self._consumer = None
+                self._discard_consumer(stale_consumer)
             if self._transport is not None:
                 try:
                     self._transport.disconnect()
@@ -404,7 +536,23 @@ class DaqifiDevice:
             raise
 
     def disconnect(self) -> None:
-        self._is_disconnecting = True
+        """Stop the consumer and close the transport.
+
+        If another connect()/disconnect() still holds the device after
+        ``teardown_lock_timeout`` seconds, nothing is torn down and the
+        device is only marked Disconnected (the holder is left alone).
+        """
+        if not self._lifecycle_gate.run(
+            self._disconnect_unsynchronized, self.teardown_lock_timeout, fail=False
+        ):
+            self._set_status(ConnectionStatus.Disconnected)
+
+    def _disconnect_unsynchronized(self) -> None:
+        with self._state_lock:
+            self._is_disconnecting = True
+            # A loss event still in flight for this connection must not
+            # match any later one.
+            self._transport_session = None
         # Hoisted out of `try` so the `finally` block can branch on
         # whether the transport failed (Qodo PR 17 pass 26 #2).
         transport_error: Optional[Exception] = None
@@ -705,9 +853,15 @@ class DaqifiDevice:
                 except Exception:
                     pass
         finally:
-            # Always restart the protobuf consumer so streaming
-            # resumes — even if setup_action raised.
-            if was_running:
+            # Restart the protobuf consumer so streaming resumes — even if
+            # setup_action raised — unless the connection was lost during
+            # the exchange: the stream is dead, and a restarted reader
+            # would just poll it.
+            if (
+                was_running
+                and self._status == ConnectionStatus.Connected
+                and not getattr(stream, "peer_closed", False)
+            ):
                 try:
                     self._consumer.start()
                 except Exception:
@@ -1272,39 +1426,102 @@ class DaqifiDevice:
     def _on_transport_status_changed(self, args: TransportStatusEventArgs) -> None:
         if args.is_connected:
             return
-        if self._is_disconnecting:
-            return
-        # Transport dropped unexpectedly: tear down the consumer so a
-        # daemon thread doesn't keep spinning on a dead stream after
-        # the device looks "Lost" to callers (Qodo PR 17 pass 26 #1).
-        if self._consumer is not None:
+        # Report only an unexpected drop of the live connection (upstream
+        # OnTransportStatusChanged): not during disconnect(), not for a
+        # connection that has since been closed or replaced (args.session
+        # no longer current), and not while connect() is still running,
+        # which checks its own stream before publishing "Connected".
+        # Nothing is torn down here; that is connect()'s and disconnect()'s
+        # job, serialized by the lifecycle gate, so this handler can't race
+        # either of them.
+        with self._state_lock:
+            if self._is_disconnecting:
+                return
+            if args.session is not None and args.session != self._transport_session:
+                return
+            consumer = self._consumer
+            evt = None
+            if self._status == ConnectionStatus.Connected:
+                self._is_initialized = False
+                evt = self._change_status(ConnectionStatus.Lost)
+                self._state = DeviceState.Error
+            # Otherwise the status is already decided (a failed send() set
+            # Lost, or connect() is still running and checks its stream),
+            # but the reader on the dead stream is stopped all the same.
+        # Stop the reader spinning on a dead stream; the consumer object stays
+        # for the next connect()/disconnect() to dispose of. stop_safely only
+        # sets the flag when called from the reader's own thread.
+        if consumer is not None:
             try:
-                self._consumer.remove_message_received(self._on_inbound_message)
+                if consumer.stop_safely() is False:
+                    consumer.stop()
             except Exception:
                 pass
-            try:
-                stopped = self._consumer.stop_safely()
-                if stopped is False:
-                    self._consumer.stop()
-            except Exception:
-                pass
-            try:
-                self._consumer.close()
-            except Exception:
-                pass
-            self._consumer = None
-        self._is_initialized = False
-        self._set_status(ConnectionStatus.Lost)
-        self._set_state(DeviceState.Error)
+        if evt is not None:
+            self._deliver_status_event(evt)
+
+    def _discard_consumer(self, consumer: Any) -> None:
+        try:
+            consumer.remove_message_received(self._on_inbound_message)
+        except Exception:
+            pass
+        try:
+            stopped = consumer.stop_safely()
+            if stopped is False:
+                consumer.stop()
+        except Exception:
+            pass
+        try:
+            consumer.close()
+        except Exception:
+            pass
 
     # ---- helpers ----------------------------------------------------------
 
-    def _set_status(self, value: ConnectionStatus) -> None:
+    def _set_status(
+        self,
+        value: ConnectionStatus,
+        if_consumer: Optional[Any] = None,
+        if_stream_alive: Optional[Any] = None,
+        state: Optional[DeviceState] = None,
+    ) -> bool:
+        """Change the status (and `state`, together) and notify.
+
+        With `if_consumer`, only while that consumer is still the device's;
+        with `if_stream_alive`, only while that stream has not seen the
+        peer close. Returns False, changing nothing, otherwise.
+        """
+        with self._state_lock:
+            if if_consumer is not None and self._consumer is not if_consumer:
+                return False
+            if if_stream_alive is not None and getattr(
+                if_stream_alive, "peer_closed", False
+            ):
+                return False
+            evt = self._change_status(value)
+            if state is not None:
+                self._state = state
+        if evt is not None:
+            self._deliver_status_event(evt)
+        return True
+
+    def _change_status(self, value: ConnectionStatus) -> Optional[DeviceStatusEventArgs]:
+        # Caller holds _state_lock; the event is delivered after release.
         if self._status == value:
-            return
+            return None
         self._status = value
-        evt = DeviceStatusEventArgs(status=value)
+        return DeviceStatusEventArgs(status=value)
+
+    def _deliver_status_event(self, evt: DeviceStatusEventArgs) -> None:
+        # Changes are decided under the lock but delivered outside it, so
+        # two threads' events can arrive out of order. One that is no
+        # longer true by now (a "Connected" overtaken by "Lost") is
+        # dropped rather than leave subscribers with a stale status.
+        # Checked before each subscriber, not once: the status can change
+        # while an earlier subscriber is still handling this event.
         for h in list(self._status_handlers):
+            if evt.status != self._status:
+                return
             try:
                 h(evt)
             except Exception:

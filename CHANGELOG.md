@@ -37,6 +37,21 @@ aims to follow [Semantic Versioning](https://semver.org/).
   report are split into 16-byte records instead of failing after erase (#161).
 - Bootloader replies are now checked for framing, CRC, EOT and the command
   they answer; truncated or mismatched replies are no longer accepted (#161).
+- Over TCP, every `execute_text_command` left the protobuf consumer
+  stopped (its reader was blocked in a socket read and could not be
+  restarted), so no stream frame was dispatched again until reconnect.
+  TCP reads are now bounded to 0.5 s, as upstream does (#164).
+- A device closing its TCP connection (reboot, Wi-Fi drop) went
+  unnoticed: the session stayed "connected" and the reader spun on empty
+  reads. End of stream now marks the transport disconnected, raises a
+  status event, and the device reports `ConnectionStatus.Lost` (#164).
+- `connect()` and `disconnect()` on one device no longer run alongside each
+  other (port of upstream `LifecycleGate`): a `connect()` that finds one in
+  progress waits `lifecycle_lock_timeout` (10 s) and then raises
+  `TimeoutError` without opening anything; a `disconnect()` waits
+  `teardown_lock_timeout` (30 s) and then only marks the device
+  Disconnected. A transport loss is reported as `Lost` without tearing the
+  consumer down from the transport's thread (#164).
 
 ## [0.1.0]
 

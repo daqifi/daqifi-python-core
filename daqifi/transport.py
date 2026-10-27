@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import logging
+import selectors
 import socket
 import threading
 import time
@@ -76,6 +77,119 @@ def _validate_usb_identifier(value: int, name: str) -> None:
 # ---- TcpStreamTransport ------------------------------------------------------
 
 
+class _SocketStream(io.RawIOBase):
+    """The TCP transport's stream: a socket with bounded reads.
+
+    Port of upstream daqifi-core #384 and #403, for Python's socket API:
+
+    * A read waits at most ``read_timeout`` seconds and then raises
+      ``socket.timeout``, which the consumer treats as an idle window. A
+      reader that blocked forever could not be stopped, so every text
+      exchange over TCP left the protobuf consumer dead (its restart
+      found the old thread still alive). ``socket.makefile`` can't be
+      used for this: after one timeout it refuses all further reads.
+    * End of stream (the device closed the connection: reboot, Wi-Fi
+      drop) is reported to the transport, on the reading thread, and
+      every read from then on raises ``ConnectionResetError``. It used to
+      read as an endless run of empty, "idle" reads.
+    """
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        read_timeout: float,
+        session: int,
+        on_peer_closed: Callable[["_SocketStream"], None],
+    ) -> None:
+        super().__init__()
+        self._sock = sock
+        self._read_timeout = read_timeout
+        self.session = session
+        self._on_peer_closed = on_peer_closed
+        self.peer_closed = False
+        # Set when this connection is being closed by us, or its loss has
+        # already been reported, so the loss is reported at most once.
+        self.loss_reported = False
+
+    def readable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
+
+    def readinto(self, buffer) -> int:  # type: ignore[override]
+        if self.peer_closed:
+            return 0
+        with selectors.DefaultSelector() as selector:
+            selector.register(self._sock, selectors.EVENT_READ)
+            if not selector.select(self._read_timeout):
+                raise socket.timeout("timed out")
+        try:
+            received = self._sock.recv_into(buffer)
+        except OSError:
+            # A reset or other socket failure ends the connection too; it
+            # is reported, and the error itself still reaches the caller.
+            self._mark_peer_closed()
+            raise
+        if received == 0 and len(buffer) > 0:
+            # End of stream, returned the standard way (a 0-byte read) so
+            # file methods (read(), readline(), ...) end cleanly; the
+            # report above runs first, so a device's consumer is already
+            # told to stop by the time it sees the empty read.
+            self._mark_peer_closed()
+        return received
+
+    def _mark_peer_closed(self) -> None:
+        if not self.peer_closed:
+            self.peer_closed = True
+            self._on_peer_closed(self)
+
+    def readall(self) -> bytes:
+        """Everything until the peer closes, like a blocking socket file
+        (the read windows' timeouts are waited through, not raised)."""
+        chunks = []
+        while True:
+            try:
+                chunk = self.read(65536)
+            except socket.timeout:
+                continue
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+
+    def readline(self, size: Optional[int] = -1) -> bytes:  # type: ignore[override]
+        """A line, waiting through read windows like a blocking socket
+        file; the inherited version would drop a partial line on the
+        first window that timed out."""
+        line = bytearray()
+        while size is None or size < 0 or len(line) < size:
+            try:
+                byte = self.read(1)
+            except socket.timeout:
+                continue
+            if not byte:
+                break
+            line += byte
+            if byte == b"\n":
+                break
+        return bytes(line)
+
+    def write(self, data) -> int:  # type: ignore[override]
+        self._sock.sendall(data)
+        # Bytes, not elements: len() of a multi-byte-item buffer counts
+        # items, and a caller resuming from it would resend data.
+        return memoryview(data).nbytes
+
+    def close(self) -> None:
+        # The transport owns the socket and closes it; drop this view's
+        # reference so a closed stream doesn't keep the socket alive.
+        super().close()
+        self._sock = None  # type: ignore[assignment]
+
+
 class TcpStreamTransport:
     """TCP implementation of :class:`StreamTransport` Protocol.
 
@@ -87,13 +201,27 @@ class TcpStreamTransport:
     hostname; hostname resolution happens at :meth:`connect` time.
     """
 
+    # Bound on a single read once connected (upstream
+    # OperationalReceiveTimeoutMs = 500): short enough that a consumer
+    # thread parked in a read can always be stopped promptly.
+    OPERATIONAL_READ_TIMEOUT_S = 0.5
+
     def __init__(self, host: str, port: int) -> None:
         self._host = host
         self._port = port
         self._socket: Optional[socket.socket] = None
         self._stream: Optional[IO[bytes]] = None
         self._disposed = False
+        # Bumped on every successful connect; loss events carry the
+        # session they are about, so a late one can be told from current.
+        self._session = 0
+        self._connect_lock = threading.Lock()
         self._status_handlers: List[Callable[[TransportStatusEventArgs], None]] = []
+
+    @property
+    def session(self) -> int:
+        """Number of the current connection; increases on every connect."""
+        return self._session
 
     @property
     def stream(self) -> Optional[IO[bytes]]:
@@ -121,6 +249,8 @@ class TcpStreamTransport:
         if self._socket is None or self._stream is None:
             return False
         if getattr(self._stream, "closed", False):
+            return False
+        if getattr(self._stream, "peer_closed", False):
             return False
         try:
             return self._socket.fileno() != -1
@@ -162,69 +292,44 @@ class TcpStreamTransport:
         last_exc: Optional[BaseException] = None
 
         for attempt in range(1, max_attempts + 1):
-            # Track the locally-created socket separately from
-            # self._socket so a failure between socket() and the final
-            # self._socket = sock assignment doesn't leak the file
-            # descriptor (Qodo PR 17 pass 2 finding 1).
-            sock: Optional[socket.socket] = None
-            try:
-                if attempt > 1:
-                    delay = options.calculate_delay(attempt)
-                    if delay > 0:
-                        time.sleep(delay)
+            if attempt > 1:
+                delay = options.calculate_delay(attempt)
+                if delay > 0:
+                    time.sleep(delay)
 
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(options.connection_timeout)
-                sock.connect((self._host, self._port))
-                # Switch off the connect-timeout so blocking reads can
-                # use socket.makefile's default semantics. We rely on
-                # `disconnect()` calling `socket.shutdown(SHUT_RDWR)`
-                # to interrupt any blocked `stream.read()` in the
-                # consumer thread — that's the "wakeup" mechanism for
-                # graceful stop without paying a per-iteration timeout.
-                sock.settimeout(None)
-                self._socket = sock
-                # Hand-off complete; subsequent failure paths should
-                # close via self._socket, not the local `sock`.
-                sock = None
-                self._stream = self._socket.makefile("rwb", buffering=0)
+            # One attempt at a time per transport: two threads connecting at
+            # once would each open a socket, and the later assignment would
+            # leave the other's consumer reading a socket the transport no
+            # longer writes to. A thread that waited here finds the
+            # transport connected and is done. Notifications go out after
+            # the lock is released, so a status handler may wait on a
+            # thread that connects.
+            with self._connect_lock:
+                if self.is_connected:
+                    return
+                # A previous connection that is no longer "connected" (its
+                # stream closed, or the peer hung up) may still hold its
+                # socket; replacing it without closing would leak one
+                # descriptor per reconnect.
+                self._release_stale_connection()
+                error = self._open_connection(options)
+
+            if error is None:
                 self._notify_status(True, None)
                 return
-            except Exception as exc:
-                last_exc = exc
-                # Close whichever handle is alive: the local `sock`
-                # (failure before hand-off) or self._socket (failure
-                # after hand-off).
-                if sock is not None:
-                    try:
-                        sock.close()
-                    except Exception:
-                        pass
-                if self._stream is not None:
-                    try:
-                        self._stream.close()
-                    except Exception:
-                        pass
-                if self._socket is not None:
-                    try:
-                        self._socket.close()
-                    except Exception:
-                        pass
-                self._socket = None
-                self._stream = None
+            last_exc = error
+            if attempt < max_attempts and options.enabled:
+                self._notify_status(
+                    False,
+                    RuntimeError(
+                        f"Connection attempt {attempt}/{max_attempts} "
+                        f"failed, retrying..."
+                    ),
+                )
+                continue
 
-                if attempt < max_attempts and options.enabled:
-                    self._notify_status(
-                        False,
-                        RuntimeError(
-                            f"Connection attempt {attempt}/{max_attempts} "
-                            f"failed, retrying..."
-                        ),
-                    )
-                    continue
-
-                self._notify_status(False, exc)
-                raise
+            self._notify_status(False, error)
+            raise error
 
         # Defensive fallback (loop should always have raised or returned).
         self._notify_status(False, last_exc)
@@ -244,6 +349,10 @@ class TcpStreamTransport:
         # stream.close doesn't prevent socket.close from running and
         # leaking the file descriptor (Qodo PR 17 pass 10 #3).
         disconnect_error: Optional[BaseException] = None
+        # Our own shutdown below reads as end-of-stream to the consumer;
+        # this keeps that from being reported as the device going away.
+        if isinstance(self._stream, _SocketStream):
+            self._stream.loss_reported = True
 
         # Shutdown both halves of the socket BEFORE closing it.
         # This wakes any consumer thread blocked in `stream.read()`
@@ -289,13 +398,90 @@ class TcpStreamTransport:
             pass
         self._disposed = True
 
-    def _notify_status(self, is_connected: bool, error: Optional[BaseException]) -> None:
+    def _open_connection(
+        self, options: ConnectionRetryOptions
+    ) -> Optional[BaseException]:
+        """One connection attempt (caller holds _connect_lock). Returns the
+        error, or None once the socket and stream are in place."""
+        # Track the locally-created socket separately from self._socket so
+        # a failure between socket() and the final self._socket = sock
+        # assignment doesn't leak the file descriptor (Qodo PR 17 pass 2
+        # finding 1).
+        sock: Optional[socket.socket] = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(options.connection_timeout)
+            sock.connect((self._host, self._port))
+            # Reads are bounded by _SocketStream (selector wait), not by a
+            # socket timeout, so the socket itself goes back to blocking
+            # for sends.
+            sock.settimeout(None)
+            self._socket = sock
+            # Hand-off complete; subsequent failure paths should close via
+            # self._socket, not the local `sock`.
+            sock = None
+            self._session += 1
+            self._stream = _SocketStream(  # type: ignore[assignment]
+                self._socket,
+                self.OPERATIONAL_READ_TIMEOUT_S,
+                self._session,
+                self._on_peer_closed,
+            )
+            return None
+        except Exception as exc:
+            # Close whichever handle is alive: the local `sock` (failure
+            # before hand-off) or self._socket (failure after hand-off).
+            for closable in (sock, self._stream, self._socket):
+                if closable is not None:
+                    try:
+                        closable.close()
+                    except Exception:
+                        pass
+            self._socket = None
+            self._stream = None
+            return exc
+
+    def _release_stale_connection(self) -> None:
+        stream, sock = self._stream, self._socket
+        self._stream = None
+        self._socket = None
+        if isinstance(stream, _SocketStream):
+            stream.loss_reported = True  # our close, not the device's
+        for closable in (stream, sock):
+            if closable is not None:
+                try:
+                    closable.close()
+                except Exception:
+                    pass
+
+    def _on_peer_closed(self, stream: "_SocketStream") -> None:
+        """The device closed `stream`'s connection (its reader saw EOF).
+
+        Runs on that reader's thread. The event names the session, so a
+        subscriber can ignore it if that connection has been replaced.
+        """
+        if stream.loss_reported:
+            return
+        stream.loss_reported = True
+        self._notify_status(
+            False,
+            ConnectionResetError("The device closed the TCP connection."),
+            session=stream.session,
+        )
+
+    def _notify_status(
+        self,
+        is_connected: bool,
+        error: Optional[BaseException],
+        session: Optional[int] = None,
+    ) -> None:
         _notify(
             self._status_handlers,
             TransportStatusEventArgs(
                 is_connected=is_connected,
                 connection_info=self.connection_info,
                 error=error,
+                session=session,
             ),
         )
 
