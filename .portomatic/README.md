@@ -15,20 +15,26 @@ ongoing port from `daqifi-core` (C#, upstream) to this repo
 ├── map/                   ← method-level shard maps (THE SOURCE OF TRUTH)
 │   ├── Channel.yaml
 │   ├── Communication.yaml
-│   ├── Communication.Consumers.yaml
-│   ├── Communication.Messages.yaml
-│   ├── Communication.Producers.yaml
-│   ├── Communication.Transport.yaml
+│   ├── Communication_Consumers.yaml
+│   ├── Communication_Messages.yaml
+│   ├── Communication_Producers.yaml
+│   ├── Communication_Transport.yaml
 │   ├── Device.yaml
 │   ├── Discovery.yaml
+│   ├── Firmware.yaml
+│   ├── Logging_Export.yaml
 │   ├── Network.yaml
 │   ├── Protocol.yaml
-│   ├── SdCard.yaml
-│   └── Firmware.yaml
+│   └── SdCard.yaml
 ├── cache/                 ← portomatic tool internal cache
 ├── reports/               ← per-run reports from past portomatic invocations
 └── research/              ← scratch notes from one-off investigations
 ```
+
+Shard names (and so the map filenames) use letters, digits, `_` and
+`-` only; portomatic refuses a dotted name such as
+`Communication.Consumers`. A nested upstream namespace is written with
+`_` (`Communication_Consumers`).
 
 ## Workflow
 
