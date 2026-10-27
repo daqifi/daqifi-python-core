@@ -25,15 +25,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- A protobuf frame over 1 KiB whose read ended right after its length
-  prefix was destroyed: the prefix was skipped as garbage and the body
-  decoded as junk frames. A large status frame over WiFi could hit it,
-  and an SD log whose 64 KiB read boundary landed there failed every
-  time. With no body byte yet the parser now waits; the field-tag check
-  still rejects garbage once a byte arrives, and a bogus prefix followed
-  by two or more complete frames running to the end of the buffer is
-  skipped, so it can't hold the stream until its declared length arrives
-  (#164).
+- An SD log whose 64 KiB read boundary fell right after the length prefix
+  of a frame over 1 KiB failed every time: the prefix was skipped as
+  garbage and the body decoded as junk frames. The SD reader now has the
+  parser wait on such a prefix (`wait_on_bare_prefix`), since more of the
+  log follows. The live stream keeps the existing gap gate, so the same
+  split on a live read is still lost, as before (#164).
 - The HID error messages told users to `pip install hid`, which is a
   different library with an incompatible API (`hid.Device`); the code
   needs the PyPI `hidapi` package (`hid.device()`). With the wrong package

@@ -1201,7 +1201,11 @@ def _read_all_messages(
         # measure against unexpectedly-short reads. We mirror that.
         combined = _strip_end_of_file_marker(combined)
 
-        parsed, consumed = parser.parse_messages(combined)
+        # More of the log follows: a frame whose length prefix ends this
+        # chunk is completed by the next one, not skipped as garbage (a log
+        # whose 64 KiB read boundary fell right after a large frame's prefix
+        # failed every time).
+        parsed, consumed = parser.parse_messages(combined, wait_on_bare_prefix=True)
         for inbound in parsed:
             messages.append(inbound.data)
 

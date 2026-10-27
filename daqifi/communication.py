@@ -137,6 +137,20 @@ _MAX_VARINT32_BYTES = 5
 # immediately and the parser resyncs one byte at a time.
 _MAX_MESSAGE_SIZE_BYTES = 4 * 1024
 
+# Maximum gap between the declared message length and the bytes
+# currently available before we give up waiting and treat the prefix
+# as garbage. A legitimate partial frame is always small — the stream
+# consumer feeds parse_messages every few milliseconds and real frames
+# are <1 KB, so a real partial never leaves a multi-KB gap between
+# declared and available bytes. A prefix that *claims* thousands of
+# bytes and is nowhere close to being satisfied is overwhelmingly
+# likely to be boot-time garbage (USB CDC setup, DTR pulse bytes) that
+# happens to varint-encode a large value. Capping the tolerable gap
+# bounds the worst-case stall: without this, a plausible-under-the-cap
+# bogus prefix still deadlocks until the buffer reaches the declared
+# size, which at slow sample rates can be many seconds.
+_MAX_PARTIAL_FRAME_GAP_BYTES = 1024
+
 
 def _is_plausible_field_tag_byte(b: int) -> bool:
     """Return True if ``b`` could plausibly be the first byte of a real
@@ -220,8 +234,18 @@ class ProtobufMessageParser:
         self._message_factory = message_factory
 
     def parse_messages(
-        self, data: bytes
+        self, data: bytes, wait_on_bare_prefix: bool = False
     ) -> Tuple[List[ObjectInboundMessage], int]:
+        """Parse length-prefixed frames from ``data``.
+
+        ``wait_on_bare_prefix``: a caller that knows more data follows (an
+        SD log not yet at EOF) can ask for a length prefix with no body
+        bytes after it to be kept rather than judged by the gap gate below.
+        The gap gate guards a live stream against a bogus prefix holding it,
+        at the cost of destroying a real frame over 1 KiB when a read ends
+        right after its prefix (pre-existing, #164 item 3); with a finite
+        log there is no stall to guard against.
+        """
         messages: List[ObjectInboundMessage] = []
         consumed_bytes = 0
         if len(data) == 0:
@@ -273,11 +297,17 @@ class ProtobufMessageParser:
                 # that masquerades as "parser hung": device LED blinking,
                 # buffer growing, zero messages parsed.
                 #
-                # A field-tag gate protects the wait path from garbage
+                # Two recovery gates protect the wait path from garbage
                 # while leaving real partial frames intact (mirrors
                 # upstream PR #173):
                 #
-                #    When at least one body byte is
+                #  1. Gap gate: a declared length more than
+                #     `_MAX_PARTIAL_FRAME_GAP_BYTES` beyond the payload
+                #     bytes currently buffered is almost certainly
+                #     garbage. Real partials for streaming frames leave
+                #     gaps measured in hundreds of bytes, not kilobytes.
+                #
+                #  2. Field-tag gate: when at least one body byte is
                 #     available, peek at it. The first body byte of a
                 #     real DaqifiOutMessage is a protobuf field tag —
                 #     field_number >= 1 and wire_type in {0,1,2,5}. A
@@ -291,40 +321,32 @@ class ProtobufMessageParser:
                 # payload: only into bytes already identified as
                 # implausible.
                 available_body_bytes = len(remaining) - prefix_bytes
+                missing_payload = message_length - available_body_bytes
                 first_body_byte_is_garbage = (
                     available_body_bytes > 0
                     and not _is_plausible_field_tag_byte(remaining[prefix_bytes])
                 )
 
-                # With no body byte yet there is nothing to judge, so wait.
-                # Upstream also skips such a prefix when it declares more
-                # than 1 KiB missing, but a read can end right after a real
-                # frame's prefix: a 1.4 KB status frame, or an SD log whose
-                # 64 KiB read boundary lands there, was destroyed every time.
-                if first_body_byte_is_garbage:
+                # Apply the gap heuristic only when we have NO body bytes
+                # to validate yet. As soon as one body byte is available,
+                # the field-tag gate can decide on its own — gating on
+                # missing_payload at that point would corrupt legitimate
+                # large frames whose first chunk happens to land right
+                # at the prefix+1 boundary. (Qodo /agentic_review on PR
+                # #100 caught the original >1024 form; pass 3 /improve
+                # tightened from `<= 1` to `== 0` to handle the edge
+                # case at exactly one body byte. Same bug exists in
+                # upstream daqifi-core PR #173.)
+                gap_is_suspicious = (
+                    available_body_bytes == 0
+                    and missing_payload > _MAX_PARTIAL_FRAME_GAP_BYTES
+                    and not wait_on_bare_prefix
+                )
+
+                if gap_is_suspicious or first_body_byte_is_garbage:
                     current_index += 1
                     consumed_bytes = current_index
                     continue
-
-                # A bogus prefix whose next byte looks like a field tag (the
-                # next real frame's length byte often does) would otherwise
-                # hold the stream until its declared length had arrived. It
-                # is noise if real frames follow it: two or more complete,
-                # parseable frames running back to back to the end of the
-                # buffer. A genuine partial runs to the end itself, and its
-                # payload practically never ends in such a chain (none in
-                # 24970 splits of 31 large frames, where a single parseable
-                # frame anywhere after, upstream's test, matched 14554
-                # times). Only checked before any frame of this call, so the
-                # streaming path, which parses frames first, doesn't pay.
-                if not messages:
-                    chain_start = self._find_frame_chain_to_end(
-                        data, current_index + 1
-                    )
-                    if chain_start is not None:
-                        current_index = chain_start
-                        consumed_bytes = current_index
-                        continue
 
                 break  # legitimate partial frame — wait for more data
 
@@ -341,40 +363,6 @@ class ProtobufMessageParser:
                 consumed_bytes = current_index
 
         return messages, consumed_bytes
-
-    def _complete_frame_end(self, data: bytes, start: int) -> Optional[int]:
-        """End of a complete, parseable frame at ``start``, else None."""
-        message_length, prefix_bytes, _ = _try_read_length_prefix(data[start:])
-        if (
-            message_length is None
-            or message_length <= 0
-            or message_length > _MAX_MESSAGE_SIZE_BYTES
-        ):
-            return None
-        end = start + prefix_bytes + message_length
-        if end > len(data) or not _is_plausible_field_tag_byte(
-            data[start + prefix_bytes]
-        ):
-            return None
-        try:
-            self._message_factory(bytes(data[start + prefix_bytes : end]))
-        except Exception:
-            return None
-        return end
-
-    def _find_frame_chain_to_end(self, data: bytes, start: int) -> Optional[int]:
-        """First index from ``start`` where two or more complete frames run
-        back to back exactly to the end of ``data``."""
-        for index in range(start, len(data)):
-            position, frames = index, 0
-            while position < len(data):
-                end = self._complete_frame_end(data, position)
-                if end is None:
-                    break
-                position, frames = end, frames + 1
-            if position == len(data) and frames >= 2:
-                return index
-        return None
 
 
 class _MessageTypeHint:
