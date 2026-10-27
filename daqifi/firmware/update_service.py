@@ -987,9 +987,18 @@ class DefaultFirmwareUpdateService:
         template = self._options.wifi_flash_tool_arguments_template
 
         executable_path = tool_path
-        executable_arguments: Any = template.replace(
-            "{port}", _quote_argument(port)
-        ).replace("{firmwarePath}", _quote_argument(firmware_path))
+        # Split first, then put each value into its argument whole: nothing
+        # substituted is parsed again, so quotes or apostrophes in a value
+        # (or the template's own quotes around a placeholder) can't change
+        # where arguments start and end. A list reaches a POSIX program as
+        # argv, and a Windows one through list2cmdline (C-runtime quoting).
+        executable_arguments: Any = _substitute_placeholders(
+            _split_windows_template(template)
+            if os.name == "nt"
+            else _split_posix_template(template),
+            port,
+            firmware_path,
+        )
 
         extension = os.path.splitext(tool_path)[1].lower()
         if extension in (".cmd", ".bat"):
@@ -1999,33 +2008,6 @@ def _build_recovery_guidance(state: FirmwareUpdateState) -> str:
     )
 
 
-def _quote_argument(value: str) -> str:
-    """Quote a single argument so it survives shell-style parsing.
-
-    Windows ``cmd.exe`` does NOT honour ``\\"`` as an escape — embedded
-    double quotes have to be doubled (``""``). POSIX shells do the
-    opposite. Pick the right rule based on ``os.name`` so the WiFi
-    flash tool gets correctly-quoted paths regardless of host platform.
-
-    On Windows we **always** wrap the value in quotes (when non-empty)
-    so cmd.exe metacharacters like ``& | > < ^ ( ) % !`` cannot be
-    interpreted as command syntax. A port-override or firmware-path
-    string sourced from configuration could contain any of those, and
-    cmd.exe would otherwise treat e.g. ``foo&bar`` as ``foo`` followed
-    by command ``bar``.
-    """
-    if value is None or value == "":
-        return '""'
-
-    if os.name == "nt":
-        return _quote_crt_argument(value)
-
-    # POSIX: the arguments are split by shlex (SubprocessRunner), so quote
-    # for shlex. Quoting only whitespace and double quotes left a path such
-    # as /tmp/O'Brien/fw unbalanced, and the split raised "No closing
-    # quotation" after the device had entered WiFi-update mode.
-    return shlex.quote(value)
-
 
 def _cmd_exe_arguments(
     script: str,
@@ -2076,9 +2058,16 @@ def _cmd_exe_arguments(
             "which cmd.exe would interpret."
         )
     if native_windows:
-        tool_arguments = template.replace(
-            "{port}", _quote_windows_argument(port)
-        ).replace("{firmwarePath}", _quote_windows_argument(firmware_path))
+        # The template's own quotes are consumed by the split and each
+        # argument is quoted once, whole, so a placeholder the template had
+        # already quoted can't end up between two quote pairs, leaving its
+        # value's metacharacters bare.
+        written = _split_windows_template(template)
+        filled = _substitute_placeholders(written, port, firmware_path)
+        tool_arguments = " ".join(
+            _quote_cmd_token(value, bool(_PLACEHOLDER.search(token)))
+            for token, value in zip(written, filled)
+        )
         command = f"{_quote_windows_argument(script)} {tool_arguments}".strip()
         # /v:off: with delayed expansion enabled in the registry, !VAR! would
         # expand inside the quotes as %VAR% does.
@@ -2090,10 +2079,9 @@ def _cmd_exe_arguments(
             f"WiFi flash tool name {script!r} contains whitespace, which "
             "cmd.exe cannot run reliably when started from WSL; rename it."
         )
-    tokens = [
-        token.replace("{port}", port).replace("{firmwarePath}", firmware_path)
-        for token in _split_windows_template(template)
-    ]
+    tokens = _substitute_placeholders(
+        _split_windows_template(template), port, firmware_path
+    )
     for token in tokens:
         # The split removes a quoted literal's quotes, and WSL re-quotes only
         # tokens with whitespace, so "C:\fw&calc.exe&rem\x" from the
@@ -2106,6 +2094,46 @@ def _cmd_exe_arguments(
                 "cmd.exe would interpret when started from WSL."
             )
     return ["/d", "/v:off", "/c", script] + tokens
+
+
+_PLACEHOLDER = re.compile(r"\{port\}|\{firmwarePath\}")
+
+
+def _substitute_placeholders(
+    tokens: List[str], port: str, firmware_path: str
+) -> List[str]:
+    """Fill the placeholders in already-split arguments, in one pass, so a
+    value that itself contains ``{firmwarePath}`` is not substituted again."""
+    values = {"{port}": port, "{firmwarePath}": firmware_path}
+    return [_PLACEHOLDER.sub(lambda m: values[m.group(0)], t) for t in tokens]
+
+
+def _split_posix_template(template: str) -> List[str]:
+    """Split an arguments template the way a POSIX shell reads it.
+
+    Raises ValueError for an unbalanced quote, while the request is still
+    being built, before the device is switched into update mode.
+    """
+    try:
+        return shlex.split(template)
+    except ValueError as exc:
+        raise ValueError(
+            f"WiFi flash arguments template {template!r} can't be split: {exc}"
+        ) from exc
+
+
+def _quote_cmd_token(token: str, had_placeholder: bool) -> str:
+    """One argument for the native cmd.exe line.
+
+    Values are always quoted, so cmd.exe metacharacters in them stay
+    literal; a template literal is quoted only when it needs it, so a
+    switch such as ``/p`` reaches the script exactly as written.
+    """
+    if had_placeholder or not token or any(
+        ch.isspace() or ch in "&|<>^()" for ch in token
+    ):
+        return _quote_windows_argument(token)
+    return token
 
 
 def _split_windows_template(template: str) -> List[str]:
@@ -2127,20 +2155,6 @@ def _split_windows_template(template: str) -> List[str]:
 _CMD_ALWAYS_UNSAFE = frozenset('%"')
 _CMD_METACHARACTERS = frozenset('&|<>^%!"')
 
-
-def _quote_crt_argument(value: str) -> str:
-    """Quote for a Windows program parsing its command line by the C runtime rules.
-
-    Unlike cmd.exe, the runtime treats backslashes before a double quote as
-    escapes: "C:\\bundle\\" would swallow the closing quote and the next
-    argument with it. Backslashes before a quote (including the closing one)
-    are doubled and an embedded quote becomes \\".
-    """
-    if value is None or value == "":
-        return '""'
-    quoted = re.sub(r'(\\*)"', r'\1\1\\"', value)
-    quoted = re.sub(r"(\\+)$", r"\1\1", quoted)
-    return f'"{quoted}"'
 
 
 def _quote_windows_argument(value: str) -> str:

@@ -1286,16 +1286,59 @@ class TestUpdateWifiModule:
         assert _anchor_to_cwd(dotted) == dotted
         assert os.path.realpath(_anchor_to_cwd(dotted)) == str(tmp_path / "releases" / "bundle")
 
-    @pytest.mark.skipif(os.name != "posix", reason="POSIX shlex quoting")
-    @pytest.mark.parametrize("value", ["/tmp/O'Brien/fw", "/tmp/a b/fw", '/tmp/q"x/fw', "plain"])
-    def test_quoted_arguments_survive_the_runners_split(self, value) -> None:
-        # Audit finding on #166 (round 9): an apostrophe in an anchored path
-        # was left unquoted and the shlex split raised "No closing quotation".
-        import shlex
+    @staticmethod
+    def _native_tool_request(firmware_dir: str, template: str):
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        options = _fast_options()
+        options.wifi_flash_tool_file_name = "flash-tool"
+        options.wifi_flash_tool_arguments_template = template
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=options,
+        )
+        os.makedirs(firmware_dir, exist_ok=True)
+        with open(os.path.join(firmware_dir, "flash-tool"), "w") as handle:
+            handle.write("#!/bin/sh\n")
+        return service, device, runner
 
-        from daqifi.firmware.update_service import _quote_argument
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX template split")
+    @pytest.mark.parametrize("template", ["--bundle {firmwarePath} /w", '--bundle "{firmwarePath}" /w'])
+    @pytest.mark.parametrize("name", ["O'Brien", "a b", 'q"x', "plain"])
+    def test_each_value_reaches_a_native_tool_as_one_argument(self, tmp_path, template, name) -> None:
+        # Audit findings on #166 (rounds 9 and 16): a quoted value was parsed
+        # again by the runner's split, and inside the template's own quotes
+        # an apostrophe raised "No closing quotation" after the device had
+        # entered update mode. The template is split first now.
+        firmware_dir = str(tmp_path / name)
+        service, device, runner = self._native_tool_request(firmware_dir, template)
 
-        assert shlex.split(f"--bundle {_quote_argument(value)} /w") == ["--bundle", value, "/w"]
+        service.update_wifi_module(device, firmware_dir)
+
+        assert runner.last_request.arguments == ["--bundle", firmware_dir, "/w"]
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX template split")
+    def test_unbalanced_template_fails_before_update_mode(self, tmp_path) -> None:
+        firmware_dir = str(tmp_path / "fw")
+        service, device, runner = self._native_tool_request(firmware_dir, '--bundle "{firmwarePath} /w')
+
+        with pytest.raises(FirmwareUpdateException) as exc_info:
+            service.update_wifi_module(device, firmware_dir)
+
+        assert "can't be split" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []
+        assert runner.last_request is None
+
+    def test_a_value_containing_a_placeholder_is_not_substituted_again(self) -> None:
+        from daqifi.firmware.update_service import _substitute_placeholders
+
+        assert _substitute_placeholders(
+            ["/p", "{port}", "/i", "{firmwarePath}"], "{firmwarePath}", r"C:\fw"
+        ) == ["/p", "{firmwarePath}", "/i", r"C:\fw"]
 
     def test_relative_firmware_path_is_made_absolute(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1611,6 +1654,17 @@ class TestUpdateWifiModule:
             "t.cmd", r'/p {port} /i "C:\a&b"', "P1", r"C:\fw", native_windows=True
         )
 
+    def test_a_placeholder_the_template_quoted_is_quoted_once_on_native_windows(self) -> None:
+        # Audit finding on #166 (round 16): '/i "{firmwarePath}"' became
+        # ""C:\fw&calc.exe&rem"", the quote pairs cancelled and cmd.exe ran
+        # calc.exe. Checked on real cmd.exe: the script gets the path intact.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        assert _cmd_exe_arguments(
+            "t.cmd", '/p {port} /i "{firmwarePath}" /w', "P1", r"C:\fw&calc.exe&rem",
+            native_windows=True,
+        ) == r'/d /v:off /s /c ""t.cmd" /p "P1" /i "C:\fw&calc.exe&rem" /w"'
+
     def test_cmd_exe_disables_delayed_expansion_on_every_host(self) -> None:
         # Audit finding on #166 (round 15): with EnableDelayedExpansion set in
         # the registry, !BUILD! in a quoted path expanded. Verified on real
@@ -1627,29 +1681,21 @@ class TestUpdateWifiModule:
             "t.cmd", "/i {firmwarePath}", "P1", r"C:\fw", native_windows=False
         )[:3] == ["/d", "/v:off", "/c"]
 
-    @pytest.mark.parametrize("value,expected", [
-        ("C:\\bundle\\", '"C:\\bundle\\\\"'),
-        ('a"b', '"a\\"b"'),
-        ('a\\"b', '"a\\\\\\"b"'),
-        ("C:\\a b\\x", '"C:\\a b\\x"'),
-        ("", '""'),
-    ])
-    def test_native_executable_arguments_follow_the_c_runtime_rules(self, value, expected) -> None:
-        # Audit finding on #166 (round 15): "C:\bundle\" ended in \", which
-        # a C-runtime program reads as an escaped quote, swallowing the next
-        # flag. Each expected line was checked on real Windows: sys.argv
-        # round-trips the value and the following "/w".
-        from daqifi.firmware.update_service import _quote_crt_argument
+    @pytest.mark.parametrize("value", ["C:\\bundle\\", 'a"b', 'a\\"b', "C:\\a b\\x\\", ""])
+    def test_native_windows_tool_arguments_go_as_a_list(self, value) -> None:
+        # Audit finding on #166 (round 15): "C:\bundle\" ended in \", which a
+        # C-runtime program reads as an escaped quote, swallowing the next
+        # flag. On Windows the arguments are now a list, which the runner
+        # joins with list2cmdline (the C-runtime rules); checked on real
+        # Windows that sys.argv round-trips each value and the next "/w".
+        from daqifi.firmware.update_service import (
+            _split_windows_template,
+            _substitute_placeholders,
+        )
 
-        assert _quote_crt_argument(value) == expected
-
-    def test_native_executable_template_uses_c_runtime_quoting(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import daqifi.firmware.update_service as update_service
-
-        monkeypatch.setattr(update_service.os, "name", "nt")
-        assert update_service._quote_argument("C:\\bundle\\") == '"C:\\bundle\\\\"'
+        assert _substitute_placeholders(
+            _split_windows_template('/i "{firmwarePath}" /w'), "P1", value
+        ) == ["/i", value, "/w"]
 
     def test_happy_path_sends_expected_commands_and_reports_progress(
         self,

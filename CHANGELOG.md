@@ -54,9 +54,16 @@ aims to follow [Semantic Versioning](https://semver.org/).
   expanded where delayed expansion is on in the registry; under WSL the
   arguments template's own literals are checked for cmd.exe
   metacharacters like the substituted values, and on native Windows a `%`
-  in the template is refused. A native flash executable's arguments are
-  quoted by the C-runtime rules, so a path ending in a backslash no
-  longer swallows the next argument (#161).
+  in the template is refused (#161).
+- The WiFi flash arguments template is split into arguments before the
+  port and firmware path are put in, each as one whole argument, so a
+  value is never parsed again: an apostrophe inside a quoted
+  `"{firmwarePath}"` no longer fails after the device entered update
+  mode, a placeholder the template already quoted is quoted once on the
+  cmd.exe line (nested quotes left `&` in the path bare), and a native
+  tool's arguments go as a list (C-runtime quoting, so a path ending in a
+  backslash no longer swallows the next argument). An unbalanced template
+  is refused before update mode (#161).
 - `SubprocessRunner` killed only the direct child on timeout, so a
   descendant holding the pipes kept `run()` blocked; the whole process
   tree is killed now (a process group on POSIX, a Job Object on Windows,
