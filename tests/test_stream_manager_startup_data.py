@@ -262,3 +262,20 @@ def test_an_empty_selection_names_the_device_channels_for_exports() -> None:
     assert sample.channels == {3: 1.5}
     assert stream.channels == [3] and stream.buffer.channels == [3]
     assert stream.buffer.to_dict()["channel_3"] == [1.5]
+
+
+# Audit round 7 on #180.
+
+def test_an_empty_selection_follows_the_enabled_channels_across_restarts() -> None:
+    fake = _FakeSerial(enabled_mask=0b1, on_start=_frame(msg_time_stamp=1, analog_in_data_float=[1.0]))
+    stream = _manager(fake, channels=[], sample_rate=10, format=0)
+    stream.start()
+    assert stream.read(1, timeout=1.0)[0].channels == {0: 1.0}
+    stream.stop()
+    fake.enabled_mask = 0b1000
+    fake.on_start = _frame(msg_time_stamp=2, analog_in_data_float=[3.0])
+    stream.start()
+    sample = stream.read(1, timeout=1.0)[0]
+    stream.stop()
+    assert sample.channels == {3: 3.0}
+    assert stream.channels == [3]

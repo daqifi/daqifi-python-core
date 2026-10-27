@@ -278,6 +278,9 @@ class StreamManager:
         # are O(chunk) instead of O(total) — at 50 kHz the bytes
         # path would copy the whole buffer on every poll.
         self._pb_buffer: bytearray = bytearray()
+        # An empty channel selection means "all enabled channels", kept as
+        # intent across restarts rather than frozen to the first session's.
+        self._all_channels = not self._channels
         # Channels enabled on the device when streaming started (ascending),
         # or None before the first start(). See _samples_from_pb_message.
         self._device_channels: Optional[List[int]] = None
@@ -375,9 +378,11 @@ class StreamManager:
             # channel list the caller asked for.
             self._device_channels = [bit for bit in range(mask.bit_length()) if mask >> bit & 1]
             enabled_count = len(self._device_channels)
-            if not self._channels:
-                # No selection means every enabled channel; record them so
-                # .channels and the buffer's exports name what samples carry.
+            if self._all_channels:
+                # No selection means every enabled channel, re-read on each
+                # start (the enabled set may change between sessions); record
+                # them so .channels and the buffer's exports name what samples
+                # carry.
                 self._channels = list(self._device_channels)
                 self._buffer.channels = list(self._device_channels)
             if enabled_count == 0:
