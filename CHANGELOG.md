@@ -20,6 +20,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- A protobuf frame over 1 KiB whose read ended right after its length
+  prefix was destroyed: the prefix was skipped as garbage and the body
+  decoded as junk frames. A large status frame over WiFi could hit it,
+  and an SD log whose 64 KiB read boundary landed there failed every
+  time. With no body byte yet the parser now waits; the field-tag check
+  still rejects garbage once a byte arrives (#164).
 - Package homepage URL pointed at a repository that does not exist.
 - PIC32 firmware update could erase a different board: a bootloader that was
   already enumerated before `SYSTem:FORceBoot` is no longer accepted; on Linux
