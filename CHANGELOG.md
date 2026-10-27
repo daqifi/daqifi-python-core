@@ -20,6 +20,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- The HID error messages told users to `pip install hid`, which is a
+  different library with an incompatible API (`hid.Device`); the code
+  needs the PyPI `hidapi` package (`hid.device()`). With the wrong package
+  installed, bootloader enumeration silently found nothing and opening a
+  device raised `AttributeError`. Both now raise an `ImportError` naming
+  `hidapi`, and a `daqifi[hid]` extra installs it.
 - Package homepage URL pointed at a repository that does not exist.
 - PIC32 firmware update could erase a different board: a bootloader that was
   already enumerated before `SYSTem:FORceBoot` is no longer accepted; on Linux
