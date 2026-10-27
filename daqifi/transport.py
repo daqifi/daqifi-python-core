@@ -156,10 +156,13 @@ class TcpStreamTransport:
         self._socket: Optional[socket.socket] = None
         self._stream: Optional[IO[bytes]] = None
         self._disposed = False
-        self._closing = False
         # Bumped on every successful connect, so a peer-close event raised
         # for one connection can be recognised as stale by a later one.
         self._session = 0
+        # The session already being closed (by us, or reported closed by
+        # the peer), so its EOF is reported once. Per session: a stale
+        # reader of an old connection must not mute the next one's EOF.
+        self._closed_session: Optional[int] = None
         self._status_handlers: List[Callable[[TransportStatusEventArgs], None]] = []
 
     @property
@@ -253,7 +256,6 @@ class TcpStreamTransport:
                 # Hand-off complete; subsequent failure paths should
                 # close via self._socket, not the local `sock`.
                 sock = None
-                self._closing = False
                 self._session += 1
                 session = self._session
                 self._stream = _SocketStream(  # type: ignore[assignment]
@@ -319,7 +321,7 @@ class TcpStreamTransport:
         disconnect_error: Optional[BaseException] = None
         # Our own shutdown below reads as end-of-stream to the consumer;
         # this keeps that from being reported as the device going away.
-        self._closing = True
+        self._closed_session = self._session
 
         # Shutdown both halves of the socket BEFORE closing it.
         # This wakes any consumer thread blocked in `stream.read()`
@@ -367,9 +369,9 @@ class TcpStreamTransport:
 
     def _on_peer_closed(self, session: int) -> None:
         """The device closed connection `session` (seen by a reader as EOF)."""
-        if self._closing or session != self._session:
+        if session != self._session or self._closed_session == session:
             return
-        self._closing = True
+        self._closed_session = session
         error = ConnectionResetError("The device closed the TCP connection.")
 
         def _notify_if_current() -> None:

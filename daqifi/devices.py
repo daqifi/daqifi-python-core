@@ -13,6 +13,7 @@ thread that delivers parsed protobuf messages via callback.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import queue
@@ -214,6 +215,13 @@ class DaqifiDevice:
         # setup or teardown of the next (re-entrant: status callbacks run
         # under it and may call back in).
         self._lifecycle_lock = threading.RLock()
+        # Status events raised while the lifecycle lock is held are queued
+        # and delivered once it is released: a handler that hands work to
+        # another thread (say, a reconnect) and waits for it would otherwise
+        # deadlock, since that thread needs the lock. RLock re-entry only
+        # helps the owning thread.
+        self._lifecycle_depth = threading.local()
+        self._pending_status_events: List[DeviceStatusEventArgs] = []
         self._text_exchange_lock_owner: Optional[int] = None
 
         if transport is not None:
@@ -302,10 +310,28 @@ class DaqifiDevice:
 
     # ---- lifecycle --------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _lifecycle(self):
+        """Hold the lifecycle lock; deliver queued status events after it."""
+        with self._lifecycle_lock:
+            depth = getattr(self._lifecycle_depth, "value", 0)
+            self._lifecycle_depth.value = depth + 1
+            try:
+                yield
+            finally:
+                self._lifecycle_depth.value = depth
+                pending: List[DeviceStatusEventArgs] = []
+                if depth == 0:
+                    pending, self._pending_status_events = (
+                        self._pending_status_events, []
+                    )
+        for evt in pending:
+            self._deliver_status_event(evt)
+
     def connect(
         self, retry_options: Optional[ConnectionRetryOptions] = None,
     ) -> None:
-        with self._lifecycle_lock:
+        with self._lifecycle():
             self._connect_locked(retry_options)
 
     def _connect_locked(
@@ -417,7 +443,7 @@ class DaqifiDevice:
             raise
 
     def disconnect(self) -> None:
-        with self._lifecycle_lock:
+        with self._lifecycle():
             self._disconnect_locked()
 
     def _disconnect_locked(self) -> None:
@@ -1296,7 +1322,7 @@ class DaqifiDevice:
         # that follows can't straddle a disconnect/connect on another
         # thread, and a loss seen while connect() is still running is
         # applied after it, not overwritten by its final "Connected".
-        with self._lifecycle_lock:
+        with self._lifecycle():
             self._handle_transport_loss(args)
 
     def _handle_transport_loss(self, args: TransportStatusEventArgs) -> None:
@@ -1337,6 +1363,12 @@ class DaqifiDevice:
             return
         self._status = value
         evt = DeviceStatusEventArgs(status=value)
+        if getattr(self._lifecycle_depth, "value", 0) > 0:
+            self._pending_status_events.append(evt)
+            return
+        self._deliver_status_event(evt)
+
+    def _deliver_status_event(self, evt: DeviceStatusEventArgs) -> None:
         for h in list(self._status_handlers):
             try:
                 h(evt)

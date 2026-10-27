@@ -272,3 +272,70 @@ def test_peer_closing_during_connect_is_not_overwritten_by_connected(monkeypatch
     finally:
         device.disconnect()
         server.close()
+
+
+def test_status_handler_can_wait_for_a_reconnect_on_another_thread():
+    # Audit finding on #167 (round 3): status handlers ran under the
+    # lifecycle lock, so a handler that hands a reconnect to a worker and
+    # waits for it deadlocked (the worker needs the lock).
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    finished = threading.Event()
+    joined_in_time = []
+
+    def _on_status(args):
+        if args.status == ConnectionStatus.Lost:
+            def _reconnect():
+                device.disconnect()
+                device.connect()
+                finished.set()
+
+            worker = threading.Thread(target=_reconnect, daemon=True)
+            worker.start()
+            worker.join(3)
+            # With the deadlock, the worker can't finish until this handler
+            # gives up waiting and returns.
+            joined_in_time.append(not worker.is_alive())
+
+    device.add_status_changed(_on_status)
+    try:
+        first_conn = fake.conn
+        fake._accepted.clear()
+        threading.Thread(target=fake._serve, daemon=True).start()
+        first_conn.shutdown(socket.SHUT_RDWR)
+        assert finished.wait(8)
+        assert _wait_until(lambda: joined_in_time)  # the handler records after its join
+        assert joined_in_time == [True]
+        fake.wait_accepted()
+        assert device.status == ConnectionStatus.Connected
+    finally:
+        device.disconnect()
+        fake.close()
+
+
+def test_a_stale_eof_report_does_not_mute_the_next_connection():
+    # Audit finding on #167 (round 3): an old reader's late EOF report set a
+    # transport-wide "closing" flag after the reconnect, so the new
+    # connection's own EOF was then ignored.
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    try:
+        old_session = transport.session
+        fake._accepted.clear()
+        threading.Thread(target=fake._serve, daemon=True).start()
+        device.disconnect()
+        device.connect()
+        fake.wait_accepted()
+        # The old reader, reporting late: it passed its session check while
+        # its connection was current, and marks it closed only now.
+        current = transport._session
+        transport._session = old_session
+        try:
+            transport._on_peer_closed(old_session)
+        finally:
+            transport._session = current
+        fake.conn.shutdown(socket.SHUT_RDWR)
+        assert _wait_until(lambda: device.status == ConnectionStatus.Lost)
+    finally:
+        device.disconnect()
+        fake.close()
