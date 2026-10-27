@@ -15,7 +15,7 @@ platform and skip the import entirely.
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Iterable, List, Optional, Protocol, Sequence, runtime_checkable
 
 from .comm import HidDeviceEnumerator, HidDeviceInfo
 
@@ -31,6 +31,33 @@ class HidPlatform(Protocol):
 
     def enumerate_devices(self) -> Iterable[HidDeviceInfo]:
         ...
+
+
+def import_hidapi(purpose: str, alternative: str) -> Any:
+    """The ``hid`` module of the PyPI ``hidapi`` package (cython-hidapi).
+
+    The unrelated PyPI ``hid`` package installs a module of the same name
+    with a different API (``hid.Device``, not ``hid.device()``) and needs a
+    system libhidapi, so it is recognised and refused with the fix.
+    """
+    install = (
+        "`pip install hidapi` (or `pip install daqifi[hid]`). "
+        "The PyPI package named 'hid' is a different library that also "
+        "installs a module named 'hid'; if it is installed, uninstall it "
+        "first."
+    )
+    try:
+        import hid  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ImportError(
+            f"{purpose} requires the 'hidapi' package: {install} {alternative}"
+        ) from exc
+    if not callable(getattr(hid, "device", None)):
+        raise ImportError(
+            f"{purpose} requires the 'hidapi' package, but the installed "
+            f"'hid' module is not it: {install} {alternative}"
+        )
+    return hid
 
 
 def _describe_filter(vendor_id: Optional[int], product_id: Optional[int]) -> str:
@@ -53,14 +80,11 @@ class HidApiPlatform:
     """
 
     def enumerate_devices(self) -> Iterable[HidDeviceInfo]:
-        try:
-            import hid  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise ImportError(
-                "HID enumeration requires the 'hid' package "
-                "(`pip install hid`). Pass a custom HidPlatform to "
-                "HidLibraryDeviceEnumerator to avoid this dependency."
-            ) from exc
+        hid = import_hidapi(
+            "HID enumeration",
+            "Pass a custom HidPlatform to HidLibraryDeviceEnumerator to "
+            "avoid this dependency.",
+        )
 
         for entry in hid.enumerate():
             path = entry.get("path") or b""

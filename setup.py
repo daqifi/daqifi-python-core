@@ -133,6 +133,12 @@ setup(
         "testing": [
             "pyyaml>=5.4",
         ],
+        # HID transport and enumeration (the PIC32 bootloader). The PyPI
+        # package is "hidapi" (cython-hidapi, module "hid", hid.device());
+        # the unrelated "hid" package has a different API.
+        "hid": [
+            "hidapi>=0.14",
+        ],
     },
     entry_points={
         "console_scripts": [
