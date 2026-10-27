@@ -408,6 +408,8 @@ def _is_likely_text_command(data: bytes) -> bool:
         or head_upper.startswith("SYST")
         or head_upper.startswith("CONF")
         or head_upper.startswith("READ")
+        or data.endswith(b"\r\n")
+        or data.endswith(b"\n")
     )
 
 
@@ -421,23 +423,6 @@ def _is_likely_protobuf_data(data: bytes) -> bool:
         if (b & 0x07) <= 5 and (b >> 3) > 0:
             return True
     return False
-
-
-def _frames_tile(data: bytes, end: int, frame_count: int) -> bool:
-    """True if ``data[:end]`` is exactly ``frame_count`` length-prefixed
-    frames back to back from the first byte, with nothing skipped."""
-    position, frames = 0, 0
-    while position < end:
-        length, prefix_bytes, _ = _try_read_length_prefix(data[position:])
-        if length is None or length <= 0:
-            return False
-        position += prefix_bytes + length
-        frames += 1
-    return position == end and frames == frame_count
-
-
-def _is_printable_line(line: object) -> bool:
-    return isinstance(line, str) and line.replace("\t", "").isprintable()
 
 
 class CompositeMessageParser:
@@ -477,49 +462,40 @@ class CompositeMessageParser:
             return [], 0
 
         hint = _detect_message_type(data)
-        # A parser's progress without a message is kept only where it can't
-        # destroy the other format: blank lines or malformed prefixes it may
-        # skip, so the consumer's buffer doesn't grow without bound (Qodo PR
-        # 17 pass 6 #1). A fallback that "resyncs" over bytes of the other
-        # format loses them: the protobuf parser ate the first byte of a SCPI
-        # reply split across reads (b'0,' then b'"No error"\r\n', #164).
-        if hint == _MessageTypeHint.LIKELY_TEXT:
-            wrapped, consumed = self._try_text(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-            wrapped, consumed = self._try_protobuf(data)
-            return (wrapped, consumed) if wrapped else ([], 0)
+
+        # Critical: return whenever EITHER messages OR consumed > 0.
+        # A parser may legitimately advance through ignorable bytes
+        # (blank lines, malformed prefixes) without producing a
+        # message; dropping that progress causes the consumer's
+        # buffer to grow without bound (Qodo PR 17 pass 6 #1).
         if hint == _MessageTypeHint.LIKELY_PROTOBUF:
             wrapped, consumed = self._try_protobuf(data)
             if wrapped or consumed:
                 return wrapped, consumed
+
+        if hint == _MessageTypeHint.LIKELY_TEXT:
             wrapped, consumed = self._try_text(data)
-            return (wrapped, consumed) if wrapped or consumed else ([], 0)
-        # Uncertain. Both parsers are lenient enough to accept the other's
-        # bytes, so each must show more than "I produced something":
-        #  1. Text wins when it reads the whole buffer as complete lines of
-        #     printable text (b"\t1.23456\r\n", "µV\r\n"). A binary frame
-        #     ending in CR LF contains control bytes, so it doesn't qualify.
-        #  2. Protobuf wins when its frames run back to back from the first
-        #     byte up to what it consumed: nothing skipped (it skipped over
-        #     b"0\r\n" to reach frames behind it), and a trailing partial
-        #     frame left for the next read is fine.
-        #  3. Otherwise text with its progress (a blank line), and only then
-        #     the protobuf parser's resync progress so garbage drains; frames
-        #     it decoded are never dropped as mere progress.
-        text_wrapped, text_consumed = self._try_text(data)
-        if (
-            text_wrapped
-            and text_consumed == len(data)
-            and all(_is_printable_line(m.data) for m in text_wrapped)
-        ):
-            return text_wrapped, text_consumed
-        pb_wrapped, pb_consumed = self._try_protobuf(data)
-        if pb_wrapped and _frames_tile(data, pb_consumed, len(pb_wrapped)):
-            return pb_wrapped, pb_consumed
-        if text_wrapped or text_consumed:
-            return text_wrapped, text_consumed
-        return ([], pb_consumed) if not pb_wrapped else ([], 0)
+            if wrapped or consumed:
+                return wrapped, consumed
+            # The protobuf fallback counts only with a decoded frame: its
+            # "progress" resyncing over the start of a SCPI reply split
+            # across reads (b'0,' then b'"No error"\r\n') ate its first
+            # byte (#164 item 5).
+            wrapped, consumed = self._try_protobuf(data)
+            return (wrapped, consumed) if wrapped else ([], 0)
+
+        # Heuristics uncertain or first attempt failed -- try the other.
+        if hint != _MessageTypeHint.LIKELY_TEXT:
+            wrapped, consumed = self._try_text(data)
+            if wrapped or consumed:
+                return wrapped, consumed
+
+        if hint != _MessageTypeHint.LIKELY_PROTOBUF:
+            wrapped, consumed = self._try_protobuf(data)
+            if wrapped or consumed:
+                return wrapped, consumed
+
+        return [], 0
 
     def _try_text(self, data: bytes) -> Tuple[List[ObjectInboundMessage], int]:
         text_messages, consumed = self._text_parser.parse_messages(data)

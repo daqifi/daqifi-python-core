@@ -1,4 +1,7 @@
-"""#164 items 4-5: CompositeMessageParser routing (port of upstream #457/#810)."""
+"""#164 item 5: CompositeMessageParser must not let the protobuf fallback eat
+the start of a SCPI reply split across reads. Item 4 (a protobuf frame ending
+in CR LF routed as text) is recorded on #164 as a pre-existing trade-off; the
+guards below pin cases that four audit rounds of routing changes broke."""
 
 import pytest
 
@@ -30,18 +33,8 @@ def _frame(**fields) -> bytes:
     return bytes([len(body)]) + body
 
 
-def test_a_frame_ending_in_crlf_is_parsed_as_protobuf() -> None:
-    # Item 4: digital mask 0x0A0D serializes to a frame ending 0d0a, which
-    # the trailing-line-ending heuristic sent to the text parser.
-    frame = _frame(msg_time_stamp=1, digital_data=b"\r\n")
-    assert frame.hex() == "0608012a020d0a"
-    out = _feed([frame])
-    assert len(out) == 1 and out[0].msg_time_stamp == 1 and out[0].digital_data == b"\r\n"
 
 
-def test_three_frames_the_last_ending_in_crlf_are_all_kept() -> None:
-    frames = _frame(msg_time_stamp=1) + _frame(msg_time_stamp=2) + _frame(msg_time_stamp=3, digital_data=b"\r\n")
-    assert [m.msg_time_stamp for m in _feed([frames])] == [1, 2, 3]
 
 
 @pytest.mark.parametrize("first", [b"0,", b"0,\"No", b"-200,\"Exec", b"SYST:ERR? 0"])
@@ -58,12 +51,6 @@ def test_text_lines_and_scpi_echo_still_route_to_text() -> None:
     assert _feed([b"*IDN?\r\nDAQiFi,Nq1,1,01-02\r\n"]) == ["*IDN?", "DAQiFi,Nq1,1,01-02"]
 
 
-def test_a_null_heavy_status_frame_with_an_echoed_command_routes_to_protobuf() -> None:
-    # Upstream #268: echoed "SYST..." text before a binary status frame
-    # terminated by CRLF; null density decides.
-    frame = _frame(device_sn=0, analog_in_data=[0] * 40, device_pn="Nq1")
-    out = _feed([frame + b"\r\n"])
-    assert any(getattr(m, "device_pn", None) == "Nq1" for m in out)
 
 
 # Audit round 1 on #177: the routing change must not break what the existing
