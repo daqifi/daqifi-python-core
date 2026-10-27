@@ -251,3 +251,54 @@ def test_an_interrupt_before_the_worker_is_visibly_alive_keeps_it(monkeypatch) -
         stream.start(callback=lambda sample: None)
     release.set()
     _wait(lambda: not stream._thread or not stream._thread.is_alive())
+
+
+def test_a_worker_whose_bootstrap_resumes_after_a_restart_never_reads(monkeypatch) -> None:
+    # Audit findings on #178 (round 6): an interrupt inside Thread.start()
+    # before bootstrap, then stop() and start(): the stale worker came up
+    # later beside the new one. Each session now has its own stop event, so
+    # the stale worker finds its event set and never reads.
+    stream, fake = _manager()
+    gate = threading.Event()
+    real_start = threading.Thread.start
+    stale_calls = []
+
+    def gated_start(thread):
+        timer = threading.Timer(0, lambda: (gate.wait(10), real_start(thread)))
+        real_start(timer)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading.Thread, "start", gated_start)
+    with pytest.raises(KeyboardInterrupt):
+        stream.start(callback=stale_calls.append)
+    monkeypatch.setattr(threading.Thread, "start", real_start)
+    stream.stop()  # the stale worker hasn't come up yet
+    deliverers = set()
+
+    def fresh(sample):
+        deliverers.add(threading.get_ident())
+
+    stream.start(callback=fresh)
+    gate.set()  # now the stale worker's bootstrap resumes
+    time.sleep(0.5)  # both would be delivering by now
+    stream.stop()
+    # Workers call the manager's current callback, so a stale reader would
+    # show up as a second thread delivering to the new session.
+    assert stale_calls == []
+    assert len(deliverers) == 1
+
+
+def test_stop_sends_stop_when_join_refuses_a_bootstrapping_thread(monkeypatch) -> None:
+    # Round 6, medium: ident is set before CPython marks the thread started;
+    # join() then raises "cannot join thread before it is started" and STOP
+    # was never sent.
+    stream, fake = _manager()
+    stream.start(callback=lambda sample: None)
+
+    def refusing_join(self, timeout=None):
+        raise RuntimeError("cannot join thread before it is started")
+
+    monkeypatch.setattr(threading.Thread, "join", refusing_join)
+    stream.stop()
+    monkeypatch.undo()
+    assert _stops(fake) == 1 and not fake.streaming
