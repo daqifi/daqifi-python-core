@@ -38,6 +38,13 @@ aims to follow [Semantic Versioning](https://semver.org/).
   which ones a sample keeps (#162).
 - `analog_in_data_ts` is treated as an offset to `msg_time_stamp`, as
   `DaqifiOutMessage.proto` defines it, not as an absolute time (#162).
+- `StreamManager.stop()` returned without sending STOP once a callback
+  exception had moved the state to ERROR, leaving the board streaming; it
+  forgot a worker still running after its 2 s join, so a restart ran two
+  readers on one port; and called from inside the callback it tried to
+  join its own thread and never sent STOP. stop() now sends STOP whenever
+  the device was started, doesn't join from the worker itself, and
+  start() refuses while a previous worker is still running (#162).
 - SD-card operations on one device could interleave across threads: a raw
   capture (list, delete, download) didn't take the text-exchange lock, so a
   listing could switch the SPI bus under a download and read its reply off
@@ -111,6 +118,9 @@ aims to follow [Semantic Versioning](https://semver.org/).
   runs, and the interrupt is re-raised afterwards (#161).
 - README: a bootloader that has sat idle stops answering (Windows selective
   suspend); the updater then stops before ERASE (#161).
+- README: the idle bootloader is suspended about 5–6 s after it enumerates
+  (11 bench trials), not about 37 s as first stated; see
+  daqifi-nyquist-firmware #1172 (#174).
 - `SubprocessRunner` killed only the direct child on timeout, so a
   descendant holding the pipes kept `run()` blocked; the whole process
   tree is killed now (a process group on POSIX, a Job Object on Windows,
