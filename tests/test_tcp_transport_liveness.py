@@ -802,3 +802,53 @@ def test_stream_write_returns_bytes_written_not_items():
     finally:
         transport.disconnect()
         server.close()
+
+
+def test_concurrent_connects_leave_the_consumer_on_the_transports_socket(monkeypatch):
+    # Audit finding on #167 (round 11): two threads connecting at once each
+    # opened a socket; the slower one's replaced the transport's after the
+    # other had installed the consumer, so the consumer read one socket
+    # while send() wrote another.
+    import daqifi.transport as transport_module
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(5)
+    conns = []
+    threading.Thread(
+        target=lambda: [conns.append(server.accept()[0]) for _ in range(2)],
+        daemon=True,
+    ).start()
+
+    real_socket = transport_module.socket.socket
+    slow_once = []
+
+    class _SlowFirstSocket(real_socket):
+        def connect(self, address):
+            if not slow_once:
+                slow_once.append(True)
+                time.sleep(0.5)
+            return super().connect(address)
+
+    monkeypatch.setattr(transport_module.socket, "socket", _SlowFirstSocket)
+    transport = TcpStreamTransport("127.0.0.1", server.getsockname()[1])
+    device = DaqifiDevice("fake", transport=transport, message_factory=lambda b: bytes(b))
+    try:
+        first = threading.Thread(target=device.connect)
+        first.start()
+        time.sleep(0.1)  # the first thread is inside its slow socket connect
+        device.connect()
+        first.join(5)
+        assert device.status == ConnectionStatus.Connected
+        assert device._consumer is not None and device._consumer.is_running
+        assert device._consumer._stream is transport.stream
+        assert len(conns) == 1  # one socket opened, not two
+        received = []
+        device._consumer.add_message_received(received.append)
+        conns[0].sendall(bytes([3, 0x08, 0x01, 0x10]))
+        assert _wait_until(lambda: len(received) == 1)
+    finally:
+        device.disconnect()
+        server.close()
+        for conn in conns:
+            conn.close()
