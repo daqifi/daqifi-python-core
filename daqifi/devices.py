@@ -2447,18 +2447,20 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     f"{self._SD_DOWNLOAD_TIMEOUT_S:.0f}s "
                     f"({bytes_written} bytes written, no EOF marker)."
                 )
-            if now >= idle_deadline:
-                raise TimeoutError(
-                    f"SD card file download stalled for "
-                    f"{self._SD_DOWNLOAD_IDLE_TIMEOUT_S:.0f}s with no "
-                    f"data ({bytes_written} bytes written, no EOF marker)."
-                )
             in_waiting = getattr(raw_stream, "in_waiting", 0) or 0
-            if not in_waiting:
-                time.sleep(self._SD_DOWNLOAD_POLL_INTERVAL_S)
-                continue
-            chunk = raw_stream.read(min(in_waiting, self._SD_DOWNLOAD_BUFFER_BYTES))
+            chunk = (
+                raw_stream.read(min(in_waiting, self._SD_DOWNLOAD_BUFFER_BYTES))
+                if in_waiting else b""
+            )
             if not chunk:
+                # Idle means the line had nothing to read, so it's checked
+                # only here: data already buffered is never refused.
+                if now >= idle_deadline:
+                    raise TimeoutError(
+                        f"SD card file download stalled for "
+                        f"{self._SD_DOWNLOAD_IDLE_TIMEOUT_S:.0f}s with no "
+                        f"data ({bytes_written} bytes written, no EOF marker)."
+                    )
                 time.sleep(self._SD_DOWNLOAD_POLL_INTERVAL_S)
                 continue
             # Reset only the idle deadline on incoming data — the total
@@ -2493,6 +2495,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 _write_all(destination_stream, writable, total_deadline)
                 bytes_written += len(writable)
                 trailing = bytearray(combined[len(combined) - marker_len:])
+                # Time spent waiting on the destination isn't the line
+                # being idle (#163 audit): restart the idle clock after it.
+                idle_deadline = time.monotonic() + self._SD_DOWNLOAD_IDLE_TIMEOUT_S
             else:
                 trailing = bytearray(combined)
 
