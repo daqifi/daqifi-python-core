@@ -1934,12 +1934,16 @@ class SdCardJsonFileParser:
                 samples=iter(()),
             )
 
-        config = _infer_json_configuration(lines[0], options)
+        # The firmware writes each sample object across several lines (and a
+        # {"meta":...} header first), so the file is read as a sequence of
+        # JSON objects, not one object per line (#163).
+        objects = list(_iter_json_objects("\n".join(lines)))
+        config = _infer_json_configuration(objects, options)
         if config.timestamp_frequency == 0 and options.fallback_timestamp_frequency > 0:
             config = _replace_timestamp_frequency(
                 config, options.fallback_timestamp_frequency
             )
-        samples = _produce_json_samples(lines, config, file_created_date, options)
+        samples = _produce_json_samples(objects, config, file_created_date, options)
         return SdCardLogSession(
             file_name=file_name,
             file_created_date=file_created_date,
@@ -1963,34 +1967,101 @@ class SdCardJsonFileParser:
             )
 
 
+def _iter_json_objects(text: str) -> Iterator[Tuple[Any, int]]:
+    """Yield ``(object, end_offset)`` for each JSON value in ``text``,
+    whatever the line breaks between and inside them. Undecodable text
+    (a truncated last sample, stray bytes) is skipped up to the next
+    ``{``."""
+    import json
+
+    decoder = json.JSONDecoder()
+    position, length = 0, len(text)
+    while position < length:
+        while position < length and text[position].isspace():
+            position += 1
+        if position >= length:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, position)
+        except ValueError:
+            nxt = text.find("{", position + 1)
+            if nxt < 0:
+                break
+            position = nxt
+            continue
+        yield obj, end
+        position = end
+
+
+def _json_meta(obj: Any) -> Optional[dict]:
+    meta = obj.get("meta") if isinstance(obj, dict) else None
+    return meta if isinstance(meta, dict) else None
+
+
+def _try_parse_json_sample(
+    obj: Any,
+) -> Optional[Tuple[int, List[float], Optional[List[int]], int]]:
+    """``(timestamp, analog_values, channels, digital_data)`` from one sample
+    object, or None if it isn't one.
+
+    Two shapes: the firmware's (JSON_Encoder.c) ``{"ts":t, "ai":[{"ch":n,
+    "val":v},...], "di":[{"ts":t, "mask":m, "val":b},...]}``, whose analog
+    entries name their channel, and the older ``{"ts":t, "analog":[v,...],
+    "digital":"AB-CD"}`` (upstream's TryParseJsonLine), positional.
+    ``channels`` is None for the positional shape."""
+    if not isinstance(obj, dict) or _json_meta(obj) is not None:
+        return None
+    ts_raw = obj.get("ts")
+    if not isinstance(ts_raw, int) or isinstance(ts_raw, bool) or not 0 <= ts_raw <= 0xFFFFFFFF:
+        return None
+    analog_values: List[float] = []
+    channels: Optional[List[int]] = None
+    digital_data = 0
+    if "ai" in obj or "di" in obj:
+        channels = []
+        for entry in obj.get("ai") or []:
+            if not isinstance(entry, dict):
+                return None
+            ch, val = entry.get("ch"), entry.get("val")
+            if (
+                not isinstance(ch, int) or isinstance(ch, bool)
+                or isinstance(val, bool) or not isinstance(val, (int, float))
+            ):
+                return None
+            channels.append(ch)
+            analog_values.append(float(val))
+        digital = obj.get("di") or []
+        if digital:
+            last = digital[-1]  # the latest port state in this period
+            val = last.get("val") if isinstance(last, dict) else None
+            if isinstance(val, int) and not isinstance(val, bool):
+                digital_data = val & 0xFFFFFFFF
+        return ts_raw, analog_values, channels, digital_data
+    analog_raw = obj.get("analog")
+    if not isinstance(analog_raw, list):
+        return None
+    for v in analog_raw:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        analog_values.append(float(v))
+    digital_raw = obj.get("digital")
+    if isinstance(digital_raw, str) and digital_raw:
+        digital_data = _parse_digital_hex_string(digital_raw)
+    return ts_raw, analog_values, None, digital_data
+
+
 def _try_parse_json_line(line: str) -> Optional[Tuple[int, List[float], int]]:
-    """Parse one JSONL row into ``(timestamp, analog_values,
-    digital_data)`` or None on malformed input. Matches the upstream
-    ``TryParseJsonLine`` — any exception → skip line."""
+    """One JSON sample on one line (kept for callers of the old API)."""
     import json
 
     try:
-        obj = json.loads(line)
-        if not isinstance(obj, dict):
-            return None
-        ts_raw = obj.get("ts")
-        if not isinstance(ts_raw, int) or isinstance(ts_raw, bool) or ts_raw < 0 or ts_raw > 0xFFFFFFFF:
-            return None
-        analog_raw = obj.get("analog")
-        if not isinstance(analog_raw, list):
-            return None
-        analog_values: List[float] = []
-        for v in analog_raw:
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                return None
-            analog_values.append(float(v))
-        digital_data = 0
-        digital_raw = obj.get("digital")
-        if isinstance(digital_raw, str) and digital_raw:
-            digital_data = _parse_digital_hex_string(digital_raw)
-        return ts_raw, analog_values, digital_data
+        parsed = _try_parse_json_sample(json.loads(line))
     except Exception:
         return None
+    if parsed is None:
+        return None
+    ts, values, _channels, digital = parsed
+    return ts, values, digital
 
 
 def _parse_digital_hex_string(hex_string: str) -> int:
@@ -2013,27 +2084,32 @@ def _parse_digital_hex_string(hex_string: str) -> int:
 
 
 def _infer_json_configuration(
-    first_line: str,
+    objects: List[Tuple[Any, int]],
     options: SdCardParseOptions,
 ) -> SdCardDeviceConfiguration:
-    """Infer the analog channel count from the first JSONL row, then
-    merge with the caller's override (which fills in resolution /
-    calibration / port_range for scaling). Mirrors the upstream
-    ``InferConfiguration``.
-
-    JSONL has no in-band tick-rate header, so the inferred config
-    leaves ``timestamp_frequency=0`` and lets the merge / fallback
-    chain decide the final value (override → fallback). Same
-    three-tier precedence as the protobuf and CSV parsers.
-    """
-    parsed = _try_parse_json_line(first_line)
-    analog_count = len(parsed[1]) if parsed is not None else 0
+    """Device metadata from the firmware's leading {"meta":...} header
+    (device name, serial, tick rate) when present, and the analog channel
+    count from the first sample; then merged with the caller's override,
+    which supplies resolution/calibration/range for scaling. Same
+    precedence as the CSV parser: file, then override, then fallback."""
+    meta: dict = {}
+    analog_count = 0
+    for obj, _end in objects[:2]:
+        found = _json_meta(obj)
+        if found is not None:
+            meta = found
+            continue
+        parsed = _try_parse_json_sample(obj)
+        if parsed is not None:
+            analog_count = len(parsed[1])
+            break
+    tick = meta.get("tick_hz")
     inferred = SdCardDeviceConfiguration(
         analog_port_count=analog_count,
-        digital_port_count=0,  # cannot infer from JSONL data
-        timestamp_frequency=0,  # fallback applied AFTER override merge
-        device_serial_number=None,
-        device_part_number=None,
+        digital_port_count=0,
+        timestamp_frequency=tick if isinstance(tick, int) and tick > 0 else 0,
+        device_serial_number=meta.get("sn") if isinstance(meta.get("sn"), str) else None,
+        device_part_number=meta.get("dev") if isinstance(meta.get("dev"), str) else None,
         firmware_revision=None,
         calibration_values=None,
     )
@@ -2041,7 +2117,7 @@ def _infer_json_configuration(
 
 
 def _produce_json_samples(
-    lines: List[str],
+    objects: List[Tuple[Any, int]],
     config: SdCardDeviceConfiguration,
     file_created_date: Optional[datetime],
     options: SdCardParseOptions,
@@ -2055,18 +2131,18 @@ def _produce_json_samples(
     lines_processed = 0
     bytes_read = 0
     progress = options.progress
-    total_bytes = sum(len(line) + 1 for line in lines)
+    total_bytes = objects[-1][1] if objects else 0
 
-    for line in lines:
+    for obj, end in objects:
         lines_processed += 1
-        bytes_read += len(line) + 1
+        bytes_read = end
 
-        parsed = _try_parse_json_line(line)
+        parsed = _try_parse_json_sample(obj)
         if parsed is None:
             continue
-        ts, raw_analog, digital_data = parsed
+        ts, raw_analog, channels, digital_data = parsed
         analog_values = _scale_raw_analog_values(
-            [int(v) for v in raw_analog], config
+            [int(v) for v in raw_analog], config, channels
         )
 
         absolute_time = base_time

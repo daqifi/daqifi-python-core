@@ -25,6 +25,13 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- SD JSON logs written by the firmware parsed to no samples: the parser
+  expected one object per line with an `analog` key, but the firmware
+  writes a `{"meta":...}` header and then each sample object across several
+  lines with `"ai":[{"ch":n,"val":v},...]` and `"di":[...]`. The file is now
+  read as a sequence of JSON objects; the header supplies the tick rate
+  and device name, analog values are calibrated by their `ch` number, and
+  the old one-line `analog` form still parses (#163).
 - SD logs: consecutive frames with the same timestamp were merged even when
   each carried its own analog data, keeping only the first frame's values;
   only complementary frames (the firmware's separate analog and digital
