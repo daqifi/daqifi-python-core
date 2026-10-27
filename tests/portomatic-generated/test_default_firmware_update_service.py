@@ -326,6 +326,21 @@ def _build_pic32_service(
     )
 
 
+from daqifi.firmware.update_service import (  # noqa: E402  (before the fixture patches it)
+    _list_usb_serial_ports as _real_list_usb_serial_ports,
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_application_ports_on_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The several-boards refusal lists the host's real serial ports; a board
+    # plugged into the machine running the suite would otherwise refuse
+    # every update test. Tests of the refusal override this.
+    import daqifi.firmware.update_service as update_service
+
+    monkeypatch.setattr(update_service, "_list_usb_serial_ports", lambda vid, pid: [])
+
+
 # ---- Construction validation --------------------------------------------
 
 
@@ -1139,6 +1154,171 @@ class TestUpdateFirmwareFailureModes:
 
 
 _FAKE_CMD_EXE = "/fake/bin/cmd.exe"
+
+
+class TestSeveralBoardsAttached:
+    # Operator ruling 2026-10-27 (4=C): with more than one DAQiFi board on
+    # USB at the start, a PIC32 update refuses before sending anything; a
+    # single board goes ahead.
+
+    @staticmethod
+    def _service(hid, bootloaders_before, monkeypatch, application_ports):
+        # application_ports: one listing for every scan, or a list of
+        # listings returned scan by scan.
+        import daqifi.firmware.update_service as update_service
+
+        scans = (
+            iter(application_ports)
+            if application_ports and isinstance(application_ports[0], list)
+            or application_ports and application_ports[0] is None
+            else None
+        )
+
+        def _list(vid, pid):
+            assert (vid, pid) == (0x04D8, 0xF794)
+            return next(scans) if scans is not None else application_ports
+
+        monkeypatch.setattr(update_service, "_list_usb_serial_ports", _list)
+        monkeypatch.setattr(update_service, "_list_serial_port_names", lambda: frozenset())
+        ours = HidDeviceInfo(0x04D8, 0x003C, "path-a", None, "Bootloader")
+        return _build_pic32_service(
+            hid,
+            _FakeHidEnumerator([bootloaders_before, bootloaders_before + [ours]]),
+            _FakeBootloaderProtocol([bytes([0xA1])]),
+        )
+
+    def _assert_refused_before_anything_was_sent(self, service, device, hid) -> str:
+        hex_path = _make_temp_hex()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+        assert exc_info.value.failed_state == FirmwareUpdateState.PREPARING_DEVICE
+        assert device.sent_commands == []
+        assert hid._connect_calls == 0
+        return str(exc_info.value.__cause__)
+
+    def test_two_boards_in_their_application_are_refused(self, monkeypatch) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        service = self._service(hid, [], monkeypatch, ["TEST-PORT-1", "TEST-PORT-2"])
+
+        message = self._assert_refused_before_anything_was_sent(service, device, hid)
+        assert "2 DAQiFi boards" in message
+        assert "TEST-PORT-1" in message and "TEST-PORT-2" in message
+        assert "Disconnect every board except the one being updated" in message
+
+    def test_a_board_left_in_bootloader_mode_counts(self, monkeypatch) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        stale = HidDeviceInfo(0x04D8, 0x003C, "path-x", None, "Bootloader")
+        service = self._service(hid, [stale], monkeypatch, ["TEST-PORT-1"])
+
+        message = self._assert_refused_before_anything_was_sent(service, device, hid)
+        assert "1 in bootloader mode" in message
+
+    def test_a_single_board_goes_ahead(self, monkeypatch) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        service = self._service(hid, [], monkeypatch, ["TEST-PORT-1"])
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+        assert hid.connected_path == "path-a"
+
+    def test_an_unlistable_serial_bus_is_refused(self, monkeypatch) -> None:
+        # Audit finding on #168 (round 1): a failed listing counted as no
+        # application boards, so two attached boards passed the check.
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        service = self._service(hid, [], monkeypatch, [None, None, None])
+
+        message = self._assert_refused_before_anything_was_sent(service, device, hid)
+        assert "Could not list serial ports" in message
+
+    def test_a_listing_that_fails_once_is_retried(self, monkeypatch) -> None:
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        for reply in ([0x01, 0x10], [0x01, 0x02], [0x01, 0x03], [0x01, 0x10]):
+            hid.enqueue_read(bytes(reply))
+        service = self._service(
+            hid, [], monkeypatch, [None, ["TEST-PORT-1"], ["TEST-PORT-1"]]
+        )
+
+        hex_path = _make_temp_hex()
+        try:
+            service.update_firmware(device, hex_path)
+        finally:
+            os.remove(hex_path)
+        assert service.current_state == FirmwareUpdateState.COMPLETE
+
+    def test_a_board_entering_its_bootloader_during_the_check_is_counted(
+        self, monkeypatch
+    ) -> None:
+        # Audit finding on #168 (round 1): B left its application after the
+        # HID snapshot and before the serial scan, so it was in neither.
+        import daqifi.firmware.update_service as update_service
+
+        device = _FakeStreamingDevice("fake-port-3")
+        hid = _FakeHidTransport()
+        service = self._service(hid, [], monkeypatch, [])
+        enumerator = service._hid_device_enumerator
+        batches_before = len(enumerator._batches)
+        # B's serial port is there until the HID snapshot has been taken,
+        # and gone afterwards (B is rebooting into its bootloader).
+        monkeypatch.setattr(
+            update_service, "_list_usb_serial_ports",
+            lambda vid, pid: ["TEST-PORT-1", "TEST-PORT-2"]
+            if len(enumerator._batches) == batches_before else ["TEST-PORT-1"],
+        )
+
+        message = self._assert_refused_before_anything_was_sent(service, device, hid)
+        assert "TEST-PORT-2" in message
+
+    @pytest.mark.parametrize("bad", [0x10000, -1, 0.1, True])
+    def test_application_usb_ids_are_validated(self, bad) -> None:
+        with pytest.raises(ValueError, match="application_product_id"):
+            FirmwareUpdateServiceOptions(application_product_id=bad).validate()
+
+    def test_ports_without_usb_ids_count_when_they_are_cdc_acm(self, monkeypatch) -> None:
+        # Audit finding on #168 (round 4): with /sys/class/tty hidden, pyserial
+        # lists the boards' ttyACM nodes with vid=None, the VID/PID filter
+        # dropped both, and two boards passed as none.
+        from types import SimpleNamespace
+
+        from serial.tools import list_ports
+
+        listing = [
+            SimpleNamespace(device="/dev/ttyACM0", vid=None, pid=None),
+            SimpleNamespace(device="/dev/ttyACM1", vid=None, pid=None),
+            SimpleNamespace(device="/dev/cu.usbmodem1101", vid=None, pid=None),
+            SimpleNamespace(device="/dev/ttyS0", vid=None, pid=None),
+            SimpleNamespace(device="COM1", vid=None, pid=None),
+            SimpleNamespace(device="TEST-PORT-7", vid=0x04D8, pid=0xF794),
+            SimpleNamespace(device="TEST-PORT-8", vid=0x0403, pid=0x6001),
+        ]
+        monkeypatch.setattr(list_ports, "comports", lambda: listing)
+
+        assert _real_list_usb_serial_ports(0x04D8, 0xF794) == [
+            "/dev/cu.usbmodem1101", "/dev/ttyACM0", "/dev/ttyACM1", "TEST-PORT-7",
+        ]
+
+    def test_positional_options_keep_their_meaning(self) -> None:
+        # Audit finding on #168 (round 2): the new fields were inserted
+        # after the bootloader IDs, so FirmwareUpdateServiceOptions(0x04D8,
+        # 0x003C, 0.1) set application_vendor_id=0.1 instead of poll_interval.
+        options = FirmwareUpdateServiceOptions(0x04D8, 0x003C, 0.1, 20.0, 45.0)
+        assert options.poll_interval == 0.1
+        assert options.preparing_device_timeout == 20.0
+        assert options.waiting_for_bootloader_timeout == 45.0
+        assert (options.application_vendor_id, options.application_product_id) == (0x04D8, 0xF794)
 
 
 class TestUpdateWifiModule:
