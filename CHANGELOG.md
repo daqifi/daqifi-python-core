@@ -81,6 +81,15 @@ aims to follow [Semantic Versioning](https://semver.org/).
   firmware path is translated with `wslpath -w`), and shlex for a POSIX
   program. A native tool's `-c "print(\"done\")"` and a WSL `.exe`'s
   `C:\fw\image.bin` were mangled before (#161).
+- A `.cmd` template's `^` escapes are consumed as cmd.exe does (`A^&B` is
+  `A&B`; inside quotes `^` stays literal); they were kept and then quoted,
+  so the script got `^&` (#161).
+- A Ctrl-C while `SubprocessRunner` was joining its output readers skipped
+  the rest of cleanup, so a descendant still holding stdout kept firing
+  the caller's callbacks after `run()` had raised. The cleanup now always
+  runs, and the interrupt is re-raised afterwards (#161).
+- README: a bootloader that has sat idle stops answering (Windows selective
+  suspend); the updater then stops before ERASE (#161).
 - `SubprocessRunner` killed only the direct child on timeout, so a
   descendant holding the pipes kept `run()` blocked; the whole process
   tree is killed now (a process group on POSIX, a Job Object on Windows,

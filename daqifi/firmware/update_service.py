@@ -2291,24 +2291,48 @@ def _quote_cmd_token(token: str, had_placeholder: bool) -> str:
 
 
 def _split_windows_template(template: str) -> List[str]:
-    """Split an arguments template the way a Windows command line reads it.
+    """Split a .cmd/.bat arguments template the way cmd.exe reads it.
 
     Double quotes group words (``"C:\\Firmware Files\\image.bin"`` is one
-    argument, without its quotes) and backslashes are literal path
-    separators. Plain ``str.split`` kept the quotes and broke the argument
-    in two; POSIX ``shlex`` ate the backslashes.
+    argument, without its quotes), backslashes, apostrophes and ``#`` are
+    ordinary characters, and outside quotes ``^`` escapes the next character
+    (``A^&B`` is ``A&B``; inside quotes ``^`` is literal). Plain
+    ``str.split`` kept the quotes and broke the argument in two; POSIX
+    ``shlex`` ate the backslashes, and kept ``^`` so the script got ``^&``.
+    An unclosed quote is refused while the request is built.
     """
-    lexer = shlex.shlex(template, posix=True)
-    lexer.whitespace_split = True
-    lexer.escape = ""
-    lexer.quotes = '"'  # an apostrophe is an ordinary character on Windows
-    lexer.commenters = ""  # and "#" is a legal filename character
-    try:
-        return list(lexer)
-    except ValueError as exc:
+    arguments: List[str] = []
+    current: List[str] = []
+    in_argument = in_quotes = False
+    i, n = 0, len(template)
+    while i < n:
+        ch = template[i]
+        if ch == '"':
+            in_argument = True
+            in_quotes = not in_quotes
+        elif in_quotes:
+            current.append(ch)
+        elif ch == "^":
+            in_argument = True
+            if i + 1 < n:
+                i += 1
+                current.append(template[i])
+        elif ch in " \t":
+            if in_argument:
+                arguments.append("".join(current))
+                current, in_argument = [], False
+        else:
+            current.append(ch)
+            in_argument = True
+        i += 1
+    if in_quotes:
         raise ValueError(
-            f"WiFi flash arguments template {template!r} can't be split: {exc}"
-        ) from exc
+            f"WiFi flash arguments template {template!r} can't be split: "
+            "No closing quotation"
+        )
+    if in_argument:
+        arguments.append("".join(current))
+    return arguments
 
 
 _CMD_ALWAYS_UNSAFE = frozenset('%"')

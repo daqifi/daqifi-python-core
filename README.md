@@ -364,6 +364,26 @@ board that arrives and enters its bootloader in the seconds between
 connect other boards while an update runs; on a shared multi-board host,
 take the bench lock for the duration of an update.
 
+### Bootloader that sat idle stops answering
+
+Once a board is in its HID bootloader, send it its first command promptly.
+If the bootloader sits idle, Windows selectively suspends it, after about
+37 s in a bench measurement. On the way back from suspend the bootloader's
+USB stack sees a bus reset without the SET_CONFIGURATION that should follow,
+so its endpoints stay disabled. Writes are then accepted but get no reply,
+or fail outright. The bootloader source documents this (its #568 note in
+`datastream_usb_hid.c`), and recovery needs a fresh enumeration: the host
+closes and reopens the device, or the board re-enters the bootloader.
+
+`DefaultFirmwareUpdateService` sends its first command (a version request)
+within milliseconds of seeing the bootloader, so a normal update stays well
+inside that window. If the bootloader has already sat idle, for example
+after an update that was interrupted while waiting, the version request
+fails and the update stops **before ERASE**. The application is untouched.
+Bring the board out of the bootloader (power-cycle, or re-enter it and
+retry promptly) and run the update again. The updater does not yet reopen
+the device and retry by itself.
+
 ### Multi-NIC WiFi Discovery
 
 On hosts with multiple network interfaces (Ethernet + WiFi, VPN

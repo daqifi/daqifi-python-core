@@ -1530,6 +1530,31 @@ class TestUpdateWifiModule:
         service.update_wifi_module(device, fw)
         assert runner.last_request.arguments == [fw if a == "<fw>" else a for a in expected]
 
+    def test_matrix_native_windows_cmd_consumes_carets_outside_quotes(self, monkeypatch, tmp_path) -> None:
+        # Audit finding on #166 (round 19): "^" escapes were kept and then
+        # quoted, so the script got "^&". Checked on real cmd.exe: with this
+        # line %~2 is A&B, %~4 is C:\x^y (literal inside quotes), %~6 is A^B.
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=True, tool="winc_flash_tool.cmd",
+            template=r'/n A^&B /m "C:\x^y" /k A^^B /p {port}',
+        )
+        service.update_wifi_module(device, fw)
+        assert runner.last_request.arguments == (
+            r'/d /v:off /s /c ""winc_flash_tool.cmd" /n "A&B" /m "C:\x^y" /k "A^B" /p "TESTPORT""'
+        )
+
+    def test_matrix_wsl_cmd_consumes_carets_and_refuses_what_they_escaped(self, monkeypatch, tmp_path) -> None:
+        # Under WSL the arguments reach cmd.exe bare, so an escaped "&" would
+        # run as syntax again: refused before update mode, like a literal one.
+        service, device, runner, fw = self._matrix_request(
+            monkeypatch, tmp_path, native=False, tool="winc_flash_tool.cmd",
+            template=r"/n A^&B /p {port}", fw_name="fw",
+        )
+        with pytest.raises(FirmwareUpdateException) as exc_info:
+            service.update_wifi_module(device, fw)
+        assert "'A&B'" in str(exc_info.value.__cause__)
+        assert device.sent_commands == [] and runner.last_request is None
+
     def test_matrix_wsl_cmd_is_a_list_split_by_cmd_rules(self, monkeypatch, tmp_path) -> None:
         service, device, runner, fw = self._matrix_request(
             monkeypatch, tmp_path, native=False, tool="winc_flash_tool.cmd",

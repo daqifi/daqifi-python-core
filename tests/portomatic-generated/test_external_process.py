@@ -754,3 +754,42 @@ def test_stdin_is_closed_when_its_writer_outlives_an_interrupted_cleanup(monkeyp
         )
     time.sleep(0.5)
     assert spawned[0].stdin.closed
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX sessions")
+def test_an_interrupted_cleanup_join_still_stops_callbacks(monkeypatch):
+    # Audit finding on #166 (round 19): a KeyboardInterrupt in the cleanup's
+    # reader join skipped clearing `delivering`, so a descendant still
+    # holding stdout kept firing the caller's callback after run() raised.
+    import threading as th
+    import time
+
+    real_join = th.Thread.join
+
+    def interrupted_join(self, timeout=None):
+        if timeout == 2.0:  # the cleanup's bounded reader join
+            raise KeyboardInterrupt
+        return real_join(self, timeout)
+
+    monkeypatch.setattr(th.Thread, "join", interrupted_join)
+    script = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c',"
+        " 'import time\\nfor _ in range(40): print(\"tick\", flush=True); time.sleep(0.1)'],"
+        " start_new_session=True)\n"
+        "time.sleep(60)\n"
+    )
+    lines = []
+    with pytest.raises(KeyboardInterrupt):
+        SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable,
+                arguments=["-c", script],
+                timeout_seconds=0.5,
+                on_standard_output_line=lines.append,
+            )
+        )
+    monkeypatch.setattr(th.Thread, "join", real_join)
+    count = len(lines)
+    time.sleep(1.0)
+    assert len(lines) == count, "callback fired after run() raised"
