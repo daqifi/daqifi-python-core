@@ -711,3 +711,46 @@ def test_blocked_stdin_response_does_not_outlive_a_timeout():
     assert result.timed_out
     time.sleep(0.5)
     assert [t for t in th.enumerate() if t not in before] == []
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX descriptors")
+def test_stdin_is_closed_when_its_writer_outlives_an_interrupted_cleanup(monkeypatch):
+    # Audit finding on #166 (round 12): after an interrupt, cleanup left
+    # stdin to the still-running stdout reader, which closed only stdout.
+    import subprocess as sp
+    import time
+
+    from daqifi.firmware import external_process
+
+    spawned = []
+    real_popen = sp.Popen
+
+    class _InterruptedPopen(real_popen):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            spawned.append(self)
+
+        def wait(self, timeout=None):
+            if timeout is not None and timeout > 5:
+                time.sleep(1.0)  # let the launcher hand the pipes to its descendant
+                raise KeyboardInterrupt
+            return super().wait(timeout)
+
+    monkeypatch.setattr(external_process.subprocess, "Popen", _InterruptedPopen)
+    script = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],"
+        " start_new_session=True)\n"
+        "time.sleep(60)\n"
+    )
+    with pytest.raises(KeyboardInterrupt):
+        SubprocessRunner().run(
+            ExternalProcessRequest(
+                file_name=sys.executable,
+                arguments=["-c", script],
+                timeout_seconds=10,
+                standard_input_response_factory=lambda line: None,
+            )
+        )
+    time.sleep(0.5)
+    assert spawned[0].stdin.closed

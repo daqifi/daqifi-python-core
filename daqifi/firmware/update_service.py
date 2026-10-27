@@ -1005,17 +1005,16 @@ class DefaultFirmwareUpdateService:
             # below (WSL translates that for the Windows process), and Linux
             # paths in its arguments are translated: WSL hands arguments to
             # Windows programs as-is.
-            if os.name != "nt" and _path_for_windows_tool(
-                os.path.dirname(tool_path)
-            ).startswith("\\\\"):
-                # WSL hands a Linux-filesystem directory to Windows as a UNC
-                # path, which cmd.exe refuses as a working directory, so the
-                # script could not be found once the device is already in
-                # update mode.
+            if _path_for_windows_tool(os.path.dirname(tool_path)).startswith("\\\\"):
+                # cmd.exe refuses a UNC path (\\server\share, or the
+                # \\wsl.localhost\... path WSL gives a Linux-filesystem
+                # directory) as its working directory, so the script could
+                # not be found once the device is already in update mode.
                 raise FileNotFoundError(
-                    f"WiFi flash tool {tool_path!r} is on the Linux filesystem; "
-                    "cmd.exe cannot run it from there under WSL. Put the WiFi "
-                    "firmware bundle on a Windows drive (e.g. under /mnt/c/)."
+                    f"WiFi flash tool {tool_path!r} is on a network or Linux "
+                    "filesystem path, which cmd.exe cannot use as its working "
+                    "directory. Put the WiFi firmware bundle on a local Windows "
+                    "drive (under WSL, e.g. under /mnt/c/)."
                 )
             executable_arguments = _cmd_exe_arguments(
                 os.path.basename(tool_path),
@@ -2050,40 +2049,55 @@ def _cmd_exe_arguments(
     the arguments go separately and unquoted, and WSL quotes the ones with
     spaces itself.
     """
+    # Neither host can pass these safely. cmd.exe expands %VAR% even inside
+    # double quotes, so a path containing a literal %NAME% would reach the
+    # tool as a different path; and a value containing a double quote can't
+    # be quoted for cmd.exe at all. Under WSL, which leaves arguments without
+    # whitespace unquoted, the other metacharacters would run as command
+    # syntax ("&" in a path runs what follows it), and caret escapes would
+    # arrive literally inside the arguments it does quote.
+    unsafe_chars = _CMD_ALWAYS_UNSAFE if native_windows else _CMD_METACHARACTERS
+    for name, value in (("port", port), ("firmware path", firmware_path)):
+        unsafe = sorted(set(value) & unsafe_chars)
+        if unsafe:
+            raise ValueError(
+                f"The WiFi flash {name} {value!r} contains {''.join(unsafe)!r}, "
+                "which cmd.exe would interpret. Use a path or port name "
+                "without cmd.exe special characters."
+            )
     if native_windows:
         tool_arguments = template.replace(
             "{port}", _quote_windows_argument(port)
         ).replace("{firmwarePath}", _quote_windows_argument(firmware_path))
         command = f"{_quote_windows_argument(script)} {tool_arguments}".strip()
         return f'/d /s /c "{command}"'
-    # WSL quotes only arguments containing whitespace, and caret escapes
-    # would arrive literally inside the ones it does quote, so a cmd.exe
-    # metacharacter can't be passed safely: "&" in a path would run what
-    # follows it as a command. Refuse those values instead.
-    for name, value in (("port", port), ("firmware path", firmware_path)):
-        unsafe = sorted(set(value) & _CMD_METACHARACTERS)
-        if unsafe:
-            raise ValueError(
-                f"The WiFi flash {name} {value!r} contains {''.join(unsafe)!r}, "
-                "which cmd.exe would interpret when run from WSL. Use a path "
-                "or port name without cmd.exe special characters."
-            )
+    if any(ch.isspace() for ch in script):
+        # WSL would quote it first, and cmd.exe /c strips a leading quote
+        # when the line holds more than one quoted argument.
+        raise ValueError(
+            f"WiFi flash tool name {script!r} contains whitespace, which "
+            "cmd.exe cannot run reliably when started from WSL; rename it."
+        )
+    # Split on whitespace only: a template's literal Windows paths keep their
+    # backslashes (shlex's POSIX rules would eat them).
     tokens = [
         token.replace("{port}", port).replace("{firmwarePath}", firmware_path)
-        for token in shlex.split(template)
+        for token in template.split()
     ]
     return ["/c", script] + tokens
 
 
+_CMD_ALWAYS_UNSAFE = frozenset('%"')
 _CMD_METACHARACTERS = frozenset('&|<>^%!"')
 
 
 def _quote_windows_argument(value: str) -> str:
     """Quote for a Windows/cmd.exe command line, whatever the host.
 
-    Always quoted, so cmd.exe metacharacters (``& | > < ^ ( ) % !``) in a
-    configured value can't be read as command syntax; embedded double
-    quotes are doubled, which is what cmd.exe honours.
+    Always quoted, so cmd.exe metacharacters (``& | > < ^ ( )``) in a
+    configured value can't be read as command syntax. Quoting does not stop
+    ``%VAR%`` expansion, and a double quote can't be embedded reliably;
+    callers refuse values containing either (see _cmd_exe_arguments).
     """
     if value is None or value == "":
         return '""'

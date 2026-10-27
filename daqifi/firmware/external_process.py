@@ -531,6 +531,13 @@ def _pump_stream(
             stream.close()
         except Exception:
             pass
+        # This reader is stdin's only writer; when it outlives run()'s
+        # cleanup, run() leaves stdin open for it, so it closes stdin here.
+        if stdin is not None:
+            try:
+                stdin.close()
+            except Exception:
+                pass
 
 
 def _write_response(stdin, text: str, delivering: threading.Event) -> None:

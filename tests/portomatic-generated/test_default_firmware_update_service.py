@@ -1470,6 +1470,77 @@ class TestUpdateWifiModule:
         assert device.sent_commands == []
         assert runner.last_request is None
 
+    @pytest.mark.parametrize("native", [True, False])
+    def test_percent_and_double_quote_are_refused_on_every_host(self, native) -> None:
+        # Audit finding on #166 (round 12): cmd.exe expands %VAR% even inside
+        # quotes, so a literal %USERNAME% in a path reached the tool changed.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        for bad in (r"C:\fw\%USERNAME%", 'C:\\fw"x'):
+            with pytest.raises(ValueError, match="cmd.exe"):
+                _cmd_exe_arguments(
+                    "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}", "P", bad,
+                    native_windows=native,
+                )
+
+    def test_ampersand_stays_allowed_and_quoted_on_native_windows(self) -> None:
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        assert '"A&B"' in _cmd_exe_arguments(
+            "t.cmd", "/p {port}", "A&B", r"C:\fw", native_windows=True
+        )
+
+    def test_literal_windows_paths_in_the_template_keep_backslashes_under_wsl(self) -> None:
+        # Audit finding on #166 (round 12): POSIX shlex turned
+        # C:\firmware\image.bin into C:firmwareimage.bin.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        arguments = _cmd_exe_arguments(
+            "t.cmd", r"/p {port} /i C:\firmware\image.bin", "P1", r"C:\fw",
+            native_windows=False,
+        )
+        assert arguments[-1] == r"C:\firmware\image.bin"
+
+    def test_script_name_with_whitespace_is_refused_under_wsl(self) -> None:
+        # Audit finding on #166 (round 12): WSL quotes it first, and cmd.exe
+        # /c then strips the leading quote.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        with pytest.raises(ValueError, match="whitespace"):
+            _cmd_exe_arguments("flash tool.cmd", "/p {port}", "P1", r"C:\fw", native_windows=False)
+        assert _cmd_exe_arguments(
+            "flash tool.cmd", "/p {port}", "P1", r"C:\fw", native_windows=True
+        ).startswith('/d /s /c ""flash tool.cmd"')
+
+    def test_unc_bundle_is_refused_on_native_windows_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Audit finding on #166 (round 12): \\server\share is a UNC working
+        # directory cmd.exe refuses on any host.
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(
+            update_service, "_path_for_windows_tool", lambda path: r"\\server\share\bundle"
+        )
+        device = _FakeStreamingDevice("fake-port-6")
+        runner = _FakeExternalProcessRunner()
+        service = DefaultFirmwareUpdateService(
+            hid_transport=_FakeHidTransport(),
+            firmware_download_service=_FakeFirmwareDownloadService(),
+            external_process_runner=runner,
+            bootloader_protocol=_FakeBootloaderProtocol([bytes([0x10])]),
+            hid_device_enumerator=_FakeHidEnumerator([]),
+            options=_fast_options(),
+        )
+        firmware_dir = _make_temp_wifi_dir()
+        try:
+            with pytest.raises(FirmwareUpdateException) as exc_info:
+                service.update_wifi_module(device, firmware_dir)
+        finally:
+            shutil.rmtree(firmware_dir, ignore_errors=True)
+        assert "local Windows drive" in str(exc_info.value.__cause__)
+        assert device.sent_commands == []
+
     def test_cmd_exe_arguments_under_wsl_are_separate_and_unquoted(self) -> None:
         # Verified under real WSL interop: quotes inside an argument reach
         # cmd.exe as \", so WSL must do the quoting.
