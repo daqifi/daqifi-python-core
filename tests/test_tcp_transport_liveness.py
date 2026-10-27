@@ -187,3 +187,88 @@ def test_late_loss_event_does_not_tear_down_a_reconnected_session():
         release.set()
         device.disconnect()
         fake.close()
+
+
+def test_reconnect_during_a_loss_teardown_keeps_the_new_session():
+    # Audit finding on #167 (round 2): the loss handler passed its session
+    # check, then sat in the old consumer's stop while the app reconnected;
+    # resuming, it closed the NEW consumer.
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    release = threading.Event()
+    in_teardown = threading.Event()
+    old_consumer = device._consumer
+    real_stop = old_consumer.stop_safely
+
+    def _slow_stop(*a, **k):
+        # Stall only the loss handler (it runs on the peer-closed thread);
+        # the app's own disconnect must not be held up by this patch.
+        if threading.current_thread().name == "daqifi-tcp-peer-closed":
+            in_teardown.set()
+            release.wait(5)
+        return real_stop(*a, **k)
+
+    old_consumer.stop_safely = _slow_stop
+    try:
+        first_conn = fake.conn
+        fake._accepted.clear()
+        threading.Thread(target=fake._serve, daemon=True).start()
+        first_conn.shutdown(socket.SHUT_RDWR)
+        assert in_teardown.wait(3)
+
+        def _reconnect():
+            device.disconnect()
+            device.connect()
+
+        reconnect = threading.Thread(target=_reconnect)
+        reconnect.start()
+        time.sleep(0.3)
+        release.set()
+        reconnect.join(10)
+        assert not reconnect.is_alive()
+        fake.wait_accepted()
+        assert device.status == ConnectionStatus.Connected
+        assert device._consumer is not None and device._consumer is not old_consumer
+        assert device._consumer.is_running
+        received = []
+        device._consumer.add_message_received(received.append)
+        fake.send_frame()
+        assert _wait_until(lambda: len(received) == 1)
+    finally:
+        release.set()
+        device.disconnect()
+        fake.close()
+
+
+def test_peer_closing_during_connect_is_not_overwritten_by_connected(monkeypatch):
+    # Audit finding on #167 (round 2): the loss handler ran while connect()
+    # was still finishing, and connect() then set Connected over Lost.
+    import daqifi.devices as devices
+
+    real_start = devices.StreamMessageConsumer.start
+
+    def _start_then_pause(self, *a, **k):
+        result = real_start(self, *a, **k)
+        time.sleep(0.5)  # the peer's FIN is read and reported meanwhile
+        return result
+
+    monkeypatch.setattr(devices.StreamMessageConsumer, "start", _start_then_pause)
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def _accept_and_close():
+        conn, _ = server.accept()
+        conn.shutdown(socket.SHUT_RDWR)
+        conn.close()
+
+    threading.Thread(target=_accept_and_close, daemon=True).start()
+    transport = TcpStreamTransport("127.0.0.1", server.getsockname()[1])
+    device = DaqifiDevice("fake", transport=transport, message_factory=lambda b: bytes(b))
+    try:
+        device.connect()
+        assert _wait_until(lambda: device.status == ConnectionStatus.Lost)
+        assert not transport.is_connected
+    finally:
+        device.disconnect()
+        server.close()

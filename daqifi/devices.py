@@ -209,6 +209,11 @@ class DaqifiDevice:
         # state), strictly better failure mode for debugging.
         # Mirrors the fix expected upstream in daqifi-core#186.
         self._text_exchange_lock = threading.Lock()
+        # Serializes connect(), disconnect() and the transport-loss handler,
+        # so a loss reported for one connection can't interleave with the
+        # setup or teardown of the next (re-entrant: status callbacks run
+        # under it and may call back in).
+        self._lifecycle_lock = threading.RLock()
         self._text_exchange_lock_owner: Optional[int] = None
 
         if transport is not None:
@@ -298,6 +303,12 @@ class DaqifiDevice:
     # ---- lifecycle --------------------------------------------------------
 
     def connect(
+        self, retry_options: Optional[ConnectionRetryOptions] = None,
+    ) -> None:
+        with self._lifecycle_lock:
+            self._connect_locked(retry_options)
+
+    def _connect_locked(
         self, retry_options: Optional[ConnectionRetryOptions] = None,
     ) -> None:
         # Accept retry_options so callers can request resilient
@@ -406,7 +417,14 @@ class DaqifiDevice:
             raise
 
     def disconnect(self) -> None:
+        with self._lifecycle_lock:
+            self._disconnect_locked()
+
+    def _disconnect_locked(self) -> None:
         self._is_disconnecting = True
+        # A loss event still in flight for the connection being closed
+        # must not match any later one.
+        self._transport_session = None
         # Hoisted out of `try` so the `finally` block can branch on
         # whether the transport failed (Qodo PR 17 pass 26 #2).
         transport_error: Optional[Exception] = None
@@ -1274,11 +1292,19 @@ class DaqifiDevice:
     def _on_transport_status_changed(self, args: TransportStatusEventArgs) -> None:
         if args.is_connected:
             return
+        # Under the lifecycle lock, so the checks below and the teardown
+        # that follows can't straddle a disconnect/connect on another
+        # thread, and a loss seen while connect() is still running is
+        # applied after it, not overwritten by its final "Connected".
+        with self._lifecycle_lock:
+            self._handle_transport_loss(args)
+
+    def _handle_transport_loss(self, args: TransportStatusEventArgs) -> None:
         if self._is_disconnecting:
             return
-        # A loss reported for a connection that has since been replaced
-        # (delivered late, e.g. behind a slow handler): tearing down now
-        # would kill the new session.
+        # A loss reported for a connection that has since been replaced or
+        # closed (delivered late, e.g. behind a slow handler): tearing down
+        # now would kill the new session.
         if args.session is not None and args.session != self._transport_session:
             return
         # Transport dropped unexpectedly: tear down the consumer so a
