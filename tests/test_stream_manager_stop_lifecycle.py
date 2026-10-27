@@ -145,3 +145,45 @@ def test_stop_sends_stop_when_the_worker_could_not_be_started(monkeypatch) -> No
     assert fake.streaming  # START reached the board
     stream.stop()
     assert _stops(fake) == 1 and not fake.streaming
+
+
+def test_a_restart_from_the_first_callback_cannot_add_a_second_worker() -> None:
+    # Audit finding on #178 (round 3): the worker reference was published
+    # after worker.start(), so a first callback calling stop() then start()
+    # could see no worker and launch a second one. The reference is now
+    # published first; the restart is refused while the worker (the
+    # caller itself) is alive.
+    stream, fake = _manager()
+    outcome = []
+
+    def first(sample):
+        if outcome:
+            return
+        stream.stop()
+        try:
+            stream.start(callback=lambda s: None)
+            outcome.append("restarted")
+        except RuntimeError as exc:
+            outcome.append(str(exc))
+
+    stream.start(callback=first)
+    _wait(lambda: outcome)
+    assert "previous streaming thread" in outcome[0]
+    _wait(lambda: not stream._thread or not stream._thread.is_alive())
+    assert _stops(fake) == 1 and not fake.streaming
+
+
+def test_the_worker_reference_is_published_before_the_worker_runs(monkeypatch) -> None:
+    stream, fake = _manager()
+    seen = []
+    real_start = threading.Thread.start
+
+    def checking_start(thread):
+        seen.append(stream._thread is thread)
+        return real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", checking_start)
+    stream.start(callback=lambda sample: None)
+    monkeypatch.undo()
+    stream.stop()
+    assert seen and seen[0] is True

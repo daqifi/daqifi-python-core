@@ -400,8 +400,14 @@ class StreamManager:
             # Start background thread if callback provided
             if callback is not None:
                 worker = threading.Thread(target=self._streaming_thread, daemon=True)
-                worker.start()  # may fail (thread quota); then no worker is kept
+                # Published before it runs: its first callback may already
+                # call stop() and start(), which must see it.
                 self._thread = worker
+                try:
+                    worker.start()
+                except BaseException:
+                    self._thread = None  # never started (thread quota)
+                    raise
 
         except Exception as e:
             self._state = StreamState.ERROR
