@@ -50,6 +50,13 @@ aims to follow [Semantic Versioning](https://semver.org/).
   Windows now passes one verbatim `/d /s /c "..."` line; under WSL the
   arguments go separately (WSL quotes them) and Linux paths are translated
   with `wslpath -w` (#161).
+- The `cmd.exe` line now runs with `/v:off`, so `!NAME!` in a path is not
+  expanded where delayed expansion is on in the registry; under WSL the
+  arguments template's own literals are checked for cmd.exe
+  metacharacters like the substituted values, and on native Windows a `%`
+  in the template is refused. A native flash executable's arguments are
+  quoted by the C-runtime rules, so a path ending in a backslash no
+  longer swallows the next argument (#161).
 - `SubprocessRunner` killed only the direct child on timeout, so a
   descendant holding the pipes kept `run()` blocked; the whole process
   tree is killed now (a process group on POSIX, a Job Object on Windows,

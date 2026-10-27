@@ -1189,8 +1189,8 @@ class TestUpdateWifiModule:
 
         assert runner.last_request is not None
         assert runner.last_request.file_name == _FAKE_CMD_EXE
-        assert runner.last_request.arguments[0] == "/c"
-        assert "winc_flash_tool.cmd" in runner.last_request.arguments[1]
+        assert runner.last_request.arguments[:3] == ["/d", "/v:off", "/c"]
+        assert "winc_flash_tool.cmd" in runner.last_request.arguments[3]
 
     def test_when_cmd_exe_missing_throws_file_not_found(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1409,7 +1409,7 @@ class TestUpdateWifiModule:
             "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}", "A&B", r"C:\fw dir",
             native_windows=True,
         )
-        assert arguments == r'/d /s /c ""winc_flash_tool.cmd" /p "A&B" /i "C:\fw dir""'
+        assert arguments == r'/d /v:off /s /c ""winc_flash_tool.cmd" /p "A&B" /i "C:\fw dir""'
 
     @pytest.mark.parametrize("bad", [r"C:\fw&calc.exe&rem", r"C:\fw|x", r"C:\%PATH%", "PORT^1"])
     def test_cmd_metacharacters_are_refused_under_wsl(self, bad) -> None:
@@ -1511,7 +1511,7 @@ class TestUpdateWifiModule:
         # quotes and broke it in two; WSL then escaped the quotes.
         from daqifi.firmware.update_service import _cmd_exe_arguments
 
-        assert _cmd_exe_arguments("t.cmd", template, "P1", r"C:\fw", native_windows=False) == ["/c", "t.cmd"] + expected
+        assert _cmd_exe_arguments("t.cmd", template, "P1", r"C:\fw", native_windows=False) == ["/d", "/v:off", "/c", "t.cmd"] + expected
 
     @pytest.mark.parametrize("native", [True, False])
     def test_script_name_is_checked_like_the_other_values(self, native) -> None:
@@ -1541,7 +1541,7 @@ class TestUpdateWifiModule:
             _cmd_exe_arguments("flash tool.cmd", "/p {port}", "P1", r"C:\fw", native_windows=False)
         assert _cmd_exe_arguments(
             "flash tool.cmd", "/p {port}", "P1", r"C:\fw", native_windows=True
-        ).startswith('/d /s /c ""flash tool.cmd"')
+        ).startswith('/d /v:off /s /c ""flash tool.cmd"')
 
     def test_unc_bundle_is_refused_on_native_windows_too(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1581,7 +1581,75 @@ class TestUpdateWifiModule:
             "winc_flash_tool.cmd", "/p {port} /i {firmwarePath}", "PORT 1", r"C:\fw dir",
             native_windows=False,
         )
-        assert arguments == ["/c", "winc_flash_tool.cmd", "/p", "PORT 1", "/i", r"C:\fw dir"]
+        assert arguments == ["/d", "/v:off", "/c", "winc_flash_tool.cmd", "/p", "PORT 1", "/i", r"C:\fw dir"]
+
+    @pytest.mark.parametrize("template", [
+        r'/p {port} /i "C:\fw&calc.exe&rem\image.bin" /w',
+        r"/p {port} /i C:\fw|x /w",
+        r"/p {port} /k %TEMP%",
+    ])
+    def test_template_literals_are_checked_for_metacharacters_under_wsl(self, template) -> None:
+        # Audit finding on #166 (round 15): the split removed a quoted
+        # literal's quotes and WSL left it bare, so "&" in the template ran
+        # calc.exe; only the substituted values were checked.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        with pytest.raises(ValueError, match="template"):
+            _cmd_exe_arguments("t.cmd", template, "P1", r"C:\fw", native_windows=False)
+
+    def test_percent_in_the_template_is_refused_on_native_windows(self) -> None:
+        # Quoting doesn't stop %VAR% expansion in the template's own text.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        with pytest.raises(ValueError, match="template"):
+            _cmd_exe_arguments(
+                "t.cmd", r'/p {port} /i "C:\%USERNAME%\fw"', "P1", r"C:\fw",
+                native_windows=True,
+            )
+        # A quoted "&" in the template stays quoted in the verbatim line.
+        assert '"C:\\a&b"' in _cmd_exe_arguments(
+            "t.cmd", r'/p {port} /i "C:\a&b"', "P1", r"C:\fw", native_windows=True
+        )
+
+    def test_cmd_exe_disables_delayed_expansion_on_every_host(self) -> None:
+        # Audit finding on #166 (round 15): with EnableDelayedExpansion set in
+        # the registry, !BUILD! in a quoted path expanded. Verified on real
+        # cmd.exe: /v:on /d /s /c passed C:\fw\other, /v:on /d /v:off /s /c
+        # passed C:\fw\!BUILD!.
+        from daqifi.firmware.update_service import _cmd_exe_arguments
+
+        native = _cmd_exe_arguments(
+            "t.cmd", "/i {firmwarePath}", "P1", r"C:\fw\!BUILD!", native_windows=True
+        )
+        assert native.startswith("/d /v:off /s /c ")
+        assert r'"C:\fw\!BUILD!"' in native
+        assert _cmd_exe_arguments(
+            "t.cmd", "/i {firmwarePath}", "P1", r"C:\fw", native_windows=False
+        )[:3] == ["/d", "/v:off", "/c"]
+
+    @pytest.mark.parametrize("value,expected", [
+        ("C:\\bundle\\", '"C:\\bundle\\\\"'),
+        ('a"b', '"a\\"b"'),
+        ('a\\"b', '"a\\\\\\"b"'),
+        ("C:\\a b\\x", '"C:\\a b\\x"'),
+        ("", '""'),
+    ])
+    def test_native_executable_arguments_follow_the_c_runtime_rules(self, value, expected) -> None:
+        # Audit finding on #166 (round 15): "C:\bundle\" ended in \", which
+        # a C-runtime program reads as an escaped quote, swallowing the next
+        # flag. Each expected line was checked on real Windows: sys.argv
+        # round-trips the value and the following "/w".
+        from daqifi.firmware.update_service import _quote_crt_argument
+
+        assert _quote_crt_argument(value) == expected
+
+    def test_native_executable_template_uses_c_runtime_quoting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import daqifi.firmware.update_service as update_service
+
+        monkeypatch.setattr(update_service.os, "name", "nt")
+        assert update_service._quote_argument("C:\\bundle\\") == '"C:\\bundle\\\\"'
 
     def test_happy_path_sends_expected_commands_and_reports_progress(
         self,

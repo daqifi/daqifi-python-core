@@ -2018,7 +2018,7 @@ def _quote_argument(value: str) -> str:
         return '""'
 
     if os.name == "nt":
-        return _quote_windows_argument(value)
+        return _quote_crt_argument(value)
 
     # POSIX: the arguments are split by shlex (SubprocessRunner), so quote
     # for shlex. Quoting only whitespace and double quotes left a path such
@@ -2067,12 +2067,22 @@ def _cmd_exe_arguments(
                 "which cmd.exe would interpret. Use a path or port name "
                 "without cmd.exe special characters."
             )
+    literal_text = template.replace("{port}", "").replace("{firmwarePath}", "")
+    if native_windows and "%" in literal_text:
+        # Quotes in the template survive into the line, so its own
+        # metacharacters stay as written; %VAR% expands regardless.
+        raise ValueError(
+            f"The WiFi flash arguments template {template!r} contains '%', "
+            "which cmd.exe would interpret."
+        )
     if native_windows:
         tool_arguments = template.replace(
             "{port}", _quote_windows_argument(port)
         ).replace("{firmwarePath}", _quote_windows_argument(firmware_path))
         command = f"{_quote_windows_argument(script)} {tool_arguments}".strip()
-        return f'/d /s /c "{command}"'
+        # /v:off: with delayed expansion enabled in the registry, !VAR! would
+        # expand inside the quotes as %VAR% does.
+        return f'/d /v:off /s /c "{command}"'
     if any(ch.isspace() for ch in script):
         # WSL would quote it first, and cmd.exe /c strips a leading quote
         # when the line holds more than one quoted argument.
@@ -2084,7 +2094,18 @@ def _cmd_exe_arguments(
         token.replace("{port}", port).replace("{firmwarePath}", firmware_path)
         for token in _split_windows_template(template)
     ]
-    return ["/c", script] + tokens
+    for token in tokens:
+        # The split removes a quoted literal's quotes, and WSL re-quotes only
+        # tokens with whitespace, so "C:\fw&calc.exe&rem\x" from the
+        # template itself would reach cmd.exe bare.
+        unsafe = sorted(set(token) & _CMD_METACHARACTERS)
+        if unsafe:
+            raise ValueError(
+                f"The WiFi flash arguments template {template!r} yields the "
+                f"argument {token!r}, containing {''.join(unsafe)!r}, which "
+                "cmd.exe would interpret when started from WSL."
+            )
+    return ["/d", "/v:off", "/c", script] + tokens
 
 
 def _split_windows_template(template: str) -> List[str]:
@@ -2105,6 +2126,21 @@ def _split_windows_template(template: str) -> List[str]:
 
 _CMD_ALWAYS_UNSAFE = frozenset('%"')
 _CMD_METACHARACTERS = frozenset('&|<>^%!"')
+
+
+def _quote_crt_argument(value: str) -> str:
+    """Quote for a Windows program parsing its command line by the C runtime rules.
+
+    Unlike cmd.exe, the runtime treats backslashes before a double quote as
+    escapes: "C:\\bundle\\" would swallow the closing quote and the next
+    argument with it. Backslashes before a quote (including the closing one)
+    are doubled and an embedded quote becomes \\".
+    """
+    if value is None or value == "":
+        return '""'
+    quoted = re.sub(r'(\\*)"', r'\1\1\\"', value)
+    quoted = re.sub(r"(\\+)$", r"\1\1", quoted)
+    return f'"{quoted}"'
 
 
 def _quote_windows_argument(value: str) -> str:
