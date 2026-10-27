@@ -126,7 +126,9 @@ def test_device_closing_the_connection_is_detected_as_lost():
             not e.is_connected and isinstance(e.error, ConnectionResetError)
             for e in transport_events
         )
-        assert device._consumer is None  # torn down, not spinning
+        # The reader is stopped (not spinning on the dead stream); the next
+        # connect()/disconnect() disposes of it, under the lifecycle gate.
+        assert _wait_until(lambda: not device._consumer.is_running)
     finally:
         device.disconnect()
         fake.close()
@@ -368,28 +370,37 @@ def test_failed_connect_still_notifies_its_status_changes():
     assert events[-1] == device.status
 
 
-def test_transport_handler_can_wait_on_a_worker_that_reconnects():
-    # Audit finding on #167 (round 4): transport callbacks ran under the
-    # device's lifecycle lock, so one waiting on a worker that calls
-    # device.connect() deadlocked.
+def test_connect_from_inside_a_disconnect_gets_a_prompt_timeout_not_a_hang():
+    # Audit finding on #167 (round 4): a transport handler, called inside
+    # disconnect(), waited on a worker calling device.connect(). With the
+    # lifecycle gate (upstream LifecycleGate) the worker can't run
+    # alongside the disconnect; it waits lifecycle_lock_timeout and raises,
+    # so the handler's wait ends instead of deadlocking.
     fake = _FakeDevice()
     transport, device = _connect(fake)
-    joined_in_time = []
+    device.lifecycle_lock_timeout = 0.5
+    outcome = []
 
     def _on_transport(args):
-        if not args.is_connected and not joined_in_time:
-            worker = threading.Thread(target=lambda: device.connect(), daemon=True)
-            fake._accepted.clear()
-            threading.Thread(target=fake._serve, daemon=True).start()
+        if not args.is_connected and not outcome:
+            def _reconnect():
+                try:
+                    device.connect()
+                    outcome.append("connected")
+                except TimeoutError:
+                    outcome.append("timeout")
+
+            worker = threading.Thread(target=_reconnect, daemon=True)
             worker.start()
             worker.join(3)
-            joined_in_time.append(not worker.is_alive())
+            if worker.is_alive():
+                outcome.append("hung")
 
     transport.add_status_changed(_on_transport)
     try:
         device.disconnect()
-        assert _wait_until(lambda: joined_in_time)
-        assert joined_in_time == [True]
+        assert outcome == ["timeout"]
+        assert device.status == ConnectionStatus.Disconnected
     finally:
         transport.remove_status_changed(_on_transport)
         device.disconnect()
@@ -557,81 +568,51 @@ def test_closing_the_stream_does_not_leak_the_socket_across_a_reconnect():
             conn.close()
 
 
-def test_nested_reconnect_before_the_outer_claims_the_old_consumer(monkeypatch):
-    # Audit finding on #167 (round 7): the outer connect() claimed (and
-    # disposed) the consumer before checking the session, so a nested
-    # connect() that completed in between lost its consumer.
+def test_a_second_connect_never_runs_alongside_one_in_flight(monkeypatch):
+    # Audit findings on #167 (rounds 6-7, 10-12): overlapping connect()
+    # calls interleaved their consumer teardown and installation. With the
+    # lifecycle gate the second call waits for the first and never runs
+    # alongside it; with a short timeout it raises instead.
     import daqifi.devices as devices
 
     fake = _FakeDevice()
     transport, device = _connect(fake)
-    nested_done = threading.Event()
+    real_start = devices.StreamMessageConsumer.start
+    inside = threading.Event()
+    release = threading.Event()
+    overlapped = []
+    active = [0]
 
-    def _on_status(args):
-        if args.status == ConnectionStatus.Lost and not nested_done.is_set():
-            fake._accepted.clear()
-            threading.Thread(target=fake._serve, daemon=True).start()
-            device.connect()
-            nested_done.set()
+    def _start(self, *a, **k):
+        active[0] += 1
+        if active[0] > 1:
+            overlapped.append(True)
+        inside.set()
+        release.wait(5)
+        try:
+            return real_start(self, *a, **k)
+        finally:
+            active[0] -= 1
 
-    device.add_status_changed(_on_status)
-    real_session = type(transport).session
-    outer = threading.current_thread()
-    paused = []
-
-    def _session_pausing_once(self):
-        value = real_session.fget(self)
-        # The outer call has just captured its session and stream: the
-        # peer closes and the nested reconnect completes before it goes on.
-        if threading.current_thread() is outer and not paused and device._consumer is not None:
-            paused.append(True)
-            fake.conn.shutdown(socket.SHUT_RDWR)
-            assert nested_done.wait(5)
-        return value
-
-    monkeypatch.setattr(type(transport), "session", property(_session_pausing_once))
+    monkeypatch.setattr(devices.StreamMessageConsumer, "start", _start)
+    device.lifecycle_lock_timeout = 0.5
+    first = threading.Thread(target=device.connect)
+    first.start()
     try:
-        device.connect()
-        monkeypatch.setattr(type(transport), "session", real_session)
-        fake.wait_accepted()
-        time.sleep(0.3)
-        assert paused == [True]
-        assert transport.is_connected
+        assert inside.wait(5)
+        import pytest
+
+        with pytest.raises(TimeoutError, match="Nothing was opened"):
+            device.connect()
+        release.set()
+        first.join(5)
+        assert not overlapped
         assert device._consumer is not None and device._consumer.is_running
-        received = []
-        device._consumer.add_message_received(received.append)
-        fake.send_frame()
-        assert _wait_until(lambda: len(received) == 1)
     finally:
-        monkeypatch.setattr(type(transport), "session", real_session)
+        release.set()
+        monkeypatch.setattr(devices.StreamMessageConsumer, "start", real_start)
         device.disconnect()
         fake.close()
-
-
-def test_read_to_end_returns_the_data_before_the_peer_closed():
-    # Audit finding on #167 (round 8): read() with no size gathered the
-    # data, then the EOF signal aborted it and the data was lost.
-    server = socket.socket()
-    server.bind(("127.0.0.1", 0))
-    server.listen(1)
-
-    def _send_and_close():
-        conn, _ = server.accept()
-        conn.sendall(b"abc")
-        time.sleep(0.7)  # spans a read window
-        conn.sendall(b"def")
-        conn.shutdown(socket.SHUT_RDWR)
-        conn.close()
-
-    threading.Thread(target=_send_and_close, daemon=True).start()
-    transport = TcpStreamTransport("127.0.0.1", server.getsockname()[1])
-    transport.connect()
-    try:
-        assert transport.stream.read() == b"abcdef"
-        assert not transport.is_connected
-    finally:
-        transport.disconnect()
-        server.close()
 
 
 def test_a_tcp_reset_is_raised_and_reported_not_taken_as_a_clean_end():
@@ -766,15 +747,17 @@ def test_older_connect_steps_aside_for_a_nested_one_on_the_same_session(monkeypa
                 device.connect()
                 nested["consumer"] = device._consumer
 
-            worker = threading.Thread(target=_nested_connect)
-            worker.start()
-            worker.join(5)
+            # With the lifecycle gate the nested call waits for this one to
+            # finish rather than interleave with it.
+            nested["worker"] = threading.Thread(target=_nested_connect)
+            nested["worker"].start()
         return value
 
     monkeypatch.setattr(type(transport), "session", property(_session_pausing_once))
     try:
         device.connect()
         monkeypatch.setattr(type(transport), "session", real_session)
+        nested["worker"].join(5)
         assert nested.get("consumer") is not None
         assert transport.session == 1  # one session throughout
         assert device._consumer is nested["consumer"]

@@ -154,6 +154,50 @@ def _default_message_factory(payload: bytes) -> Any:
 # ---- DaqifiDevice ------------------------------------------------------------
 
 
+
+class _LifecycleGate:
+    """Serializes connect() against disconnect() on one device.
+
+    Port of upstream daqifi-core ``LifecycleGate``. Two threads must never
+    drive the transport at once: both would find no consumer, both would
+    start one, and two readers on one stream corrupt its framing. So a
+    lifecycle call that finds the gate taken does not run alongside: a
+    connect waits ``connect_timeout`` and then raises (nothing was opened;
+    the caller can retry), a disconnect waits ``teardown_timeout`` and then
+    gives up (reported to the caller; the holder is left alone). Re-entry
+    from the same thread (a status handler calling disconnect() from inside
+    connect()) runs nested, as it always has.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._holder = threading.local()
+
+    def run(self, operation: Callable[[], None], timeout: float, fail: bool) -> bool:
+        if getattr(self._holder, "inside", False):
+            operation()
+            return True
+        if not self._lock.acquire(timeout=timeout):
+            if fail:
+                raise TimeoutError(
+                    f"Could not start connecting within {timeout:.1f}s because "
+                    "another connect or disconnect was still in progress. "
+                    "Nothing was opened; retry once it has finished."
+                )
+            _log.error(
+                "Could not take the connect/disconnect lock within %.1fs; "
+                "nothing was torn down (a connect is likely still in progress).",
+                timeout,
+            )
+            return False
+        self._holder.inside = True
+        try:
+            operation()
+        finally:
+            self._holder.inside = False
+            self._lock.release()
+        return True
+
 class DaqifiDevice:
     """Base device implementation.
 
@@ -164,6 +208,11 @@ class DaqifiDevice:
     Subclasses (e.g. :class:`DaqifiStreamingDevice`) layer
     domain-specific behaviour on top.
     """
+
+    # How long connect()/disconnect() wait for one another (upstream
+    # LifecycleLockTimeout / TeardownLockTimeout); see _LifecycleGate.
+    lifecycle_lock_timeout: float = 10.0
+    teardown_lock_timeout: float = 30.0
 
     def __init__(
         self,
@@ -214,6 +263,7 @@ class DaqifiDevice:
         # never across a callback, a transport call or a thread join, so
         # status handlers can freely wait on other threads.
         self._state_lock = threading.Lock()
+        self._lifecycle_gate = _LifecycleGate()
         self._transport_session: Optional[int] = None
         # Number of the most recently started connect(); only the newest
         # call may claim or publish the device's consumer, so an older one
@@ -309,6 +359,21 @@ class DaqifiDevice:
     # ---- lifecycle --------------------------------------------------------
 
     def connect(
+        self, retry_options: Optional[ConnectionRetryOptions] = None,
+    ) -> None:
+        """Open the transport and start the message consumer.
+
+        Raises ``TimeoutError`` if another connect()/disconnect() is still
+        in progress after ``lifecycle_lock_timeout`` seconds; nothing is
+        opened in that case.
+        """
+        self._lifecycle_gate.run(
+            lambda: self._connect_unsynchronized(retry_options),
+            self.lifecycle_lock_timeout,
+            fail=True,
+        )
+
+    def _connect_unsynchronized(
         self, retry_options: Optional[ConnectionRetryOptions] = None,
     ) -> None:
         # Accept retry_options so callers can request resilient
@@ -471,6 +536,18 @@ class DaqifiDevice:
             raise
 
     def disconnect(self) -> None:
+        """Stop the consumer and close the transport.
+
+        If another connect()/disconnect() still holds the device after
+        ``teardown_lock_timeout`` seconds, nothing is torn down and the
+        device is only marked Disconnected (the holder is left alone).
+        """
+        if not self._lifecycle_gate.run(
+            self._disconnect_unsynchronized, self.teardown_lock_timeout, fail=False
+        ):
+            self._set_status(ConnectionStatus.Disconnected)
+
+    def _disconnect_unsynchronized(self) -> None:
         with self._state_lock:
             self._is_disconnecting = True
             # A loss event still in flight for this connection must not
@@ -1343,29 +1420,34 @@ class DaqifiDevice:
     def _on_transport_status_changed(self, args: TransportStatusEventArgs) -> None:
         if args.is_connected:
             return
-        # Checked and claimed atomically with connect()/disconnect(): a
-        # loss for a connection that has since been closed or replaced
-        # (args.session no longer current) must not touch the new one.
+        # Report only an unexpected drop of the live connection (upstream
+        # OnTransportStatusChanged): not during disconnect(), not for a
+        # connection that has since been closed or replaced (args.session
+        # no longer current), and not while connect() is still running,
+        # which checks its own stream before publishing "Connected".
+        # Nothing is torn down here; that is connect()'s and disconnect()'s
+        # job, serialized by the lifecycle gate, so this handler can't race
+        # either of them.
         with self._state_lock:
             if self._is_disconnecting:
                 return
             if args.session is not None and args.session != self._transport_session:
                 return
+            if self._status != ConnectionStatus.Connected:
+                return
             consumer = self._consumer
-            self._consumer = None
-            self._transport_session = None
             self._is_initialized = False
             evt = self._change_status(ConnectionStatus.Lost)
-            # With the status, under the lock: set later, it could land on
-            # a connection made while this teardown was still running.
             self._state = DeviceState.Error
-        # Transport dropped unexpectedly: tear down the consumer so a
-        # daemon thread doesn't keep spinning on a dead stream after
-        # the device looks "Lost" to callers (Qodo PR 17 pass 26 #1).
-        # Outside the lock; stop_safely is safe from the consumer's own
-        # thread, which is where a TCP peer-close is reported.
+        # Stop the reader spinning on a dead stream; the consumer object stays
+        # for the next connect()/disconnect() to dispose of. stop_safely only
+        # sets the flag when called from the reader's own thread.
         if consumer is not None:
-            self._discard_consumer(consumer)
+            try:
+                if consumer.stop_safely() is False:
+                    consumer.stop()
+            except Exception:
+                pass
         if evt is not None:
             self._deliver_status_event(evt)
 

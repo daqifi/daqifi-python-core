@@ -27,6 +27,13 @@ aims to follow [Semantic Versioning](https://semver.org/).
   unnoticed: the session stayed "connected" and the reader spun on empty
   reads. End of stream now marks the transport disconnected, raises a
   status event, and the device reports `ConnectionStatus.Lost` (#164).
+- `connect()` and `disconnect()` on one device no longer run alongside each
+  other (port of upstream `LifecycleGate`): a `connect()` that finds one in
+  progress waits `lifecycle_lock_timeout` (10 s) and then raises
+  `TimeoutError` without opening anything; a `disconnect()` waits
+  `teardown_lock_timeout` (30 s) and then only marks the device
+  Disconnected. A transport loss is reported as `Lost` without tearing the
+  consumer down from the transport's thread (#164).
 
 ## [0.1.0]
 
