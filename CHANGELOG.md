@@ -25,6 +25,13 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- `StreamManager.stop()` returned without sending STOP once a callback
+  exception had moved the state to ERROR, leaving the board streaming; it
+  forgot a worker still running after its 2 s join, so a restart ran two
+  readers on one port; and called from inside the callback it tried to
+  join its own thread and never sent STOP. stop() now sends STOP whenever
+  the device was started, doesn't join from the worker itself, and
+  start() refuses while a previous worker is still running (#162).
 - SD-card operations on one device could interleave across threads: a raw
   capture (list, delete, download) didn't take the text-exchange lock, so a
   listing could switch the SPI bus under a download and read its reply off
