@@ -326,6 +326,11 @@ def _build_pic32_service(
     )
 
 
+from daqifi.firmware.update_service import (  # noqa: E402  (before the fixture patches it)
+    _list_usb_serial_ports as _real_list_usb_serial_ports,
+)
+
+
 @pytest.fixture(autouse=True)
 def _no_application_ports_on_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
     # The several-boards refusal lists the host's real serial ports; a board
@@ -1281,6 +1286,29 @@ class TestSeveralBoardsAttached:
     def test_application_usb_ids_are_validated(self, bad) -> None:
         with pytest.raises(ValueError, match="application_product_id"):
             FirmwareUpdateServiceOptions(application_product_id=bad).validate()
+
+    def test_ports_without_usb_ids_count_when_they_are_cdc_acm(self, monkeypatch) -> None:
+        # Audit finding on #168 (round 4): with /sys/class/tty hidden, pyserial
+        # lists the boards' ttyACM nodes with vid=None, the VID/PID filter
+        # dropped both, and two boards passed as none.
+        from types import SimpleNamespace
+
+        from serial.tools import list_ports
+
+        listing = [
+            SimpleNamespace(device="/dev/ttyACM0", vid=None, pid=None),
+            SimpleNamespace(device="/dev/ttyACM1", vid=None, pid=None),
+            SimpleNamespace(device="/dev/cu.usbmodem1101", vid=None, pid=None),
+            SimpleNamespace(device="/dev/ttyS0", vid=None, pid=None),
+            SimpleNamespace(device="COM1", vid=None, pid=None),
+            SimpleNamespace(device="TEST-PORT-7", vid=0x04D8, pid=0xF794),
+            SimpleNamespace(device="TEST-PORT-8", vid=0x0403, pid=0x6001),
+        ]
+        monkeypatch.setattr(list_ports, "comports", lambda: listing)
+
+        assert _real_list_usb_serial_ports(0x04D8, 0xF794) == [
+            "/dev/cu.usbmodem1101", "/dev/ttyACM0", "/dev/ttyACM1", "TEST-PORT-7",
+        ]
 
     def test_positional_options_keep_their_meaning(self) -> None:
         # Audit finding on #168 (round 2): the new fields were inserted

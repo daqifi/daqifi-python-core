@@ -276,18 +276,33 @@ def _list_serial_port_names() -> Optional[FrozenSet[str]]:
         return None
 
 
+# USB CDC-ACM serial nodes, the class a DAQiFi board enumerates as (Linux
+# and macOS names). A built-in UART (ttyS0, COM1) has no USB IDs either but
+# can't be a board.
+_CDC_ACM_NODE = re.compile(r"^(ttyACM\d+|(cu|tty)\.usbmodem.*)$")
+
+
 def _list_usb_serial_ports(
     vendor_id: int, product_id: int
 ) -> Optional[List[str]]:
     """Serial ports of USB devices with this VID/PID, or None when they
-    can't be listed."""
+    can't be listed.
+
+    A CDC-ACM port whose USB IDs can't be read (sysfs hidden, e.g. in a
+    container) is included: it may be a board, and leaving it out would let
+    two boards pass as none.
+    """
     try:
         from serial.tools import list_ports
 
         return sorted(
             port.device
             for port in list_ports.comports()
-            if port.vid == vendor_id and port.pid == product_id
+            if (port.vid, port.pid) == (vendor_id, product_id)
+            or (
+                port.vid is None
+                and _CDC_ACM_NODE.match(os.path.basename(port.device or ""))
+            )
         )
     except Exception:
         return None
@@ -1237,7 +1252,8 @@ class DefaultFirmwareUpdateService:
             found.append(f"{bootloaders} in bootloader mode")
         raise RuntimeError(
             f"{len(applications) + bootloaders} DAQiFi boards are connected "
-            f"over USB ({', '.join(found)}). A PIC32 update needs exactly one: "
+            f"over USB ({', '.join(found)}; a USB serial port whose IDs can't "
+            "be read counts as one). A PIC32 update needs exactly one: "
             "with several attached, another board's bootloader could be "
             "flashed instead. Disconnect every board except the one being "
             "updated, including any left in bootloader mode, then retry."
