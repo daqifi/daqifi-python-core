@@ -555,3 +555,54 @@ def test_closing_the_stream_does_not_leak_the_socket_across_a_reconnect():
         server.close()
         for conn in accepted:
             conn.close()
+
+
+def test_nested_reconnect_before_the_outer_claims_the_old_consumer(monkeypatch):
+    # Audit finding on #167 (round 7): the outer connect() claimed (and
+    # disposed) the consumer before checking the session, so a nested
+    # connect() that completed in between lost its consumer.
+    import daqifi.devices as devices
+
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    nested_done = threading.Event()
+
+    def _on_status(args):
+        if args.status == ConnectionStatus.Lost and not nested_done.is_set():
+            fake._accepted.clear()
+            threading.Thread(target=fake._serve, daemon=True).start()
+            device.connect()
+            nested_done.set()
+
+    device.add_status_changed(_on_status)
+    real_session = type(transport).session
+    outer = threading.current_thread()
+    paused = []
+
+    def _session_pausing_once(self):
+        value = real_session.fget(self)
+        # The outer call has just captured its session and stream: the
+        # peer closes and the nested reconnect completes before it goes on.
+        if threading.current_thread() is outer and not paused and device._consumer is not None:
+            paused.append(True)
+            fake.conn.shutdown(socket.SHUT_RDWR)
+            assert nested_done.wait(5)
+        return value
+
+    monkeypatch.setattr(type(transport), "session", property(_session_pausing_once))
+    try:
+        device.connect()
+        monkeypatch.setattr(type(transport), "session", real_session)
+        fake.wait_accepted()
+        time.sleep(0.3)
+        assert paused == [True]
+        assert transport.is_connected
+        assert device._consumer is not None and device._consumer.is_running
+        received = []
+        device._consumer.add_message_received(received.append)
+        fake.send_frame()
+        assert _wait_until(lambda: len(received) == 1)
+    finally:
+        monkeypatch.setattr(type(transport), "session", real_session)
+        device.disconnect()
+        fake.close()

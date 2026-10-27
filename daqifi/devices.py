@@ -349,6 +349,11 @@ class DaqifiDevice:
             # reaching the old session (Qodo PR 17 pass 42 #1); stopping
             # before closing avoids a zombie reader (pass 29 #3).
             with self._state_lock:
+                # Superseded already? A nested connect() may have replaced
+                # this call's connection since transport.connect() above;
+                # the consumer now installed is that newer one's.
+                if getattr(self._transport, "session", None) != session:
+                    return
                 old_consumer = self._consumer
                 self._consumer = None
             if old_consumer is not None:
