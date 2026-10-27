@@ -195,21 +195,59 @@ def test_an_interrupt_inside_thread_start_keeps_a_live_worker(monkeypatch) -> No
     # so stop() couldn't join it and a restart added a second worker.
     stream, fake = _manager()
     release = threading.Event()
+    entered = threading.Event()
     real_start = threading.Thread.start
 
     def interrupted_start(thread):
         real_start(thread)  # the worker is running...
         raise KeyboardInterrupt  # ...when the interrupt lands
 
+    def blocking(sample):
+        entered.set()
+        release.wait(10)
+
     monkeypatch.setattr(threading.Thread, "start", interrupted_start)
     with pytest.raises(KeyboardInterrupt):
-        stream.start(callback=lambda sample: release.wait(10))
+        stream.start(callback=blocking)
     monkeypatch.undo()
     worker = stream._thread
-    assert worker is not None and worker.is_alive()
+    assert worker is not None
+    assert entered.wait(5)  # the worker is inside its callback
     stream.stop()  # the audit's sequence: stop, then restart, worker still busy
     assert not fake.streaming
     with pytest.raises(RuntimeError, match="previous streaming thread"):
         stream.start(callback=lambda sample: None)
     release.set()
     _wait(lambda: not worker.is_alive())
+
+
+def test_an_interrupt_before_the_worker_is_visibly_alive_keeps_it(monkeypatch) -> None:
+    # Audit finding on #178 (round 5): the interrupt can land after the
+    # native thread launched but before CPython marks it started (ident
+    # None, not yet alive); judging "never started" there forgot a worker
+    # that then ran. Simulated by launching the thread just after raising.
+    stream, fake = _manager()
+    release = threading.Event()
+    entered = threading.Event()
+    real_start = threading.Thread.start
+
+    def late_start(thread):
+        timer = threading.Timer(0.1, lambda: real_start(thread))
+        real_start(timer)  # (start() itself is patched)
+        raise KeyboardInterrupt
+
+    def blocking(sample):
+        entered.set()
+        release.wait(10)
+
+    monkeypatch.setattr(threading.Thread, "start", late_start)
+    with pytest.raises(KeyboardInterrupt):
+        stream.start(callback=blocking)
+    monkeypatch.setattr(threading.Thread, "start", real_start)
+    assert stream._thread is not None  # kept although it wasn't alive yet
+    assert entered.wait(5)
+    stream.stop()
+    with pytest.raises(RuntimeError, match="previous streaming thread"):
+        stream.start(callback=lambda sample: None)
+    release.set()
+    _wait(lambda: not stream._thread or not stream._thread.is_alive())

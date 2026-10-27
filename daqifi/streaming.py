@@ -400,19 +400,15 @@ class StreamManager:
             # Start background thread if callback provided
             if callback is not None:
                 worker = threading.Thread(target=self._streaming_thread, daemon=True)
-                # Published before it runs: its first callback may already
-                # call stop() and start(), which must see it.
+                # Published before it runs, and kept even if start() raises:
+                # its first callback may call stop() and start(), which must
+                # see it, and an interrupt can land inside start() after the
+                # native thread launched (before it is visibly alive), so
+                # "did it start" can't be judged here. A thread that really
+                # never started is not alive: start() admits a new worker
+                # and stop() drops it without joining.
                 self._thread = worker
-                try:
-                    worker.start()
-                except BaseException:
-                    # Forget it only if it really never started (a thread
-                    # quota): an interrupt can land inside start() after
-                    # the worker is already running, and a forgotten live
-                    # worker would let a restart add a second one.
-                    if worker.ident is None or not worker.is_alive():
-                        self._thread = None
-                    raise
+                worker.start()
 
         except Exception as e:
             self._state = StreamState.ERROR
