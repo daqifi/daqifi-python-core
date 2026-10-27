@@ -188,3 +188,30 @@ def test_a_prompt_before_the_first_frames_does_not_corrupt_them(prompt) -> None:
     samples = stream.read(2, timeout=1.0)
     stream.stop()
     assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+# Audit round 4 on #180.
+
+def test_a_prompt_split_across_the_start_read_does_not_corrupt_the_frames() -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _FakeSerial(enabled_mask=1, on_start=b"DAQIFI>")
+
+    def late_tail():
+        with fake.lock:
+            fake.rx += b" " + frame * 2
+
+    import threading as _th
+    original_write = fake.write
+
+    def write(data):
+        n = original_write(data)
+        if b"STReam:START" in data or b"STREAM:START" in data.upper():
+            _th.Timer(0.3, late_tail).start()  # after the 200 ms settle + first read
+        return n
+
+    fake.write = write
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]

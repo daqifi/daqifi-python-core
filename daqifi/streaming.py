@@ -466,6 +466,19 @@ class StreamManager:
                     break
             else:
                 time.sleep(0.01)
+        # If the read window ended inside the echo or the prompt (b"DAQIFI>"
+        # with its space still in flight), read on briefly: deciding on a
+        # partial console prefix would leave its tail in the stream.
+        echo_line = start_cmd.encode("ascii") + b"\r\n"
+        extra_deadline = time.monotonic() + 0.5
+        while time.monotonic() < extra_deadline and self._ends_inside_console_prefix(
+            bytes(raw), echo_line
+        ):
+            waiting = port.in_waiting
+            if waiting:
+                raw.extend(port.read(waiting))
+            else:
+                time.sleep(0.01)
         head = bytes(raw)
         # The firmware's console (microrl) echoes the typed command and ends
         # the line with exactly CR LF (ENDL, _ENDL_CRLF); strip precisely
@@ -494,6 +507,16 @@ class StreamManager:
             if line:
                 return line
         return ""
+
+    @staticmethod
+    def _ends_inside_console_prefix(data: bytes, echo_line: bytes) -> bool:
+        """True if ``data`` stops part-way through the echo line or the
+        prompt that may lead the START reply."""
+        prompt = b"DAQIFI> "
+        rest = data[len(echo_line):] if data.startswith(echo_line) else data
+        if rest is data and data and echo_line.startswith(data) and data != echo_line:
+            return True
+        return bool(rest) and prompt.startswith(rest) and rest != prompt
 
     def stop(self):
         """
