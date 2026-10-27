@@ -367,17 +367,22 @@ take the bench lock for the duration of an update.
 ### Bootloader that sat idle stops answering
 
 Once a board is in its HID bootloader, send it its first command promptly.
-If the bootloader sits idle, Windows selectively suspends it, after about
-37 s in a bench measurement. On the way back from suspend the bootloader's
+If the bootloader sits idle, Windows selectively suspends it about 5–6 s
+after it enumerates (11 bench trials on a host with USB selective suspend
+enabled: D0 to D3 between 5.0 and 6.2 s; a first command at 5.4 s worked,
+one at 6.3 s did not). On the way back from suspend the bootloader's
 USB stack sees a bus reset without the SET_CONFIGURATION that should follow,
 so its endpoints stay disabled. Writes are then accepted but get no reply,
 or fail outright. The bootloader source documents this (its #568 note in
-`datastream_usb_hid.c`), and recovery needs a fresh enumeration: the host
-closes and reopens the device, or the board re-enters the bootloader.
+`datastream_usb_hid.c`; tracked as daqifi-nyquist-firmware #1172), and
+recovery needs a fresh enumeration: the host closes and reopens the device,
+or the board re-enters the bootloader.
 
 `DefaultFirmwareUpdateService` sends its first command (a version request)
-within milliseconds of seeing the bootloader, so a normal update stays well
-inside that window. If the bootloader has already sat idle, for example
+about 50 ms after it sees the bootloader, so a normal update stays well
+inside that window. A host that takes several seconds between enumerating
+the bootloader and connecting to it (a slow HID stack, an antivirus scan, a
+debugger breakpoint) can miss it. If the bootloader has already sat idle, for example
 after an update that was interrupted while waiting, the version request
 fails and the update stops **before ERASE**. The application is untouched.
 Bring the board out of the bootloader (power-cycle, or re-enter it and

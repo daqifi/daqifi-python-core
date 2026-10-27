@@ -90,6 +90,9 @@ aims to follow [Semantic Versioning](https://semver.org/).
   runs, and the interrupt is re-raised afterwards (#161).
 - README: a bootloader that has sat idle stops answering (Windows selective
   suspend); the updater then stops before ERASE (#161).
+- README: the idle bootloader is suspended about 5–6 s after it enumerates
+  (11 bench trials), not about 37 s as first stated; see
+  daqifi-nyquist-firmware #1172 (#174).
 - `SubprocessRunner` killed only the direct child on timeout, so a
   descendant holding the pipes kept `run()` blocked; the whole process
   tree is killed now (a process group on POSIX, a Job Object on Windows,
