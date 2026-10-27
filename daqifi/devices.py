@@ -13,7 +13,6 @@ thread that delivers parsed protobuf messages via callback.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import queue
@@ -178,7 +177,6 @@ class DaqifiDevice:
         self._transport = transport
         self._message_factory = message_factory or _default_message_factory
         self._status = ConnectionStatus.Disconnected
-        self._transport_session: Optional[int] = None
         self._state = DeviceState.Disconnected
         self._metadata = DeviceMetadata()
         self._channels: List[Any] = []
@@ -210,18 +208,13 @@ class DaqifiDevice:
         # state), strictly better failure mode for debugging.
         # Mirrors the fix expected upstream in daqifi-core#186.
         self._text_exchange_lock = threading.Lock()
-        # Serializes connect(), disconnect() and the transport-loss handler,
-        # so a loss reported for one connection can't interleave with the
-        # setup or teardown of the next (re-entrant: status callbacks run
-        # under it and may call back in).
-        self._lifecycle_lock = threading.RLock()
-        # Status events raised while the lifecycle lock is held are queued
-        # and delivered once it is released: a handler that hands work to
-        # another thread (say, a reconnect) and waits for it would otherwise
-        # deadlock, since that thread needs the lock. RLock re-entry only
-        # helps the owning thread.
-        self._lifecycle_depth = threading.local()
-        self._pending_status_events: List[DeviceStatusEventArgs] = []
+        # Guards the consumer/session/status handoff between connect(),
+        # disconnect() and the transport-loss handler, which runs on the
+        # transport's reader thread. Held only for those few assignments:
+        # never across a callback, a transport call or a thread join, so
+        # status handlers can freely wait on other threads.
+        self._state_lock = threading.Lock()
+        self._transport_session: Optional[int] = None
         self._text_exchange_lock_owner: Optional[int] = None
 
         if transport is not None:
@@ -310,31 +303,7 @@ class DaqifiDevice:
 
     # ---- lifecycle --------------------------------------------------------
 
-    @contextlib.contextmanager
-    def _lifecycle(self):
-        """Hold the lifecycle lock; deliver queued status events after it."""
-        with self._lifecycle_lock:
-            depth = getattr(self._lifecycle_depth, "value", 0)
-            self._lifecycle_depth.value = depth + 1
-            try:
-                yield
-            finally:
-                self._lifecycle_depth.value = depth
-                pending: List[DeviceStatusEventArgs] = []
-                if depth == 0:
-                    pending, self._pending_status_events = (
-                        self._pending_status_events, []
-                    )
-        for evt in pending:
-            self._deliver_status_event(evt)
-
     def connect(
-        self, retry_options: Optional[ConnectionRetryOptions] = None,
-    ) -> None:
-        with self._lifecycle():
-            self._connect_locked(retry_options)
-
-    def _connect_locked(
         self, retry_options: Optional[ConnectionRetryOptions] = None,
     ) -> None:
         # Accept retry_options so callers can request resilient
@@ -355,7 +324,7 @@ class DaqifiDevice:
                     "a transport-backed stream."
                 )
             self._transport.connect(retry_options=retry_options)
-            self._transport_session = getattr(self._transport, "session", None)
+            session = getattr(self._transport, "session", None)
             # Capture the stream once and validate it. A transport
             # that returns None from `.stream` after a successful
             # `.connect()` is broken — surface it now rather than
@@ -405,14 +374,21 @@ class DaqifiDevice:
             # Override per-device by passing ``message_factory``
             # to the constructor — useful for tests that want
             # raw-bytes passthrough or a custom proto class.
-            self._consumer = StreamMessageConsumer[Any](
+            consumer = StreamMessageConsumer[Any](
                 stream,
                 ProtobufMessageParser(message_factory=self._message_factory),
             )
-            self._consumer.start()
+            with self._state_lock:
+                self._consumer = consumer
+                self._transport_session = session
+            consumer.start()
 
-            self._set_status(ConnectionStatus.Connected)
-            self._set_state(DeviceState.Connected)
+            # Only if this connection is still the current one: the device
+            # may already have closed it (the loss handler runs on the
+            # reader thread just started), and "Connected" must not
+            # overwrite that "Lost".
+            if self._set_status(ConnectionStatus.Connected, if_consumer=consumer):
+                self._set_state(DeviceState.Connected)
         except Exception:
             # Setup failed mid-way. Tear down anything partially
             # constructed so the transport doesn't leak file
@@ -443,14 +419,11 @@ class DaqifiDevice:
             raise
 
     def disconnect(self) -> None:
-        with self._lifecycle():
-            self._disconnect_locked()
-
-    def _disconnect_locked(self) -> None:
-        self._is_disconnecting = True
-        # A loss event still in flight for the connection being closed
-        # must not match any later one.
-        self._transport_session = None
+        with self._state_lock:
+            self._is_disconnecting = True
+            # A loss event still in flight for this connection must not
+            # match any later one.
+            self._transport_session = None
         # Hoisted out of `try` so the `finally` block can branch on
         # whether the transport failed (Qodo PR 17 pass 26 #2).
         transport_error: Optional[Exception] = None
@@ -1318,57 +1291,74 @@ class DaqifiDevice:
     def _on_transport_status_changed(self, args: TransportStatusEventArgs) -> None:
         if args.is_connected:
             return
-        # Under the lifecycle lock, so the checks below and the teardown
-        # that follows can't straddle a disconnect/connect on another
-        # thread, and a loss seen while connect() is still running is
-        # applied after it, not overwritten by its final "Connected".
-        with self._lifecycle():
-            self._handle_transport_loss(args)
-
-    def _handle_transport_loss(self, args: TransportStatusEventArgs) -> None:
-        if self._is_disconnecting:
-            return
-        # A loss reported for a connection that has since been replaced or
-        # closed (delivered late, e.g. behind a slow handler): tearing down
-        # now would kill the new session.
-        if args.session is not None and args.session != self._transport_session:
-            return
+        # Checked and claimed atomically with connect()/disconnect(): a
+        # loss for a connection that has since been closed or replaced
+        # (args.session no longer current) must not touch the new one.
+        with self._state_lock:
+            if self._is_disconnecting:
+                return
+            if args.session is not None and args.session != self._transport_session:
+                return
+            consumer = self._consumer
+            self._consumer = None
+            self._transport_session = None
+            self._is_initialized = False
+            evt = self._change_status(ConnectionStatus.Lost)
         # Transport dropped unexpectedly: tear down the consumer so a
         # daemon thread doesn't keep spinning on a dead stream after
         # the device looks "Lost" to callers (Qodo PR 17 pass 26 #1).
-        if self._consumer is not None:
+        # Outside the lock; stop_safely is safe from the consumer's own
+        # thread, which is where a TCP peer-close is reported.
+        if consumer is not None:
             try:
-                self._consumer.remove_message_received(self._on_inbound_message)
+                consumer.remove_message_received(self._on_inbound_message)
             except Exception:
                 pass
             try:
-                stopped = self._consumer.stop_safely()
+                stopped = consumer.stop_safely()
                 if stopped is False:
-                    self._consumer.stop()
+                    consumer.stop()
             except Exception:
                 pass
             try:
-                self._consumer.close()
+                consumer.close()
             except Exception:
                 pass
-            self._consumer = None
-        self._is_initialized = False
-        self._set_status(ConnectionStatus.Lost)
         self._set_state(DeviceState.Error)
+        if evt is not None:
+            self._deliver_status_event(evt)
 
     # ---- helpers ----------------------------------------------------------
 
-    def _set_status(self, value: ConnectionStatus) -> None:
+    def _set_status(
+        self,
+        value: ConnectionStatus,
+        if_consumer: Optional[Any] = None,
+    ) -> bool:
+        """Change the status and notify. With `if_consumer`, only while that
+        consumer is still the device's; returns False if it no longer is."""
+        with self._state_lock:
+            if if_consumer is not None and self._consumer is not if_consumer:
+                return False
+            evt = self._change_status(value)
+        if evt is not None:
+            self._deliver_status_event(evt)
+        return True
+
+    def _change_status(self, value: ConnectionStatus) -> Optional[DeviceStatusEventArgs]:
+        # Caller holds _state_lock; the event is delivered after release.
         if self._status == value:
-            return
+            return None
         self._status = value
-        evt = DeviceStatusEventArgs(status=value)
-        if getattr(self._lifecycle_depth, "value", 0) > 0:
-            self._pending_status_events.append(evt)
-            return
-        self._deliver_status_event(evt)
+        return DeviceStatusEventArgs(status=value)
 
     def _deliver_status_event(self, evt: DeviceStatusEventArgs) -> None:
+        # Changes are decided under the lock but delivered outside it, so
+        # two threads' events can arrive out of order. One that is no
+        # longer true by now (a "Connected" overtaken by "Lost") is
+        # dropped rather than leave subscribers with a stale status.
+        if evt.status != self._status:
+            return
         for h in list(self._status_handlers):
             try:
                 h(evt)

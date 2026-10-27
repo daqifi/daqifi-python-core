@@ -89,22 +89,27 @@ class _SocketStream(io.RawIOBase):
       found the old thread still alive). ``socket.makefile`` can't be
       used for this: after one timeout it refuses all further reads.
     * End of stream (the device closed the connection: reboot, Wi-Fi
-      drop) is reported to the transport, which declares the connection
-      lost, and every read from then on raises ``ConnectionResetError``.
-      It used to read as an endless run of empty, "idle" reads.
+      drop) is reported to the transport, on the reading thread, and
+      every read from then on raises ``ConnectionResetError``. It used to
+      read as an endless run of empty, "idle" reads.
     """
 
     def __init__(
         self,
         sock: socket.socket,
         read_timeout: float,
-        on_peer_closed: Callable[[], None],
+        session: int,
+        on_peer_closed: Callable[["_SocketStream"], None],
     ) -> None:
         super().__init__()
         self._sock = sock
         self._read_timeout = read_timeout
+        self.session = session
         self._on_peer_closed = on_peer_closed
-        self._peer_closed = False
+        self.peer_closed = False
+        # Set when this connection is being closed by us, or its loss has
+        # already been reported, so the loss is reported at most once.
+        self.loss_reported = False
 
     def readable(self) -> bool:
         return True
@@ -116,7 +121,7 @@ class _SocketStream(io.RawIOBase):
         return self._sock.fileno()
 
     def readinto(self, buffer) -> int:  # type: ignore[override]
-        if self._peer_closed:
+        if self.peer_closed:
             raise ConnectionResetError("The device closed the TCP connection.")
         with selectors.DefaultSelector() as selector:
             selector.register(self._sock, selectors.EVENT_READ)
@@ -124,8 +129,8 @@ class _SocketStream(io.RawIOBase):
                 raise socket.timeout("timed out")
         received = self._sock.recv_into(buffer)
         if received == 0 and len(buffer) > 0:
-            self._peer_closed = True
-            self._on_peer_closed()
+            self.peer_closed = True
+            self._on_peer_closed(self)
             raise ConnectionResetError("The device closed the TCP connection.")
         return received
 
@@ -156,14 +161,15 @@ class TcpStreamTransport:
         self._socket: Optional[socket.socket] = None
         self._stream: Optional[IO[bytes]] = None
         self._disposed = False
-        # Bumped on every successful connect, so a peer-close event raised
-        # for one connection can be recognised as stale by a later one.
+        # Bumped on every successful connect; loss events carry the
+        # session they are about, so a late one can be told from current.
         self._session = 0
-        # The session already being closed (by us, or reported closed by
-        # the peer), so its EOF is reported once. Per session: a stale
-        # reader of an old connection must not mute the next one's EOF.
-        self._closed_session: Optional[int] = None
         self._status_handlers: List[Callable[[TransportStatusEventArgs], None]] = []
+
+    @property
+    def session(self) -> int:
+        """Number of the current connection; increases on every connect."""
+        return self._session
 
     @property
     def stream(self) -> Optional[IO[bytes]]:
@@ -192,7 +198,7 @@ class TcpStreamTransport:
             return False
         if getattr(self._stream, "closed", False):
             return False
-        if getattr(self._stream, "_peer_closed", False):
+        if getattr(self._stream, "peer_closed", False):
             return False
         try:
             return self._socket.fileno() != -1
@@ -257,11 +263,11 @@ class TcpStreamTransport:
                 # close via self._socket, not the local `sock`.
                 sock = None
                 self._session += 1
-                session = self._session
                 self._stream = _SocketStream(  # type: ignore[assignment]
                     self._socket,
                     self.OPERATIONAL_READ_TIMEOUT_S,
-                    lambda: self._on_peer_closed(session),
+                    self._session,
+                    self._on_peer_closed,
                 )
                 self._notify_status(True, None)
                 return
@@ -321,7 +327,8 @@ class TcpStreamTransport:
         disconnect_error: Optional[BaseException] = None
         # Our own shutdown below reads as end-of-stream to the consumer;
         # this keeps that from being reported as the device going away.
-        self._closed_session = self._session
+        if isinstance(self._stream, _SocketStream):
+            self._stream.loss_reported = True
 
         # Shutdown both halves of the socket BEFORE closing it.
         # This wakes any consumer thread blocked in `stream.read()`
@@ -367,33 +374,20 @@ class TcpStreamTransport:
             pass
         self._disposed = True
 
-    def _on_peer_closed(self, session: int) -> None:
-        """The device closed connection `session` (seen by a reader as EOF)."""
-        if session != self._session or self._closed_session == session:
+    def _on_peer_closed(self, stream: "_SocketStream") -> None:
+        """The device closed `stream`'s connection (its reader saw EOF).
+
+        Runs on that reader's thread. The event names the session, so a
+        subscriber can ignore it if that connection has been replaced.
+        """
+        if stream.loss_reported:
             return
-        self._closed_session = session
-        error = ConnectionResetError("The device closed the TCP connection.")
-
-        def _notify_if_current() -> None:
-            # Raised for one connection; a reconnect in the meantime makes
-            # it stale, and delivering it would tear the new session down.
-            # The event also names its session, so a subscriber reached
-            # only after a reconnect (behind a slow handler) can tell.
-            if session == self._session:
-                self._notify_status(False, error, session)
-
-        # Not on the reading thread: status handlers stop the consumer,
-        # and that thread is the consumer's own.
-        threading.Thread(
-            target=_notify_if_current,
-            name="daqifi-tcp-peer-closed",
-            daemon=True,
-        ).start()
-
-    @property
-    def session(self) -> int:
-        """Number of the current connection; increases on every connect."""
-        return self._session
+        stream.loss_reported = True
+        self._notify_status(
+            False,
+            ConnectionResetError("The device closed the TCP connection."),
+            session=stream.session,
+        )
 
     def _notify_status(
         self,

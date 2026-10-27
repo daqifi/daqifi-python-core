@@ -201,9 +201,9 @@ def test_reconnect_during_a_loss_teardown_keeps_the_new_session():
     real_stop = old_consumer.stop_safely
 
     def _slow_stop(*a, **k):
-        # Stall only the loss handler (it runs on the peer-closed thread);
-        # the app's own disconnect must not be held up by this patch.
-        if threading.current_thread().name == "daqifi-tcp-peer-closed":
+        # Stall only the loss handler, which runs on the old consumer's own
+        # reader thread; the app's own disconnect must not be held up.
+        if threading.current_thread() is old_consumer._thread:
             in_teardown.set()
             release.wait(5)
         return real_stop(*a, **k)
@@ -265,10 +265,15 @@ def test_peer_closing_during_connect_is_not_overwritten_by_connected(monkeypatch
     threading.Thread(target=_accept_and_close, daemon=True).start()
     transport = TcpStreamTransport("127.0.0.1", server.getsockname()[1])
     device = DaqifiDevice("fake", transport=transport, message_factory=lambda b: bytes(b))
+    events = []
+    device.add_status_changed(lambda args: events.append(args.status))
     try:
         device.connect()
         assert _wait_until(lambda: device.status == ConnectionStatus.Lost)
         assert not transport.is_connected
+        # Subscribers must not be left believing it is connected.
+        assert events[-1] == ConnectionStatus.Lost
+        assert ConnectionStatus.Connected not in events[events.index(ConnectionStatus.Lost):]
     finally:
         device.disconnect()
         server.close()
@@ -314,28 +319,102 @@ def test_status_handler_can_wait_for_a_reconnect_on_another_thread():
 
 
 def test_a_stale_eof_report_does_not_mute_the_next_connection():
-    # Audit finding on #167 (round 3): an old reader's late EOF report set a
-    # transport-wide "closing" flag after the reconnect, so the new
-    # connection's own EOF was then ignored.
+    # Audit findings on #167 (rounds 1 and 3): a loss reported late for an
+    # old connection must neither tear down nor mute the new one.
     fake = _FakeDevice()
     transport, device = _connect(fake)
     try:
-        old_session = transport.session
+        old_stream = transport.stream
         fake._accepted.clear()
         threading.Thread(target=fake._serve, daemon=True).start()
         device.disconnect()
         device.connect()
         fake.wait_accepted()
-        # The old reader, reporting late: it passed its session check while
-        # its connection was current, and marks it closed only now.
-        current = transport._session
-        transport._session = old_session
-        try:
-            transport._on_peer_closed(old_session)
-        finally:
-            transport._session = current
+        # The old reader reporting late, as if it slipped past every guard.
+        old_stream.loss_reported = False
+        transport._on_peer_closed(old_stream)
+        time.sleep(0.2)
+        assert device.status == ConnectionStatus.Connected
+        assert device._consumer is not None and device._consumer.is_running
         fake.conn.shutdown(socket.SHUT_RDWR)
         assert _wait_until(lambda: device.status == ConnectionStatus.Lost)
     finally:
         device.disconnect()
         fake.close()
+
+
+def test_failed_connect_still_notifies_its_status_changes():
+    # Audit finding on #167 (round 4): status events queued during a
+    # connect that raised were discarded, so subscribers saw nothing.
+    import pytest
+
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    port = closed.getsockname()[1]
+    closed.close()  # nothing listens here: the connect is refused
+    device = DaqifiDevice("fake", transport=TcpStreamTransport("127.0.0.1", port))
+    events = []
+    device.add_status_changed(lambda args: events.append(args.status))
+    with pytest.raises(Exception):
+        device.connect()
+    assert events and events[0] == ConnectionStatus.Connecting
+    assert events[-1] == device.status
+
+
+def test_transport_handler_can_wait_on_a_worker_that_reconnects():
+    # Audit finding on #167 (round 4): transport callbacks ran under the
+    # device's lifecycle lock, so one waiting on a worker that calls
+    # device.connect() deadlocked.
+    fake = _FakeDevice()
+    transport, device = _connect(fake)
+    joined_in_time = []
+
+    def _on_transport(args):
+        if not args.is_connected and not joined_in_time:
+            worker = threading.Thread(target=lambda: device.connect(), daemon=True)
+            fake._accepted.clear()
+            threading.Thread(target=fake._serve, daemon=True).start()
+            worker.start()
+            worker.join(3)
+            joined_in_time.append(not worker.is_alive())
+
+    transport.add_status_changed(_on_transport)
+    try:
+        device.disconnect()
+        assert _wait_until(lambda: joined_in_time)
+        assert joined_in_time == [True]
+    finally:
+        transport.remove_status_changed(_on_transport)
+        device.disconnect()
+        fake.close()
+
+
+def test_sd_download_over_tcp_tolerates_gaps_longer_than_a_read_window():
+    # Audit finding on #167 (round 4): the 0.5 s read bound raised
+    # socket.timeout out of SdCardFileReceiver, failing a transfer whose
+    # data paused for longer, well within its own deadline.
+    import io as _io
+
+    from daqifi.sdcard import SdCardFileReceiver
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def _send_late():
+        conn, _ = server.accept()
+        time.sleep(0.8)
+        conn.sendall(b"abc__END_OF_FILE__")
+        time.sleep(0.5)
+        conn.close()
+
+    threading.Thread(target=_send_late, daemon=True).start()
+    transport = TcpStreamTransport("127.0.0.1", server.getsockname()[1])
+    transport.connect()
+    try:
+        destination = _io.BytesIO()
+        written = SdCardFileReceiver(transport.stream).receive(destination, "log.bin", timeout_s=10)
+        assert written == 3 and destination.getvalue() == b"abc"
+    finally:
+        transport.disconnect()
+        server.close()
