@@ -109,3 +109,14 @@ def test_a_text_reply_before_frames_in_one_read_is_kept() -> None:
 
 def test_a_tab_prefixed_line_stays_text() -> None:
     assert _feed([b"\t123456789\r\n"]) == ["\t123456789"]
+
+
+# Audit round 3 on #177.
+
+def test_a_complete_frame_before_a_partial_one_is_kept() -> None:
+    out = _feed([bytes.fromhex("02080102"), bytes.fromhex("0802")])
+    assert [m.msg_time_stamp for m in out] == [1, 2]
+
+
+def test_a_tab_prefixed_reply_that_tiles_as_a_frame_stays_text() -> None:
+    assert _feed([b"\t1.23456\r\n"]) == ["\t1.23456"]
