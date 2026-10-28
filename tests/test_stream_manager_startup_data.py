@@ -439,3 +439,28 @@ def test_a_console_only_reply_with_blank_line_and_prompts_keeps_later_frames() -
     samples = stream.read(1, timeout=2.0)
     stream.stop()
     assert [s.channels for s in samples] == [{0: 1.5}]
+
+
+# Audit round 12 on #180.
+
+@pytest.mark.parametrize("lead", [b"\r\nDAQIFI> ", b"\n\r\nDAQIFI>\r\n", b"DAQIFI> \r\nDAQIFI> "])
+def test_line_endings_before_a_prompt_without_an_echo_are_console_output(lead) -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _FakeSerial(enabled_mask=1, on_start=lead)
+    original_write = fake.write
+
+    def write(data):
+        n = original_write(data)
+        if b"START" in data.upper():
+            def tail():
+                with fake.lock:
+                    fake.rx += frame * 2
+            threading.Timer(0.6, tail).start()  # after start() has returned
+        return n
+
+    fake.write = write
+    stream = _manager(fake, channels=[0], sample_rate=1, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=2.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]

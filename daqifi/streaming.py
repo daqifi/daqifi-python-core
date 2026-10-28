@@ -544,12 +544,29 @@ class StreamManager:
         line endings and prompts (a prompt pending from the previous command,
         blank lines), and that goes with the echo, as does one prompt after
         it. The console (microrl) ends the echo with exactly CR LF (ENDL,
-        _ENDL_CRLF). Without an echo only a leading prompt is dropped: bare
-        CR or LF bytes can be a protobuf frame's length byte."""
+        _ENDL_CRLF). Without an echo, line endings go only together with a
+        prompt after them, which confirms they are console output: bare CR
+        or LF bytes can be a protobuf frame's length byte."""
         position = cls._find_echo(data, echo_line)
         if position >= 0:
             return cls._strip_prompt(data[position + len(echo_line):])
-        return cls._strip_prompt(data)
+        return data[cls._console_prefix_end(data):]
+
+    @classmethod
+    def _console_prefix_end(cls, data: bytes) -> int:
+        """End of the longest leading run of line endings and prompts that
+        ends with a complete prompt; 0 if there is none."""
+        end = 0
+        position = data.find(b"DAQIFI>")
+        while 0 <= position < 256:
+            for prompt in _CONSOLE_PROMPTS:  # longest forms first
+                if data.startswith(prompt, position):
+                    candidate = position + len(prompt)
+                    if cls._is_console_noise(data[:candidate]):
+                        end = candidate
+                    break
+            position = data.find(b"DAQIFI>", position + 1)
+        return end
 
     @classmethod
     def _ends_inside_console_prefix(cls, data: bytes, echo_line: bytes) -> bool:
