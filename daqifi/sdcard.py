@@ -2112,22 +2112,28 @@ def _split_batched_samples(obj: Any) -> List[Any]:
         elif key == "ai" and samples:
             samples[-1]["ai"] = value
     di = obj.get("di")
-    if isinstance(di, list) and di:
-        reference = samples[-1].get("ts")
-        placed = []
-        for entry in di:
-            age = entry.get("ts") if isinstance(entry, dict) else None
-            if (
-                isinstance(reference, int) and not isinstance(reference, bool)
-                and isinstance(age, int) and not isinstance(age, bool)
-            ):
-                placed.append((reference - age, entry))
+    reference = samples[-1].get("ts")
+    if isinstance(di, list) and di and _is_plain_int(reference):
+        ages = [
+            (entry["ts"], entry) for entry in di
+            if isinstance(entry, dict) and _is_plain_int(entry.get("ts"))
+        ]
         for sample in samples:
             ts = sample.get("ts")
-            due = [entry for when, entry in placed if isinstance(ts, int) and when <= ts]
+            if not _is_plain_int(ts):
+                continue
+            # Ages back from the reference, in the timer's uint32 domain so
+            # a batch across the rollover still compares in order: an entry
+            # is due for this sample if it is at least as old as the sample.
+            sample_age = (reference - ts) & 0xFFFFFFFF
+            due = [(age, entry) for age, entry in ages if age >= sample_age]
             if due:
-                sample["di"] = [due[-1]]
+                sample["di"] = [min(due, key=lambda pair: pair[0])[1]]
     return samples
+
+
+def _is_plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _try_parse_json_samples(obj: Any) -> List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]]:

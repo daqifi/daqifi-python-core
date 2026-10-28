@@ -304,3 +304,15 @@ def test_batched_samples_take_the_digital_state_of_their_own_time() -> None:
 def test_a_single_sample_object_still_takes_the_latest_digital_state() -> None:
     data = b'{"di":[{"ts":10,"mask":15,"val":3},{"ts":0,"mask":15,"val":5}],"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
     assert [s.digital_data for s in _parse(data).samples] == [5]
+
+
+@pytest.mark.parametrize("first, second, ages", [(4294967290, 4, (10, 0)), (4294967286, 10, (20, 0))])
+def test_batched_digital_states_across_the_timer_rollover(first, second, ages) -> None:
+    # Audit finding on #183 (round 9): reference - age wrapped negative and
+    # compared below the earlier sample's wrapped "ts". SYNTHETIC.
+    data = (
+        b'{"di":[{"ts":%d,"mask":15,"val":3},{"ts":%d,"mask":15,"val":5}],'
+        b'"ts":%d,"ai":[{"ch":0,"val":1.0000}],"ts":%d,"ai":[{"ch":0,"val":2.0000}]}\n'
+        % (ages[0], ages[1], first, second)
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [3, 5]
