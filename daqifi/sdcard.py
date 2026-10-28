@@ -2088,29 +2088,29 @@ class _JsonObject(dict):
         self.pairs = pairs
 
 
-def _split_batched_samples(obj: Any) -> Tuple[List[Any], List[Tuple[int, int]]]:
-    """``(samples, digital events)`` for one decoded object.
+def _split_batched_samples(obj: Any) -> Tuple[List[Any], List[Tuple[int, int]], Any]:
+    """``(samples, digital ages, reference ts)`` for one decoded object.
 
     A firmware object with repeated ``"ts"`` keys becomes one sample per
-    ``"ts"``, each with the ``"ai"`` after it and the object's other
-    fields. A firmware object with a ``"di"`` array gives its entries as
-    ``(tick, value)`` events for :class:`_DigitalTimeline`, and its samples
+    ``"ts"``, each with the ``"ai"`` after it and the object's other fields;
+    a single-sample object takes its fields by key. A firmware object with a
+    ``"di"`` array gives its entries as ``(age, value)``, and its samples
     lose the array (an ``"ai"`` of their own, possibly empty, keeps them in
-    the firmware shape). Anything else is one sample and no events.
+    the firmware shape). Anything else is one sample and no ages.
 
     ``"di"`` entries carry ages, not times: each is measured back from the
     trigger stamp at encode time, which an ADC object doesn't include. That
     is a documented firmware limitation (JSON_Encoder.c, at the di element
-    writer), tracked on daqifi-nyquist-firmware#959. The latest sample's
-    ``"ts"`` stands in for it, so an entry's tick is ``latest ts - age``,
-    off by (ADC ts - trigger stamp) when the ADC lags. Ages are uint32
-    differences read as signed int32: a read just after the trigger (age
-    0xFFFFFFFF) is one tick in the future."""
+    writer), tracked on daqifi-nyquist-firmware#959. The object's latest
+    sample stands in for it (the returned reference ts), off by (ADC ts -
+    trigger stamp) when the ADC lags. Ages are uint32 differences read as
+    signed int32: a read just after the trigger (age 0xFFFFFFFF) is one tick
+    in the future."""
     pairs = getattr(obj, "pairs", None)
     if not pairs or (
         sum(1 for key, _ in pairs if key == "ts") < 2 and "di" not in obj
     ):
-        return [obj], []
+        return [obj], [], None
     shared = {key: value for key, value in pairs if key not in ("ts", "ai", "di")}
     samples: List[dict] = []
     if sum(1 for key, _ in pairs if key == "ts") == 1:
@@ -2124,50 +2124,102 @@ def _split_batched_samples(obj: Any) -> Tuple[List[Any], List[Tuple[int, int]]]:
             elif key == "ai" and samples:
                 samples[-1]["ai"] = value
     if not samples:
-        return [obj], []  # no "ts" at all: left to the sample parser to reject
-    events: List[Tuple[int, int]] = []
+        return [obj], [], None  # no "ts" at all: left to the sample parser to reject
     di = obj.get("di")
     if "di" in obj and not isinstance(di, list):
         for sample in samples:
             sample["di"] = di  # malformed: left for the sample parser to reject
-        return samples, events
-    reference = samples[-1]["ts"]
-    # A record whose timestamp the sample parser rejects gives no events.
-    if isinstance(di, list) and _is_plain_int(reference) and 0 <= reference <= 0xFFFFFFFF:
-        for entry in di:
-            if not isinstance(entry, dict):
-                continue
-            age, value = entry.get("ts"), entry.get("val")
-            if _is_plain_int(age) and _is_plain_int(value):
-                events.append(((reference - _signed32(age)) & 0xFFFFFFFF, value & 0xFFFFFFFF))
-    return samples, events
+        return samples, [], None
+    ages: List[Tuple[int, int]] = []
+    for entry in di or []:
+        if not isinstance(entry, dict):
+            continue
+        age, value = entry.get("ts"), entry.get("val")
+        if _is_plain_int(age) and _is_plain_int(value):
+            ages.append((_signed32(age), value & 0xFFFFFFFF))
+    return samples, ages, samples[-1]["ts"]
 
 
-class _DigitalTimeline:
-    """The digital port state over one parse.
+class _JsonClock:
+    """Unwrapped ticks for a JSON parse's records, from their uint32 "ts".
 
-    Events are ``(tick, value)`` in the timer's uint32 domain. A sample
-    takes the latest event at or before its own tick, else keeps the state
-    it had: the port holds its value between reads, across objects. An
-    event in a sample's future waits for a later sample."""
-
-    _MAX_PENDING = 1024
+    Anchored at tick 0 on the first record of any kind. An analog record
+    moves the base: forward with rollover (as the other formats), or, when
+    the base was last moved by a digital-only record, by a signed step,
+    since an ADC sample queued for the next object can be older than a
+    digital record stamped with the trigger (JSON_Encoder.c). A digital-only
+    record moves the base only while no analog record has been seen, or if
+    it isn't ahead of the latest analog tick; otherwise it is placed without
+    moving it."""
 
     def __init__(self) -> None:
-        self.state = 0
-        self._pending: List[Tuple[int, int]] = []
+        self._anchored = False
+        self._base_raw = 0
+        self._base_tick = 0
+        self._base_by_digital = False
+        self._latest_analog: Optional[int] = None
 
-    def add(self, events: List[Tuple[int, int]]) -> None:
-        self._pending.extend(events)
-        del self._pending[: max(0, len(self._pending) - self._MAX_PENDING)]
+    def place(self, ts: Any, analog: bool) -> Optional[int]:
+        """The record's unwrapped tick; None for "no timestamp" (0)."""
+        if not _is_plain_int(ts) or ts == 0:
+            return None
+        if not self._anchored:
+            self._anchored = True
+            self._move(ts, 0, by_digital=not analog)
+            if analog:
+                self._latest_analog = 0
+            return 0
+        if analog:
+            step = (
+                _signed32(ts - self._base_raw) if self._base_by_digital
+                else _compute_tick_delta(self._base_raw, ts)
+            )
+            tick = self._base_tick + step
+            self._move(ts, tick, by_digital=False)
+            self._latest_analog = tick
+            return tick
+        tick = self._base_tick + _compute_tick_delta(self._base_raw, ts)
+        if self._latest_analog is None or tick <= self._latest_analog:
+            self._move(ts, tick, by_digital=True)
+        return tick
 
-    def at(self, tick: int) -> int:
-        due = [event for event in self._pending if _signed32(tick - event[0]) >= 0]
-        if due:
-            # The latest due event: the one closest before the tick.
-            self.state = min(due, key=lambda event: _signed32(tick - event[0]))[1]
-            self._pending = [event for event in self._pending if event not in due]
-        return self.state
+    def _move(self, ts: int, tick: int, by_digital: bool) -> None:
+        self._base_raw, self._base_tick, self._base_by_digital = ts, tick, by_digital
+
+
+class _DigitalHistory:
+    """Digital port events by unwrapped tick over one parse.
+
+    A sample takes the latest event at or before its own tick: the port
+    holds its value between reads, across objects, and a sample older than
+    an event already seen (a queued ADC sample) still gets the state of its
+    own time. Events are never consumed; a long history is compacted to
+    its recent part plus the state before it."""
+
+    _MAX_EVENTS = 4096
+
+    def __init__(self) -> None:
+        self._events: List[Tuple[int, int, int]] = []  # (tick, order, value)
+        self._order = 0
+
+    def add(self, tick: int, value: int) -> None:
+        import bisect
+
+        self._order += 1
+        bisect.insort(self._events, (tick, self._order, value))
+        if len(self._events) > self._MAX_EVENTS:
+            keep = self._MAX_EVENTS // 2
+            del self._events[: len(self._events) - keep - 1]
+
+    def at(self, tick: Optional[int]) -> int:
+        import bisect
+
+        if not self._events:
+            return 0
+        if tick is None:
+            return self._events[-1][2]
+        index = bisect.bisect_right(self._events, (tick, float("inf"), 0))
+        return self._events[index - 1][2] if index else 0
 
 
 def _signed32(value: int) -> int:
@@ -2181,20 +2233,20 @@ def _is_plain_int(value: Any) -> bool:
 
 def _try_parse_json_samples(
     obj: Any,
-) -> Tuple[List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]], List[Tuple[int, int]]]:
-    """``(well-formed samples, digital events)`` in ``obj``; a malformed
-    sample is skipped, and a record malformed beyond splitting gives
-    neither."""
+) -> Tuple[List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]], List[Tuple[int, int]], Any]:
+    """``(well-formed samples, digital ages, reference ts)`` in ``obj``; a
+    malformed sample is skipped, and a record malformed beyond splitting
+    gives nothing."""
     try:
-        split, events = _split_batched_samples(obj)
+        split, ages, reference = _split_batched_samples(obj)
     except Exception:
-        return [], []
+        return [], [], None
     out = []
     for sample in split:
         parsed = _try_parse_json_sample(sample)
         if parsed is not None:
             out.append(parsed)
-    return out, events
+    return out, ages, reference
 
 
 def _try_parse_json_sample(
@@ -2329,7 +2381,7 @@ def _infer_json_configuration(
         if found is not None:
             meta = found
             continue
-        parsed, _events = _try_parse_json_samples(obj)
+        parsed, _ages, _reference = _try_parse_json_samples(obj)
         if parsed:
             analog_count = len(parsed[0][1])
             break
@@ -2361,70 +2413,54 @@ def _produce_json_samples(
     timestamp_freq = config.timestamp_frequency
     tick_period = 1.0 / timestamp_freq if timestamp_freq > 0 else 0.0
 
-    previous_timestamp: Optional[int] = None
-    elapsed_seconds = 0.0
     lines_processed = 0
     bytes_read = 0
     progress = options.progress
     total_bytes = objects[-1][1] if objects else 0
     reader = _FirmwareValueReader(config, options.integer_units)
-    digital = _DigitalTimeline()
-    # A digital-only record is stamped with the trigger time, which can be
-    # newer than an ADC sample still queued for the next object
-    # (JSON_Encoder.c). In a log with analog samples such a record is placed
-    # in time but doesn't move the time base, or that older ADC sample would
-    # read as a timer rollover. In a digital-only log it does.
-    log_has_analog = any(
-        isinstance(obj, dict) and obj.get("ai") for obj, _end in objects
-    )
+    clock = _JsonClock()
+    digital = _DigitalHistory()
 
     for obj, end in objects:
         lines_processed += 1
         bytes_read = end
 
-        parsed_samples, events = _try_parse_json_samples(obj)
-        digital.add(events)
+        parsed_samples, ages, reference = _try_parse_json_samples(obj)
+        # Place every sample of the object first: its digital ages are
+        # measured back from its latest sample.
+        placed = []
         for parsed in parsed_samples:
             ts, raw_analog, channels, digital_data = parsed
             units: Optional[str] = None
             if channels is not None:
-                # The firmware's "ai" shape: the shared firmware rule, and
-                # the port state from the parse's digital timeline.
+                # The firmware's "ai" shape: the shared firmware rule.
                 read = reader.read(raw_analog, channels)
                 if read is None:
                     continue
                 analog_values, units = read
-                digital_data = digital.at(ts)
             else:
                 # The legacy "analog" shape is raw counts, as upstream
                 # scales it, whatever the number syntax.
                 analog_values = _scale_raw_analog_values(
                     [int(v) for v in raw_analog], config, channels
                 )
+            digital_only = channels is not None and not raw_analog
+            tick = clock.place(ts, analog=not digital_only)
+            placed.append((ts, tick, analog_values, units, channels, digital_data))
+        if ages and placed and placed[-1][0] == reference and placed[-1][1] is not None:
+            for age, value in ages:
+                digital.add(placed[-1][1] - age, value)
 
-            absolute_time = base_time
-            # ``ts == 0`` is treated as "no timestamp" — matches the
+        for ts, tick, analog_values, units, channels, digital_data in placed:
+            if channels is not None:
+                # The port state at the sample's own time.
+                digital_data = digital.at(tick)
+            # ``ts == 0`` is "no timestamp" (tick None) — matches the
             # protobuf parser so the same physical log reconstructs to
             # consistent absolute timestamps regardless of file format.
-            moves_time_base = not (
-                log_has_analog and channels is not None and not raw_analog
-            )
-            if tick_period > 0 and ts != 0:
-                if previous_timestamp is None:
-                    if moves_time_base:
-                        previous_timestamp = ts
-                    absolute_time = base_time + timedelta(seconds=elapsed_seconds)
-                else:
-                    delta = _compute_tick_delta(previous_timestamp, ts)
-                    if moves_time_base:
-                        elapsed_seconds += delta * tick_period
-                        previous_timestamp = ts
-                        absolute_time = base_time + timedelta(seconds=elapsed_seconds)
-                    else:
-                        absolute_time = base_time + timedelta(
-                            seconds=elapsed_seconds + delta * tick_period
-                        )
-
+            absolute_time = base_time
+            if tick_period > 0 and tick is not None:
+                absolute_time = base_time + timedelta(seconds=tick * tick_period)
             yield SdCardLogEntry(
                 timestamp=absolute_time,
                 analog_values=tuple(analog_values),

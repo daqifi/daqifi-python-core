@@ -424,3 +424,75 @@ def test_a_digital_only_log_still_advances_its_time_base() -> None:
     t0 = samples[0].timestamp
     assert [round((s.timestamp - t0).total_seconds(), 3) for s in samples] == [0.0, 0.1, 0.2]
     assert [s.digital_data for s in samples] == [1, 2, 3]
+
+
+# Audit round 15 on #183 and the operator's redesign cases: one clock
+# anchored on the first record, one digital history looked up by tick.
+
+def _offsets(samples):
+    t0 = samples[0].timestamp
+    return [round((s.timestamp - t0).total_seconds(), 3) for s in samples]
+
+
+def test_a_queued_adc_sample_gets_the_digital_state_of_its_own_time() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":0,"mask":15,"val":0}]}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":1050,"ai":[{"ch":0,"val":2.0000}]}\n'
+        b'{"ts":1150,"ai":[{"ch":0,"val":3.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert [s.digital_data for s in samples] == [0, 5, 0, 5]
+    assert _offsets(samples) == [0.0, 0.1, 0.05, 0.15]
+
+
+def test_leading_digital_records_keep_their_spacing_in_a_mixed_log() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":2}]}\n'
+        b'{"ts":1200,"ai":[{"ch":0,"val":3.0000}]}\n'
+        b'{"ts":1300,"ai":[{"ch":0,"val":4.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert _offsets(samples) == [0.0, 0.1, 0.2, 0.3]
+    assert [s.digital_data for s in samples] == [1, 2, 2, 2]
+
+
+def test_a_late_analog_sample_right_after_a_leading_digital_record() -> None:
+    # The first record is digital-only and stamped with the trigger; the
+    # first ADC sample is older (queued). A step back, not a rollover.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":1050,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":1150,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert _offsets(samples) == [0.0, -0.05, 0.05]
+    assert [s.digital_data for s in samples] == [5, 0, 5]
+
+
+def test_a_long_held_digital_state_survives_far_past_the_signed_window() -> None:
+    # 3e9 ticks later (past the int32 window, across a rollover), a state
+    # set once still holds: the history is unwrapped, not windowed.
+    data = (
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":0,"mask":15,"val":9}]}\n'
+        b'{"ts":2000000000,"ai":[{"ch":0,"val":2.0000}]}\n'
+        b'{"ts":3000000000,"ai":[{"ch":0,"val":3.0000}]}\n'
+        b'{"ts":705032704,"ai":[{"ch":0,"val":4.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [9, 9, 9, 9]
+
+
+def test_a_digital_record_ahead_of_the_analog_does_not_move_the_time_base() -> None:
+    # Were the trigger-stamped digital record the base, the next ADC sample
+    # 3e9 ticks on (past the int32 window) would read as a step back.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":3000001000,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    assert _offsets(list(_parse(data).samples)) == [0.0, 0.1, 3000000.0]
