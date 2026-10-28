@@ -191,6 +191,12 @@ class SampleBuffer:
         return pd.DataFrame(data)
 
 
+# Prompt forms that may lead the START reply, longest first so a prompt line
+# is taken with its CR LF as a unit: the firmware's "DAQIFI> " (microrl
+# _PROMPT_DEFAULT), and the same on a line of its own.
+_CONSOLE_PROMPTS = (b"DAQIFI> \r\n", b"DAQIFI>\r\n", b"DAQIFI> ", b"DAQIFI>")
+
+
 class StreamManager:
     """
     Manages data streaming from Nyquist device.
@@ -272,6 +278,12 @@ class StreamManager:
         # are O(chunk) instead of O(total) — at 50 kHz the bytes
         # path would copy the whole buffer on every poll.
         self._pb_buffer: bytearray = bytearray()
+        # An empty channel selection means "all enabled channels", kept as
+        # intent across restarts rather than frozen to the first session's.
+        self._all_channels = not self._channels
+        # Channels enabled on the device when streaming started (ascending),
+        # or None before the first start(). See _samples_from_pb_message.
+        self._device_channels: Optional[List[int]] = None
         self._pb_parser: Optional[ProtobufMessageParser] = None
         self._pending_pb_samples: Deque[Sample] = deque()
 
@@ -360,7 +372,19 @@ class StreamManager:
             # Verify at least one channel is enabled (firmware bug workaround)
             # Without this check, firmware crashes with TLB exception
             enabled_mask = self._comm.send_query("ENABle:VOLTage:DC?")
-            enabled_count = bin(int(enabled_mask)).count('1')
+            mask = int(enabled_mask)
+            # The channels the device will actually send, in ascending
+            # order: a protobuf frame's values follow this order, whatever
+            # channel list the caller asked for.
+            self._device_channels = [bit for bit in range(mask.bit_length()) if mask >> bit & 1]
+            enabled_count = len(self._device_channels)
+            if self._all_channels:
+                # No selection means every enabled channel, re-read on each
+                # start (the enabled set may change between sessions); record
+                # them so .channels and the buffer's exports name what samples
+                # carry.
+                self._channels = list(self._device_channels)
+                self._buffer.channels = list(self._device_channels)
             if enabled_count == 0:
                 raise ConfigurationError(
                     "No ADC channels enabled. Enable at least one channel before streaming.\n"
@@ -377,7 +401,7 @@ class StreamManager:
             # Set before sending: if the send fails midway the device may
             # still have started, and a later stop() should send STOP.
             self._device_streaming = True
-            response = self._comm.send_command(start_cmd, delay=0.2)
+            response = self._send_start(start_cmd)
 
             # Validate the START response before transitioning to RUNNING.
             # Without this, a device-side rejection (e.g. unknown command
@@ -392,7 +416,7 @@ class StreamManager:
             # scan over the whole buffer and false-positives on stream
             # payload that happens to include the word "ERROR" (Qodo
             # PR #6 pass 2 #1 — regression from the naïve guard above).
-            first_line = response.splitlines()[0] if response else ""
+            first_line = response
             if scpi.contains_scpi_error([first_line]):
                 raise CommandError(
                     f"Streaming START rejected by device: {first_line.strip()!r}"
@@ -427,6 +451,157 @@ class StreamManager:
             if isinstance(e, CommandError):
                 raise
             raise CommandError(f"Failed to start streaming: {e}") from e
+
+    def _send_start(self, start_cmd: str) -> str:
+        """Send START and hand everything that arrives with it to the stream.
+
+        ``send_command`` would read and discard those bytes: the CSV/JSON
+        metadata header (tick rate, column-to-channel mapping) and the first
+        protobuf frames. Only a leading echo of the command and the prompt
+        are dropped; the rest seeds the decode buffers. Returns the first
+        text line, for the START-rejection check.
+        """
+        port = self._comm._serial
+        port.write((start_cmd + "\r").encode("ascii"))
+        port.flush()
+        time.sleep(0.2)
+        # As send_command: wait up to its timeout for the first bytes (a
+        # rejection can arrive after the 200 ms settle), then read until the
+        # line goes quiet.
+        raw = bytearray()
+        timeout = getattr(self._comm, "timeout", 0.3)
+        if not isinstance(timeout, (int, float)):
+            timeout = 0.3
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            waiting = port.in_waiting
+            if waiting:
+                raw.extend(port.read(waiting))
+                time.sleep(0.05)
+                if not port.in_waiting:
+                    break
+            else:
+                time.sleep(0.01)
+        # If the read window ended inside the echo or the prompt (b"DAQIFI>"
+        # with its space still in flight), read on briefly: deciding on a
+        # partial console prefix would leave its tail in the stream.
+        echo_line = start_cmd.encode("ascii") + b"\r\n"
+        extra_deadline = time.monotonic() + 0.5
+        while time.monotonic() < extra_deadline and self._ends_inside_console_prefix(
+            bytes(raw), echo_line
+        ):
+            waiting = port.in_waiting
+            if waiting:
+                raw.extend(port.read(waiting))
+            else:
+                time.sleep(0.01)
+        head = self._strip_console_prefix(bytes(raw), echo_line)
+        if self._format == 0:
+            self._pb_buffer.extend(head)
+        else:
+            self._read_buffer += head.decode("utf-8", errors="ignore")
+        # For the rejection check: the first line with content, past blank
+        # lines and a prompt on a line of its own.
+        for line in head.decode("ascii", errors="ignore").splitlines():
+            line = line.strip()
+            if line.upper().startswith("DAQIFI>"):
+                line = line[len("DAQIFI>"):].strip()
+            if line and line != start_cmd:  # an echo the strip didn't reach
+                return line
+        return ""
+
+    @staticmethod
+    def _strip_prompt(data: bytes) -> bytes:
+        """``data`` without one leading prompt. The firmware prompt is
+        exactly "DAQIFI> " (microrl _PROMPT_DEFAULT, no line ending); a
+        prompt on a line of its own loses its CR LF with it, as a unit:
+        never a bare CR or LF, which can be a protobuf frame's length byte."""
+        for prompt in _CONSOLE_PROMPTS:
+            if data.startswith(prompt):
+                return data[len(prompt):]
+        return data
+
+    @staticmethod
+    def _is_console_noise(data: bytes) -> bool:
+        """True if ``data`` is only line endings and prompts."""
+        rest = data.replace(b"DAQIFI> ", b"").replace(b"DAQIFI>", b"")
+        return not rest.strip(b"\r\n")
+
+    @classmethod
+    def _find_echo(cls, data: bytes, echo_line: bytes) -> int:
+        """Where the START echo starts, if only line endings and prompts
+        come before it; else -1."""
+        position = data.find(echo_line)
+        if position >= 0 and cls._is_console_noise(data[:position]):
+            return position
+        return -1
+
+    @classmethod
+    def _strip_console_prefix(cls, data: bytes, echo_line: bytes) -> bytes:
+        """Drop the console output that can lead the START reply.
+
+        When the echo of START is there, everything before it may be only
+        line endings and prompts (a prompt pending from the previous command,
+        blank lines), and that goes with the echo, as does one prompt after
+        it. The console (microrl) ends the echo with exactly CR LF (ENDL,
+        _ENDL_CRLF). Without an echo, line endings go only together with a
+        prompt after them, which confirms they are console output: bare CR
+        or LF bytes can be a protobuf frame's length byte."""
+        position = cls._find_echo(data, echo_line)
+        if position >= 0:
+            # After the echo, the same rule: line endings go only together
+            # with the prompt after them.
+            rest = data[position + len(echo_line):]
+            return rest[cls._console_prefix_end(rest):]
+        return data[cls._console_prefix_end(data):]
+
+    @classmethod
+    def _console_prefix_end(cls, data: bytes) -> int:
+        """End of the longest leading run of line endings and prompts that
+        ends with a complete prompt; 0 if there is none."""
+        end = 0
+        position = data.find(b"DAQIFI>")
+        while 0 <= position < 256:
+            for prompt in _CONSOLE_PROMPTS:  # longest forms first
+                if data.startswith(prompt, position):
+                    candidate = position + len(prompt)
+                    if cls._is_console_noise(data[:candidate]):
+                        end = candidate
+                    break
+            position = data.find(b"DAQIFI>", position + 1)
+        return end
+
+    @classmethod
+    def _ends_inside_console_prefix(cls, data: bytes, echo_line: bytes) -> bool:
+        """True if ``data`` stops part-way through the console output that
+        may lead the START reply: in the echo, in a prompt, or with only
+        line endings and prompts so far (the echo may follow)."""
+        position = cls._find_echo(data, echo_line)
+        if position >= 0:
+            rest = data[position + len(echo_line):]
+            # Nothing after the echo yet, only line endings so far, or a
+            # prompt still arriving ("DAQIFI> ", or a prompt line split after
+            # its CR). The console prints a prompt after the command, so wait
+            # for it rather than let it reach the decoder.
+            if not rest or (cls._is_console_noise(rest) and not cls._console_prefix_end(rest)):
+                return True
+            return cls._ends_in_partial_console(rest)
+        if data and cls._is_console_noise(data):
+            return True
+        return cls._ends_in_partial_console(data, echo_line)
+
+    @classmethod
+    def _ends_in_partial_console(cls, data: bytes, echo_line: bytes = b"") -> bool:
+        """True if ``data`` is line endings and prompts followed by the
+        start of a prompt (or of ``echo_line``) still arriving. A partial
+        can only be the last few bytes."""
+        candidates = [prompt for prompt in _CONSOLE_PROMPTS] + ([echo_line] if echo_line else [])
+        longest = max(len(candidate) for candidate in candidates)
+        for split in range(max(0, len(data) - longest), len(data)):
+            head, tail = data[:split], data[split:]
+            if any(candidate.startswith(tail) for candidate in candidates) and cls._is_console_noise(head):
+                return True
+        return False
 
     def stop(self):
         """
@@ -711,6 +886,9 @@ class StreamManager:
                 ch_pattern = re.findall(r'(?:ain|ch)(\d+)_ts', line)
                 if ch_pattern:
                     self._channels = [int(ch) for ch in ch_pattern]
+                    # Keep the buffer's channel list in step: exports
+                    # (to_dict/to_csv/to_dataframe) read it.
+                    self._buffer.channels = list(self._channels)
                     print(f"CSV Column Headers detected: Enabled channels = {self._channels}")
                 return None
 
@@ -901,10 +1079,17 @@ class StreamManager:
             values = [float(v) for v in (
                 getattr(message, "analog_in_data", None) or []
             )]
-        if not values or not self._channels:
+        # A frame carries one value per channel ENABLED ON THE DEVICE, in
+        # ascending channel order. Mapping by the caller's list instead
+        # relabelled channel 1's data as channel 0 and doubled the apparent
+        # rate whenever the two differed (#162). The caller's list then
+        # selects which of those channels the sample keeps.
+        source = self._device_channels or self._channels
+        if not values or not source:
             return []
+        wanted = set(self._channels) if self._channels else set(source)
 
-        num_channels = len(self._channels)
+        num_channels = len(source)
         if len(values) % num_channels != 0:
             # Partial / misaligned frame — refuse to guess at the
             # per-channel split. The CSV/JSON paths silently drop
@@ -923,19 +1108,16 @@ class StreamManager:
         batch_count = len(values) // num_channels
         for i in range(batch_count):
             block = values[i * num_channels : (i + 1) * num_channels]
-            raw_ts = (
-                per_sample_ts[i]
-                if i < len(per_sample_ts) else msg_ts
-            )
-            samples.append(
-                Sample(
-                    timestamp=_convert_ts(raw_ts),
-                    channels={
-                        ch: float(block[idx])
-                        for idx, ch in enumerate(self._channels)
-                    },
-                )
-            )
+            # analog_in_data_ts is an offset to msg_time_stamp
+            # (DaqifiOutMessage.proto, field 4), not an absolute time.
+            raw_ts = msg_ts + (per_sample_ts[i] if i < len(per_sample_ts) else 0)
+            channels = {
+                ch: float(block[idx])
+                for idx, ch in enumerate(source)
+                if ch in wanted
+            }
+            if channels:
+                samples.append(Sample(timestamp=_convert_ts(raw_ts), channels=channels))
         return samples
 
     def _streaming_thread(self, stop_event: Optional[threading.Event] = None):
