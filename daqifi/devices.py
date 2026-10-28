@@ -1832,6 +1832,18 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._is_logging_to_sd = True
         self._forget_sd_card_sizes()
 
+    def connect(
+        self, retry_options: Optional[ConnectionRetryOptions] = None,
+    ) -> None:
+        # A listing from an earlier session isn't a safe download length:
+        # the card may have changed while disconnected.
+        self._forget_sd_card_sizes()
+        super().connect(retry_options)
+
+    def disconnect(self) -> None:
+        self._forget_sd_card_sizes()
+        super().disconnect()
+
     def _forget_sd_card_sizes(self) -> None:
         # Logging can grow a listed file, so sizes listed before or during a
         # recording aren't a safe download length; they come back with the

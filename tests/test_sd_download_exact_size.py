@@ -240,3 +240,21 @@ def test_a_download_keeps_the_other_files_listed_sizes() -> None:
     device.request_sd_card_file_list()
     assert device.download_sd_card_file("a.bin", io.BytesIO()).size_verified
     assert [f.size for f in device.sd_card_files] == [3, 100]
+
+
+# Audit round 5 on #185.
+
+def test_a_reconnect_forgets_listed_sizes() -> None:
+    device = _fakes._make_device_with_serial_facade(
+        {
+            b"SD:LIST?": b"log.bin 3\r\n",
+            b"SD:GET": b"DAQIFI> abcdef" + END_OF_FILE_MARKER + _TRAILER,
+        }
+    )
+    device.request_sd_card_file_list()
+    device.disconnect()
+    device.connect()
+    assert device.sd_card_files[0].size is None
+    sink = io.BytesIO()
+    result = device.download_sd_card_file("log.bin", sink)
+    assert sink.getvalue() == b"abcdef" and not result.size_verified
