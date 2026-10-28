@@ -51,7 +51,9 @@ def test_firmware_json_calibration_follows_the_named_channel() -> None:
 
 
 def test_firmware_json_digital_list_gives_the_latest_port_state() -> None:
-    data = b'{"ts":10, "di":[{"ts":9, "mask":15, "val":3},{"ts":10, "mask":15, "val":5}]}\n'
+    # di "ts" values are ages back from the trigger stamp, oldest element
+    # first (JSON_Encoder.c pops the queue in order), so ages decrease.
+    data = b'{"ts":10, "di":[{"ts":10, "mask":15, "val":3},{"ts":9, "mask":15, "val":5}]}\n'
     sample = list(_parse(data).samples)[0]
     assert sample.digital_data == 5
 
@@ -327,3 +329,13 @@ def test_a_digital_read_just_after_the_trigger_is_not_given_to_earlier_samples()
         b'"ts":100,"ai":[{"ch":0,"val":1.0000}],"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
     )
     assert [s.digital_data for s in _parse(data).samples] == [0, 3]
+
+
+def test_a_single_sample_object_ignores_a_digital_read_after_the_trigger() -> None:
+    # Audit finding on #183 (round 11): single-sample objects skipped the
+    # age placement and took di[-1], a read one tick after the trigger.
+    data = (
+        b'{"di":[{"ts":9,"mask":15,"val":3},{"ts":4294967295,"mask":15,"val":5}],'
+        b'"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [3]

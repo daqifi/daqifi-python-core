@@ -2091,7 +2091,8 @@ class _JsonObject(dict):
 def _split_batched_samples(obj: Any) -> List[Any]:
     """One object per sample: a firmware object with repeated ``"ts"`` keys
     becomes one per ``"ts"``, each with the ``"ai"`` after it and the
-    object's other fields. Anything else is returned as is.
+    object's other fields, and every object with a ``"di"`` array gets the
+    digital entry due at its sample's time. Anything else is returned as is.
 
     The object's ``"di"`` entries carry ages, not times: each is measured
     back from the trigger stamp at encode time, which an ADC object doesn't
@@ -2102,7 +2103,9 @@ def _split_batched_samples(obj: Any) -> List[Any]:
     its own ``"ts"``: off by (ADC ts - trigger stamp) when the ADC lags. A
     sample before every entry gets none (digital 0)."""
     pairs = getattr(obj, "pairs", None)
-    if not pairs or sum(1 for key, _ in pairs if key == "ts") < 2:
+    if not pairs or (
+        sum(1 for key, _ in pairs if key == "ts") < 2 and "di" not in obj
+    ):
         return [obj]
     shared = {key: value for key, value in pairs if key not in ("ts", "ai", "di")}
     samples: List[dict] = []
