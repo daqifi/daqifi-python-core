@@ -148,11 +148,16 @@ def test_a_token_followed_by_content_is_not_the_end(monkeypatch) -> None:
         device.download_sd_card_file("log.bin", io.BytesIO())
 
 
-class _SlowThenFeeds:
-    """Accepts nothing for 0.15 s from its first write; once it accepts,
-    the rest of the file arrives 40 ms later (flow control)."""
+class _SlowThenFeeds(io.RawIOBase):
+    """A non-blocking raw sink: accepts nothing for 0.15 s from its first
+    write; once it accepts, the rest of the file arrives 40 ms later (flow
+    control)."""
+
+    def writable(self):
+        return True
 
     def __init__(self, stream, rest):
+        super().__init__()
         self._stream, self._rest = stream, rest
         self._until = None
         self.data = bytearray()
