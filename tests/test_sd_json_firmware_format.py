@@ -51,7 +51,9 @@ def test_firmware_json_calibration_follows_the_named_channel() -> None:
 
 
 def test_firmware_json_digital_list_gives_the_latest_port_state() -> None:
-    data = b'{"ts":10, "di":[{"ts":9, "mask":15, "val":3},{"ts":10, "mask":15, "val":5}]}\n'
+    # di "ts" values are ages back from the trigger stamp, oldest element
+    # first (JSON_Encoder.c pops the queue in order), so ages decrease.
+    data = b'{"ts":10, "di":[{"ts":10, "mask":15, "val":3},{"ts":9, "mask":15, "val":5}]}\n'
     sample = list(_parse(data).samples)[0]
     assert sample.digital_data == 5
 
@@ -286,3 +288,302 @@ def test_an_unknown_integer_units_value_is_rejected() -> None:
 def test_legacy_samples_carry_no_units_and_do_not_warn() -> None:
     samples, caught = _samples_and_warnings(b'{"ts":1,"analog":[50]}\n')
     assert caught == [] and samples[0].analog_units is None
+
+
+def test_batched_samples_take_the_digital_state_of_their_own_time() -> None:
+    # Audit finding on #183 (round 8): every batched sample took the
+    # object's LAST "di" state. di "ts" values are ages back from the
+    # trigger stamp; the latest sample's "ts" stands in for it. SYNTHETIC.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"di":[{"ts":10,"mask":15,"val":3},{"ts":0,"mask":15,"val":5}],'
+        b'"ts":100,"ai":[{"ch":0,"val":1.0000}],"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert [s.digital_data for s in samples] == [3, 5]
+
+
+def test_a_single_sample_object_still_takes_the_latest_digital_state() -> None:
+    data = b'{"di":[{"ts":10,"mask":15,"val":3},{"ts":0,"mask":15,"val":5}],"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
+    assert [s.digital_data for s in _parse(data).samples] == [5]
+
+
+@pytest.mark.parametrize("first, second, ages", [(4294967290, 4, (10, 0)), (4294967286, 10, (20, 0))])
+def test_batched_digital_states_across_the_timer_rollover(first, second, ages) -> None:
+    # Audit finding on #183 (round 9): reference - age wrapped negative and
+    # compared below the earlier sample's wrapped "ts". SYNTHETIC.
+    data = (
+        b'{"di":[{"ts":%d,"mask":15,"val":3},{"ts":%d,"mask":15,"val":5}],'
+        b'"ts":%d,"ai":[{"ch":0,"val":1.0000}],"ts":%d,"ai":[{"ch":0,"val":2.0000}]}\n'
+        % (ages[0], ages[1], first, second)
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [3, 5]
+
+
+def test_a_digital_read_just_after_the_trigger_is_not_given_to_earlier_samples() -> None:
+    # Audit finding on #183 (round 10): a DIO read one tick after the
+    # trigger has age 0xFFFFFFFF (-1); read unsigned it looked ancient and
+    # leaked into earlier samples. SYNTHETIC.
+    data = (
+        b'{"di":[{"ts":9,"mask":15,"val":3},{"ts":4294967295,"mask":15,"val":5}],'
+        b'"ts":100,"ai":[{"ch":0,"val":1.0000}],"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [0, 3]
+
+
+def test_a_single_sample_object_ignores_a_digital_read_after_the_trigger() -> None:
+    # Audit finding on #183 (round 11): single-sample objects skipped the
+    # age placement and took di[-1], a read one tick after the trigger.
+    data = (
+        b'{"di":[{"ts":9,"mask":15,"val":3},{"ts":4294967295,"mask":15,"val":5}],'
+        b'"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [3]
+
+
+@pytest.mark.parametrize("record", [b'{"di":[]}', b'{"di":[{"ts":1,"mask":1,"val":1}]}', b'{"di":"x","ts":1}'])
+def test_a_digital_object_without_a_usable_timestamp_is_skipped_not_fatal(record) -> None:
+    # Audit finding on #183 (round 12): a "di" object with no top-level "ts"
+    # raised IndexError outside the malformed-record handler.
+    samples = list(_parse(record + b'\n{"ts":2,"analog":[3]}\n').samples)
+    assert samples[-1].analog_values == (3.0,)
+
+
+# Audit round 13 on #183: one digital timeline per parse.
+
+def test_the_digital_state_carries_across_objects() -> None:
+    # The port held 5; the second object's only read is one tick after its
+    # trigger. The state at tick 110 is still 5, not an invented 0.
+    data = (
+        b'{"ts":100,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":110,"ai":[{"ch":0,"val":2.0000}],"di":[{"ts":4294967295,"mask":15,"val":5}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [5, 5]
+
+
+def test_a_future_digital_read_applies_to_the_next_sample() -> None:
+    data = (
+        b'{"ts":110,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":4294967295,"mask":15,"val":7}]}\n'
+        b'{"ts":120,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [0, 7]
+
+
+def test_a_digital_only_sample_with_only_a_future_read_is_kept() -> None:
+    data = b'{"ts":110,"di":[{"ts":4294967295,"mask":15,"val":5}]}\n'
+    samples = list(_parse(data).samples)
+    assert len(samples) == 1 and samples[0].analog_values == ()
+
+
+# Audit round 14 on #183.
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        b'{"ai":[{"ch":0,"val":1.2500}],"di":[{"ts":0,"mask":15,"val":3}],"ts":100}',
+        b'{"ai":[{"ch":0,"val":1.2500}],"ts":100,"di":[]}',
+    ],
+)
+def test_a_single_sample_object_keeps_its_analog_whatever_the_key_order(record) -> None:
+    samples = list(_parse(record + b"\n").samples)
+    assert [s.analog_values for s in samples] == [(1.25,)]
+
+
+def test_a_rejected_record_gives_no_digital_events() -> None:
+    data = (
+        b'{"ts":-1,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":100,"ai":[{"ch":0,"val":1.2500}]}\n'
+        b'{"ts":110,"ai":[{"ch":0,"val":2.2500}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [0, 0]
+
+
+def test_a_digital_only_record_before_an_older_queued_adc_sample_is_not_a_rollover() -> None:
+    # The encoder can commit a digital record stamped with the trigger and
+    # leave an older ADC sample for the next object.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"di":[{"ts":0,"mask":15,"val":5}],"ts":1100}\n'
+        b'{"ts":1050,"ai":[{"ch":0,"val":2.0000}]}\n'
+        b'{"ts":1150,"ai":[{"ch":0,"val":3.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    t0 = samples[0].timestamp
+    assert [round((s.timestamp - t0).total_seconds(), 3) for s in samples] == [0.0, 0.1, 0.05, 0.15]
+
+
+def test_a_digital_only_log_still_advances_its_time_base() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":2}]}\n'
+        b'{"ts":1200,"di":[{"ts":0,"mask":15,"val":3}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    t0 = samples[0].timestamp
+    assert [round((s.timestamp - t0).total_seconds(), 3) for s in samples] == [0.0, 0.1, 0.2]
+    assert [s.digital_data for s in samples] == [1, 2, 3]
+
+
+# Audit round 15 on #183 and the operator's redesign cases: one clock
+# anchored on the first record, one digital history looked up by tick.
+
+def _offsets(samples):
+    t0 = samples[0].timestamp
+    return [round((s.timestamp - t0).total_seconds(), 3) for s in samples]
+
+
+def test_a_queued_adc_sample_gets_the_digital_state_of_its_own_time() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":0,"mask":15,"val":0}]}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":1050,"ai":[{"ch":0,"val":2.0000}]}\n'
+        b'{"ts":1150,"ai":[{"ch":0,"val":3.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert [s.digital_data for s in samples] == [0, 5, 0, 5]
+    assert _offsets(samples) == [0.0, 0.1, 0.05, 0.15]
+
+
+def test_leading_digital_records_keep_their_spacing_in_a_mixed_log() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":2}]}\n'
+        b'{"ts":1200,"ai":[{"ch":0,"val":3.0000}]}\n'
+        b'{"ts":1300,"ai":[{"ch":0,"val":4.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert _offsets(samples) == [0.0, 0.1, 0.2, 0.3]
+    assert [s.digital_data for s in samples] == [1, 2, 2, 2]
+
+
+def test_a_late_analog_sample_right_after_a_leading_digital_record() -> None:
+    # The first record is digital-only and stamped with the trigger; the
+    # first ADC sample is older (queued). A step back, not a rollover.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":1050,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":1150,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert _offsets(samples) == [0.0, -0.05, 0.05]
+    assert [s.digital_data for s in samples] == [5, 0, 5]
+
+
+def test_a_long_held_digital_state_survives_far_past_the_signed_window() -> None:
+    # 3e9 ticks later (past the int32 window, across a rollover), a state
+    # set once still holds: the history is unwrapped, not windowed.
+    data = (
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":0,"mask":15,"val":9}]}\n'
+        b'{"ts":2000000000,"ai":[{"ch":0,"val":2.0000}]}\n'
+        b'{"ts":3000000000,"ai":[{"ch":0,"val":3.0000}]}\n'
+        b'{"ts":705032704,"ai":[{"ch":0,"val":4.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [9, 9, 9, 9]
+
+
+def test_a_digital_record_ahead_of_the_analog_does_not_move_the_time_base() -> None:
+    # Were the trigger-stamped digital record the base, the next ADC sample
+    # 3e9 ticks on (past the int32 window) would read as a step back.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":3000001000,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    assert _offsets(list(_parse(data).samples)) == [0.0, 0.1, 3000000.0]
+
+
+def test_a_deferred_digital_event_applies_to_samples_already_seen() -> None:
+    # Audit finding on #183 (round 16): the encoder can defer its DIO block
+    # to a later object; its event at tick 90 still applies to the sample
+    # at 100 that came before it in the file.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":80,"di":[{"ts":0,"mask":15,"val":0}]}\n'
+        b'{"ts":100,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":110,"ai":[{"ch":0,"val":2.0000}],"di":[{"ts":20,"mask":15,"val":5}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [0, 5, 5]
+
+
+def test_a_digital_only_stretch_just_under_one_timer_period_is_placed_correctly() -> None:
+    # The recorded limit begins past one 2**32-tick period after the last
+    # analog record; just under it, digital-only records are exact.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":2000001000,"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":4294967000,"di":[{"ts":0,"mask":15,"val":2}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert _offsets(samples) == [0.0, 2000000.0, 4294966.0]
+    assert [s.digital_data for s in samples] == [0, 1, 2]
+
+
+# Audit round 17 on #183.
+
+def test_a_digital_record_level_with_the_analog_base_does_not_change_the_next_step() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":1000,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":3000001000,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert _offsets(samples) == [0.0, 0.0, 3000000.0]
+    assert samples[-1].digital_data == 5
+
+
+def test_a_zero_timestamp_record_keeps_its_digital_events() -> None:
+    # ts 0 is "no timestamp" for time, but its digital change still counts,
+    # from just after the previous record, and doesn't reach back.
+    data = (
+        b'{"ts":4294967280,"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":0,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":16,"ai":[{"ch":0,"val":1.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [1, 5, 5]
+
+
+def test_leading_digital_records_do_not_hide_the_analog_channel_count() -> None:
+    data = (
+        b'{"meta":{"tick_hz":42000000}}\n'
+        b'{"ts":1000,"di":[{"ts":0,"mask":15,"val":3}]}\n'
+        b'{"ts":1100,"ai":[{"ch":0,"val":1.0000},{"ch":1,"val":2.0000}]}\n'
+    )
+    assert _parse(data).device_config.analog_port_count == 2
+
+
+# Audit round 18 on #183: ts 0 is a real tick for the clock and the digital
+# history (the tick after a rollover); only the displayed time treats it as
+# "no timestamp".
+
+def test_a_leading_zero_timestamp_record_keeps_its_digital_state() -> None:
+    data = b'{"ts":0,"di":[{"ts":0,"mask":15,"val":5}]}\n{"ts":10,"ai":[{"ch":0,"val":1.0000}]}\n'
+    assert [s.digital_data for s in _parse(data).samples] == [5, 5]
+
+
+def test_a_zero_timestamp_record_across_the_rollover_places_its_change_by_age() -> None:
+    data = (
+        b'{"ts":4294547296,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":0,"di":[{"ts":419900,"mask":15,"val":5}]}\n'
+        b'{"ts":420000,"ai":[{"ch":0,"val":1.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [1, 5, 5]
+
+
+def test_a_legacy_zero_timestamp_row_does_not_move_the_clock() -> None:
+    # Audit finding on #183 (round 19): legacy "analog" rows use ts 0 for
+    # "no timestamp"; placing it counted a rollover for every later row.
+    from datetime import datetime
+
+    data = b'{"ts":1000,"analog":[1]}\n{"ts":0,"analog":[2]}\n{"ts":2000,"analog":[3]}\n'
+    options = SdCardParseOptions(
+        session_start_time=datetime(2026, 1, 1), fallback_timestamp_frequency=1000
+    )
+    assert _offsets(list(_parse(data, options).samples)) == [0.0, 0.0, 1.0]

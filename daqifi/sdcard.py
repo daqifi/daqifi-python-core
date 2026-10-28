@@ -38,6 +38,7 @@ Includes the small value classes the parser surface needs:
 """
 from __future__ import annotations
 
+import io
 import math
 import os
 import re
@@ -394,6 +395,45 @@ class SdCardTransferProgress:
     file_name: str
 
 
+def _write_all(stream: Any, data: bytes, deadline: Optional[float] = None) -> None:
+    """Write all of ``data``: a raw sink may accept only part per call.
+
+    ``BufferedWriter``/``BytesIO`` always take everything, but a raw
+    stream's ``write`` returns how much it took, and that return value was
+    ignored, so a short write lost the rest (#163). Only an
+    ``io.RawIOBase`` uses ``None`` to mean "nothing written, it would
+    block", so only there is ``None`` retried; other writers (codecs
+    stream writers, many file-likes) return ``None`` after writing
+    everything, and repeating the write would duplicate it. Every retry,
+    after a short write or a would-block, stops at ``deadline``
+    (``time.monotonic()`` value): a sink that drains slowly or not at all
+    must not hold a download, and the exchange lock with it, past its
+    timeout.
+    """
+    raw = isinstance(stream, io.RawIOBase)
+    remaining = bytes(data)
+    while remaining:
+        written = stream.write(remaining)
+        if written is None and not raw:
+            return
+        if written is not None:
+            if not isinstance(written, int) or isinstance(written, bool):
+                return  # not a byte count: the writer took it all
+            if written <= 0:
+                raise OSError(f"write accepted {written} bytes; destination is not writable")
+            remaining = remaining[written:]
+            if not remaining:
+                return
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(
+                "The download destination did not accept all the data before "
+                "the download's deadline."
+            )
+        if written is None:
+            time.sleep(0.001)
+
+
+
 class SdCardFileReceiver:
     """Receives raw bytes from a transport stream during an SD-card
     file download, accumulating into a destination stream and
@@ -591,17 +631,17 @@ class SdCardFileReceiver:
                     # Marker started inside the trailing buffer — only
                     # write the part of trailing before the marker.
                     if position > 0:
-                        destination_stream.write(bytes(trailing[:position]))
+                        _write_all(destination_stream, bytes(trailing[:position]), deadline)
                         total_bytes += position
                 else:
                     # Marker started inside the new chunk — write all
                     # of trailing + the part of chunk before the marker.
                     if trailing:
-                        destination_stream.write(bytes(trailing))
+                        _write_all(destination_stream, bytes(trailing), deadline)
                         total_bytes += len(trailing)
                     marker_start_in_chunk = position - len(trailing)
                     if marker_start_in_chunk > 0:
-                        destination_stream.write(chunk_bytes[:marker_start_in_chunk])
+                        _write_all(destination_stream, chunk_bytes[:marker_start_in_chunk], deadline)
                         total_bytes += marker_start_in_chunk
                 # Capture any bytes after the marker for the caller.
                 if 0 <= marker_end_in_chunk < len(chunk_bytes):
@@ -620,11 +660,11 @@ class SdCardFileReceiver:
                 if safe_count > 0:
                     from_trailing = min(safe_count, len(trailing))
                     if from_trailing > 0:
-                        destination_stream.write(bytes(trailing[:from_trailing]))
+                        _write_all(destination_stream, bytes(trailing[:from_trailing]), deadline)
                         total_bytes += from_trailing
                     from_new = safe_count - from_trailing
                     if from_new > 0:
-                        destination_stream.write(chunk_bytes[:from_new])
+                        _write_all(destination_stream, chunk_bytes[:from_new], deadline)
                         total_bytes += from_new
                 # Rebuild trailing window: last marker_len bytes of
                 # the combined [trailing + chunk] sequence.
@@ -2111,31 +2151,173 @@ class _JsonObject(dict):
         self.pairs = pairs
 
 
-def _split_batched_samples(obj: Any) -> List[Any]:
-    """One object per sample: a firmware object with repeated ``"ts"`` keys
-    becomes one per ``"ts"``, each with the ``"ai"`` after it and the
-    object's other fields (its ``"di"``). Anything else is returned as is."""
+def _split_batched_samples(obj: Any) -> Tuple[List[Any], List[Tuple[int, int]], Any]:
+    """``(samples, digital ages, reference ts)`` for one decoded object.
+
+    A firmware object with repeated ``"ts"`` keys becomes one sample per
+    ``"ts"``, each with the ``"ai"`` after it and the object's other fields;
+    a single-sample object takes its fields by key. A firmware object with a
+    ``"di"`` array gives its entries as ``(age, value)``, and its samples
+    lose the array (an ``"ai"`` of their own, possibly empty, keeps them in
+    the firmware shape). Anything else is one sample and no ages.
+
+    ``"di"`` entries carry ages, not times: each is measured back from the
+    trigger stamp at encode time, which an ADC object doesn't include. That
+    is a documented firmware limitation (JSON_Encoder.c, at the di element
+    writer), tracked on daqifi-nyquist-firmware#959. The object's latest
+    sample stands in for it (the returned reference ts), off by (ADC ts -
+    trigger stamp) when the ADC lags. Ages are uint32 differences read as
+    signed int32: a read just after the trigger (age 0xFFFFFFFF) is one tick
+    in the future."""
     pairs = getattr(obj, "pairs", None)
-    if not pairs or sum(1 for key, _ in pairs if key == "ts") < 2:
-        return [obj]
-    shared = {key: value for key, value in pairs if key not in ("ts", "ai")}
+    if not pairs or (
+        sum(1 for key, _ in pairs if key == "ts") < 2 and "di" not in obj
+    ):
+        return [obj], [], None
+    shared = {key: value for key, value in pairs if key not in ("ts", "ai", "di")}
     samples: List[dict] = []
-    for key, value in pairs:
-        if key == "ts":
-            samples.append(dict(shared, ts=value))
-        elif key == "ai" and samples:
-            samples[-1]["ai"] = value
-    return samples
+    if sum(1 for key, _ in pairs if key == "ts") == 1:
+        # One sample: its fields by key, in whatever order they came.
+        samples.append(dict(shared, ts=obj["ts"], ai=obj.get("ai", [])))
+    else:
+        # Batched: the encoder writes each "ts" before its "ai".
+        for key, value in pairs:
+            if key == "ts":
+                samples.append(dict(shared, ts=value, ai=[]))
+            elif key == "ai" and samples:
+                samples[-1]["ai"] = value
+    if not samples:
+        return [obj], [], None  # no "ts" at all: left to the sample parser to reject
+    di = obj.get("di")
+    if "di" in obj and not isinstance(di, list):
+        for sample in samples:
+            sample["di"] = di  # malformed: left for the sample parser to reject
+        return samples, [], None
+    ages: List[Tuple[int, int]] = []
+    for entry in di or []:
+        if not isinstance(entry, dict):
+            continue
+        age, value = entry.get("ts"), entry.get("val")
+        if _is_plain_int(age) and _is_plain_int(value):
+            ages.append((_signed32(age), value & 0xFFFFFFFF))
+    return samples, ages, samples[-1]["ts"]
 
 
-def _try_parse_json_samples(obj: Any) -> List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]]:
-    """Every well-formed sample in ``obj``; a malformed one is skipped."""
+class _JsonClock:
+    """Unwrapped ticks for a JSON parse's records, from their uint32 "ts".
+
+    Anchored at tick 0 on the first record of any kind. An analog record
+    moves the base: forward with rollover (as the other formats), or, when
+    the base was last moved by a digital-only record, by a signed step,
+    since an ADC sample queued for the next object can be older than a
+    digital record stamped with the trigger (JSON_Encoder.c). A digital-only
+    record moves the base only while no analog record has been seen, or if
+    it is behind the latest analog tick; otherwise it is placed without
+    moving it, so a digital record level with the analog base doesn't
+    change how the next analog step is read.
+
+    Limit (recorded on #164, tied to daqifi-nyquist-firmware#959): after the
+    last analog record, digital-only records are placed by their distance
+    from it, so a digital-only stretch longer than one timer period (2**32
+    ticks, about 102 s at 42 MHz) loses its rollover count. That needs ADC
+    acquisition to stop mid-session while DIO continues, which a session's
+    fixed stream configuration doesn't do."""
+
+    def __init__(self) -> None:
+        self._anchored = False
+        self._base_raw = 0
+        self._base_tick = 0
+        self._base_by_digital = False
+        self._latest_analog: Optional[int] = None
+
+    def place(self, ts: Any, analog: bool) -> Optional[int]:
+        """The record's unwrapped tick; None if ``ts`` isn't an integer.
+
+        For firmware records 0 is a real tick: the one after a rollover on
+        firmware before #533 (current firmware clamps stamps to 1). Only the
+        displayed time treats it as "no timestamp", as the protobuf parser
+        does. Legacy "analog" rows with ts 0 aren't placed at all."""
+        if not _is_plain_int(ts):
+            return None
+        if not self._anchored:
+            self._anchored = True
+            self._move(ts, 0, by_digital=not analog)
+            if analog:
+                self._latest_analog = 0
+            return 0
+        if analog:
+            step = (
+                _signed32(ts - self._base_raw) if self._base_by_digital
+                else _compute_tick_delta(self._base_raw, ts)
+            )
+            tick = self._base_tick + step
+            self._move(ts, tick, by_digital=False)
+            self._latest_analog = tick
+            return tick
+        tick = self._base_tick + _compute_tick_delta(self._base_raw, ts)
+        if self._latest_analog is None or tick < self._latest_analog:
+            self._move(ts, tick, by_digital=True)
+        return tick
+
+    def _move(self, ts: int, tick: int, by_digital: bool) -> None:
+        self._base_raw, self._base_tick, self._base_by_digital = ts, tick, by_digital
+
+
+class _DigitalHistory:
+    """Digital port events by unwrapped tick over one parse.
+
+    A sample takes the latest event at or before its own tick: the port
+    holds its value between reads, across objects, and a sample older than
+    an event already seen (a queued ADC sample) still gets the state of its
+    own time. Events are never consumed, and every event of the parse is
+    loaded before any lookup (the file is already in memory)."""
+
+    def __init__(self) -> None:
+        self._events: List[Tuple[int, int, int]] = []  # (tick, order, value)
+        self._order = 0
+
+    def add(self, tick: int, value: int) -> None:
+        import bisect
+
+        self._order += 1
+        bisect.insort(self._events, (tick, self._order, value))
+
+    def at(self, tick: Optional[int]) -> int:
+        import bisect
+
+        if not self._events:
+            return 0
+        if tick is None:
+            return 0  # no tick: no state known
+        index = bisect.bisect_right(self._events, (tick, float("inf"), 0))
+        return self._events[index - 1][2] if index else 0
+
+
+def _signed32(value: int) -> int:
+    value &= 0xFFFFFFFF
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+def _is_plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _try_parse_json_samples(
+    obj: Any,
+) -> Tuple[List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]], List[Tuple[int, int]], Any]:
+    """``(well-formed samples, digital ages, reference ts)`` in ``obj``; a
+    malformed sample is skipped, and a record malformed beyond splitting
+    gives nothing."""
+    try:
+        split, ages, reference = _split_batched_samples(obj)
+    except Exception:
+        return [], [], None
     out = []
-    for sample in _split_batched_samples(obj):
+    for sample in split:
         parsed = _try_parse_json_sample(sample)
         if parsed is not None:
             out.append(parsed)
-    return out
+    return out, ages, reference
 
 
 def _try_parse_json_sample(
@@ -2260,19 +2442,21 @@ def _infer_json_configuration(
 ) -> SdCardDeviceConfiguration:
     """Device metadata from the firmware's leading {"meta":...} header
     (device name, serial, tick rate) when present, and the analog channel
-    count from the first sample; then merged with the caller's override,
+    count from the first sample with analog values (digital-only records
+    may come first); then merged with the caller's override,
     which supplies resolution/calibration/range for scaling. Same
     precedence as the CSV parser: file, then override, then fallback."""
     meta: dict = {}
     analog_count = 0
-    for obj, _end in objects[:2]:
-        found = _json_meta(obj)
+    for index, (obj, _end) in enumerate(objects):
+        found = _json_meta(obj) if index < 2 else None
         if found is not None:
             meta = found
             continue
-        parsed = _try_parse_json_samples(obj)
-        if parsed:
-            analog_count = len(parsed[0][1])
+        parsed, _ages, _reference = _try_parse_json_samples(obj)
+        with_analog = [sample for sample in parsed if sample[1]]
+        if with_analog:
+            analog_count = len(with_analog[0][1])
             break
     tick = meta.get("tick_hz")
     inferred = SdCardDeviceConfiguration(
@@ -2302,19 +2486,25 @@ def _produce_json_samples(
     timestamp_freq = config.timestamp_frequency
     tick_period = 1.0 / timestamp_freq if timestamp_freq > 0 else 0.0
 
-    previous_timestamp: Optional[int] = None
-    elapsed_seconds = 0.0
     lines_processed = 0
     bytes_read = 0
     progress = options.progress
     total_bytes = objects[-1][1] if objects else 0
     reader = _FirmwareValueReader(config, options.integer_units)
+    clock = _JsonClock()
+    digital = _DigitalHistory()
 
+    # Two passes over the decoded objects (already in memory): place every
+    # sample and load every digital event first, then emit. The firmware can
+    # defer its DIO block to a later object (JSON_Encoder.c), so an event can
+    # arrive after a sample it applies to.
+    placed_by_object = []
     for obj, end in objects:
-        lines_processed += 1
-        bytes_read = end
-
-        for parsed in _try_parse_json_samples(obj):
+        parsed_samples, ages, reference = _try_parse_json_samples(obj)
+        # Every sample of the object is placed first: its digital ages are
+        # measured back from its latest sample.
+        placed = []
+        for parsed in parsed_samples:
             ts, raw_analog, channels, digital_data = parsed
             units: Optional[str] = None
             if channels is not None:
@@ -2329,20 +2519,33 @@ def _produce_json_samples(
                 analog_values = _scale_raw_analog_values(
                     [int(v) for v in raw_analog], config, channels
                 )
+            digital_only = channels is not None and not raw_analog
+            if channels is None and ts == 0:
+                # The legacy "analog" shape uses ts 0 for "no timestamp"
+                # (as the protobuf and CSV parsers do): it doesn't move the
+                # clock. In the firmware shape 0 is a real tick.
+                tick = None
+            else:
+                tick = clock.place(ts, analog=not digital_only)
+            placed.append((ts, tick, analog_values, units, channels, digital_data))
+        if ages and placed and placed[-1][0] == reference and placed[-1][1] is not None:
+            for age, value in ages:
+                digital.add(placed[-1][1] - age, value)
+        placed_by_object.append((end, placed))
 
-            absolute_time = base_time
-            # ``ts == 0`` is treated as "no timestamp" — matches the
-            # protobuf parser so the same physical log reconstructs to
+    for end, placed in placed_by_object:
+        lines_processed += 1
+        bytes_read = end
+        for ts, tick, analog_values, units, channels, digital_data in placed:
+            if channels is not None:
+                # The port state at the sample's own time.
+                digital_data = digital.at(tick)
+            # ``ts == 0`` is "no timestamp": session start, as in the
+            # protobuf parser, so the same physical log reconstructs to
             # consistent absolute timestamps regardless of file format.
-            if tick_period > 0 and ts != 0:
-                if previous_timestamp is None:
-                    previous_timestamp = ts
-                else:
-                    delta = _compute_tick_delta(previous_timestamp, ts)
-                    elapsed_seconds += delta * tick_period
-                    previous_timestamp = ts
-                absolute_time = base_time + timedelta(seconds=elapsed_seconds)
-
+            absolute_time = base_time
+            if tick_period > 0 and tick is not None and ts != 0:
+                absolute_time = base_time + timedelta(seconds=tick * tick_period)
             yield SdCardLogEntry(
                 timestamp=absolute_time,
                 analog_values=tuple(analog_values),
