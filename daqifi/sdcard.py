@@ -2073,12 +2073,20 @@ def _parse_json_sample(
     return ts_raw, analog_values, None, digital_data
 
 
+# Integers beyond this aren't exact as floats, and far beyond it overflow
+# float() during scaling.
+_JSON_INT_LIMIT = 2 ** 53
+
+
 def _is_finite_number(value: Any) -> bool:
-    # JSON gives inf for 1e309 and accepts NaN/Infinity; neither converts
-    # to a raw count later, outside the malformed-record handler.
+    # JSON gives inf for 1e309 and accepts NaN/Infinity, and integers of any
+    # size; none of those survive scaling, which runs outside the
+    # malformed-record handler.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return isinstance(value, int) or math.isfinite(value)
+    if isinstance(value, int):
+        return -_JSON_INT_LIMIT <= value <= _JSON_INT_LIMIT
+    return math.isfinite(value)
 
 
 def _try_parse_json_line(line: str) -> Optional[Tuple[int, List[float], int]]:
@@ -2177,9 +2185,11 @@ def _produce_json_samples(
         if parsed is None:
             continue
         ts, raw_analog, channels, digital_data = parsed
-        if any(isinstance(v, float) for v in raw_analog):
-            # Written with decimals: the firmware's voltage mode (precision
-            # >= 1, its default) already calibrated these to volts (#163).
+        if channels is not None and any(isinstance(v, float) for v in raw_analog):
+            # Firmware shape written with decimals: the firmware's voltage
+            # mode (precision >= 1, its default) already calibrated these to
+            # volts (#163). The legacy "analog" shape stays raw counts, as
+            # upstream scales it.
             analog_values = [float(v) for v in raw_analog]
         else:
             # Integers: raw ADC codes, or millivolts at precision 0, which

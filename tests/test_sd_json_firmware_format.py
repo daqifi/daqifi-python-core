@@ -156,3 +156,31 @@ def test_raw_mode_integers_are_still_scaled_as_codes() -> None:
         )
     )
     assert [s.analog_values for s in _parse(data, options).samples] == [pytest.approx((1.0,))]
+
+
+def test_legacy_decimal_values_are_still_raw_counts() -> None:
+    # Audit finding on #183 (round 6): the volts rule reached the legacy
+    # "analog" shape, which upstream scales as raw counts, so 50.0 came out
+    # as 50.0 instead of the calibrated 1.0.
+    options = SdCardParseOptions(
+        configuration_override=SdCardDeviceConfiguration(
+            analog_port_count=1, digital_port_count=0, timestamp_frequency=1000,
+            resolution=100, calibration_values=((2.0, 0.0),),
+        )
+    )
+    samples = list(_parse(b'{"ts":1,"analog":[50.0]}\n', options).samples)
+    assert [s.analog_values for s in samples] == [pytest.approx((1.0,))]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        b'{"ts":1,"analog":[1' + b"0" * 400 + b"]}",
+        b'{"ts":1,"ai":[{"ch":0,"val":1' + b"0" * 400 + b"}]}",
+    ],
+)
+def test_an_oversized_integer_is_skipped_not_fatal(record) -> None:
+    # Audit finding on #183 (round 6): a 401-digit integer passed validation,
+    # then float() overflowed during scaling, outside the handler.
+    samples = list(_parse(record + b'\n{"ts":2,"analog":[3]}\n').samples)
+    assert [s.analog_values for s in samples] == [(3.0,)]
