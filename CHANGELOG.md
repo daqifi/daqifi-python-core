@@ -25,6 +25,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- SD CSV logs written at voltage precision 0 (integer millivolts) were read
+  as raw ADC codes. `SdCardParseOptions.integer_units` (`"raw"` or
+  `"millivolts"`) now says what integer values are; left unset they are read
+  as raw codes with one warning per parse, and each sample's `analog_units`
+  records what was applied. The rule is shared with the firmware JSON parser
+  (#163).
 - SD CSV logs in the firmware's default voltage mode (volts with decimals)
   were truncated to whole volts: every value was converted to an integer as
   if it were a raw ADC code. A value written with decimals is now kept as
