@@ -1783,6 +1783,9 @@ def _find_csv_data_start_index(lines: List[str]) -> int:
 
 # An integer CSV value: optional sign, ASCII digits only.
 _CSV_INTEGER_VALUE = re.compile(r"[+-]?[0-9]+\Z")
+# Integers beyond this aren't exact as floats; firmware codes and
+# millivolts are int32.
+_CSV_INT_LIMIT = 2 ** 53
 
 
 def _try_parse_csv_data_row(
@@ -1819,6 +1822,8 @@ def _try_parse_csv_data_row(
             ts = int(ts_col)
             if _CSV_INTEGER_VALUE.match(val_col):
                 val: Union[int, float] = int(val_col)
+                if abs(val) > _CSV_INT_LIMIT:
+                    return None  # would overflow float() during scaling
             else:
                 try:
                     val = float(val_col)

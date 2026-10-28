@@ -69,3 +69,8 @@ def test_raw_mode_integers_are_still_scaled_as_codes() -> None:
 def test_a_non_finite_value_skips_the_row_not_the_log(bad) -> None:
     data = b"ain0_ts,ain0_val\n1," + bad + b"\n2,0.5000\n"
     assert [s.analog_values for s in _parse(data).samples] == [(0.5,)]
+
+
+def test_an_oversized_integer_skips_the_row_not_the_log() -> None:
+    data = b"ain0_ts,ain0_val\n1,1" + b"0" * 400 + b"\n2,7\n"
+    assert [s.analog_values for s in _parse(data).samples] == [(7.0,)]
