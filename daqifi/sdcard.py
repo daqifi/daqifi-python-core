@@ -2091,17 +2091,40 @@ class _JsonObject(dict):
 def _split_batched_samples(obj: Any) -> List[Any]:
     """One object per sample: a firmware object with repeated ``"ts"`` keys
     becomes one per ``"ts"``, each with the ``"ai"`` after it and the
-    object's other fields (its ``"di"``). Anything else is returned as is."""
+    object's other fields. Anything else is returned as is.
+
+    The object's ``"di"`` entries carry ages, not times: each is measured
+    back from the trigger stamp at encode time (JSON_Encoder.c, #959), which
+    an ADC object doesn't include. The latest sample's ``"ts"`` stands in for
+    it, so each entry is placed at ``latest ts - age``, and each sample gets
+    the latest entry at or before its own ``"ts"``. That is approximate by
+    the encode latency. A sample before every entry gets none (digital 0)."""
     pairs = getattr(obj, "pairs", None)
     if not pairs or sum(1 for key, _ in pairs if key == "ts") < 2:
         return [obj]
-    shared = {key: value for key, value in pairs if key not in ("ts", "ai")}
+    shared = {key: value for key, value in pairs if key not in ("ts", "ai", "di")}
     samples: List[dict] = []
     for key, value in pairs:
         if key == "ts":
             samples.append(dict(shared, ts=value))
         elif key == "ai" and samples:
             samples[-1]["ai"] = value
+    di = obj.get("di")
+    if isinstance(di, list) and di:
+        reference = samples[-1].get("ts")
+        placed = []
+        for entry in di:
+            age = entry.get("ts") if isinstance(entry, dict) else None
+            if (
+                isinstance(reference, int) and not isinstance(reference, bool)
+                and isinstance(age, int) and not isinstance(age, bool)
+            ):
+                placed.append((reference - age, entry))
+        for sample in samples:
+            ts = sample.get("ts")
+            due = [entry for when, entry in placed if isinstance(ts, int) and when <= ts]
+            if due:
+                sample["di"] = [due[-1]]
     return samples
 
 

@@ -286,3 +286,21 @@ def test_an_unknown_integer_units_value_is_rejected() -> None:
 def test_legacy_samples_carry_no_units_and_do_not_warn() -> None:
     samples, caught = _samples_and_warnings(b'{"ts":1,"analog":[50]}\n')
     assert caught == [] and samples[0].analog_units is None
+
+
+def test_batched_samples_take_the_digital_state_of_their_own_time() -> None:
+    # Audit finding on #183 (round 8): every batched sample took the
+    # object's LAST "di" state. di "ts" values are ages back from the
+    # trigger stamp; the latest sample's "ts" stands in for it. SYNTHETIC.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"di":[{"ts":10,"mask":15,"val":3},{"ts":0,"mask":15,"val":5}],'
+        b'"ts":100,"ai":[{"ch":0,"val":1.0000}],"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert [s.digital_data for s in samples] == [3, 5]
+
+
+def test_a_single_sample_object_still_takes_the_latest_digital_state() -> None:
+    data = b'{"di":[{"ts":10,"mask":15,"val":3},{"ts":0,"mask":15,"val":5}],"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
+    assert [s.digital_data for s in _parse(data).samples] == [5]
