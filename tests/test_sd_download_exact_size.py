@@ -146,3 +146,38 @@ def test_a_token_followed_by_content_is_not_the_end(monkeypatch) -> None:
     monkeypatch.setattr(type(device), "_SD_DOWNLOAD_IDLE_TIMEOUT_S", 0.6)
     with pytest.raises(TimeoutError):
         device.download_sd_card_file("log.bin", io.BytesIO())
+
+
+class _SlowThenFeeds:
+    """Accepts nothing for 0.15 s from its first write; once it accepts,
+    the rest of the file arrives 40 ms later (flow control)."""
+
+    def __init__(self, stream, rest):
+        self._stream, self._rest = stream, rest
+        self._until = None
+        self.data = bytearray()
+
+    def write(self, data):
+        import threading
+        import time
+
+        if self._until is None:
+            self._until = time.monotonic() + 0.15
+        if time.monotonic() < self._until:
+            return None
+        if self._rest is not None:
+            threading.Timer(0.04, self._stream.feed, args=(self._rest,)).start()
+            self._rest = None
+        self.data += bytes(data)
+        return len(data)
+
+
+def test_the_idle_clock_restarts_after_a_slow_destination_with_a_size(monkeypatch) -> None:
+    device = _fakes._make_device_with_serial_facade(
+        {b"SD:GET": b"DAQIFI> " + b"x" * 292}, max_read_bytes=300
+    )
+    monkeypatch.setattr(type(device), "_SD_DOWNLOAD_IDLE_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(type(device), "_SD_DOWNLOAD_TIMEOUT_S", 5.0)
+    sink = _SlowThenFeeds(device._transport.stream, b"x" * 308 + END_OF_FILE_MARKER)
+    result = device.download_sd_card_file("log.bin", sink, expected_size=600)
+    assert bytes(sink.data) == b"x" * 600 and result.size_verified

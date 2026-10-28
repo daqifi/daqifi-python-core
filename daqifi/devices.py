@@ -2529,7 +2529,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     expected_size is None
                     and head_done
                     and _ends_with_eof_marker(trailing)
-                    and now - last_data >= settle_s
+                    and (now - last_data >= settle_s or now >= idle_deadline)
                 ):
                     # The line went quiet with the marker at the end.
                     payload = bytes(trailing[: _eof_marker_start(trailing)])
@@ -2543,7 +2543,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     expected_size is not None
                     and bytes_written < expected_size
                     and _ends_with_eof_marker(body_tail)
-                    and now - last_data >= settle_s
+                    and (now - last_data >= settle_s or now >= idle_deadline)
                 ):
                     raise IOError(
                         f"SD card file {file_name!r}: the transfer ended after "
@@ -2604,6 +2604,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
                                 "file is longer than listed or the transfer is corrupt."
                             )
                         return bytes_written
+                # Time spent waiting on the destination isn't the line
+                # being idle or quiet (#163 audit): restart both clocks.
+                last_data = time.monotonic()
+                idle_deadline = last_data + self._SD_DOWNLOAD_IDLE_TIMEOUT_S
                 continue
             # No size: hold back enough to recognise a marker plus its
             # trailer at the end; everything before that is file content,
@@ -2617,6 +2621,8 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 del trailing[: len(trailing) - keep]
                 if progress is not None:
                     progress(SdCardTransferProgress(bytes_written, file_name))
+                last_data = time.monotonic()
+                idle_deadline = last_data + self._SD_DOWNLOAD_IDLE_TIMEOUT_S
 
     # ---- Network facade (NetworkConfigurable Protocol impl) ---------------
 

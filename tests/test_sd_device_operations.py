@@ -148,3 +148,66 @@ def test_a_slowly_draining_sink_fails_at_the_receive_deadline() -> None:
             _SlowOneByte(), "log.bin", timeout_s=0.05
         )
     assert time.monotonic() - start < 0.25
+
+
+class _BackpressuredSink:
+    """Accepts nothing for ``delay`` seconds from its first write, then
+    everything."""
+
+    def __init__(self, delay):
+        self._delay = delay
+        self._until = None
+        self.data = bytearray()
+
+    def write(self, data):
+        import time
+
+        if self._until is None:
+            self._until = time.monotonic() + self._delay
+        if time.monotonic() < self._until:
+            return None
+        self.data += bytes(data)
+        return len(data)
+
+
+def test_destination_backpressure_does_not_count_as_an_idle_line(monkeypatch) -> None:
+    # Audit finding on #182 (round 4): time spent retrying the destination
+    # used up the serial idle timeout, so a download failed with the rest of
+    # the file, EOF marker included, already buffered.
+    device = _fakes._make_device_with_serial_facade(
+        {b"SD:GET": b"DAQIFI> " + b"x" * 600 + END_OF_FILE_MARKER}, max_read_bytes=300
+    )
+    monkeypatch.setattr(type(device), "_SD_DOWNLOAD_IDLE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(type(device), "_SD_DOWNLOAD_TIMEOUT_S", 5.0)
+    sink = _BackpressuredSink(0.10)
+    result = device.download_sd_card_file("log.bin", sink)
+    assert bytes(sink.data) == b"x" * 600 and result.file_size == 600
+
+
+def test_the_idle_clock_restarts_after_a_slow_destination(monkeypatch) -> None:
+    # Flow control: the device sends the rest only once the host has caught
+    # up, so the line is empty for a moment after a slow write. That moment
+    # must be measured from the end of the write.
+    import threading
+
+    device = _fakes._make_device_with_serial_facade(
+        {b"SD:GET": b"DAQIFI> " + b"x" * 292}, max_read_bytes=300
+    )
+    monkeypatch.setattr(type(device), "_SD_DOWNLOAD_IDLE_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(type(device), "_SD_DOWNLOAD_TIMEOUT_S", 5.0)
+    stream = device._transport.stream
+
+    class _SinkThenRest(_BackpressuredSink):
+        fed = False
+
+        def write(self, data):
+            written = super().write(data)
+            if written and not self.fed:
+                self.fed = True
+                rest = b"x" * 308 + END_OF_FILE_MARKER
+                threading.Timer(0.04, stream.feed, args=(rest,)).start()
+            return written
+
+    sink = _SinkThenRest(0.15)
+    result = device.download_sd_card_file("log.bin", sink)
+    assert bytes(sink.data) == b"x" * 600 and result.file_size == 600
