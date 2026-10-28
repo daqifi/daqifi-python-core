@@ -557,3 +557,21 @@ def test_leading_digital_records_do_not_hide_the_analog_channel_count() -> None:
         b'{"ts":1100,"ai":[{"ch":0,"val":1.0000},{"ch":1,"val":2.0000}]}\n'
     )
     assert _parse(data).device_config.analog_port_count == 2
+
+
+# Audit round 18 on #183: ts 0 is a real tick for the clock and the digital
+# history (the tick after a rollover); only the displayed time treats it as
+# "no timestamp".
+
+def test_a_leading_zero_timestamp_record_keeps_its_digital_state() -> None:
+    data = b'{"ts":0,"di":[{"ts":0,"mask":15,"val":5}]}\n{"ts":10,"ai":[{"ch":0,"val":1.0000}]}\n'
+    assert [s.digital_data for s in _parse(data).samples] == [5, 5]
+
+
+def test_a_zero_timestamp_record_across_the_rollover_places_its_change_by_age() -> None:
+    data = (
+        b'{"ts":4294547296,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":0,"di":[{"ts":419900,"mask":15,"val":5}]}\n'
+        b'{"ts":420000,"ai":[{"ch":0,"val":1.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [1, 5, 5]

@@ -2206,20 +2206,15 @@ class _JsonClock:
         self._base_tick = 0
         self._base_by_digital = False
         self._latest_analog: Optional[int] = None
-        self.last_tick: Optional[int] = None
 
-    def place(self, ts: Any, analog: bool) -> Optional[float]:
-        """The record's unwrapped tick. A record with "no timestamp" (0)
-        sits just after the last placed record (+0.5), so its digital
-        events still count without changing earlier samples; None if
-        nothing has been placed yet."""
-        if not _is_plain_int(ts) or ts == 0:
-            return None if self.last_tick is None else self.last_tick + 0.5
-        tick = self._place(ts, analog)
-        self.last_tick = tick
-        return tick
+    def place(self, ts: Any, analog: bool) -> Optional[int]:
+        """The record's unwrapped tick; None if ``ts`` isn't an integer.
 
-    def _place(self, ts: int, analog: bool) -> int:
+        0 is a real tick here: the one after a rollover on firmware before
+        #533 (current firmware clamps stamps to 1). Only the displayed time
+        treats it as "no timestamp", as the protobuf parser does."""
+        if not _is_plain_int(ts):
+            return None
         if not self._anchored:
             self._anchored = True
             self._move(ts, 0, by_digital=not analog)
@@ -2257,19 +2252,19 @@ class _DigitalHistory:
         self._events: List[Tuple[int, int, int]] = []  # (tick, order, value)
         self._order = 0
 
-    def add(self, tick: float, value: int) -> None:
+    def add(self, tick: int, value: int) -> None:
         import bisect
 
         self._order += 1
         bisect.insort(self._events, (tick, self._order, value))
 
-    def at(self, tick: Optional[float]) -> int:
+    def at(self, tick: Optional[int]) -> int:
         import bisect
 
         if not self._events:
             return 0
         if tick is None:
-            return 0  # nothing placed yet: no state known
+            return 0  # no tick: no state known
         index = bisect.bisect_right(self._events, (tick, float("inf"), 0))
         return self._events[index - 1][2] if index else 0
 
