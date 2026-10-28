@@ -640,3 +640,15 @@ def test_a_memory_error_while_parsing_is_raised_not_skipped(monkeypatch) -> None
     monkeypatch.setattr(sdcard, "_parse_json_sample", exhausted)
     with pytest.raises(MemoryError):
         list(_parse(b'{"ts":1,"ai":[{"ch":0,"val":1.0000}]}\n').samples)
+
+
+def test_a_firmware_sample_at_tick_zero_keeps_its_time() -> None:
+    # Audit finding on #183 (round 21): ts 0 after a rollover is a real
+    # tick for firmware samples, so its time is reconstructed, not reset.
+    data = (
+        b'{"meta":{"tick_hz":42000000}}\n'
+        b'{"ts":4294547296,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":0,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":420000,"ai":[{"ch":0,"val":1.0000}]}\n'
+    )
+    assert _offsets(list(_parse(data).samples)) == [0.0, 0.01, 0.02]

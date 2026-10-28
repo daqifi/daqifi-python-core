@@ -2265,10 +2265,10 @@ class _JsonClock:
     def place(self, ts: Any, analog: bool) -> Optional[int]:
         """The record's unwrapped tick; None if ``ts`` isn't an integer.
 
-        For firmware records 0 is a real tick: the one after a rollover on
-        firmware before #533 (current firmware clamps stamps to 1). Only the
-        displayed time treats it as "no timestamp", as the protobuf parser
-        does. Legacy "analog" rows with ts 0 aren't placed at all."""
+        For firmware records 0 is a real tick, time included: the one after
+        a rollover on firmware before #533 (current firmware clamps stamps
+        to 1). Legacy "analog" rows with ts 0 mean "no timestamp" and
+        aren't placed at all."""
         if not _is_plain_int(ts):
             return None
         if not self._anchored:
@@ -2604,11 +2604,12 @@ def _produce_json_samples(
             if channels is not None:
                 # The port state at the sample's own time.
                 digital_data = digital.at(tick)
-            # ``ts == 0`` is "no timestamp": session start, as in the
-            # protobuf parser, so the same physical log reconstructs to
-            # consistent absolute timestamps regardless of file format.
+            # A legacy row with ts 0 is "no timestamp" (no tick): session
+            # start, as in the protobuf parser, so the same physical log
+            # reconstructs consistently across formats. A firmware sample at
+            # tick 0 (after a rollover) keeps its reconstructed time.
             absolute_time = base_time
-            if tick_period > 0 and tick is not None and ts != 0:
+            if tick_period > 0 and tick is not None:
                 absolute_time = base_time + timedelta(seconds=tick * tick_period)
             yield SdCardLogEntry(
                 timestamp=absolute_time,
