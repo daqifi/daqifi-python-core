@@ -2189,8 +2189,9 @@ class _JsonClock:
     since an ADC sample queued for the next object can be older than a
     digital record stamped with the trigger (JSON_Encoder.c). A digital-only
     record moves the base only while no analog record has been seen, or if
-    it isn't ahead of the latest analog tick; otherwise it is placed without
-    moving it.
+    it is behind the latest analog tick; otherwise it is placed without
+    moving it, so a digital record level with the analog base doesn't
+    change how the next analog step is read.
 
     Limit (recorded on #164, tied to daqifi-nyquist-firmware#959): after the
     last analog record, digital-only records are placed by their distance
@@ -2205,11 +2206,20 @@ class _JsonClock:
         self._base_tick = 0
         self._base_by_digital = False
         self._latest_analog: Optional[int] = None
+        self.last_tick: Optional[int] = None
 
-    def place(self, ts: Any, analog: bool) -> Optional[int]:
-        """The record's unwrapped tick; None for "no timestamp" (0)."""
+    def place(self, ts: Any, analog: bool) -> Optional[float]:
+        """The record's unwrapped tick. A record with "no timestamp" (0)
+        sits just after the last placed record (+0.5), so its digital
+        events still count without changing earlier samples; None if
+        nothing has been placed yet."""
         if not _is_plain_int(ts) or ts == 0:
-            return None
+            return None if self.last_tick is None else self.last_tick + 0.5
+        tick = self._place(ts, analog)
+        self.last_tick = tick
+        return tick
+
+    def _place(self, ts: int, analog: bool) -> int:
         if not self._anchored:
             self._anchored = True
             self._move(ts, 0, by_digital=not analog)
@@ -2226,7 +2236,7 @@ class _JsonClock:
             self._latest_analog = tick
             return tick
         tick = self._base_tick + _compute_tick_delta(self._base_raw, ts)
-        if self._latest_analog is None or tick <= self._latest_analog:
+        if self._latest_analog is None or tick < self._latest_analog:
             self._move(ts, tick, by_digital=True)
         return tick
 
@@ -2247,19 +2257,19 @@ class _DigitalHistory:
         self._events: List[Tuple[int, int, int]] = []  # (tick, order, value)
         self._order = 0
 
-    def add(self, tick: int, value: int) -> None:
+    def add(self, tick: float, value: int) -> None:
         import bisect
 
         self._order += 1
         bisect.insort(self._events, (tick, self._order, value))
 
-    def at(self, tick: Optional[int]) -> int:
+    def at(self, tick: Optional[float]) -> int:
         import bisect
 
         if not self._events:
             return 0
         if tick is None:
-            return self._events[-1][2]
+            return 0  # nothing placed yet: no state known
         index = bisect.bisect_right(self._events, (tick, float("inf"), 0))
         return self._events[index - 1][2] if index else 0
 
@@ -2413,19 +2423,21 @@ def _infer_json_configuration(
 ) -> SdCardDeviceConfiguration:
     """Device metadata from the firmware's leading {"meta":...} header
     (device name, serial, tick rate) when present, and the analog channel
-    count from the first sample; then merged with the caller's override,
+    count from the first sample with analog values (digital-only records
+    may come first); then merged with the caller's override,
     which supplies resolution/calibration/range for scaling. Same
     precedence as the CSV parser: file, then override, then fallback."""
     meta: dict = {}
     analog_count = 0
-    for obj, _end in objects[:2]:
-        found = _json_meta(obj)
+    for index, (obj, _end) in enumerate(objects):
+        found = _json_meta(obj) if index < 2 else None
         if found is not None:
             meta = found
             continue
         parsed, _ages, _reference = _try_parse_json_samples(obj)
-        if parsed:
-            analog_count = len(parsed[0][1])
+        with_analog = [sample for sample in parsed if sample[1]]
+        if with_analog:
+            analog_count = len(with_analog[0][1])
             break
     tick = meta.get("tick_hz")
     inferred = SdCardDeviceConfiguration(
@@ -2503,11 +2515,11 @@ def _produce_json_samples(
             if channels is not None:
                 # The port state at the sample's own time.
                 digital_data = digital.at(tick)
-            # ``ts == 0`` is "no timestamp" (tick None) — matches the
-            # protobuf parser so the same physical log reconstructs to
+            # ``ts == 0`` is "no timestamp": session start, as in the
+            # protobuf parser, so the same physical log reconstructs to
             # consistent absolute timestamps regardless of file format.
             absolute_time = base_time
-            if tick_period > 0 and tick is not None:
+            if tick_period > 0 and tick is not None and ts != 0:
                 absolute_time = base_time + timedelta(seconds=tick * tick_period)
             yield SdCardLogEntry(
                 timestamp=absolute_time,

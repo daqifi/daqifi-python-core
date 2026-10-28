@@ -523,3 +523,37 @@ def test_a_digital_only_stretch_just_under_one_timer_period_is_placed_correctly(
     samples = list(_parse(data).samples)
     assert _offsets(samples) == [0.0, 2000000.0, 4294966.0]
     assert [s.digital_data for s in samples] == [0, 1, 2]
+
+
+# Audit round 17 on #183.
+
+def test_a_digital_record_level_with_the_analog_base_does_not_change_the_next_step() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":1000,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":3000001000,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert _offsets(samples) == [0.0, 0.0, 3000000.0]
+    assert samples[-1].digital_data == 5
+
+
+def test_a_zero_timestamp_record_keeps_its_digital_events() -> None:
+    # ts 0 is "no timestamp" for time, but its digital change still counts,
+    # from just after the previous record, and doesn't reach back.
+    data = (
+        b'{"ts":4294967280,"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":0,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":16,"ai":[{"ch":0,"val":1.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [1, 5, 5]
+
+
+def test_leading_digital_records_do_not_hide_the_analog_channel_count() -> None:
+    data = (
+        b'{"meta":{"tick_hz":42000000}}\n'
+        b'{"ts":1000,"di":[{"ts":0,"mask":15,"val":3}]}\n'
+        b'{"ts":1100,"ai":[{"ch":0,"val":1.0000},{"ch":1,"val":2.0000}]}\n'
+    )
+    assert _parse(data).device_config.analog_port_count == 2
