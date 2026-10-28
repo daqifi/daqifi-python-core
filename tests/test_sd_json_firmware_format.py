@@ -587,3 +587,56 @@ def test_a_legacy_zero_timestamp_row_does_not_move_the_clock() -> None:
         session_start_time=datetime(2026, 1, 1), fallback_timestamp_frequency=1000
     )
     assert _offsets(list(_parse(data, options).samples)) == [0.0, 0.0, 1.0]
+
+
+# Audit round 2 on #186 (in #183's code): memory and falsy containers.
+
+@pytest.mark.parametrize("bad", [b"0", b"false", b'""', b"{}"])
+def test_a_falsy_non_array_ai_is_malformed_not_empty(bad) -> None:
+    from datetime import datetime
+
+    data = (
+        b'{"ts":1000,"ai":' + bad + b',"di":[{"ts":0,"mask":15,"val":15}]}\n'
+        b'{"ts":1100,"ai":[{"ch":0,"val":1.0000}]}\n'
+    )
+    options = SdCardParseOptions(
+        session_start_time=datetime(2026, 1, 1), fallback_timestamp_frequency=1000
+    )
+    samples = list(_parse(data, options).samples)
+    assert [(s.timestamp, s.digital_data) for s in samples] == [(datetime(2026, 1, 1), 0)]
+
+
+def test_parsing_does_not_hold_every_decoded_object(monkeypatch) -> None:
+    # The producer decodes lazily in two passes; no list of every decoded
+    # object or converted sample is built.
+    import daqifi.sdcard as sdcard
+
+    real = sdcard._iter_json_objects
+    alive = []
+
+    def counting(text):
+        for obj, end in real(text):
+            alive.append(1)
+            yield obj, end
+
+    monkeypatch.setattr(sdcard, "_iter_json_objects", counting)
+    data = b"".join(b'{"ts":%d,"analog":[1]}\n' % (i + 1) for i in range(50))
+    session = _parse(data)
+    # Building the session decodes only what inference needs, not the file.
+    assert len(alive) <= 2
+    first = next(iter(session.samples))
+    # Pass 1 decoded all 50; pass 2 has decoded only what it has emitted.
+    assert first.analog_values and len(alive) <= 2 + 50 + 1
+
+
+def test_a_memory_error_while_parsing_is_raised_not_skipped(monkeypatch) -> None:
+    # A broad except turned MemoryError into "malformed record, skip", so a
+    # parse under memory pressure silently lost samples.
+    import daqifi.sdcard as sdcard
+
+    def exhausted(obj):
+        raise MemoryError
+
+    monkeypatch.setattr(sdcard, "_parse_json_sample", exhausted)
+    with pytest.raises(MemoryError):
+        list(_parse(b'{"ts":1,"ai":[{"ch":0,"val":1.0000}]}\n').samples)

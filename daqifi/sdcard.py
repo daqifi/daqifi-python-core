@@ -1992,14 +1992,16 @@ class SdCardJsonFileParser:
 
         # The firmware writes each sample object across several lines (and a
         # {"meta":...} header first), so the file is read as a sequence of
-        # JSON objects, not one object per line (#163).
-        objects = list(_iter_json_objects("\n".join(lines)))
-        config = _infer_json_configuration(objects, options)
+        # JSON objects, not one object per line (#163). Objects are decoded
+        # lazily from the text, never all held at once.
+        text = "\n".join(lines)
+        del lines
+        config = _infer_json_configuration(text, options)
         if config.timestamp_frequency == 0 and options.fallback_timestamp_frequency > 0:
             config = _replace_timestamp_frequency(
                 config, options.fallback_timestamp_frequency
             )
-        samples = _produce_json_samples(objects, config, file_created_date, options)
+        samples = _produce_json_samples(text, config, file_created_date, options)
         return SdCardLogSession(
             file_name=file_name,
             file_created_date=file_created_date,
@@ -2279,6 +2281,15 @@ def _is_plain_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+# What a malformed record can raise while being taken apart. Anything else
+# (MemoryError above all) is not a bad record and must not be swallowed as
+# one: under memory pressure that silently dropped samples.
+_MALFORMED_JSON_ERRORS = (
+    ValueError, TypeError, KeyError, IndexError, AttributeError,
+    OverflowError, RecursionError,
+)
+
+
 def _try_parse_json_samples(
     obj: Any,
 ) -> Tuple[List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]], List[Tuple[int, int]], Any]:
@@ -2287,7 +2298,7 @@ def _try_parse_json_samples(
     gives nothing."""
     try:
         split, ages, reference = _split_batched_samples(obj)
-    except Exception:
+    except _MALFORMED_JSON_ERRORS:
         return [], [], None
     out = []
     for sample in split:
@@ -2304,7 +2315,7 @@ def _try_parse_json_sample(
     record is skipped instead of aborting the whole log."""
     try:
         return _parse_json_sample(obj)
-    except Exception:
+    except _MALFORMED_JSON_ERRORS:
         return None
 
 
@@ -2330,8 +2341,9 @@ def _parse_json_sample(
     digital_data = 0
     if "ai" in obj or "di" in obj:
         channels = []
-        ai = obj.get("ai") or []
-        di = obj.get("di") or []
+        # Absent means none; present must be a list (0, "" or {} isn't one).
+        ai = obj.get("ai", [])
+        di = obj.get("di", [])
         if not isinstance(ai, list) or not isinstance(di, list):
             return None
         for entry in ai:
@@ -2386,7 +2398,7 @@ def _try_parse_json_line(line: str) -> Optional[Tuple[int, List[float], int]]:
 
     try:
         parsed = _try_parse_json_sample(json.loads(line))
-    except Exception:
+    except _MALFORMED_JSON_ERRORS:
         return None
     if parsed is None:
         return None
@@ -2414,7 +2426,7 @@ def _parse_digital_hex_string(hex_string: str) -> int:
 
 
 def _infer_json_configuration(
-    objects: List[Tuple[Any, int]],
+    text: str,
     options: SdCardParseOptions,
 ) -> SdCardDeviceConfiguration:
     """Device metadata from the firmware's leading {"meta":...} header
@@ -2425,7 +2437,7 @@ def _infer_json_configuration(
     precedence as the CSV parser: file, then override, then fallback."""
     meta: dict = {}
     analog_count = 0
-    for index, (obj, _end) in enumerate(objects):
+    for index, (obj, _end) in enumerate(_iter_json_objects(text)):
         found = _json_meta(obj) if index < 2 else None
         if found is not None:
             meta = found
@@ -2454,7 +2466,7 @@ def _infer_json_configuration(
 
 
 def _produce_json_samples(
-    objects: List[Tuple[Any, int]],
+    text: str,
     config: SdCardDeviceConfiguration,
     file_created_date: Optional[datetime],
     options: SdCardParseOptions,
@@ -2462,41 +2474,52 @@ def _produce_json_samples(
     base_time = _resolve_session_base_time(file_created_date)
     timestamp_freq = config.timestamp_frequency
     tick_period = 1.0 / timestamp_freq if timestamp_freq > 0 else 0.0
-
-    lines_processed = 0
-    bytes_read = 0
     progress = options.progress
-    total_bytes = objects[-1][1] if objects else 0
     reader = _FirmwareValueReader(config, options.integer_units)
+
+    def converted(parsed):
+        """``(ts, analog_values, units, channels, digital_data, digital_only)``
+        for one parsed sample, or None if the firmware rule rejects it."""
+        ts, raw_analog, channels, digital_data = parsed
+        units: Optional[str] = None
+        if channels is not None:
+            # The firmware's "ai" shape: the shared firmware rule.
+            read = reader.read(raw_analog, channels)
+            if read is None:
+                return None
+            analog_values, units = read
+        else:
+            # The legacy "analog" shape is raw counts, as upstream scales
+            # it, whatever the number syntax.
+            analog_values = _scale_raw_analog_values(
+                [int(v) for v in raw_analog], config, channels
+            )
+        digital_only = channels is not None and not raw_analog
+        return ts, analog_values, units, channels, digital_data, digital_only
+
+    # Two passes over the text, decoding lazily each time, so memory stays
+    # proportional to the samples' ticks rather than to every decoded object
+    # and sample. Pass 1 places every sample and loads every digital event;
+    # pass 2 emits. The firmware can defer its DIO block to a later object
+    # (JSON_Encoder.c), so an event can arrive after a sample it applies to.
+    from array import array
+
+    no_tick = -(2 ** 63)
+    ticks = array("q")
     clock = _JsonClock()
     digital = _DigitalHistory()
-
-    # Two passes over the decoded objects (already in memory): place every
-    # sample and load every digital event first, then emit. The firmware can
-    # defer its DIO block to a later object (JSON_Encoder.c), so an event can
-    # arrive after a sample it applies to.
-    placed_by_object = []
-    for obj, end in objects:
+    total_bytes = 0
+    for obj, end in _iter_json_objects(text):
+        total_bytes = end
         parsed_samples, ages, reference = _try_parse_json_samples(obj)
         # Every sample of the object is placed first: its digital ages are
         # measured back from its latest sample.
-        placed = []
+        last_ts, last_tick = None, None
         for parsed in parsed_samples:
-            ts, raw_analog, channels, digital_data = parsed
-            units: Optional[str] = None
-            if channels is not None:
-                # The firmware's "ai" shape: the shared firmware rule.
-                read = reader.read(raw_analog, channels)
-                if read is None:
-                    continue
-                analog_values, units = read
-            else:
-                # The legacy "analog" shape is raw counts, as upstream
-                # scales it, whatever the number syntax.
-                analog_values = _scale_raw_analog_values(
-                    [int(v) for v in raw_analog], config, channels
-                )
-            digital_only = channels is not None and not raw_analog
+            sample = converted(parsed)
+            if sample is None:
+                continue
+            ts, _values, _units, channels, _digital, digital_only = sample
             if channels is None and ts == 0:
                 # The legacy "analog" shape uses ts 0 for "no timestamp"
                 # (as the protobuf and CSV parsers do): it doesn't move the
@@ -2504,16 +2527,27 @@ def _produce_json_samples(
                 tick = None
             else:
                 tick = clock.place(ts, analog=not digital_only)
-            placed.append((ts, tick, analog_values, units, channels, digital_data))
-        if ages and placed and placed[-1][0] == reference and placed[-1][1] is not None:
+            ticks.append(no_tick if tick is None else tick)
+            last_ts, last_tick = ts, tick
+        if ages and last_ts == reference and last_tick is not None:
             for age, value in ages:
-                digital.add(placed[-1][1] - age, value)
-        placed_by_object.append((end, placed))
+                digital.add(last_tick - age, value)
 
-    for end, placed in placed_by_object:
+    lines_processed = 0
+    bytes_read = 0
+    index = 0
+    for obj, end in _iter_json_objects(text):
         lines_processed += 1
         bytes_read = end
-        for ts, tick, analog_values, units, channels, digital_data in placed:
+        parsed_samples, _ages, _reference = _try_parse_json_samples(obj)
+        for parsed in parsed_samples:
+            sample = converted(parsed)
+            if sample is None:
+                continue
+            ts, analog_values, units, channels, digital_data, _digital_only = sample
+            tick = ticks[index]
+            index += 1
+            tick = None if tick == no_tick else tick
             if channels is not None:
                 # The port state at the sample's own time.
                 digital_data = digital.at(tick)
