@@ -506,7 +506,7 @@ class StreamManager:
             line = line.strip()
             if line.upper().startswith("DAQIFI>"):
                 line = line[len("DAQIFI>"):].strip()
-            if line:
+            if line and line != start_cmd:  # an echo the strip didn't reach
                 return line
         return ""
 
@@ -530,9 +530,20 @@ class StreamManager:
         _ENDL_CRLF); strip precisely that, never more: a protobuf frame's
         length byte can be 0x0A/0x0D."""
         data = cls._strip_prompt(data)
-        if data.startswith(echo_line):
-            data = data[len(echo_line):]
+        blank, rest = cls._split_blank_lines(data)
+        if rest.startswith(echo_line):
+            # Blank lines go only together with the echo after them, never
+            # alone: CR LF can open a protobuf frame.
+            data = rest[len(echo_line):]
         return cls._strip_prompt(data)
+
+    @staticmethod
+    def _split_blank_lines(data: bytes) -> "tuple[bytes, bytes]":
+        """``(leading CR LF pairs, the rest)``."""
+        end = 0
+        while data[end:end + 2] == b"\r\n":
+            end += 2
+        return data[:end], data[end:]
 
     @classmethod
     def _ends_inside_console_prefix(cls, data: bytes, echo_line: bytes) -> bool:
@@ -552,6 +563,13 @@ class StreamManager:
             if not after_prompt.startswith(echo_line):
                 return False
             data = after_prompt
+        blank, after_blank = cls._split_blank_lines(data)
+        if blank:
+            # Blank lines first: the echo may still be arriving after them.
+            if echo_line.startswith(after_blank) and after_blank != echo_line:
+                return True
+            if after_blank.startswith(echo_line):
+                data = after_blank
         rest = data[len(echo_line):] if data.startswith(echo_line) else data
         if rest is data and data and echo_line.startswith(data) and data != echo_line:
             return True

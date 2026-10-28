@@ -340,3 +340,53 @@ def test_a_pending_prompt_and_an_echo_split_across_the_read_keep_the_frames() ->
     samples = stream.read(2, timeout=1.0)
     stream.stop()
     assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+# Audit round 10 on #180.
+
+class _BlankLineThenEcho(_FakeSerial):
+    def write(self, data):
+        command = data.decode().strip()
+        if "STREAM:START" in command.upper():
+            with self.lock:
+                self.rx += b"\r\n" + command.encode() + b"\r\n"
+        return super().write(data)
+
+
+def test_a_start_rejection_after_a_blank_line_and_the_echo_is_detected() -> None:
+    from daqifi.exceptions import CommandError
+
+    fake = _BlankLineThenEcho(on_start=b'**ERROR: -113,"Undefined header"\r\n')
+    stream = _manager(fake, channels=[0], sample_rate=10, format=2)
+    with pytest.raises(CommandError, match="rejected"):
+        stream.start()
+
+
+def test_frames_after_a_blank_line_and_the_echo_are_kept() -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _BlankLineThenEcho(enabled_mask=1, on_start=frame * 2)
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+
+def test_a_start_rejection_after_a_bare_lf_and_the_echo_is_detected() -> None:
+    # The strip removes only CR LF pairs before the echo; a bare LF leaves
+    # the echo in the text, where the rejection check must still pass over it.
+    from daqifi.exceptions import CommandError
+
+    class _BareLfThenEcho(_FakeSerial):
+        def write(self, data):
+            command = data.decode().strip()
+            if "STREAM:START" in command.upper():
+                with self.lock:
+                    self.rx += b"\n" + command.encode() + b"\r\n"
+            return super().write(data)
+
+    fake = _BareLfThenEcho(on_start=b'**ERROR: -113,"Undefined header"\r\n')
+    stream = _manager(fake, channels=[0], sample_rate=10, format=2)
+    with pytest.raises(CommandError, match="rejected"):
+        stream.start()
