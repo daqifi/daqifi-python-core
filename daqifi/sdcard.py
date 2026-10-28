@@ -38,6 +38,7 @@ Includes the small value classes the parser surface needs:
 """
 from __future__ import annotations
 
+import io
 import math
 import os
 import re
@@ -394,6 +395,45 @@ class SdCardTransferProgress:
     file_name: str
 
 
+def _write_all(stream: Any, data: bytes, deadline: Optional[float] = None) -> None:
+    """Write all of ``data``: a raw sink may accept only part per call.
+
+    ``BufferedWriter``/``BytesIO`` always take everything, but a raw
+    stream's ``write`` returns how much it took, and that return value was
+    ignored, so a short write lost the rest (#163). Only an
+    ``io.RawIOBase`` uses ``None`` to mean "nothing written, it would
+    block", so only there is ``None`` retried; other writers (codecs
+    stream writers, many file-likes) return ``None`` after writing
+    everything, and repeating the write would duplicate it. Every retry,
+    after a short write or a would-block, stops at ``deadline``
+    (``time.monotonic()`` value): a sink that drains slowly or not at all
+    must not hold a download, and the exchange lock with it, past its
+    timeout.
+    """
+    raw = isinstance(stream, io.RawIOBase)
+    remaining = bytes(data)
+    while remaining:
+        written = stream.write(remaining)
+        if written is None and not raw:
+            return
+        if written is not None:
+            if not isinstance(written, int) or isinstance(written, bool):
+                return  # not a byte count: the writer took it all
+            if written <= 0:
+                raise OSError(f"write accepted {written} bytes; destination is not writable")
+            remaining = remaining[written:]
+            if not remaining:
+                return
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(
+                "The download destination did not accept all the data before "
+                "the download's deadline."
+            )
+        if written is None:
+            time.sleep(0.001)
+
+
+
 class SdCardFileReceiver:
     """Receives raw bytes from a transport stream during an SD-card
     file download, accumulating into a destination stream and
@@ -591,17 +631,17 @@ class SdCardFileReceiver:
                     # Marker started inside the trailing buffer — only
                     # write the part of trailing before the marker.
                     if position > 0:
-                        destination_stream.write(bytes(trailing[:position]))
+                        _write_all(destination_stream, bytes(trailing[:position]), deadline)
                         total_bytes += position
                 else:
                     # Marker started inside the new chunk — write all
                     # of trailing + the part of chunk before the marker.
                     if trailing:
-                        destination_stream.write(bytes(trailing))
+                        _write_all(destination_stream, bytes(trailing), deadline)
                         total_bytes += len(trailing)
                     marker_start_in_chunk = position - len(trailing)
                     if marker_start_in_chunk > 0:
-                        destination_stream.write(chunk_bytes[:marker_start_in_chunk])
+                        _write_all(destination_stream, chunk_bytes[:marker_start_in_chunk], deadline)
                         total_bytes += marker_start_in_chunk
                 # Capture any bytes after the marker for the caller.
                 if 0 <= marker_end_in_chunk < len(chunk_bytes):
@@ -620,11 +660,11 @@ class SdCardFileReceiver:
                 if safe_count > 0:
                     from_trailing = min(safe_count, len(trailing))
                     if from_trailing > 0:
-                        destination_stream.write(bytes(trailing[:from_trailing]))
+                        _write_all(destination_stream, bytes(trailing[:from_trailing]), deadline)
                         total_bytes += from_trailing
                     from_new = safe_count - from_trailing
                     if from_new > 0:
-                        destination_stream.write(chunk_bytes[:from_new])
+                        _write_all(destination_stream, chunk_bytes[:from_new], deadline)
                         total_bytes += from_new
                 # Rebuild trailing window: last marker_len bytes of
                 # the combined [trailing + chunk] sequence.
