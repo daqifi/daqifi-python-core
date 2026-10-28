@@ -549,7 +549,10 @@ class StreamManager:
         or LF bytes can be a protobuf frame's length byte."""
         position = cls._find_echo(data, echo_line)
         if position >= 0:
-            return cls._strip_prompt(data[position + len(echo_line):])
+            # After the echo, the same rule: line endings go only together
+            # with the prompt after them.
+            rest = data[position + len(echo_line):]
+            return rest[cls._console_prefix_end(rest):]
         return data[cls._console_prefix_end(data):]
 
     @classmethod
@@ -576,23 +579,27 @@ class StreamManager:
         position = cls._find_echo(data, echo_line)
         if position >= 0:
             rest = data[position + len(echo_line):]
-            # Nothing after the echo yet, or a prompt still arriving:
-            # "DAQIFI> " (the firmware's) or a prompt line "DAQIFI>\r\n" split
-            # after its CR. The console prints a prompt after the command, so
-            # wait for it rather than let it reach the decoder.
-            return not rest or any(
-                prompt.startswith(rest) and rest != prompt for prompt in _CONSOLE_PROMPTS
-            )
+            # Nothing after the echo yet, only line endings so far, or a
+            # prompt still arriving ("DAQIFI> ", or a prompt line split after
+            # its CR). The console prints a prompt after the command, so wait
+            # for it rather than let it reach the decoder.
+            if not rest or (cls._is_console_noise(rest) and not cls._console_prefix_end(rest)):
+                return True
+            return cls._ends_in_partial_console(rest)
         if data and cls._is_console_noise(data):
             return True
-        # A partial echo or prompt can only be the last few bytes.
-        longest = max(len(echo_line), *(len(prompt) for prompt in _CONSOLE_PROMPTS))
+        return cls._ends_in_partial_console(data, echo_line)
+
+    @classmethod
+    def _ends_in_partial_console(cls, data: bytes, echo_line: bytes = b"") -> bool:
+        """True if ``data`` is line endings and prompts followed by the
+        start of a prompt (or of ``echo_line``) still arriving. A partial
+        can only be the last few bytes."""
+        candidates = [prompt for prompt in _CONSOLE_PROMPTS] + ([echo_line] if echo_line else [])
+        longest = max(len(candidate) for candidate in candidates)
         for split in range(max(0, len(data) - longest), len(data)):
             head, tail = data[:split], data[split:]
-            if (
-                echo_line.startswith(tail)
-                or any(prompt.startswith(tail) for prompt in _CONSOLE_PROMPTS)
-            ) and cls._is_console_noise(head):
+            if any(candidate.startswith(tail) for candidate in candidates) and cls._is_console_noise(head):
                 return True
         return False
 

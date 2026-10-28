@@ -488,3 +488,16 @@ def test_a_prompt_arriving_after_a_read_that_ended_with_the_echo_is_stripped() -
     samples = stream.read(2, timeout=1.0)
     stream.stop()
     assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+# Audit round 15 on #180 (applied under the raised cap).
+
+@pytest.mark.parametrize("after", [b"\r\nDAQIFI> ", b"\r\n\r\nDAQIFI>\r\n"])
+def test_line_endings_and_a_prompt_after_the_echo_are_console_output(after) -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _FakeSerial(enabled_mask=1, echo=True, on_start=after + frame * 2)
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
