@@ -2114,22 +2114,29 @@ def _split_batched_samples(obj: Any) -> List[Any]:
     di = obj.get("di")
     reference = samples[-1].get("ts")
     if isinstance(di, list) and di and _is_plain_int(reference):
+        # Ages are uint32 differences back from the reference: read them
+        # as signed int32, so an entry read just after the trigger (age
+        # 0xFFFFFFFF, i.e. -1) is in the future, and a batch across the
+        # timer rollover still compares in order.
         ages = [
-            (entry["ts"], entry) for entry in di
+            (_signed32(entry["ts"]), entry) for entry in di
             if isinstance(entry, dict) and _is_plain_int(entry.get("ts"))
         ]
         for sample in samples:
             ts = sample.get("ts")
             if not _is_plain_int(ts):
                 continue
-            # Ages back from the reference, in the timer's uint32 domain so
-            # a batch across the rollover still compares in order: an entry
-            # is due for this sample if it is at least as old as the sample.
-            sample_age = (reference - ts) & 0xFFFFFFFF
+            # An entry is due for this sample if it is at least as old.
+            sample_age = _signed32(reference - ts)
             due = [(age, entry) for age, entry in ages if age >= sample_age]
             if due:
                 sample["di"] = [min(due, key=lambda pair: pair[0])[1]]
     return samples
+
+
+def _signed32(value: int) -> int:
+    value &= 0xFFFFFFFF
+    return value - 0x100000000 if value & 0x80000000 else value
 
 
 def _is_plain_int(value: Any) -> bool:

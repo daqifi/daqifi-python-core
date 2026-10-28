@@ -316,3 +316,14 @@ def test_batched_digital_states_across_the_timer_rollover(first, second, ages) -
         % (ages[0], ages[1], first, second)
     )
     assert [s.digital_data for s in _parse(data).samples] == [3, 5]
+
+
+def test_a_digital_read_just_after_the_trigger_is_not_given_to_earlier_samples() -> None:
+    # Audit finding on #183 (round 10): a DIO read one tick after the
+    # trigger has age 0xFFFFFFFF (-1); read unsigned it looked ancient and
+    # leaked into earlier samples. SYNTHETIC.
+    data = (
+        b'{"di":[{"ts":9,"mask":15,"val":3},{"ts":4294967295,"mask":15,"val":5}],'
+        b'"ts":100,"ai":[{"ch":0,"val":1.0000}],"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [0, 3]
