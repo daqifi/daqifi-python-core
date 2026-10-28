@@ -279,3 +279,64 @@ def test_an_empty_selection_follows_the_enabled_channels_across_restarts() -> No
     stream.stop()
     assert sample.channels == {3: 3.0}
     assert stream.channels == [3]
+
+
+# Audit round 9 on #180.
+
+class _PromptThenEcho(_FakeSerial):
+    """The previous command's prompt is still pending when START is typed,
+    so the reply opens with "DAQIFI> " and then the echo."""
+
+    def write(self, data):
+        command = data.decode().strip()
+        if "STREAM:START" in command.upper():
+            with self.lock:
+                self.rx += b"DAQIFI> " + command.encode() + b"\r\n"
+        return super().write(data)
+
+
+def test_a_start_rejection_after_a_pending_prompt_and_the_echo_is_detected() -> None:
+    from daqifi.exceptions import CommandError
+
+    fake = _PromptThenEcho(on_start=b'**ERROR: -113,"Undefined header"\r\n')
+    stream = _manager(fake, channels=[0], sample_rate=10, format=2)
+    with pytest.raises(CommandError, match="rejected"):
+        stream.start()
+
+
+def test_frames_after_a_pending_prompt_and_the_echo_are_kept() -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _PromptThenEcho(enabled_mask=1, on_start=frame * 2)
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+def test_a_pending_prompt_and_an_echo_split_across_the_read_keep_the_frames() -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _FakeSerial(enabled_mask=1)
+    original_write = fake.write
+
+    def write(data):
+        command = data.decode().strip()
+        n = original_write(data)
+        if "STREAM:START" in command.upper():
+            echo = command.encode() + b"\r\n"
+            with fake.lock:
+                fake.rx += b"DAQIFI> " + echo[:5]
+
+            def tail():
+                with fake.lock:
+                    fake.rx += echo[5:] + frame * 2
+
+            threading.Timer(0.3, tail).start()  # after the settle and first read
+        return n
+
+    fake.write = write
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]

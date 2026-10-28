@@ -495,21 +495,7 @@ class StreamManager:
                 raw.extend(port.read(waiting))
             else:
                 time.sleep(0.01)
-        head = bytes(raw)
-        # The firmware's console (microrl) echoes the typed command and ends
-        # the line with exactly CR LF (ENDL, _ENDL_CRLF); strip precisely
-        # that, never more: a protobuf frame's length byte can be 0x0A/0x0D.
-        echo = start_cmd.encode("ascii") + b"\r\n"
-        if head.startswith(echo):
-            head = head[len(echo):]
-        # The firmware prompt is exactly "DAQIFI> " (microrl
-        # _PROMPT_DEFAULT, no line ending). A prompt on a line of its own
-        # loses its CR LF with it, as a unit: never a bare CR or LF, which
-        # can be a protobuf frame's length byte.
-        for prompt in _CONSOLE_PROMPTS:
-            if head.startswith(prompt):
-                head = head[len(prompt):]
-                break
+        head = self._strip_console_prefix(bytes(raw), echo_line)
         if self._format == 0:
             self._pb_buffer.extend(head)
         else:
@@ -525,9 +511,47 @@ class StreamManager:
         return ""
 
     @staticmethod
-    def _ends_inside_console_prefix(data: bytes, echo_line: bytes) -> bool:
+    def _strip_prompt(data: bytes) -> bytes:
+        """``data`` without one leading prompt. The firmware prompt is
+        exactly "DAQIFI> " (microrl _PROMPT_DEFAULT, no line ending); a
+        prompt on a line of its own loses its CR LF with it, as a unit:
+        never a bare CR or LF, which can be a protobuf frame's length byte."""
+        for prompt in _CONSOLE_PROMPTS:
+            if data.startswith(prompt):
+                return data[len(prompt):]
+        return data
+
+    @classmethod
+    def _strip_console_prefix(cls, data: bytes, echo_line: bytes) -> bytes:
+        """Drop the console output that can lead the START reply: a prompt
+        still pending from the previous command, the echo of START, and the
+        prompt after it, each at most once. The console (microrl) echoes the
+        typed command and ends the line with exactly CR LF (ENDL,
+        _ENDL_CRLF); strip precisely that, never more: a protobuf frame's
+        length byte can be 0x0A/0x0D."""
+        data = cls._strip_prompt(data)
+        if data.startswith(echo_line):
+            data = data[len(echo_line):]
+        return cls._strip_prompt(data)
+
+    @classmethod
+    def _ends_inside_console_prefix(cls, data: bytes, echo_line: bytes) -> bool:
         """True if ``data`` stops part-way through the echo line or the
         prompt that may lead the START reply."""
+        if data and any(
+            prompt.startswith(data) and data != prompt for prompt in _CONSOLE_PROMPTS
+        ):
+            return True  # a prompt still arriving
+        after_prompt = cls._strip_prompt(data)
+        if after_prompt is not data:
+            # A prompt pending from the previous command: the echo may follow.
+            if not after_prompt or (
+                echo_line.startswith(after_prompt) and after_prompt != echo_line
+            ):
+                return True
+            if not after_prompt.startswith(echo_line):
+                return False
+            data = after_prompt
         rest = data[len(echo_line):] if data.startswith(echo_line) else data
         if rest is data and data and echo_line.startswith(data) and data != echo_line:
             return True
