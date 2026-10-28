@@ -205,15 +205,31 @@ class _LifecycleGate:
 _EOF_TRAILER_MAX = 16
 
 
+def _is_eof_trailer(trailer: bytes) -> bool:
+    """True if ``trailer`` can follow the end-of-file marker at the end of
+    a transfer: line endings and the console prompt, at most
+    ``_EOF_TRAILER_MAX`` bytes, possibly ending part-way through a prompt
+    still arriving."""
+    if len(trailer) > _EOF_TRAILER_MAX:
+        return False
+    rest = trailer.replace(b"DAQIFI> ", b"").replace(b"DAQIFI>", b"")
+    stripped = rest.rstrip(b"\r\n ")
+    if not stripped.strip(b"\r\n "):
+        return True
+    # A prompt still arriving at the very end ("DAQ").
+    for cut in range(1, len(b"DAQIFI>")):
+        if rest.endswith(b"DAQIFI>"[:cut]):
+            return not rest[: len(rest) - cut].strip(b"\r\n ")
+    return False
+
+
 def _eof_marker_start(buffer: bytes) -> int:
     """Index of an end-of-file marker that ends ``buffer`` apart from a
     trailer of line endings and prompt, or -1."""
     marker = END_OF_FILE_MARKER
     position = bytes(buffer).rfind(marker)
     while position >= 0:
-        trailer = bytes(buffer[position + len(marker):])
-        rest = trailer.replace(b"DAQIFI> ", b"").replace(b"DAQIFI>", b"")
-        if len(trailer) <= _EOF_TRAILER_MAX and not rest.strip(b"\r\n "):
+        if _is_eof_trailer(bytes(buffer[position + len(marker):])):
             return position
         position = bytes(buffer).rfind(marker, 0, position)
     return -1
@@ -1817,8 +1833,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._forget_sd_card_sizes()
 
     def _forget_sd_card_sizes(self) -> None:
-        # Logging can grow a listed file, so the listed sizes stop being a
-        # safe download length; they come back with the next listing.
+        # Logging can grow a listed file, so sizes listed before or during a
+        # recording aren't a safe download length; they come back with the
+        # next listing taken while not logging.
         self._sd_card_files = [replace(f, size=None) for f in self._sd_card_files]
 
     def disable_sd_card_logging(self) -> None:
@@ -1826,6 +1843,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         Use :meth:`stop_sd_card_logging` for the full Protocol flow."""
         self.send(scpi_commands.disable_storage_sd())
         self._is_logging_to_sd = False
+        self._forget_sd_card_sizes()
 
     def set_sd_logging_file_name(self, file_name: str) -> None:
         self.send(scpi_commands.set_sd_logging_file_name(file_name))
@@ -1884,6 +1902,8 @@ class DaqifiStreamingDevice(DaqifiDevice):
         lines = _strip_prompt_prefixes(lines)
         throw_if_sd_card_list_error(lines)
         self._sd_card_files = parse_sd_card_file_list(lines)
+        if self._is_logging_to_sd:
+            self._forget_sd_card_sizes()
 
     @_exclusive_sd_operation
     def get_sd_logging_state(self) -> bool:
@@ -2070,6 +2090,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         # live path decodes protobuf only (#163).
         self.send(scpi_commands.set_protobuf_stream_format())
         self._is_logging_to_sd = False
+        self._forget_sd_card_sizes()
 
     @_exclusive_sd_operation
     def delete_sd_card_file(self, file_name: str) -> None:
@@ -2121,6 +2142,8 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         throw_if_sd_card_list_error(lines)
         self._sd_card_files = parse_sd_card_file_list(lines)
+        if self._is_logging_to_sd:
+            self._forget_sd_card_sizes()
 
     @_exclusive_sd_operation
     def format_sd_card(self) -> None:
@@ -2507,10 +2530,6 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         last_data = start
         settle_s = self._SD_DOWNLOAD_END_SETTLE_S
-        # Last bytes taken as file content when the size is known: if they
-        # end in the marker and the line goes quiet, the transfer stopped
-        # short of the listed size.
-        body_tail = bytearray()
         while True:
             now = time.monotonic()
             if now >= total_deadline:
@@ -2541,15 +2560,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     return bytes_written
                 if (
                     expected_size is not None
-                    and bytes_written < expected_size
-                    and _ends_with_eof_marker(body_tail)
+                    and bytes_written == expected_size
+                    and len(trailing) >= marker_len
                     and (now - last_data >= settle_s or now >= idle_deadline)
                 ):
-                    raise IOError(
-                        f"SD card file {file_name!r}: the transfer ended after "
-                        f"{bytes_written} of the listed {expected_size} bytes "
-                        "(short read)."
-                    )
+                    # The listed size, the marker, and then only a line
+                    # ending or prompt before the line went quiet.
+                    return bytes_written
                 if now >= idle_deadline:
                     short = (
                         f" (short read: {bytes_written} of {expected_size} bytes)"
@@ -2589,21 +2606,26 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     body = data[:remaining]
                     _write_all(destination_stream, body, total_deadline)
                     bytes_written += len(body)
-                    body_tail.extend(body)
-                    del body_tail[: max(0, len(body_tail) - marker_len - _EOF_TRAILER_MAX)]
                     data = data[remaining:]
                     if progress is not None:
                         progress(SdCardTransferProgress(bytes_written, file_name))
                 if bytes_written == expected_size:
                     trailing.extend(data)
-                    if len(trailing) >= marker_len:
-                        if bytes(trailing[:marker_len]) != marker:
-                            raise IOError(
-                                f"SD card file {file_name!r}: {expected_size} bytes "
-                                "received but no end-of-file marker after them; the "
-                                "file is longer than listed or the transfer is corrupt."
-                            )
-                        return bytes_written
+                    # The marker must follow directly, then nothing but a
+                    # line ending or prompt: more data means the file is
+                    # longer than listed, even if the marker text happens
+                    # to sit at the listed boundary. The end is taken when
+                    # the line goes quiet (above).
+                    if len(trailing) >= marker_len and (
+                        bytes(trailing[:marker_len]) != marker
+                        or not _is_eof_trailer(bytes(trailing[marker_len:]))
+                    ):
+                        raise IOError(
+                            f"SD card file {file_name!r}: {expected_size} bytes "
+                            "received but no end-of-file marker alone after them; "
+                            "the file is longer than listed or the transfer is "
+                            "corrupt."
+                        )
                 # Time spent waiting on the destination isn't the line
                 # being idle or quiet (#163 audit): restart both clocks.
                 last_data = time.monotonic()
@@ -2752,6 +2774,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.disable_storage_sd())
         self.send(scpi_commands.enable_network_lan())
         self._is_logging_to_sd = False
+        self._forget_sd_card_sizes()
 
     def prepare_sd_interface(self) -> None:
         """Hand the shared SPI bus to the SD card.

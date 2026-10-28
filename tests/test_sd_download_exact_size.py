@@ -62,16 +62,14 @@ def test_the_listed_size_is_used_when_none_is_passed() -> None:
     assert sink.getvalue() == _CONTENT_WITH_TOKEN and result.size_verified
 
 
-def test_a_truncated_transfer_is_an_error_with_the_listed_size() -> None:
-    # Fixture: the transfer stops after 10 of the listed 100 bytes.
-    import time
-
+def test_a_truncated_transfer_is_an_error_with_the_listed_size(monkeypatch) -> None:
+    # Fixture: the transfer stops after 10 of the listed 100 bytes. A pause
+    # can't be told from the end (audit r1 on #185: a file containing the
+    # token paused mid-transfer), so it fails at the idle timeout.
     device = _device(b"0123456789" + END_OF_FILE_MARKER + _TRAILER)
-    start = time.monotonic()
-    with pytest.raises(IOError, match="short read"):
+    monkeypatch.setattr(type(device), "_SD_DOWNLOAD_IDLE_TIMEOUT_S", 0.5)
+    with pytest.raises(TimeoutError, match="short read: 35 of 100"):
         device.download_sd_card_file("log.bin", io.BytesIO(), expected_size=100)
-    # Recognised when the line goes quiet, not after the 30 s idle timeout.
-    assert time.monotonic() - start < 5.0
 
 
 def test_a_transfer_longer_than_listed_is_an_error() -> None:
@@ -186,3 +184,43 @@ def test_the_idle_clock_restarts_after_a_slow_destination_with_a_size(monkeypatc
     sink = _SlowThenFeeds(device._transport.stream, b"x" * 308 + END_OF_FILE_MARKER)
     result = device.download_sd_card_file("log.bin", sink, expected_size=600)
     assert bytes(sink.data) == b"x" * 600 and result.size_verified
+
+
+# Audit round 1 on #185.
+
+def test_a_pause_after_an_embedded_token_is_not_a_short_read() -> None:
+    # The first part ends with the token, then the line pauses 0.4 s+.
+    import threading
+
+    device = _device(b"abc" + END_OF_FILE_MARKER)
+    stream = device._transport.stream
+    rest = b"xyz" + END_OF_FILE_MARKER + _TRAILER
+    timer = threading.Timer(0.8, stream.feed, args=(rest,))
+    timer.start()
+    sink = io.BytesIO()
+    try:
+        result = device.download_sd_card_file("log.bin", sink, expected_size=21)
+    finally:
+        timer.cancel()
+    assert sink.getvalue() == b"abc" + END_OF_FILE_MARKER + b"xyz" and result.size_verified
+
+
+def test_a_longer_file_with_the_token_at_the_listed_boundary_is_an_error() -> None:
+    device = _device(b"abc" + END_OF_FILE_MARKER + b"xyz" + END_OF_FILE_MARKER + _TRAILER)
+    with pytest.raises(IOError, match="longer than listed"):
+        device.download_sd_card_file("log.bin", io.BytesIO(), expected_size=3)
+
+
+def test_a_listing_taken_while_logging_gives_no_sizes() -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b"log.bin 3\r\n"})
+    device._is_logging_to_sd = True
+    device.request_sd_card_file_list()
+    assert device.sd_card_files[0].size is None
+
+
+def test_stopping_a_recording_forgets_listed_sizes() -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b"log.bin 3\r\n"})
+    device.request_sd_card_file_list()
+    device._is_logging_to_sd = True
+    device.stop_sd_card_logging()
+    assert device.sd_card_files[0].size is None
