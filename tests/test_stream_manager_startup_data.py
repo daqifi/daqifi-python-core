@@ -464,3 +464,27 @@ def test_line_endings_before_a_prompt_without_an_echo_are_console_output(lead) -
     samples = stream.read(2, timeout=2.0)
     stream.stop()
     assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]
+
+
+# Audit round 13 on #180.
+
+def test_a_prompt_arriving_after_a_read_that_ended_with_the_echo_is_stripped() -> None:
+    frame = _frame(msg_time_stamp=16384, analog_in_data_float=[1.5])
+    fake = _FakeSerial(enabled_mask=1, echo=True)
+    original_write = fake.write
+
+    def write(data):
+        n = original_write(data)
+        if b"START" in data.upper():
+            def tail():
+                with fake.lock:
+                    fake.rx += b"DAQIFI> " + frame * 2
+            threading.Timer(0.3, tail).start()  # after the first read window
+        return n
+
+    fake.write = write
+    stream = _manager(fake, channels=[0], sample_rate=10, format=0)
+    stream.start()
+    samples = stream.read(2, timeout=1.0)
+    stream.stop()
+    assert [s.channels for s in samples] == [{0: 1.5}, {0: 1.5}]

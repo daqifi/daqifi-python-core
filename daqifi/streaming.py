@@ -576,9 +576,11 @@ class StreamManager:
         position = cls._find_echo(data, echo_line)
         if position >= 0:
             rest = data[position + len(echo_line):]
-            # A prompt after the echo, still arriving: "DAQIFI> " (the
-            # firmware's) or a prompt line "DAQIFI>\r\n" split after its CR.
-            return bool(rest) and any(
+            # Nothing after the echo yet, or a prompt still arriving:
+            # "DAQIFI> " (the firmware's) or a prompt line "DAQIFI>\r\n" split
+            # after its CR. The console prints a prompt after the command, so
+            # wait for it rather than let it reach the decoder.
+            return not rest or any(
                 prompt.startswith(rest) and rest != prompt for prompt in _CONSOLE_PROMPTS
             )
         if data and cls._is_console_noise(data):
