@@ -43,6 +43,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   read as a sequence of JSON objects; the header supplies the tick rate
   and device name, analog values are calibrated by their `ch` number, and
   the old one-line `analog` form still parses (#163).
+- SD downloads ended at the first `__END_OF_FILE__` token, so a file
+  containing that text was cut short and reported as a success. With the
+  size from the SD listing, exactly that many bytes are read and the marker
+  must follow; a short or long transfer raises. Without a size the marker
+  counts only at the end of the transfer, and the result's `size_verified`
+  is False (#163).
 - `get_sd_card_files()` ended an active SD logging session (it stops the
   stream and hands the bus back to LAN); it now refuses while logging, as
   delete and download do. `request_sd_card_file_list()` keeps a session
