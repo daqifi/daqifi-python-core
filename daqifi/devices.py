@@ -1842,8 +1842,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
         """Low-level helper — disable the SD storage SCPI module only.
         Use :meth:`stop_sd_card_logging` for the full Protocol flow."""
         self.send(scpi_commands.disable_storage_sd())
+        if self._is_logging_to_sd:
+            self._forget_sd_card_sizes()
         self._is_logging_to_sd = False
-        self._forget_sd_card_sizes()
 
     def set_sd_logging_file_name(self, file_name: str) -> None:
         self.send(scpi_commands.set_sd_logging_file_name(file_name))
@@ -2089,8 +2090,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
         # the live stream, and a JSON/CSV session changed it; the library's
         # live path decodes protobuf only (#163).
         self.send(scpi_commands.set_protobuf_stream_format())
+        if self._is_logging_to_sd:
+            self._forget_sd_card_sizes()
         self._is_logging_to_sd = False
-        self._forget_sd_card_sizes()
 
     @_exclusive_sd_operation
     def delete_sd_card_file(self, file_name: str) -> None:
@@ -2773,8 +2775,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
         """
         self.send(scpi_commands.disable_storage_sd())
         self.send(scpi_commands.enable_network_lan())
+        if self._is_logging_to_sd:
+            self._forget_sd_card_sizes()
         self._is_logging_to_sd = False
-        self._forget_sd_card_sizes()
 
     def prepare_sd_interface(self) -> None:
         """Hand the shared SPI bus to the SD card.

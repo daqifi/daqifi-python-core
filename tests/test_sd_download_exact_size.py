@@ -224,3 +224,19 @@ def test_stopping_a_recording_forgets_listed_sizes() -> None:
     device._is_logging_to_sd = True
     device.stop_sd_card_logging()
     assert device.sd_card_files[0].size is None
+
+
+# Audit round 2 on #185.
+
+def test_a_download_keeps_the_other_files_listed_sizes() -> None:
+    # The LAN hand-back after a download cleared every listed size, so the
+    # next file of the same listing lost its truncation check.
+    device = _fakes._make_device_with_serial_facade(
+        {
+            b"SD:LIST?": b"a.bin 3\r\nb.bin 100\r\n",
+            b"SD:GET": b"DAQIFI> abc" + END_OF_FILE_MARKER + _TRAILER,
+        }
+    )
+    device.request_sd_card_file_list()
+    assert device.download_sd_card_file("a.bin", io.BytesIO()).size_verified
+    assert [f.size for f in device.sd_card_files] == [3, 100]
