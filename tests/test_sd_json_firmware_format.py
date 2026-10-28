@@ -373,3 +373,54 @@ def test_a_digital_only_sample_with_only_a_future_read_is_kept() -> None:
     data = b'{"ts":110,"di":[{"ts":4294967295,"mask":15,"val":5}]}\n'
     samples = list(_parse(data).samples)
     assert len(samples) == 1 and samples[0].analog_values == ()
+
+
+# Audit round 14 on #183.
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        b'{"ai":[{"ch":0,"val":1.2500}],"di":[{"ts":0,"mask":15,"val":3}],"ts":100}',
+        b'{"ai":[{"ch":0,"val":1.2500}],"ts":100,"di":[]}',
+    ],
+)
+def test_a_single_sample_object_keeps_its_analog_whatever_the_key_order(record) -> None:
+    samples = list(_parse(record + b"\n").samples)
+    assert [s.analog_values for s in samples] == [(1.25,)]
+
+
+def test_a_rejected_record_gives_no_digital_events() -> None:
+    data = (
+        b'{"ts":-1,"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":100,"ai":[{"ch":0,"val":1.2500}]}\n'
+        b'{"ts":110,"ai":[{"ch":0,"val":2.2500}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [0, 0]
+
+
+def test_a_digital_only_record_before_an_older_queued_adc_sample_is_not_a_rollover() -> None:
+    # The encoder can commit a digital record stamped with the trigger and
+    # leave an older ADC sample for the next object.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"di":[{"ts":0,"mask":15,"val":5}],"ts":1100}\n'
+        b'{"ts":1050,"ai":[{"ch":0,"val":2.0000}]}\n'
+        b'{"ts":1150,"ai":[{"ch":0,"val":3.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    t0 = samples[0].timestamp
+    assert [round((s.timestamp - t0).total_seconds(), 3) for s in samples] == [0.0, 0.1, 0.05, 0.15]
+
+
+def test_a_digital_only_log_still_advances_its_time_base() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":1100,"di":[{"ts":0,"mask":15,"val":2}]}\n'
+        b'{"ts":1200,"di":[{"ts":0,"mask":15,"val":3}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    t0 = samples[0].timestamp
+    assert [round((s.timestamp - t0).total_seconds(), 3) for s in samples] == [0.0, 0.1, 0.2]
+    assert [s.digital_data for s in samples] == [1, 2, 3]

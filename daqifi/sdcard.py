@@ -2113,11 +2113,16 @@ def _split_batched_samples(obj: Any) -> Tuple[List[Any], List[Tuple[int, int]]]:
         return [obj], []
     shared = {key: value for key, value in pairs if key not in ("ts", "ai", "di")}
     samples: List[dict] = []
-    for key, value in pairs:
-        if key == "ts":
-            samples.append(dict(shared, ts=value, ai=[]))
-        elif key == "ai" and samples:
-            samples[-1]["ai"] = value
+    if sum(1 for key, _ in pairs if key == "ts") == 1:
+        # One sample: its fields by key, in whatever order they came.
+        samples.append(dict(shared, ts=obj["ts"], ai=obj.get("ai", [])))
+    else:
+        # Batched: the encoder writes each "ts" before its "ai".
+        for key, value in pairs:
+            if key == "ts":
+                samples.append(dict(shared, ts=value, ai=[]))
+            elif key == "ai" and samples:
+                samples[-1]["ai"] = value
     if not samples:
         return [obj], []  # no "ts" at all: left to the sample parser to reject
     events: List[Tuple[int, int]] = []
@@ -2127,7 +2132,8 @@ def _split_batched_samples(obj: Any) -> Tuple[List[Any], List[Tuple[int, int]]]:
             sample["di"] = di  # malformed: left for the sample parser to reject
         return samples, events
     reference = samples[-1]["ts"]
-    if isinstance(di, list) and _is_plain_int(reference):
+    # A record whose timestamp the sample parser rejects gives no events.
+    if isinstance(di, list) and _is_plain_int(reference) and 0 <= reference <= 0xFFFFFFFF:
         for entry in di:
             if not isinstance(entry, dict):
                 continue
@@ -2363,6 +2369,14 @@ def _produce_json_samples(
     total_bytes = objects[-1][1] if objects else 0
     reader = _FirmwareValueReader(config, options.integer_units)
     digital = _DigitalTimeline()
+    # A digital-only record is stamped with the trigger time, which can be
+    # newer than an ADC sample still queued for the next object
+    # (JSON_Encoder.c). In a log with analog samples such a record is placed
+    # in time but doesn't move the time base, or that older ADC sample would
+    # read as a timer rollover. In a digital-only log it does.
+    log_has_analog = any(
+        isinstance(obj, dict) and obj.get("ai") for obj, _end in objects
+    )
 
     for obj, end in objects:
         lines_processed += 1
@@ -2392,14 +2406,24 @@ def _produce_json_samples(
             # ``ts == 0`` is treated as "no timestamp" — matches the
             # protobuf parser so the same physical log reconstructs to
             # consistent absolute timestamps regardless of file format.
+            moves_time_base = not (
+                log_has_analog and channels is not None and not raw_analog
+            )
             if tick_period > 0 and ts != 0:
                 if previous_timestamp is None:
-                    previous_timestamp = ts
+                    if moves_time_base:
+                        previous_timestamp = ts
+                    absolute_time = base_time + timedelta(seconds=elapsed_seconds)
                 else:
                     delta = _compute_tick_delta(previous_timestamp, ts)
-                    elapsed_seconds += delta * tick_period
-                    previous_timestamp = ts
-                absolute_time = base_time + timedelta(seconds=elapsed_seconds)
+                    if moves_time_base:
+                        elapsed_seconds += delta * tick_period
+                        previous_timestamp = ts
+                        absolute_time = base_time + timedelta(seconds=elapsed_seconds)
+                    else:
+                        absolute_time = base_time + timedelta(
+                            seconds=elapsed_seconds + delta * tick_period
+                        )
 
             yield SdCardLogEntry(
                 timestamp=absolute_time,
