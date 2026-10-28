@@ -43,6 +43,7 @@ import os
 import re
 import socket
 import time
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import (
@@ -371,6 +372,12 @@ class SdCardParseOptions:
     progress: Optional[Callable[[SdCardParseProgress], None]] = None
     fallback_timestamp_frequency: int = 50_000_000
     configuration_override: Optional[SdCardDeviceConfiguration] = field(default=None)
+    # What integer analog values in a firmware log mean: "raw" ADC codes
+    # (RawOutputMode) or "millivolts" (VoltagePrecision 0). The file doesn't
+    # say (daqifi-nyquist-firmware#1179). None reads them as raw codes and
+    # warns once per parse. Values written with decimals are volts either
+    # way.
+    integer_units: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -858,6 +865,12 @@ class SdCardLogEntry:
     analog_values: Tuple[float, ...]
     digital_data: int
     analog_timestamps: Optional[Tuple[int, ...]] = None
+    # How the sample's firmware values were read, so a caller can check it
+    # rather than rely on a warning: "volts" (written with decimals),
+    # "millivolts" or "raw" (integers, as SdCardParseOptions.integer_units
+    # said), or "raw-assumed" (integers read as raw codes because nobody
+    # said; that case warns). None for formats without the distinction.
+    analog_units: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Coerce the iterable inputs to tuples so mutating the
@@ -946,12 +959,12 @@ def _scale_raw_analog_values(
         # The value's channel number, where the format names it (CSV), else
         # its position (protobuf packs enabled channels in order).
         ch = channels[position] if channels is not None and position < len(channels) else position
-        cal_m, cal_b = (cal[ch] if cal is not None and ch < len(cal) else (1.0, 0.0))
+        cal_m, cal_b = (cal[ch] if cal is not None and 0 <= ch < len(cal) else (1.0, 0.0))
         rng = (
-            port_range[ch] if port_range is not None and ch < len(port_range) else 1.0
+            port_range[ch] if port_range is not None and 0 <= ch < len(port_range) else 1.0
         )
         scale_m = (
-            int_scale[ch] if int_scale is not None and ch < len(int_scale) else 1.0
+            int_scale[ch] if int_scale is not None and 0 <= ch < len(int_scale) else 1.0
         )
         normalized = raw / resolution
         out.append((normalized * rng * cal_m + cal_b) * scale_m)
@@ -1945,6 +1958,7 @@ class SdCardJsonFileParser:
             raise TypeError("file_name must not be None")
 
         options = options if options is not None else SdCardParseOptions()
+        _check_integer_units(options)
         if options.buffer_size <= 0:
             raise ValueError("options.buffer_size must be greater than zero")
 
@@ -1962,12 +1976,16 @@ class SdCardJsonFileParser:
                 samples=iter(()),
             )
 
-        config = _infer_json_configuration(lines[0], options)
+        # The firmware writes each sample object across several lines (and a
+        # {"meta":...} header first), so the file is read as a sequence of
+        # JSON objects, not one object per line (#163).
+        objects = list(_iter_json_objects("\n".join(lines)))
+        config = _infer_json_configuration(objects, options)
         if config.timestamp_frequency == 0 and options.fallback_timestamp_frequency > 0:
             config = _replace_timestamp_frequency(
                 config, options.fallback_timestamp_frequency
             )
-        samples = _produce_json_samples(lines, config, file_created_date, options)
+        samples = _produce_json_samples(objects, config, file_created_date, options)
         return SdCardLogSession(
             file_name=file_name,
             file_created_date=file_created_date,
@@ -1991,34 +2009,233 @@ class SdCardJsonFileParser:
             )
 
 
+def _iter_json_objects(text: str) -> Iterator[Tuple[Any, int]]:
+    """Yield ``(object, end_offset)`` for each JSON value in ``text``,
+    whatever the line breaks between and inside them. Undecodable text
+    (a truncated last sample, stray bytes) is skipped up to the next
+    ``{``."""
+    import json
+
+    decoder = json.JSONDecoder(object_pairs_hook=_JsonObject)
+    position, length = 0, len(text)
+    while position < length:
+        while position < length and text[position].isspace():
+            position += 1
+        if position >= length:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, position)
+        except (ValueError, RecursionError) as error:
+            if isinstance(error, RecursionError):
+                # Nested too deep to decode: skip the whole run of opening
+                # brackets, or every "{" in it would recurse again.
+                while position < length and text[position] in "{[ \t\r\n":
+                    position += 1
+                position -= 1
+            nxt = text.find("{", position + 1)
+            if nxt < 0:
+                break
+            position = nxt
+            continue
+        yield obj, end
+        position = end
+
+
+def _json_meta(obj: Any) -> Optional[dict]:
+    meta = obj.get("meta") if isinstance(obj, dict) else None
+    return meta if isinstance(meta, dict) else None
+
+
+_INTEGER_UNITS = (None, "raw", "millivolts")
+_INTEGER_UNITS_WARNING = (
+    "SD log analog values are integers, read as raw ADC codes. If the log "
+    "was written at voltage precision 0 they are millivolts: pass "
+    "SdCardParseOptions(integer_units='millivolts'), or integer_units='raw' "
+    "to confirm and silence this (daqifi-nyquist-firmware#1179)."
+)
+
+
+def _check_integer_units(options: SdCardParseOptions) -> None:
+    if options.integer_units not in _INTEGER_UNITS:
+        raise ValueError(
+            "integer_units must be None, 'raw' or 'millivolts' "
+            f"(got {options.integer_units!r})"
+        )
+
+
+class _FirmwareValueReader:
+    """The one rule for firmware CSV and JSON analog values (#163).
+
+    The firmware writes volts with decimals at VoltagePrecision >= 1 (its
+    default), integer millivolts at precision 0, and integer raw codes in
+    RawOutputMode; the file doesn't say which integer form it is
+    (daqifi-nyquist-firmware#1179). One instance per parse, so the
+    unspecified-integers warning is emitted once per parse."""
+
+    def __init__(self, config: Optional[SdCardDeviceConfiguration], integer_units: Optional[str]) -> None:
+        self._config = config
+        self._integer_units = integer_units
+        self._warned = False
+
+    def read(
+        self, raw: Sequence[Union[int, float]], channels: Optional[Sequence[int]] = None
+    ) -> Optional[Tuple[List[float], Optional[str]]]:
+        """``(values, analog_units)``, or None for a sample mixing decimals
+        and integers: the value mode is one global setting, and at
+        precision >= 1 even zero is written "0.0000", so that isn't firmware
+        output."""
+        decimals = [isinstance(v, float) for v in raw]
+        if any(decimals) and not all(decimals):
+            return None
+        if any(decimals):
+            # Already calibrated volts.
+            return [float(v) for v in raw], "volts"
+        if not raw:
+            return [], None
+        if self._integer_units == "millivolts":
+            # Already calibrated, in mV.
+            return [v / 1000.0 for v in raw], "millivolts"
+        if self._integer_units is None and not self._warned:
+            self._warned = True
+            warnings.warn(_INTEGER_UNITS_WARNING, UserWarning, stacklevel=4)
+        units = "raw" if self._integer_units == "raw" else "raw-assumed"
+        return _scale_raw_analog_values([int(v) for v in raw], self._config, channels), units
+
+
+class _JsonObject(dict):
+    """A decoded JSON object that also keeps every key/value pair in order.
+
+    The firmware's encoder writes all samples queued at one call into one
+    object as repeated ``"ts"``/``"ai"`` keys (JSON_Encoder.c's
+    ``while (qSize > 0)`` loop); a plain dict keeps only the last."""
+
+    def __init__(self, pairs: List[Tuple[str, Any]]) -> None:
+        super().__init__(pairs)
+        self.pairs = pairs
+
+
+def _split_batched_samples(obj: Any) -> List[Any]:
+    """One object per sample: a firmware object with repeated ``"ts"`` keys
+    becomes one per ``"ts"``, each with the ``"ai"`` after it and the
+    object's other fields (its ``"di"``). Anything else is returned as is."""
+    pairs = getattr(obj, "pairs", None)
+    if not pairs or sum(1 for key, _ in pairs if key == "ts") < 2:
+        return [obj]
+    shared = {key: value for key, value in pairs if key not in ("ts", "ai")}
+    samples: List[dict] = []
+    for key, value in pairs:
+        if key == "ts":
+            samples.append(dict(shared, ts=value))
+        elif key == "ai" and samples:
+            samples[-1]["ai"] = value
+    return samples
+
+
+def _try_parse_json_samples(obj: Any) -> List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]]:
+    """Every well-formed sample in ``obj``; a malformed one is skipped."""
+    out = []
+    for sample in _split_batched_samples(obj):
+        parsed = _try_parse_json_sample(sample)
+        if parsed is not None:
+            out.append(parsed)
+    return out
+
+
+def _try_parse_json_sample(
+    obj: Any,
+) -> Optional[Tuple[int, List[Union[int, float]], Optional[List[int]], int]]:
+    """See _parse_json_sample; None for anything malformed, so one bad
+    record is skipped instead of aborting the whole log."""
+    try:
+        return _parse_json_sample(obj)
+    except Exception:
+        return None
+
+
+def _parse_json_sample(
+    obj: Any,
+) -> Optional[Tuple[int, List[Union[int, float]], Optional[List[int]], int]]:
+    """``(timestamp, analog_values, channels, digital_data)`` from one sample
+    object, or None if it isn't one.
+
+    Two shapes: the firmware's (JSON_Encoder.c) ``{"ts":t, "ai":[{"ch":n,
+    "val":v},...], "di":[{"ts":t, "mask":m, "val":b},...]}``, whose analog
+    entries name their channel, and the older ``{"ts":t, "analog":[v,...],
+    "digital":"AB-CD"}`` (upstream's TryParseJsonLine), positional.
+    ``channels`` is None for the positional shape."""
+    if not isinstance(obj, dict) or _json_meta(obj) is not None:
+        return None
+    ts_raw = obj.get("ts")
+    if not isinstance(ts_raw, int) or isinstance(ts_raw, bool) or not 0 <= ts_raw <= 0xFFFFFFFF:
+        return None
+    # Kept as int or float: a decimal value is volts, an integer a code.
+    analog_values: List[Union[int, float]] = []
+    channels: Optional[List[int]] = None
+    digital_data = 0
+    if "ai" in obj or "di" in obj:
+        channels = []
+        ai = obj.get("ai") or []
+        di = obj.get("di") or []
+        if not isinstance(ai, list) or not isinstance(di, list):
+            return None
+        for entry in ai:
+            if not isinstance(entry, dict):
+                return None
+            ch, val = entry.get("ch"), entry.get("val")
+            if (
+                not isinstance(ch, int) or isinstance(ch, bool) or ch < 0
+                or not _is_finite_number(val)
+            ):
+                return None
+            channels.append(ch)
+            analog_values.append(val)
+        if di:
+            last = di[-1]  # the latest port state in this period
+            val = last.get("val") if isinstance(last, dict) else None
+            if isinstance(val, int) and not isinstance(val, bool):
+                digital_data = val & 0xFFFFFFFF
+        return ts_raw, analog_values, channels, digital_data
+    analog_raw = obj.get("analog")
+    if not isinstance(analog_raw, list):
+        return None
+    for v in analog_raw:
+        if not _is_finite_number(v):
+            return None
+        analog_values.append(v)
+    digital_raw = obj.get("digital")
+    if isinstance(digital_raw, str) and digital_raw:
+        digital_data = _parse_digital_hex_string(digital_raw)
+    return ts_raw, analog_values, None, digital_data
+
+
+# Integers beyond this aren't exact as floats, and far beyond it overflow
+# float() during scaling.
+_JSON_INT_LIMIT = 2 ** 53
+
+
+def _is_finite_number(value: Any) -> bool:
+    # JSON gives inf for 1e309 and accepts NaN/Infinity, and integers of any
+    # size; none of those survive scaling, which runs outside the
+    # malformed-record handler.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, int):
+        return -_JSON_INT_LIMIT <= value <= _JSON_INT_LIMIT
+    return math.isfinite(value)
+
+
 def _try_parse_json_line(line: str) -> Optional[Tuple[int, List[float], int]]:
-    """Parse one JSONL row into ``(timestamp, analog_values,
-    digital_data)`` or None on malformed input. Matches the upstream
-    ``TryParseJsonLine`` — any exception → skip line."""
+    """One JSON sample on one line (kept for callers of the old API)."""
     import json
 
     try:
-        obj = json.loads(line)
-        if not isinstance(obj, dict):
-            return None
-        ts_raw = obj.get("ts")
-        if not isinstance(ts_raw, int) or isinstance(ts_raw, bool) or ts_raw < 0 or ts_raw > 0xFFFFFFFF:
-            return None
-        analog_raw = obj.get("analog")
-        if not isinstance(analog_raw, list):
-            return None
-        analog_values: List[float] = []
-        for v in analog_raw:
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                return None
-            analog_values.append(float(v))
-        digital_data = 0
-        digital_raw = obj.get("digital")
-        if isinstance(digital_raw, str) and digital_raw:
-            digital_data = _parse_digital_hex_string(digital_raw)
-        return ts_raw, analog_values, digital_data
+        parsed = _try_parse_json_sample(json.loads(line))
     except Exception:
         return None
+    if parsed is None:
+        return None
+    ts, values, _channels, digital = parsed
+    return ts, [float(v) for v in values], digital
 
 
 def _parse_digital_hex_string(hex_string: str) -> int:
@@ -2041,27 +2258,37 @@ def _parse_digital_hex_string(hex_string: str) -> int:
 
 
 def _infer_json_configuration(
-    first_line: str,
+    objects: List[Tuple[Any, int]],
     options: SdCardParseOptions,
 ) -> SdCardDeviceConfiguration:
-    """Infer the analog channel count from the first JSONL row, then
-    merge with the caller's override (which fills in resolution /
-    calibration / port_range for scaling). Mirrors the upstream
-    ``InferConfiguration``.
-
-    JSONL has no in-band tick-rate header, so the inferred config
-    leaves ``timestamp_frequency=0`` and lets the merge / fallback
-    chain decide the final value (override → fallback). Same
-    three-tier precedence as the protobuf and CSV parsers.
-    """
-    parsed = _try_parse_json_line(first_line)
-    analog_count = len(parsed[1]) if parsed is not None else 0
+    """Device metadata from the firmware's leading {"meta":...} header
+    (device name, serial, tick rate) when present, and the analog channel
+    count from the first sample; then merged with the caller's override,
+    which supplies resolution/calibration/range for scaling. Same
+    precedence as the CSV parser: file, then override, then fallback."""
+    meta: dict = {}
+    analog_count = 0
+    for obj, _end in objects[:2]:
+        found = _json_meta(obj)
+        if found is not None:
+            meta = found
+            continue
+        parsed = _try_parse_json_samples(obj)
+        if parsed:
+            analog_count = len(parsed[0][1])
+            break
+    tick = meta.get("tick_hz")
     inferred = SdCardDeviceConfiguration(
         analog_port_count=analog_count,
-        digital_port_count=0,  # cannot infer from JSONL data
-        timestamp_frequency=0,  # fallback applied AFTER override merge
-        device_serial_number=None,
-        device_part_number=None,
+        digital_port_count=0,
+        # The firmware's tick_hz is a uint32; anything else is a damaged
+        # header, and a huge int would overflow 1.0 / tick later.
+        timestamp_frequency=(
+            tick if isinstance(tick, int) and not isinstance(tick, bool)
+            and 0 < tick <= 0xFFFFFFFF else 0
+        ),
+        device_serial_number=meta.get("sn") if isinstance(meta.get("sn"), str) else None,
+        device_part_number=meta.get("dev") if isinstance(meta.get("dev"), str) else None,
         firmware_revision=None,
         calibration_values=None,
     )
@@ -2069,7 +2296,7 @@ def _infer_json_configuration(
 
 
 def _produce_json_samples(
-    lines: List[str],
+    objects: List[Tuple[Any, int]],
     config: SdCardDeviceConfiguration,
     file_created_date: Optional[datetime],
     options: SdCardParseOptions,
@@ -2083,39 +2310,49 @@ def _produce_json_samples(
     lines_processed = 0
     bytes_read = 0
     progress = options.progress
-    total_bytes = sum(len(line) + 1 for line in lines)
+    total_bytes = objects[-1][1] if objects else 0
+    reader = _FirmwareValueReader(config, options.integer_units)
 
-    for line in lines:
+    for obj, end in objects:
         lines_processed += 1
-        bytes_read += len(line) + 1
+        bytes_read = end
 
-        parsed = _try_parse_json_line(line)
-        if parsed is None:
-            continue
-        ts, raw_analog, digital_data = parsed
-        analog_values = _scale_raw_analog_values(
-            [int(v) for v in raw_analog], config
-        )
-
-        absolute_time = base_time
-        # ``ts == 0`` is treated as "no timestamp" — matches the
-        # protobuf parser so the same physical log reconstructs to
-        # consistent absolute timestamps regardless of file format.
-        if tick_period > 0 and ts != 0:
-            if previous_timestamp is None:
-                previous_timestamp = ts
+        for parsed in _try_parse_json_samples(obj):
+            ts, raw_analog, channels, digital_data = parsed
+            units: Optional[str] = None
+            if channels is not None:
+                # The firmware's "ai" shape: the shared firmware rule.
+                read = reader.read(raw_analog, channels)
+                if read is None:
+                    continue
+                analog_values, units = read
             else:
-                delta = _compute_tick_delta(previous_timestamp, ts)
-                elapsed_seconds += delta * tick_period
-                previous_timestamp = ts
-            absolute_time = base_time + timedelta(seconds=elapsed_seconds)
+                # The legacy "analog" shape is raw counts, as upstream
+                # scales it, whatever the number syntax.
+                analog_values = _scale_raw_analog_values(
+                    [int(v) for v in raw_analog], config, channels
+                )
 
-        yield SdCardLogEntry(
-            timestamp=absolute_time,
-            analog_values=tuple(analog_values),
-            digital_data=digital_data,
-            analog_timestamps=None,  # JSON format carries one ts per row
-        )
+            absolute_time = base_time
+            # ``ts == 0`` is treated as "no timestamp" — matches the
+            # protobuf parser so the same physical log reconstructs to
+            # consistent absolute timestamps regardless of file format.
+            if tick_period > 0 and ts != 0:
+                if previous_timestamp is None:
+                    previous_timestamp = ts
+                else:
+                    delta = _compute_tick_delta(previous_timestamp, ts)
+                    elapsed_seconds += delta * tick_period
+                    previous_timestamp = ts
+                absolute_time = base_time + timedelta(seconds=elapsed_seconds)
+
+            yield SdCardLogEntry(
+                timestamp=absolute_time,
+                analog_values=tuple(analog_values),
+                digital_data=digital_data,
+                analog_timestamps=None,  # JSON format carries one ts per row
+                analog_units=units,
+            )
 
         if lines_processed % 100 == 0:
             _emit_progress(progress, bytes_read, total_bytes, lines_processed)
