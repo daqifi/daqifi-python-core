@@ -25,6 +25,11 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- SD CSV logs in the firmware's default voltage mode (volts with decimals)
+  were truncated to whole volts: every value was converted to an integer as
+  if it were a raw ADC code. A value written with decimals is now kept as
+  volts, unscaled; integer values are still scaled as codes. A non-finite
+  value skips its row instead of aborting the log (#163).
 - SD downloads ended at the first `__END_OF_FILE__` token, so a file
   containing that text was cut short and reported as a success. With the
   size from the SD listing, exactly that many bytes are read and the marker
