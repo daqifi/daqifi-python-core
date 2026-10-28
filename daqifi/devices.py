@@ -2249,10 +2249,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
         (``.write(bytes) -> int``).
 
         ``expected_size`` is the file's size; when omitted, the size from
-        the last SD listing is used if it has one. With a size the
-        download must be exactly that long and end with the marker, or it
-        raises, and the result has ``size_verified=True``. Without one the
-        marker alone ends it and ``size_verified`` is False.
+        the last SD listing taken while not logging is used, if it has one.
+        With a size, exactly that many bytes are the file and the marker
+        must follow them alone (only a line ending or prompt after it until
+        the line goes quiet); a short or long transfer raises, and the
+        result has ``size_verified=True``. Without one, a marker at the end
+        of the transfer ends it and ``size_verified`` is False. See
+        :class:`SdCardDownloadResult` for the limit of that check
+        (daqifi-nyquist-firmware#1180).
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")

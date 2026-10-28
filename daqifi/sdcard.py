@@ -786,9 +786,15 @@ class SdCardDownloadResult:
     (no on-disk artifact); set when the convenience overload writes to
     a temporary file.
 
-    ``size_verified`` is True when the download was checked against the
-    size the SD listing reported. False means the end was found only by
-    the end-of-file marker, so a transfer cut short can't be ruled out.
+    ``size_verified`` True means exactly the given size arrived, the
+    end-of-file marker came directly after it, and only a line ending or
+    prompt followed before the line went quiet. That is as strong as the
+    size: SD:GET has no positive end-of-transfer signal
+    (daqifi-nyquist-firmware#1180), so a wrong size whose last bytes are
+    followed by marker text inside the file, then a pause, passes too
+    (recorded on #164). False means no size was given and the end was found
+    only by a marker at the end of the transfer, so a transfer cut short
+    can't be ruled out.
     """
 
     file_name: str
