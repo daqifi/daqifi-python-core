@@ -56,6 +56,7 @@ from typing import (
     Protocol,
     Sequence,
     Tuple,
+    Union,
     runtime_checkable,
 )
 
@@ -2007,7 +2008,7 @@ def _json_meta(obj: Any) -> Optional[dict]:
 
 def _try_parse_json_sample(
     obj: Any,
-) -> Optional[Tuple[int, List[float], Optional[List[int]], int]]:
+) -> Optional[Tuple[int, List[Union[int, float]], Optional[List[int]], int]]:
     """See _parse_json_sample; None for anything malformed, so one bad
     record is skipped instead of aborting the whole log."""
     try:
@@ -2018,7 +2019,7 @@ def _try_parse_json_sample(
 
 def _parse_json_sample(
     obj: Any,
-) -> Optional[Tuple[int, List[float], Optional[List[int]], int]]:
+) -> Optional[Tuple[int, List[Union[int, float]], Optional[List[int]], int]]:
     """``(timestamp, analog_values, channels, digital_data)`` from one sample
     object, or None if it isn't one.
 
@@ -2032,7 +2033,8 @@ def _parse_json_sample(
     ts_raw = obj.get("ts")
     if not isinstance(ts_raw, int) or isinstance(ts_raw, bool) or not 0 <= ts_raw <= 0xFFFFFFFF:
         return None
-    analog_values: List[float] = []
+    # Kept as int or float: a decimal value is volts, an integer a code.
+    analog_values: List[Union[int, float]] = []
     channels: Optional[List[int]] = None
     digital_data = 0
     if "ai" in obj or "di" in obj:
@@ -2051,7 +2053,7 @@ def _parse_json_sample(
             ):
                 return None
             channels.append(ch)
-            analog_values.append(float(val))
+            analog_values.append(val)
         if di:
             last = di[-1]  # the latest port state in this period
             val = last.get("val") if isinstance(last, dict) else None
@@ -2064,7 +2066,7 @@ def _parse_json_sample(
     for v in analog_raw:
         if not _is_finite_number(v):
             return None
-        analog_values.append(float(v))
+        analog_values.append(v)
     digital_raw = obj.get("digital")
     if isinstance(digital_raw, str) and digital_raw:
         digital_data = _parse_digital_hex_string(digital_raw)
@@ -2090,7 +2092,7 @@ def _try_parse_json_line(line: str) -> Optional[Tuple[int, List[float], int]]:
     if parsed is None:
         return None
     ts, values, _channels, digital = parsed
-    return ts, values, digital
+    return ts, [float(v) for v in values], digital
 
 
 def _parse_digital_hex_string(hex_string: str) -> int:
@@ -2175,9 +2177,16 @@ def _produce_json_samples(
         if parsed is None:
             continue
         ts, raw_analog, channels, digital_data = parsed
-        analog_values = _scale_raw_analog_values(
-            [int(v) for v in raw_analog], config, channels
-        )
+        if any(isinstance(v, float) for v in raw_analog):
+            # Written with decimals: the firmware's voltage mode (precision
+            # >= 1, its default) already calibrated these to volts (#163).
+            analog_values = [float(v) for v in raw_analog]
+        else:
+            # Integers: raw ADC codes, or millivolts at precision 0, which
+            # the file can't tell apart; scaled as codes.
+            analog_values = _scale_raw_analog_values(
+                [int(v) for v in raw_analog], config, channels
+            )
 
         absolute_time = base_time
         # ``ts == 0`` is treated as "no timestamp" — matches the

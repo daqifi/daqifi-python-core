@@ -123,3 +123,36 @@ def test_an_unusable_tick_rate_falls_back_instead_of_aborting(tick) -> None:
     session = _parse(data)
     assert [s.analog_values for s in session.samples] == [(3.0,)]
     assert 0 < session.device_config.timestamp_frequency <= 0xFFFFFFFF
+
+
+def test_voltage_mode_values_are_kept_as_volts() -> None:
+    # Audit finding on #183 (round 5): at the firmware's default precision 4
+    # (JSON_Encoder.c "%.*f") ai[].val is already volts; int() truncated
+    # 1.2345 to 1.0 and -0.875 to 0.0.
+    data = (
+        b'{"meta":{"tick_hz":42000000}}\n'
+        b'{"ts":100,"ai":[{"ch":0,"val":1.2345},{"ch":1,"val":-0.8750}]}\n'
+    )
+    assert [s.analog_values for s in _parse(data).samples] == [(1.2345, -0.875)]
+
+
+def test_voltage_mode_values_are_not_scaled_again_by_calibration() -> None:
+    data = b'{"ts":100,"ai":[{"ch":0,"val":1.2345}]}\n'
+    options = SdCardParseOptions(
+        configuration_override=SdCardDeviceConfiguration(
+            analog_port_count=1, digital_port_count=0, timestamp_frequency=1000,
+            resolution=100, calibration_values=((2.0, 0.5),),
+        )
+    )
+    assert [s.analog_values for s in _parse(data, options).samples] == [(1.2345,)]
+
+
+def test_raw_mode_integers_are_still_scaled_as_codes() -> None:
+    data = b'{"ts":100,"ai":[{"ch":0,"val":50}]}\n'
+    options = SdCardParseOptions(
+        configuration_override=SdCardDeviceConfiguration(
+            analog_port_count=1, digital_port_count=0, timestamp_frequency=1000,
+            resolution=100, calibration_values=((2.0, 0.0),),
+        )
+    )
+    assert [s.analog_values for s in _parse(data, options).samples] == [pytest.approx((1.0,))]
