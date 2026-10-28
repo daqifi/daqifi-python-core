@@ -38,6 +38,7 @@ Includes the small value classes the parser surface needs:
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import socket
@@ -397,21 +398,29 @@ def _write_all(stream: Any, data: bytes, deadline: Optional[float] = None) -> No
 
     ``BufferedWriter``/``BytesIO`` always take everything, but a raw
     stream's ``write`` returns how much it took, and that return value was
-    ignored, so a short write lost the rest (#163). ``None`` (a non-blocking
-    raw stream that couldn't write) is retried. Every retry, after a short
-    write as well as after ``None``, stops at ``deadline``
+    ignored, so a short write lost the rest (#163). Only an
+    ``io.RawIOBase`` uses ``None`` to mean "nothing written, it would
+    block", so only there is ``None`` retried; other writers (codecs
+    stream writers, many file-likes) return ``None`` after writing
+    everything, and repeating the write would duplicate it. Every retry,
+    after a short write or a would-block, stops at ``deadline``
     (``time.monotonic()`` value): a sink that drains slowly or not at all
     must not hold a download, and the exchange lock with it, past its
     timeout.
     """
-    view = memoryview(data)
-    while view:
-        written = stream.write(view)
-        if written is not None and written <= 0:
-            raise OSError(f"write accepted {written} bytes; destination is not writable")
+    raw = isinstance(stream, io.RawIOBase)
+    remaining = bytes(data)
+    while remaining:
+        written = stream.write(remaining)
+        if written is None and not raw:
+            return
         if written is not None:
-            view = view[written:]
-            if not view:
+            if not isinstance(written, int) or isinstance(written, bool):
+                return  # not a byte count: the writer took it all
+            if written <= 0:
+                raise OSError(f"write accepted {written} bytes; destination is not writable")
+            remaining = remaining[written:]
+            if not remaining:
                 return
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError(
@@ -1000,6 +1009,7 @@ def _compute_tick_delta(previous: int, current: int) -> int:
 def _scale_raw_analog_values(
     raw_values: Sequence[int],
     config: Optional[SdCardDeviceConfiguration],
+    channels: Optional[Sequence[int]] = None,
 ) -> Tuple[float, ...]:
     """Apply calibration/range/scale factors to raw ADC integers.
 
@@ -1017,7 +1027,10 @@ def _scale_raw_analog_values(
     int_scale = config.internal_scale_m
 
     out: List[float] = []
-    for ch, raw in enumerate(raw_values):
+    for position, raw in enumerate(raw_values):
+        # The value's channel number, where the format names it (CSV), else
+        # its position (protobuf packs enabled channels in order).
+        ch = channels[position] if channels is not None and position < len(channels) else position
         cal_m, cal_b = (cal[ch] if cal is not None and ch < len(cal) else (1.0, 0.0))
         rng = (
             port_range[ch] if port_range is not None and ch < len(port_range) else 1.0
@@ -1350,6 +1363,15 @@ def _produce_samples(
         while i + 1 < len(messages) and messages[i + 1].msg_time_stamp == msg.msg_time_stamp:
             nxt = messages[i + 1]
             if not _has_stream_payload(nxt):
+                break
+            # Merge only frames that complement each other (the firmware's
+            # separate analog and digital messages for one period). Two frames
+            # that both carry analog, or both digital, data are two samples:
+            # merging kept only the first one's values (#163).
+            nxt_analog = len(nxt.analog_in_data_float) > 0 or len(nxt.analog_in_data) > 0
+            if (nxt_analog and (analog_float or analog_raw)) or (
+                len(nxt.digital_data) > 0 and digital
+            ):
                 break
             i += 1
             if not analog_float and len(nxt.analog_in_data_float) > 0:
@@ -1747,6 +1769,10 @@ class _CsvColumnLayout:
     """
     analog_pair_count: int
     has_digital_pair: bool
+    # Channel number of each analog column pair, from its header name
+    # ("ain7_ts" -> 7). The firmware names only enabled channels, so the
+    # columns are sparse and their position is not the channel (#163).
+    analog_channels: Tuple[int, ...] = ()
 
 
 def _parse_csv_header(
@@ -1769,6 +1795,7 @@ def _parse_csv_header(
     analog_count = 0
     digital_count = 0
     has_digital = False
+    analog_channels: List[int] = []
 
     for line in lines:
         if line.startswith("#"):
@@ -1799,6 +1826,8 @@ def _parse_csv_header(
                     digital_count = 1
                 else:
                     analog_count += 1
+                    number = re.match(r"\s*(?:ain|ch)(\d+)_", name_col)
+                    analog_channels.append(int(number.group(1)) if number else p)
         # Whether we matched a header or hit a data row, the comment
         # block is over — bail.
         break
@@ -1815,6 +1844,7 @@ def _parse_csv_header(
     return config, _CsvColumnLayout(
         analog_pair_count=analog_count,
         has_digital_pair=has_digital,
+        analog_channels=tuple(analog_channels),
     )
 
 
@@ -1919,7 +1949,7 @@ def _produce_csv_samples(
             continue
         row_ts, raw_analog, digital_data, per_ch_ts = parsed
         analog_values = _scale_raw_analog_values(
-            [int(v) for v in raw_analog], config
+            [int(v) for v in raw_analog], config, layout.analog_channels or None
         )
 
         absolute_time = base_time

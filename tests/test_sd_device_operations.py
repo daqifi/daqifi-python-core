@@ -93,7 +93,10 @@ def test_the_text_listing_keeps_a_file_named_after_the_prompt() -> None:
     assert [f.file_name for f in device.sd_card_files] == ["log_a.bin", "log_b.bin"]
 
 
-class _NeverDrains:
+class _NeverDrains(io.RawIOBase):
+    def writable(self):
+        return True
+
     def write(self, data):
         return None  # a non-blocking raw sink whose reader never drains
 
@@ -150,9 +153,12 @@ def test_a_slowly_draining_sink_fails_at_the_receive_deadline() -> None:
     assert time.monotonic() - start < 0.25
 
 
-class _BackpressuredSink:
-    """Accepts nothing for ``delay`` seconds from its first write, then
-    everything."""
+class _BackpressuredSink(io.RawIOBase):
+    """A non-blocking raw sink: accepts nothing for ``delay`` seconds from
+    its first write, then everything."""
+
+    def writable(self):
+        return True
 
     def __init__(self, delay):
         self._delay = delay
@@ -211,3 +217,19 @@ def test_the_idle_clock_restarts_after_a_slow_destination(monkeypatch) -> None:
     sink = _SinkThenRest(0.15)
     result = device.download_sd_card_file("log.bin", sink)
     assert bytes(sink.data) == b"x" * 600 and result.file_size == 600
+
+
+def test_a_writer_returning_none_after_writing_is_not_written_twice() -> None:
+    # Audit finding on #182 (round 5): codecs stream writers return None
+    # after writing everything; retrying None repeated the payload until the
+    # deadline. Only io.RawIOBase uses None to mean "would block".
+    import codecs
+
+    from daqifi.sdcard import SdCardFileReceiver
+
+    out = io.BytesIO()
+    sink = codecs.getwriter("hex_codec")(out)
+    n = SdCardFileReceiver(io.BytesIO(b"abc" + END_OF_FILE_MARKER)).receive(
+        sink, "log.bin", timeout_s=0.5
+    )
+    assert n == 3 and out.getvalue() == b"616263"
