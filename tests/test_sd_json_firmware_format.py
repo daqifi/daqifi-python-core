@@ -113,3 +113,13 @@ def test_deeply_nested_json_is_skipped_not_fatal() -> None:
         data = opener * 10000 + b"0" + closer * 10000 + b'\n{"ts":2,"analog":[3]}\n'
         samples = list(_parse(data).samples)
         assert [s.analog_values for s in samples] == [(3.0,)]
+
+
+@pytest.mark.parametrize("tick", [b"1" + b"0" * 400, b"4294967296", b"true", b"-5"])
+def test_an_unusable_tick_rate_falls_back_instead_of_aborting(tick) -> None:
+    # Audit finding on #183 (round 4): a 401-digit tick_hz was accepted, then
+    # 1.0 / tick raised OverflowError before any sample was produced.
+    data = b'{"meta":{"tick_hz":' + tick + b'}}\n{"ts":1,"ai":[{"ch":0,"val":3}]}\n'
+    session = _parse(data)
+    assert [s.analog_values for s in session.samples] == [(3.0,)]
+    assert 0 < session.device_config.timestamp_frequency <= 0xFFFFFFFF

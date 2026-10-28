@@ -2136,7 +2136,12 @@ def _infer_json_configuration(
     inferred = SdCardDeviceConfiguration(
         analog_port_count=analog_count,
         digital_port_count=0,
-        timestamp_frequency=tick if isinstance(tick, int) and tick > 0 else 0,
+        # The firmware's tick_hz is a uint32; anything else is a damaged
+        # header, and a huge int would overflow 1.0 / tick later.
+        timestamp_frequency=(
+            tick if isinstance(tick, int) and not isinstance(tick, bool)
+            and 0 < tick <= 0xFFFFFFFF else 0
+        ),
         device_serial_number=meta.get("sn") if isinstance(meta.get("sn"), str) else None,
         device_part_number=meta.get("dev") if isinstance(meta.get("dev"), str) else None,
         firmware_revision=None,
