@@ -38,6 +38,7 @@ Includes the small value classes the parser surface needs:
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import socket
@@ -390,21 +391,29 @@ def _write_all(stream: Any, data: bytes, deadline: Optional[float] = None) -> No
 
     ``BufferedWriter``/``BytesIO`` always take everything, but a raw
     stream's ``write`` returns how much it took, and that return value was
-    ignored, so a short write lost the rest (#163). ``None`` (a non-blocking
-    raw stream that couldn't write) is retried. Every retry, after a short
-    write as well as after ``None``, stops at ``deadline``
+    ignored, so a short write lost the rest (#163). Only an
+    ``io.RawIOBase`` uses ``None`` to mean "nothing written, it would
+    block", so only there is ``None`` retried; other writers (codecs
+    stream writers, many file-likes) return ``None`` after writing
+    everything, and repeating the write would duplicate it. Every retry,
+    after a short write or a would-block, stops at ``deadline``
     (``time.monotonic()`` value): a sink that drains slowly or not at all
     must not hold a download, and the exchange lock with it, past its
     timeout.
     """
-    view = memoryview(data)
-    while view:
-        written = stream.write(view)
-        if written is not None and written <= 0:
-            raise OSError(f"write accepted {written} bytes; destination is not writable")
+    raw = isinstance(stream, io.RawIOBase)
+    remaining = bytes(data)
+    while remaining:
+        written = stream.write(remaining)
+        if written is None and not raw:
+            return
         if written is not None:
-            view = view[written:]
-            if not view:
+            if not isinstance(written, int) or isinstance(written, bool):
+                return  # not a byte count: the writer took it all
+            if written <= 0:
+                raise OSError(f"write accepted {written} bytes; destination is not writable")
+            remaining = remaining[written:]
+            if not remaining:
                 return
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError(
