@@ -2088,55 +2088,80 @@ class _JsonObject(dict):
         self.pairs = pairs
 
 
-def _split_batched_samples(obj: Any) -> List[Any]:
-    """One object per sample: a firmware object with repeated ``"ts"`` keys
-    becomes one per ``"ts"``, each with the ``"ai"`` after it and the
-    object's other fields, and every object with a ``"di"`` array gets the
-    digital entry due at its sample's time. Anything else is returned as is.
+def _split_batched_samples(obj: Any) -> Tuple[List[Any], List[Tuple[int, int]]]:
+    """``(samples, digital events)`` for one decoded object.
 
-    The object's ``"di"`` entries carry ages, not times: each is measured
-    back from the trigger stamp at encode time, which an ADC object doesn't
-    include. That is a documented firmware limitation (JSON_Encoder.c, at
-    the di element writer), tracked on daqifi-nyquist-firmware#959. The
-    latest sample's ``"ts"`` stands in for it, so each entry is placed at
-    ``latest ts - age``, and each sample gets the latest entry at or before
-    its own ``"ts"``: off by (ADC ts - trigger stamp) when the ADC lags. A
-    sample before every entry gets none (digital 0)."""
+    A firmware object with repeated ``"ts"`` keys becomes one sample per
+    ``"ts"``, each with the ``"ai"`` after it and the object's other
+    fields. A firmware object with a ``"di"`` array gives its entries as
+    ``(tick, value)`` events for :class:`_DigitalTimeline`, and its samples
+    lose the array (an ``"ai"`` of their own, possibly empty, keeps them in
+    the firmware shape). Anything else is one sample and no events.
+
+    ``"di"`` entries carry ages, not times: each is measured back from the
+    trigger stamp at encode time, which an ADC object doesn't include. That
+    is a documented firmware limitation (JSON_Encoder.c, at the di element
+    writer), tracked on daqifi-nyquist-firmware#959. The latest sample's
+    ``"ts"`` stands in for it, so an entry's tick is ``latest ts - age``,
+    off by (ADC ts - trigger stamp) when the ADC lags. Ages are uint32
+    differences read as signed int32: a read just after the trigger (age
+    0xFFFFFFFF) is one tick in the future."""
     pairs = getattr(obj, "pairs", None)
     if not pairs or (
         sum(1 for key, _ in pairs if key == "ts") < 2 and "di" not in obj
     ):
-        return [obj]
+        return [obj], []
     shared = {key: value for key, value in pairs if key not in ("ts", "ai", "di")}
     samples: List[dict] = []
     for key, value in pairs:
         if key == "ts":
-            samples.append(dict(shared, ts=value))
+            samples.append(dict(shared, ts=value, ai=[]))
         elif key == "ai" and samples:
             samples[-1]["ai"] = value
     if not samples:
-        return [obj]  # no "ts" at all: left to the sample parser to reject
+        return [obj], []  # no "ts" at all: left to the sample parser to reject
+    events: List[Tuple[int, int]] = []
     di = obj.get("di")
-    reference = samples[-1].get("ts")
-    if isinstance(di, list) and di and _is_plain_int(reference):
-        # Ages are uint32 differences back from the reference: read them
-        # as signed int32, so an entry read just after the trigger (age
-        # 0xFFFFFFFF, i.e. -1) is in the future, and a batch across the
-        # timer rollover still compares in order.
-        ages = [
-            (_signed32(entry["ts"]), entry) for entry in di
-            if isinstance(entry, dict) and _is_plain_int(entry.get("ts"))
-        ]
+    if "di" in obj and not isinstance(di, list):
         for sample in samples:
-            ts = sample.get("ts")
-            if not _is_plain_int(ts):
+            sample["di"] = di  # malformed: left for the sample parser to reject
+        return samples, events
+    reference = samples[-1]["ts"]
+    if isinstance(di, list) and _is_plain_int(reference):
+        for entry in di:
+            if not isinstance(entry, dict):
                 continue
-            # An entry is due for this sample if it is at least as old.
-            sample_age = _signed32(reference - ts)
-            due = [(age, entry) for age, entry in ages if age >= sample_age]
-            if due:
-                sample["di"] = [min(due, key=lambda pair: pair[0])[1]]
-    return samples
+            age, value = entry.get("ts"), entry.get("val")
+            if _is_plain_int(age) and _is_plain_int(value):
+                events.append(((reference - _signed32(age)) & 0xFFFFFFFF, value & 0xFFFFFFFF))
+    return samples, events
+
+
+class _DigitalTimeline:
+    """The digital port state over one parse.
+
+    Events are ``(tick, value)`` in the timer's uint32 domain. A sample
+    takes the latest event at or before its own tick, else keeps the state
+    it had: the port holds its value between reads, across objects. An
+    event in a sample's future waits for a later sample."""
+
+    _MAX_PENDING = 1024
+
+    def __init__(self) -> None:
+        self.state = 0
+        self._pending: List[Tuple[int, int]] = []
+
+    def add(self, events: List[Tuple[int, int]]) -> None:
+        self._pending.extend(events)
+        del self._pending[: max(0, len(self._pending) - self._MAX_PENDING)]
+
+    def at(self, tick: int) -> int:
+        due = [event for event in self._pending if _signed32(tick - event[0]) >= 0]
+        if due:
+            # The latest due event: the one closest before the tick.
+            self.state = min(due, key=lambda event: _signed32(tick - event[0]))[1]
+            self._pending = [event for event in self._pending if event not in due]
+        return self.state
 
 
 def _signed32(value: int) -> int:
@@ -2148,18 +2173,22 @@ def _is_plain_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _try_parse_json_samples(obj: Any) -> List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]]:
-    """Every well-formed sample in ``obj``; a malformed one is skipped."""
+def _try_parse_json_samples(
+    obj: Any,
+) -> Tuple[List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]], List[Tuple[int, int]]]:
+    """``(well-formed samples, digital events)`` in ``obj``; a malformed
+    sample is skipped, and a record malformed beyond splitting gives
+    neither."""
     try:
-        split = _split_batched_samples(obj)
+        split, events = _split_batched_samples(obj)
     except Exception:
-        return []  # malformed beyond splitting: skip the record
+        return [], []
     out = []
     for sample in split:
         parsed = _try_parse_json_sample(sample)
         if parsed is not None:
             out.append(parsed)
-    return out
+    return out, events
 
 
 def _try_parse_json_sample(
@@ -2294,7 +2323,7 @@ def _infer_json_configuration(
         if found is not None:
             meta = found
             continue
-        parsed = _try_parse_json_samples(obj)
+        parsed, _events = _try_parse_json_samples(obj)
         if parsed:
             analog_count = len(parsed[0][1])
             break
@@ -2333,20 +2362,25 @@ def _produce_json_samples(
     progress = options.progress
     total_bytes = objects[-1][1] if objects else 0
     reader = _FirmwareValueReader(config, options.integer_units)
+    digital = _DigitalTimeline()
 
     for obj, end in objects:
         lines_processed += 1
         bytes_read = end
 
-        for parsed in _try_parse_json_samples(obj):
+        parsed_samples, events = _try_parse_json_samples(obj)
+        digital.add(events)
+        for parsed in parsed_samples:
             ts, raw_analog, channels, digital_data = parsed
             units: Optional[str] = None
             if channels is not None:
-                # The firmware's "ai" shape: the shared firmware rule.
+                # The firmware's "ai" shape: the shared firmware rule, and
+                # the port state from the parse's digital timeline.
                 read = reader.read(raw_analog, channels)
                 if read is None:
                     continue
                 analog_values, units = read
+                digital_data = digital.at(ts)
             else:
                 # The legacy "analog" shape is raw counts, as upstream
                 # scales it, whatever the number syntax.

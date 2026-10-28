@@ -347,3 +347,29 @@ def test_a_digital_object_without_a_usable_timestamp_is_skipped_not_fatal(record
     # raised IndexError outside the malformed-record handler.
     samples = list(_parse(record + b'\n{"ts":2,"analog":[3]}\n').samples)
     assert samples[-1].analog_values == (3.0,)
+
+
+# Audit round 13 on #183: one digital timeline per parse.
+
+def test_the_digital_state_carries_across_objects() -> None:
+    # The port held 5; the second object's only read is one tick after its
+    # trigger. The state at tick 110 is still 5, not an invented 0.
+    data = (
+        b'{"ts":100,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":0,"mask":15,"val":5}]}\n'
+        b'{"ts":110,"ai":[{"ch":0,"val":2.0000}],"di":[{"ts":4294967295,"mask":15,"val":5}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [5, 5]
+
+
+def test_a_future_digital_read_applies_to_the_next_sample() -> None:
+    data = (
+        b'{"ts":110,"ai":[{"ch":0,"val":1.0000}],"di":[{"ts":4294967295,"mask":15,"val":7}]}\n'
+        b'{"ts":120,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [0, 7]
+
+
+def test_a_digital_only_sample_with_only_a_future_read_is_kept() -> None:
+    data = b'{"ts":110,"di":[{"ts":4294967295,"mask":15,"val":5}]}\n'
+    samples = list(_parse(data).samples)
+    assert len(samples) == 1 and samples[0].analog_values == ()
