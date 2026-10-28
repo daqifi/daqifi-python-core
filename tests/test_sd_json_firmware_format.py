@@ -575,3 +575,15 @@ def test_a_zero_timestamp_record_across_the_rollover_places_its_change_by_age() 
         b'{"ts":420000,"ai":[{"ch":0,"val":1.0000}]}\n'
     )
     assert [s.digital_data for s in _parse(data).samples] == [1, 5, 5]
+
+
+def test_a_legacy_zero_timestamp_row_does_not_move_the_clock() -> None:
+    # Audit finding on #183 (round 19): legacy "analog" rows use ts 0 for
+    # "no timestamp"; placing it counted a rollover for every later row.
+    from datetime import datetime
+
+    data = b'{"ts":1000,"analog":[1]}\n{"ts":0,"analog":[2]}\n{"ts":2000,"analog":[3]}\n'
+    options = SdCardParseOptions(
+        session_start_time=datetime(2026, 1, 1), fallback_timestamp_frequency=1000
+    )
+    assert _offsets(list(_parse(data, options).samples)) == [0.0, 0.0, 1.0]
