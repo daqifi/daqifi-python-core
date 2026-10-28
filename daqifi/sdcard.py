@@ -2094,11 +2094,13 @@ def _split_batched_samples(obj: Any) -> List[Any]:
     object's other fields. Anything else is returned as is.
 
     The object's ``"di"`` entries carry ages, not times: each is measured
-    back from the trigger stamp at encode time (JSON_Encoder.c, #959), which
-    an ADC object doesn't include. The latest sample's ``"ts"`` stands in for
-    it, so each entry is placed at ``latest ts - age``, and each sample gets
-    the latest entry at or before its own ``"ts"``. That is approximate by
-    the encode latency. A sample before every entry gets none (digital 0)."""
+    back from the trigger stamp at encode time, which an ADC object doesn't
+    include. That is a documented firmware limitation (JSON_Encoder.c, at
+    the di element writer), tracked on daqifi-nyquist-firmware#959. The
+    latest sample's ``"ts"`` stands in for it, so each entry is placed at
+    ``latest ts - age``, and each sample gets the latest entry at or before
+    its own ``"ts"``: off by (ADC ts - trigger stamp) when the ADC lags. A
+    sample before every entry gets none (digital 0)."""
     pairs = getattr(obj, "pairs", None)
     if not pairs or sum(1 for key, _ in pairs if key == "ts") < 2:
         return [obj]
