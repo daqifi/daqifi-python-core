@@ -496,3 +496,16 @@ def test_a_digital_record_ahead_of_the_analog_does_not_move_the_time_base() -> N
         b'{"ts":3000001000,"ai":[{"ch":0,"val":2.0000}]}\n'
     )
     assert _offsets(list(_parse(data).samples)) == [0.0, 0.1, 3000000.0]
+
+
+def test_a_deferred_digital_event_applies_to_samples_already_seen() -> None:
+    # Audit finding on #183 (round 16): the encoder can defer its DIO block
+    # to a later object; its event at tick 90 still applies to the sample
+    # at 100 that came before it in the file.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":80,"di":[{"ts":0,"mask":15,"val":0}]}\n'
+        b'{"ts":100,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":110,"ai":[{"ch":0,"val":2.0000}],"di":[{"ts":20,"mask":15,"val":5}]}\n'
+    )
+    assert [s.digital_data for s in _parse(data).samples] == [0, 5, 5]

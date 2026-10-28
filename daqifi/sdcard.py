@@ -2233,10 +2233,8 @@ class _DigitalHistory:
     A sample takes the latest event at or before its own tick: the port
     holds its value between reads, across objects, and a sample older than
     an event already seen (a queued ADC sample) still gets the state of its
-    own time. Events are never consumed; a long history is compacted to
-    its recent part plus the state before it."""
-
-    _MAX_EVENTS = 4096
+    own time. Events are never consumed, and every event of the parse is
+    loaded before any lookup (the file is already in memory)."""
 
     def __init__(self) -> None:
         self._events: List[Tuple[int, int, int]] = []  # (tick, order, value)
@@ -2247,9 +2245,6 @@ class _DigitalHistory:
 
         self._order += 1
         bisect.insort(self._events, (tick, self._order, value))
-        if len(self._events) > self._MAX_EVENTS:
-            keep = self._MAX_EVENTS // 2
-            del self._events[: len(self._events) - keep - 1]
 
     def at(self, tick: Optional[int]) -> int:
         import bisect
@@ -2461,12 +2456,14 @@ def _produce_json_samples(
     clock = _JsonClock()
     digital = _DigitalHistory()
 
+    # Two passes over the decoded objects (already in memory): place every
+    # sample and load every digital event first, then emit. The firmware can
+    # defer its DIO block to a later object (JSON_Encoder.c), so an event can
+    # arrive after a sample it applies to.
+    placed_by_object = []
     for obj, end in objects:
-        lines_processed += 1
-        bytes_read = end
-
         parsed_samples, ages, reference = _try_parse_json_samples(obj)
-        # Place every sample of the object first: its digital ages are
+        # Every sample of the object is placed first: its digital ages are
         # measured back from its latest sample.
         placed = []
         for parsed in parsed_samples:
@@ -2490,7 +2487,11 @@ def _produce_json_samples(
         if ages and placed and placed[-1][0] == reference and placed[-1][1] is not None:
             for age, value in ages:
                 digital.add(placed[-1][1] - age, value)
+        placed_by_object.append((end, placed))
 
+    for end, placed in placed_by_object:
+        lines_processed += 1
+        bytes_read = end
         for ts, tick, analog_values, units, channels, digital_data in placed:
             if channels is not None:
                 # The port state at the sample's own time.
