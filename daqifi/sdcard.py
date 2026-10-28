@@ -1887,13 +1887,24 @@ def _find_csv_data_start_index(lines: List[str]) -> int:
     return len(lines)
 
 
+# An integer CSV value: optional sign, ASCII digits only.
+_CSV_INTEGER_VALUE = re.compile(r"[+-]?[0-9]+\Z")
+# Integers beyond this aren't exact as floats; firmware codes and
+# millivolts are int32.
+_CSV_INT_LIMIT = 2 ** 53
+
+
 def _try_parse_csv_data_row(
     line: str,
     layout: _CsvColumnLayout,
-) -> Optional[Tuple[int, List[float], int, List[int]]]:
+) -> Optional[Tuple[int, List[Union[int, float]], int, List[int]]]:
     """Parse one CSV data row into ``(row_timestamp, analog_values,
     digital_data, per_channel_timestamps)`` or None on malformed
     input (mirrors the upstream ``TryParseCsvDataRow`` resilience).
+
+    A value written as an integer stays an ``int`` (a raw ADC code, or
+    millivolts at precision 0); one written with decimals is a ``float``,
+    volts from the firmware's voltage mode (``csv_encoder.c`` ``%.*f``).
     """
     try:
         cols = line.split(",")
@@ -1907,7 +1918,7 @@ def _try_parse_csv_data_row(
                 total_pairs - 1 if layout.has_digital_pair else total_pairs
             )
 
-        analog_values: List[float] = []
+        analog_values: List[Union[int, float]] = []
         per_channel_ts: List[int] = []
         for ch in range(analog_pair_count):
             ts_col = cols[ch * 2].strip()
@@ -1915,10 +1926,17 @@ def _try_parse_csv_data_row(
             if not ts_col.isdigit():
                 return None
             ts = int(ts_col)
-            try:
-                val = float(val_col)
-            except ValueError:
-                return None
+            if _CSV_INTEGER_VALUE.match(val_col):
+                val: Union[int, float] = int(val_col)
+                if abs(val) > _CSV_INT_LIMIT:
+                    return None  # would overflow float() during scaling
+            else:
+                try:
+                    val = float(val_col)
+                except ValueError:
+                    return None
+                if not math.isfinite(val):
+                    return None
             per_channel_ts.append(ts)
             analog_values.append(val)
 
@@ -1969,9 +1987,17 @@ def _produce_csv_samples(
         if parsed is None:
             continue
         row_ts, raw_analog, digital_data, per_ch_ts = parsed
-        analog_values = _scale_raw_analog_values(
-            [int(v) for v in raw_analog], config, layout.analog_channels or None
-        )
+        if any(isinstance(v, float) for v in raw_analog):
+            # Written with decimals: the firmware's voltage mode (precision
+            # >= 1, its default) already calibrated these to volts (#163).
+            analog_values = [float(v) for v in raw_analog]
+        else:
+            # Integers: raw ADC codes, or millivolts at precision 0, which
+            # the file can't tell apart (daqifi-nyquist-firmware#1179);
+            # scaled as codes.
+            analog_values = _scale_raw_analog_values(
+                raw_analog, config, layout.analog_channels or None
+            )
 
         absolute_time = base_time
         # ``row_ts == 0`` is treated as "no timestamp" — matches the
