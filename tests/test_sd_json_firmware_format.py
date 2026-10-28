@@ -509,3 +509,17 @@ def test_a_deferred_digital_event_applies_to_samples_already_seen() -> None:
         b'{"ts":110,"ai":[{"ch":0,"val":2.0000}],"di":[{"ts":20,"mask":15,"val":5}]}\n'
     )
     assert [s.digital_data for s in _parse(data).samples] == [0, 5, 5]
+
+
+def test_a_digital_only_stretch_just_under_one_timer_period_is_placed_correctly() -> None:
+    # The recorded limit begins past one 2**32-tick period after the last
+    # analog record; just under it, digital-only records are exact.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":1000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":2000001000,"di":[{"ts":0,"mask":15,"val":1}]}\n'
+        b'{"ts":4294967000,"di":[{"ts":0,"mask":15,"val":2}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert _offsets(samples) == [0.0, 2000000.0, 4294966.0]
+    assert [s.digital_data for s in samples] == [0, 1, 2]

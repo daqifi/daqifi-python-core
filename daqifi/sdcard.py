@@ -2190,7 +2190,14 @@ class _JsonClock:
     digital record stamped with the trigger (JSON_Encoder.c). A digital-only
     record moves the base only while no analog record has been seen, or if
     it isn't ahead of the latest analog tick; otherwise it is placed without
-    moving it."""
+    moving it.
+
+    Limit (recorded on #164, tied to daqifi-nyquist-firmware#959): after the
+    last analog record, digital-only records are placed by their distance
+    from it, so a digital-only stretch longer than one timer period (2**32
+    ticks, about 102 s at 42 MHz) loses its rollover count. That needs ADC
+    acquisition to stop mid-session while DIO continues, which a session's
+    fixed stream configuration doesn't do."""
 
     def __init__(self) -> None:
         self._anchored = False
