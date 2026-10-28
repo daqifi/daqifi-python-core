@@ -521,63 +521,61 @@ class StreamManager:
                 return data[len(prompt):]
         return data
 
+    @staticmethod
+    def _is_console_noise(data: bytes) -> bool:
+        """True if ``data`` is only line endings and prompts."""
+        rest = data.replace(b"DAQIFI> ", b"").replace(b"DAQIFI>", b"")
+        return not rest.strip(b"\r\n")
+
+    @classmethod
+    def _find_echo(cls, data: bytes, echo_line: bytes) -> int:
+        """Where the START echo starts, if only line endings and prompts
+        come before it; else -1."""
+        position = data.find(echo_line)
+        if position >= 0 and cls._is_console_noise(data[:position]):
+            return position
+        return -1
+
     @classmethod
     def _strip_console_prefix(cls, data: bytes, echo_line: bytes) -> bytes:
-        """Drop the console output that can lead the START reply: a prompt
-        still pending from the previous command, the echo of START, and the
-        prompt after it, each at most once. The console (microrl) echoes the
-        typed command and ends the line with exactly CR LF (ENDL,
-        _ENDL_CRLF); strip precisely that, never more: a protobuf frame's
-        length byte can be 0x0A/0x0D."""
-        data = cls._strip_prompt(data)
-        blank, rest = cls._split_blank_lines(data)
-        if rest.startswith(echo_line):
-            # Blank lines go only together with the echo after them, never
-            # alone: CR LF can open a protobuf frame.
-            data = rest[len(echo_line):]
-        return cls._strip_prompt(data)
+        """Drop the console output that can lead the START reply.
 
-    @staticmethod
-    def _split_blank_lines(data: bytes) -> "tuple[bytes, bytes]":
-        """``(leading CR LF pairs, the rest)``."""
-        end = 0
-        while data[end:end + 2] == b"\r\n":
-            end += 2
-        return data[:end], data[end:]
+        When the echo of START is there, everything before it may be only
+        line endings and prompts (a prompt pending from the previous command,
+        blank lines), and that goes with the echo, as does one prompt after
+        it. The console (microrl) ends the echo with exactly CR LF (ENDL,
+        _ENDL_CRLF). Without an echo only a leading prompt is dropped: bare
+        CR or LF bytes can be a protobuf frame's length byte."""
+        position = cls._find_echo(data, echo_line)
+        if position >= 0:
+            return cls._strip_prompt(data[position + len(echo_line):])
+        return cls._strip_prompt(data)
 
     @classmethod
     def _ends_inside_console_prefix(cls, data: bytes, echo_line: bytes) -> bool:
-        """True if ``data`` stops part-way through the echo line or the
-        prompt that may lead the START reply."""
-        if data and any(
-            prompt.startswith(data) and data != prompt for prompt in _CONSOLE_PROMPTS
-        ):
-            return True  # a prompt still arriving
-        after_prompt = cls._strip_prompt(data)
-        if after_prompt is not data:
-            # A prompt pending from the previous command: the echo may follow.
-            if not after_prompt or (
-                echo_line.startswith(after_prompt) and after_prompt != echo_line
-            ):
-                return True
-            if not after_prompt.startswith(echo_line):
-                return False
-            data = after_prompt
-        blank, after_blank = cls._split_blank_lines(data)
-        if blank:
-            # Blank lines first: the echo may still be arriving after them.
-            if echo_line.startswith(after_blank) and after_blank != echo_line:
-                return True
-            if after_blank.startswith(echo_line):
-                data = after_blank
-        rest = data[len(echo_line):] if data.startswith(echo_line) else data
-        if rest is data and data and echo_line.startswith(data) and data != echo_line:
+        """True if ``data`` stops part-way through the console output that
+        may lead the START reply: in the echo, in a prompt, or with only
+        line endings and prompts so far (the echo may follow)."""
+        position = cls._find_echo(data, echo_line)
+        if position >= 0:
+            rest = data[position + len(echo_line):]
+            # A prompt after the echo, still arriving: "DAQIFI> " (the
+            # firmware's) or a prompt line "DAQIFI>\r\n" split after its CR.
+            return bool(rest) and any(
+                prompt.startswith(rest) and rest != prompt for prompt in _CONSOLE_PROMPTS
+            )
+        if data and cls._is_console_noise(data):
             return True
-        # Either prompt form, still arriving: "DAQIFI> " (the firmware's) or a
-        # prompt line "DAQIFI>\r\n" split after its CR.
-        return bool(rest) and any(
-            prompt.startswith(rest) and rest != prompt for prompt in _CONSOLE_PROMPTS
-        )
+        # A partial echo or prompt can only be the last few bytes.
+        longest = max(len(echo_line), *(len(prompt) for prompt in _CONSOLE_PROMPTS))
+        for split in range(max(0, len(data) - longest), len(data)):
+            head, tail = data[:split], data[split:]
+            if (
+                echo_line.startswith(tail)
+                or any(prompt.startswith(tail) for prompt in _CONSOLE_PROMPTS)
+            ) and cls._is_console_noise(head):
+                return True
+        return False
 
     def stop(self):
         """
