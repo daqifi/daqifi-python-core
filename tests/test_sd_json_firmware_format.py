@@ -184,3 +184,105 @@ def test_an_oversized_integer_is_skipped_not_fatal(record) -> None:
     # then float() overflowed during scaling, outside the handler.
     samples = list(_parse(record + b'\n{"ts":2,"analog":[3]}\n').samples)
     assert [s.analog_values for s in samples] == [(3.0,)]
+
+
+# Audit round 7 on #183, and #163 item 20's JSON half.
+
+def test_samples_batched_in_one_object_are_all_kept() -> None:
+    # JSON_Encoder.c's while (qSize > 0) loop writes every sample queued at
+    # one call into ONE object as repeated "ts"/"ai" keys; json keeps only
+    # the last of each. SYNTHETIC: the real 200 Hz capture has one sample
+    # per object, so it can't exercise this.
+    batched = (
+        b'{\n"ts":100,\n"ai":[\n{"ch":0, "val":1.0000}\n],\n'
+        b'"ts":110,\n"ai":[\n{"ch":0, "val":2.0000}\n],\n'
+        b'"ts":120,\n"ai":[\n{"ch":0, "val":3.0000}\n]\n}\n'
+    )
+    data = b'{"meta":{"tick_hz":1000}}\n' + batched
+    samples = list(_parse(data).samples)
+    assert len(samples) == batched.count(b'"ts"') == 3
+    assert [s.analog_values for s in samples] == [(1.0,), (2.0,), (3.0,)]
+    assert [(s.timestamp - samples[0].timestamp).total_seconds() for s in samples] == [
+        0.0, pytest.approx(0.010), pytest.approx(0.020)
+    ]
+
+
+_INTEGER_LOG = b'{"ts":1,"ai":[{"ch":0,"val":1234}]}\n{"ts":2,"ai":[{"ch":0,"val":-56}]}\n'
+
+
+def _calibrated(integer_units=None):
+    return SdCardParseOptions(
+        integer_units=integer_units,
+        configuration_override=SdCardDeviceConfiguration(
+            analog_port_count=1, digital_port_count=0, timestamp_frequency=1000,
+            resolution=100, calibration_values=((2.0, 0.0),),
+        ),
+    )
+
+
+def _samples_and_warnings(data, options=None):
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        samples = list(_parse(data, options).samples)
+    return samples, [w for w in caught if issubclass(w.category, UserWarning)]
+
+
+def test_millivolt_integers_are_read_as_volts_without_calibration() -> None:
+    samples, caught = _samples_and_warnings(_INTEGER_LOG, _calibrated("millivolts"))
+    assert [s.analog_values for s in samples] == [(1.234,), (-0.056,)]
+    assert [s.analog_units for s in samples] == ["millivolts"] * 2
+    assert caught == []
+
+
+def test_decimals_in_a_millivolts_parse_are_still_volts() -> None:
+    data = b'{"ts":1,"ai":[{"ch":0,"val":1.2345}]}\n'
+    samples, _ = _samples_and_warnings(data, _calibrated("millivolts"))
+    assert [s.analog_values for s in samples] == [(1.2345,)]
+    assert samples[0].analog_units == "volts"
+
+
+def test_unspecified_integers_warn_exactly_once_per_parse() -> None:
+    samples, caught = _samples_and_warnings(_INTEGER_LOG, _calibrated())
+    assert len(caught) == 1 and "integer_units" in str(caught[0].message)
+    assert [s.analog_units for s in samples] == ["raw-assumed"] * 2
+    assert samples[0].analog_values == pytest.approx((24.68,))
+    _, again = _samples_and_warnings(_INTEGER_LOG, _calibrated())
+    assert len(again) == 1  # once per parse, not once per process
+
+
+def test_explicit_raw_is_silent_and_says_raw() -> None:
+    samples, caught = _samples_and_warnings(_INTEGER_LOG, _calibrated("raw"))
+    assert caught == []
+    assert [s.analog_units for s in samples] == ["raw"] * 2
+    assert samples[0].analog_values == pytest.approx((24.68,))
+
+
+def test_a_decimal_only_log_does_not_warn() -> None:
+    data = b'{"ts":1,"ai":[{"ch":0,"val":1.2345}]}\n{"ts":2,"ai":[{"ch":0,"val":0.0000}]}\n'
+    samples, caught = _samples_and_warnings(data)
+    assert caught == []
+    assert [s.analog_units for s in samples] == ["volts"] * 2
+
+
+def test_a_sample_mixing_decimals_and_integers_is_skipped() -> None:
+    # The value mode is global, and precision >= 1 writes zero as "0.0000":
+    # a mixed sample isn't firmware output, so it's dropped rather than
+    # tagged by whichever value came first.
+    data = (
+        b'{"ts":1,"ai":[{"ch":0,"val":1.2345},{"ch":1,"val":2}]}\n'
+        b'{"ts":2,"ai":[{"ch":0,"val":0.5000},{"ch":1,"val":0.2500}]}\n'
+    )
+    samples, _ = _samples_and_warnings(data)
+    assert [s.analog_values for s in samples] == [(0.5, 0.25)]
+
+
+def test_an_unknown_integer_units_value_is_rejected() -> None:
+    with pytest.raises(ValueError, match="integer_units"):
+        _parse(_INTEGER_LOG, SdCardParseOptions(integer_units="volts"))
+
+
+def test_legacy_samples_carry_no_units_and_do_not_warn() -> None:
+    samples, caught = _samples_and_warnings(b'{"ts":1,"analog":[50]}\n')
+    assert caught == [] and samples[0].analog_units is None
