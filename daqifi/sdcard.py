@@ -2274,14 +2274,23 @@ class _JsonClock:
     moving it, so a digital record level with the analog base doesn't
     change how the next analog step is read.
 
-    Limit (recorded on #164, tied to daqifi-nyquist-firmware#959): after the
-    last analog record, digital-only records are placed by their distance
-    from it, so a digital-only stretch longer than one timer period (2**32
-    ticks, about 102 s at 42 MHz) loses its rollover count. That needs ADC
-    acquisition to stop mid-session while DIO continues, which a session's
-    fixed stream configuration doesn't do."""
+    A digital-only record up to one second (``behind_window`` ticks) behind
+    an analog base is placed behind it: its trigger stamp is ISR-captured
+    and can trail an already placed, period-derived ADC stamp.
 
-    def __init__(self) -> None:
+    Limits (recorded on #164, tied to daqifi-nyquist-firmware#959): after
+    the last analog record, digital-only records are placed by their
+    distance from it, so a digital-only stretch longer than one timer period
+    (2**32 ticks, about 102 s at 42 MHz) loses its rollover count; that
+    needs ADC acquisition to stop mid-session while DIO continues, which a
+    session's fixed stream configuration doesn't do. And a digital-only
+    record within one second of a full period after the analog base reads
+    as slightly behind it instead: uint32 stamps can't tell the two apart."""
+
+    def __init__(self, behind_window: int = 0) -> None:
+        # How far (ticks) a digital-only record may sit behind an analog
+        # base and still count as behind it: one second of the tick rate.
+        self._behind_window = max(0, behind_window)
         self._anchored = False
         self._base_raw = 0
         self._base_tick = 0
@@ -2312,7 +2321,13 @@ class _JsonClock:
             self._move(ts, tick, by_digital=False)
             self._latest_analog = tick
             return tick
-        tick = self._base_tick + _compute_tick_delta(self._base_raw, ts)
+        step = _compute_tick_delta(self._base_raw, ts)
+        behind = 0x100000000 - step if step else 0
+        if not self._base_by_digital and 0 < behind <= self._behind_window:
+            # Slightly behind an analog base: an ISR trigger stamp trailing
+            # a period-derived ADC stamp, not a rollover.
+            step = -behind
+        tick = self._base_tick + step
         if self._latest_analog is None or tick < self._latest_analog:
             self._move(ts, tick, by_digital=True)
         return tick
@@ -2585,7 +2600,7 @@ def _produce_json_samples(
 
     no_tick = -(2 ** 63)
     ticks = array("q")
-    clock = _JsonClock()
+    clock = _JsonClock(behind_window=timestamp_freq)
     digital = _DigitalHistory()
     total_bytes = 0
     for obj, end in _iter_json_objects(text):

@@ -652,3 +652,32 @@ def test_a_firmware_sample_at_tick_zero_keeps_its_time() -> None:
         b'{"ts":420000,"ai":[{"ch":0,"val":1.0000}]}\n'
     )
     assert _offsets(list(_parse(data).samples)) == [0.0, 0.01, 0.02]
+
+
+def test_a_digital_record_slightly_behind_the_analog_is_not_a_rollover() -> None:
+    # Audit finding on #183 (after #180's merge): an ISR trigger stamp can
+    # trail an already placed, period-derived ADC stamp. Before the fix
+    # this gave offsets [0, 102.26 s, 0.01] and digital states [0, 5, 0].
+    data = (
+        b'{"meta":{"tick_hz":42000000}}\n'
+        b'{"ts":1000000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":999000,"di":[{"ts":9000,"mask":15,"val":5}]}\n'
+        b'{"ts":1420000,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert [round((s.timestamp - samples[0].timestamp).total_seconds(), 6) for s in samples] == [
+        0.0, -0.000024, 0.01
+    ]
+    assert [s.digital_data for s in samples] == [5, 5, 5]
+
+
+@pytest.mark.parametrize("behind, expected", [(1000, -1.0), (1001, 4294966.295)])
+def test_the_behind_window_is_one_second_of_ticks(behind, expected) -> None:
+    # tick_hz 1000: a digital-only record up to 1000 ticks behind the analog
+    # base is behind it; one tick more steps forward with rollover, as before.
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":100000,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":%d,"di":[{"ts":0,"mask":15,"val":5}]}\n' % (100000 - behind)
+    )
+    assert _offsets(list(_parse(data).samples)) == [0.0, expected]
