@@ -2114,6 +2114,8 @@ def _split_batched_samples(obj: Any) -> List[Any]:
             samples.append(dict(shared, ts=value))
         elif key == "ai" and samples:
             samples[-1]["ai"] = value
+    if not samples:
+        return [obj]  # no "ts" at all: left to the sample parser to reject
     di = obj.get("di")
     reference = samples[-1].get("ts")
     if isinstance(di, list) and di and _is_plain_int(reference):
@@ -2148,8 +2150,12 @@ def _is_plain_int(value: Any) -> bool:
 
 def _try_parse_json_samples(obj: Any) -> List[Tuple[int, List[Union[int, float]], Optional[List[int]], int]]:
     """Every well-formed sample in ``obj``; a malformed one is skipped."""
+    try:
+        split = _split_batched_samples(obj)
+    except Exception:
+        return []  # malformed beyond splitting: skip the record
     out = []
-    for sample in _split_batched_samples(obj):
+    for sample in split:
         parsed = _try_parse_json_sample(sample)
         if parsed is not None:
             out.append(parsed)

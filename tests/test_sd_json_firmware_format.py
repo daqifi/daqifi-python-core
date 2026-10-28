@@ -339,3 +339,11 @@ def test_a_single_sample_object_ignores_a_digital_read_after_the_trigger() -> No
         b'"ts":110,"ai":[{"ch":0,"val":2.0000}]}\n'
     )
     assert [s.digital_data for s in _parse(data).samples] == [3]
+
+
+@pytest.mark.parametrize("record", [b'{"di":[]}', b'{"di":[{"ts":1,"mask":1,"val":1}]}', b'{"di":"x","ts":1}'])
+def test_a_digital_object_without_a_usable_timestamp_is_skipped_not_fatal(record) -> None:
+    # Audit finding on #183 (round 12): a "di" object with no top-level "ts"
+    # raised IndexError outside the malformed-record handler.
+    samples = list(_parse(record + b'\n{"ts":2,"analog":[3]}\n').samples)
+    assert samples[-1].analog_values == (3.0,)
