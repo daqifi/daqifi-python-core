@@ -30,6 +30,22 @@ aims to follow [Semantic Versioning](https://semver.org/).
   if it were a raw ADC code. A value written with decimals is now kept as
   volts, unscaled; integer values are still scaled as codes. A non-finite
   value skips its row instead of aborting the log (#163).
+- `get_sd_card_files()` ended an active SD logging session (it stops the
+  stream and hands the bus back to LAN); it now refuses while logging, as
+  delete and download do. `request_sd_card_file_list()` keeps a session
+  running (#163).
+- After a JSON or CSV SD logging session the device's stream format, one
+  global setting shared with the live stream, stayed non-protobuf, so live
+  streaming decoded nothing; `stop_sd_card_logging()` restores protobuf
+  (#163).
+- SD downloads lost leading CR/LF bytes of the file: they were stripped
+  whether or not a prompt followed. Only CR/LF before a prompt are dropped
+  now (#163).
+- SD downloads ignored the destination's `write()` return value, so a raw
+  stream that took only part of a chunk lost the rest; writes are now
+  completed (#163).
+- The text-command SD listing kept a `DAQIFI> ` prompt sharing a line with
+  the first file name, so that file came out as `DAQIFI>` (#163).
 - SD logs: consecutive frames with the same timestamp were merged even when
   each carried its own analog data, keeping only the first frame's values;
   only complementary frames (the firmware's separate analog and digital
