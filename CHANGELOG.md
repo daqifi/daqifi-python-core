@@ -38,6 +38,17 @@ aims to follow [Semantic Versioning](https://semver.org/).
   which ones a sample keeps (#162).
 - `analog_in_data_ts` is treated as an offset to `msg_time_stamp`, as
   `DaqifiOutMessage.proto` defines it, not as an absolute time (#162).
+- SD CSV logs in the firmware's default voltage mode (volts with decimals)
+  were truncated to whole volts: every value was converted to an integer as
+  if it were a raw ADC code. A value written with decimals is now kept as
+  volts, unscaled; integer values are still scaled as codes. A non-finite
+  value skips its row instead of aborting the log (#163).
+- SD downloads ended at the first `__END_OF_FILE__` token, so a file
+  containing that text was cut short and reported as a success. With the
+  size from the SD listing, exactly that many bytes are read and the marker
+  must follow; a short or long transfer raises. Without a size the marker
+  counts only at the end of the transfer, and the result's `size_verified`
+  is False (#163).
 - `get_sd_card_files()` ended an active SD logging session (it stops the
   stream and hands the bus back to LAN); it now refuses while logging, as
   delete and download do. `request_sd_card_file_list()` keeps a session
