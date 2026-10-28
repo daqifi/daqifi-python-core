@@ -134,8 +134,11 @@ class TestReadSampleProtobufDecodesRealValues:
         assert first.channels[1] == pytest.approx(2.0)
         assert second.channels[0] == pytest.approx(3.0)
         assert second.channels[1] == pytest.approx(4.0)
-        assert first.timestamp == 10 / 1000.0
-        assert second.timestamp == 20 / 1000.0
+        # analog_in_data_ts is an offset to msg_time_stamp
+        # (DaqifiOutMessage.proto field 4); this test used to assert the
+        # absolute reading (#162 item 7).
+        assert first.timestamp == pytest.approx((100 + 10) / 1000.0)
+        assert second.timestamp == pytest.approx((100 + 20) / 1000.0)
 
     def test_returns_none_when_no_data(self):
         """No bytes buffered → None, and no parser side effects."""
