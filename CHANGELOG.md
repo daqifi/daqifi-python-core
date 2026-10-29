@@ -25,12 +25,26 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- SD CSV logs written at voltage precision 0 (integer millivolts) were read
-  as raw ADC codes. `SdCardParseOptions.integer_units` (`"raw"` or
-  `"millivolts"`) now says what integer values are; left unset they are read
-  as raw codes with one warning per parse, and each sample's `analog_units`
-  records what was applied. The rule is shared with the firmware JSON parser
-  (#163).
+- SD JSON logs written by the firmware parsed to no samples: the parser
+  expected one object per line with an `analog` key, but the firmware
+  writes a `{"meta":...}` header and then each sample object across several
+  lines with `"ai":[{"ch":n,"val":v},...]` and `"di":[...]`. The file is now
+  read as a sequence of JSON objects; the header supplies the tick rate
+  and device name, analog values are calibrated by their `ch` number, and
+  the old one-line `analog` form still parses (#163).
+- `StreamManager.start()` read and discarded everything the board sent with
+  its START reply: the CSV/JSON metadata header (so the tick rate and the
+  column-to-channel mapping were lost for the session) and the first
+  protobuf frames. Those bytes now seed the stream's own buffers; only a
+  leading echo and prompt are dropped, and a START rejection is still
+  detected (#162).
+- Protobuf samples mapped values onto the caller's channel list instead of
+  the channels enabled on the device, so an extra enabled channel's data
+  was relabelled and the apparent rate doubled. Values now follow the
+  device's enabled channels (read at start), and the caller's list selects
+  which ones a sample keeps (#162).
+- `analog_in_data_ts` is treated as an offset to `msg_time_stamp`, as
+  `DaqifiOutMessage.proto` defines it, not as an absolute time (#162).
 - SD CSV logs in the firmware's default voltage mode (volts with decimals)
   were truncated to whole volts: every value was converted to an integer as
   if it were a raw ADC code. A value written with decimals is now kept as

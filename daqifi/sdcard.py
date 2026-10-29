@@ -2271,14 +2271,23 @@ class _JsonClock:
     moving it, so a digital record level with the analog base doesn't
     change how the next analog step is read.
 
-    Limit (recorded on #164, tied to daqifi-nyquist-firmware#959): after the
-    last analog record, digital-only records are placed by their distance
-    from it, so a digital-only stretch longer than one timer period (2**32
-    ticks, about 102 s at 42 MHz) loses its rollover count. That needs ADC
-    acquisition to stop mid-session while DIO continues, which a session's
-    fixed stream configuration doesn't do."""
+    A digital-only record up to one second (``behind_window`` ticks) behind
+    an analog base is placed behind it: its trigger stamp is ISR-captured
+    and can trail an already placed, period-derived ADC stamp.
 
-    def __init__(self) -> None:
+    Limits (recorded on #164, tied to daqifi-nyquist-firmware#959): after
+    the last analog record, digital-only records are placed by their
+    distance from it, so a digital-only stretch longer than one timer period
+    (2**32 ticks, about 102 s at 42 MHz) loses its rollover count; that
+    needs ADC acquisition to stop mid-session while DIO continues, which a
+    session's fixed stream configuration doesn't do. And a digital-only
+    record within one second of a full period after the analog base reads
+    as slightly behind it instead: uint32 stamps can't tell the two apart."""
+
+    def __init__(self, behind_window: int = 0) -> None:
+        # How far (ticks) a digital-only record may sit behind an analog
+        # base and still count as behind it: one second of the tick rate.
+        self._behind_window = max(0, behind_window)
         self._anchored = False
         self._base_raw = 0
         self._base_tick = 0
@@ -2288,10 +2297,10 @@ class _JsonClock:
     def place(self, ts: Any, analog: bool) -> Optional[int]:
         """The record's unwrapped tick; None if ``ts`` isn't an integer.
 
-        For firmware records 0 is a real tick: the one after a rollover on
-        firmware before #533 (current firmware clamps stamps to 1). Only the
-        displayed time treats it as "no timestamp", as the protobuf parser
-        does. Legacy "analog" rows with ts 0 aren't placed at all."""
+        For firmware records 0 is a real tick, time included: the one after
+        a rollover on firmware before #533 (current firmware clamps stamps
+        to 1). Legacy "analog" rows with ts 0 mean "no timestamp" and
+        aren't placed at all."""
         if not _is_plain_int(ts):
             return None
         if not self._anchored:
@@ -2309,7 +2318,13 @@ class _JsonClock:
             self._move(ts, tick, by_digital=False)
             self._latest_analog = tick
             return tick
-        tick = self._base_tick + _compute_tick_delta(self._base_raw, ts)
+        step = _compute_tick_delta(self._base_raw, ts)
+        behind = 0x100000000 - step if step else 0
+        if not self._base_by_digital and 0 < behind <= self._behind_window:
+            # Slightly behind an analog base: an ISR trigger stamp trailing
+            # a period-derived ADC stamp, not a rollover.
+            step = -behind
+        tick = self._base_tick + step
         if self._latest_analog is None or tick < self._latest_analog:
             self._move(ts, tick, by_digital=True)
         return tick
@@ -2351,6 +2366,16 @@ class _DigitalHistory:
 def _signed32(value: int) -> int:
     value &= 0xFFFFFFFF
     return value - 0x100000000 if value & 0x80000000 else value
+
+
+def _is_digital_only_record(obj: Any, parsed_samples: List[Any], converted: Callable[[Any], Any]) -> bool:
+    """True for a firmware record of DIO reads only: one sample, in the
+    firmware shape, with no analog values, and a "di" array. Such a record
+    yields one sample per "di" element (one per sample period)."""
+    if len(parsed_samples) != 1 or not isinstance(obj, dict) or not isinstance(obj.get("di"), list):
+        return False
+    sample = converted(parsed_samples[0])
+    return sample is not None and sample[5]  # digital_only
 
 
 def _is_plain_int(value: Any) -> bool:
@@ -2582,12 +2607,22 @@ def _produce_json_samples(
 
     no_tick = -(2 ** 63)
     ticks = array("q")
-    clock = _JsonClock()
+    clock = _JsonClock(behind_window=timestamp_freq)
     digital = _DigitalHistory()
     total_bytes = 0
     for obj, end in _iter_json_objects(text):
         total_bytes = end
         parsed_samples, ages, reference = _try_parse_json_samples(obj)
+        if _is_digital_only_record(obj, parsed_samples, converted):
+            # One sample per sample period: each "di" element is one DIO
+            # read (DIO.c pushes one per streaming tick), at the record's
+            # trigger tick minus its age.
+            # Its ts is an integer (the sample parser checked), so it has a tick.
+            tick = clock.place(parsed_samples[0][0], analog=False)
+            for age, value in ages:
+                digital.add(tick - age, value)
+                ticks.append(tick - age)
+            continue
         # Every sample of the object is placed first: its digital ages are
         # measured back from its latest sample.
         last_ts, last_tick = None, None
@@ -2615,7 +2650,22 @@ def _produce_json_samples(
     for obj, end in _iter_json_objects(text):
         lines_processed += 1
         bytes_read = end
-        parsed_samples, _ages, _reference = _try_parse_json_samples(obj)
+        parsed_samples, ages, _reference = _try_parse_json_samples(obj)
+        if _is_digital_only_record(obj, parsed_samples, converted):
+            # One sample per DIO read, each with its own value and time.
+            for _age, value in ages:
+                tick = ticks[index]
+                index += 1
+                absolute_time = base_time
+                if tick_period > 0:
+                    absolute_time = base_time + timedelta(seconds=tick * tick_period)
+                yield SdCardLogEntry(
+                    timestamp=absolute_time,
+                    analog_values=(),
+                    digital_data=value,
+                    analog_timestamps=None,
+                )
+            parsed_samples = []
         for parsed in parsed_samples:
             sample = converted(parsed)
             if sample is None:
@@ -2627,11 +2677,12 @@ def _produce_json_samples(
             if channels is not None:
                 # The port state at the sample's own time.
                 digital_data = digital.at(tick)
-            # ``ts == 0`` is "no timestamp": session start, as in the
-            # protobuf parser, so the same physical log reconstructs to
-            # consistent absolute timestamps regardless of file format.
+            # A legacy row with ts 0 is "no timestamp" (no tick): session
+            # start, as in the protobuf parser, so the same physical log
+            # reconstructs consistently across formats. A firmware sample at
+            # tick 0 (after a rollover) keeps its reconstructed time.
             absolute_time = base_time
-            if tick_period > 0 and tick is not None and ts != 0:
+            if tick_period > 0 and tick is not None:
                 absolute_time = base_time + timedelta(seconds=tick * tick_period)
             yield SdCardLogEntry(
                 timestamp=absolute_time,
