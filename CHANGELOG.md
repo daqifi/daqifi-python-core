@@ -64,8 +64,15 @@ aims to follow [Semantic Versioning](https://semver.org/).
   is False (#163).
 - `get_sd_card_files()` ended an active SD logging session (it stops the
   stream and hands the bus back to LAN); it now refuses while logging, as
-  delete and download do. `request_sd_card_file_list()` keeps a session
-  running (#163).
+  delete and download do (#163).
+- `request_sd_card_file_list()` and `get_sd_logging_state()` sent
+  `SD:ENAble 1` during an SD recording, which the firmware handles by
+  tearing the write session down. The listing now refuses while logging.
+  `get_sd_logging_state()` asked `SD:LOGging?`, which no firmware
+  implements, so it always returned the local flag; it now reads
+  `SYSTem:STReam:DATA?` and `SYSTem:STReam:INTerface?`, which leave the bus
+  alone, works over any transport, and raises when the device doesn't
+  answer (#187).
 - After a JSON or CSV SD logging session the device's stream format, one
   global setting shared with the live stream, stayed non-protobuf, so live
   streaming decoded nothing; `stop_sd_card_logging()` restores protobuf
