@@ -25,6 +25,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- Every NQ3 DAC write was rejected by the firmware. The voltage setter sent
+  `SOUR:VOLT:LEV <ch> <volts>`, which the firmware answers with -101
+  Invalid character; it now sends `<ch>,<volts>`. The DAC enable commands
+  (`ENAble:SOURce:DC`) no longer exist in the firmware, so
+  `AnalogOutputChannel.enabled` and `AnalogOutputs.enable_all()` /
+  `disable_all()` now raise `FeatureNotSupportedError` instead of a
+  `CommandError` from the device; an output drives the voltage last set
+  (#189).
 - SD CSV logs written at voltage precision 0 (integer millivolts) were read
   as raw ADC codes, and `SdCardParseOptions.integer_units` applied to JSON
   only. CSV now follows the same option through the shared firmware value

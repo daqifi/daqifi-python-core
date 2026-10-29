@@ -46,14 +46,12 @@ def main():
         for channel, voltage in voltages.items():
             print(f"  Channel {channel}: {voltage}V")
             device.analog_outputs[channel].voltage = voltage
-            device.analog_outputs[channel].enabled = True
 
         # Read back voltages
         print("\nReading back voltages:")
         for channel in voltages.keys():
             actual = device.analog_outputs[channel].voltage
-            enabled = device.analog_outputs[channel].enabled
-            print(f"  Channel {channel}: {actual:.3f}V (enabled: {enabled})")
+            print(f"  Channel {channel}: {actual:.3f}V")
 
         # Alternative: Use bulk set
         print("\nUsing bulk voltage set:")
@@ -66,7 +64,7 @@ def main():
         # Read all channels
         print("\nAll DAC channels:")
         for ch in device.analog_outputs:
-            print(f"  Channel {ch.index}: {ch.voltage:.3f}V (enabled: {ch.enabled})")
+            print(f"  Channel {ch.index}: {ch.voltage:.3f}V")
 
     finally:
         # Clean up
