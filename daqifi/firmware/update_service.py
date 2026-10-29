@@ -269,6 +269,7 @@ class _CancelledError(Exception):
 
 
 _BRIDGE_POLL_SECONDS = 1.0
+_APPLY_REPLY_WINDOW_MS = 1500
 _ERROR_QUEUE_DRAIN_LIMIT = 16
 _NOT_RECOVERED = (
     " The device could not be confirmed out of WiFi update mode: it may be "
@@ -823,6 +824,16 @@ class DefaultFirmwareUpdateService:
                         self._options.power_on_wifi_module_settle_delay, deadline
                     )
 
+                # In standby LAN:APPLY doesn't restart WiFi, so the bridge
+                # can't come up, and FWUpdate's request would linger. Refuse
+                # before anything is requested.
+                if self._wifi_module_powered(device) is False:
+                    raise RuntimeError(
+                        "The device is in standby (SYSTem:POWer:STATe? 0), so "
+                        "the WiFi bridge can't come up. Power it on, or leave "
+                        "power_on_wifi_module_before_lan_update_mode enabled."
+                    )
+
                 # FWUpdate only REQUESTS the update (SCPI_LANFwUpdate sets
                 # WIFI_FW_UPDATE_REQUESTED); the next LAN:APPLY is what
                 # enters the bridge and turns USB-transparent mode on. This is
@@ -1061,12 +1072,41 @@ class DefaultFirmwareUpdateService:
     # transparent mode is on, SetTransparentMode 0 always reaches it, and a
     # refused APPLY leaves -200 in the error queue.
 
-    def _bridge_ask(self, device, *messages) -> List[str]:
+    def _bridge_ask(self, device, *messages, completion_timeout_ms=200) -> List[str]:
         return device.execute_text_command(
             lambda: [device.send(m) for m in messages],
             response_timeout_ms=1000,
-            completion_timeout_ms=200,
+            completion_timeout_ms=completion_timeout_ms,
         )
+
+    def _read_error_code(self, device) -> Optional[int]:
+        from daqifi._internal import scpi as _scpi
+        from daqifi._internal import scpi_commands
+
+        reply = _scpi.find_system_error_reply(
+            self._bridge_ask(
+                device,
+                scpi_commands.get_last_error(),
+                completion_timeout_ms=_APPLY_REPLY_WINDOW_MS,
+            )
+        )
+        return None if reply is None else _scpi.parse_system_error(reply)[0]
+
+    def _wifi_module_powered(self, device) -> Optional[bool]:
+        """``SYSTem:POWer:STATe?``: 0 standby, 1 powered, 2 powered with
+        external power down. LAN:APPLY only restarts WiFi, and so only
+        enters or leaves the bridge, when powered (1 or 2:
+        wifi_manager_UpdateNetworkSettings' ``isPowered``). ``None`` when
+        the reply can't be read."""
+        from daqifi._internal.comm import ScpiMessage
+
+        for line in self._bridge_ask(device, ScpiMessage("SYSTem:POWer:STATe?")):
+            stripped = line.strip()
+            if stripped.upper().startswith("DAQIFI>"):
+                stripped = stripped[len("DAQIFI>"):].strip()
+            if stripped.lstrip("-").isdigit():
+                return int(stripped) in (1, 2)
+        return None
 
     def _console_answers(self, device) -> bool:
         from daqifi._internal.comm import ScpiMessage
@@ -1076,8 +1116,8 @@ class DefaultFirmwareUpdateService:
     def _send_apply(self, device) -> Optional[int]:
         """Drain the error queue, send LAN:APPLY and read the queue again.
         Returns the error code (0 = accepted, non-zero, e.g. -200 from the
-        apply gate, = refused, so retry), or ``None`` when the console didn't
-        answer: transparent mode is already on."""
+        apply gate, = refused, so retry), or ``None`` when no reply was read:
+        never acceptance. The bridge may be up, or the reply may be late."""
         from daqifi._internal import scpi as _scpi
         from daqifi._internal import scpi_commands
 
@@ -1092,11 +1132,14 @@ class DefaultFirmwareUpdateService:
             # own reply decides.
             if stale is None or _scpi.parse_system_error(stale)[0] == 0:
                 break
+        # The -200 of a refused APPLY can trail its echo by most of a
+        # second, so the read waits longer than the other exchanges.
         reply = _scpi.find_system_error_reply(
             self._bridge_ask(
                 device,
                 scpi_commands.apply_network_lan(),
                 scpi_commands.get_last_error(),
+                completion_timeout_ms=_APPLY_REPLY_WINDOW_MS,
             )
         )
         return None if reply is None else _scpi.parse_system_error(reply)[0]
@@ -1104,15 +1147,24 @@ class DefaultFirmwareUpdateService:
     def _enter_wifi_bridge(self, device, deadline: _Cancellation) -> None:
         """Send LAN:APPLY until it is accepted, then wait until the console
         stops answering, i.e. the bridge is up, before the flash tool runs.
-        Raises TimeoutError at ``deadline``, which covers the longest REINIT
-        deferral plus the bridge entry."""
-        while True:
+
+        Success is only ever the console going silent; no APPLY reply is
+        taken as proof. With no reply read, a console that still answers is
+        asked for the error queue again, so a late -200 means retry, and a
+        0 means accepted, so wait. Raises TimeoutError at ``deadline``,
+        which covers the longest REINIT deferral plus the bridge entry.
+        """
+        accepted = False
+        while not accepted:
             code = self._send_apply(device)
             if code is None:
-                return
+                if not self._console_answers(device):
+                    return
+                code = self._read_error_code(device)
             if code == 0:
-                break
-            self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)
+                accepted = True
+            else:
+                self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)
         while self._console_answers(device):
             self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)
 
@@ -1157,6 +1209,15 @@ class DefaultFirmwareUpdateService:
         exit_delay = self._options.post_usb_transparent_mode_exit_delay
         try:
             self._wait_for_serial_reconnect(device, deadline)
+            # In standby APPLY doesn't restart WiFi, so it can't consume a
+            # pending update request, and a quiet console proves nothing.
+            device.send(scpi_commands.set_usb_transparency_mode(0))
+            self._sleep_with_cancel(exit_delay, deadline)
+            if self._wifi_module_powered(device) is False:
+                raise RuntimeError(
+                    "the device is in standby, so LAN:APPLY doesn't restart "
+                    "WiFi and a pending update request can't be cleared"
+                )
             while True:
                 # The bridge can come up between attempts, so every APPLY
                 # is preceded by the exit that gets it to the console.

@@ -106,6 +106,7 @@ def clock(monkeypatch):
 
 IDN = "*IDN?"
 ERR_QUERY = "SYSTem:ERRor?"
+POWER_QUERY = "SYSTem:POWer:STATe?"
 
 
 class _FirmwareModel(_f._FakeStreamingDevice):
@@ -129,7 +130,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
     GATE_TIMEOUT = 30.0
 
     def __init__(self, clock, name="fake-port", deliver_then_raise=None, drop=None,
-                 backoff_for=0.0, prompt=""):
+                 backoff_for=0.0, prompt="", powered=True, late_errors=False):
         super().__init__(name)
         self.clock = clock
         self.state = "normal"
@@ -145,6 +146,9 @@ class _FirmwareModel(_f._FakeStreamingDevice):
         self._drop = drop
         self._replies = None
         self._prompt = prompt
+        self.powered = powered
+        self._late_errors = late_errors
+        self._refused_in_this_exchange = False
 
     def _tick(self):
         now = self.clock.now
@@ -178,16 +182,27 @@ class _FirmwareModel(_f._FakeStreamingDevice):
             self.transparent = False
         elif text == FW_UPDATE and self.state == "normal":
             self.state = "requested"
+        elif text == POWER_ON:
+            self.powered = True
+        elif text == POWER_QUERY:
+            self._reply("1" if self.powered else "0")
         elif text == LAN_APPLY:
-            if self.gate_until is not None:
+            if not self.powered:
+                pass  # UpdateNetworkSettings: no REINIT unless isPowered
+            elif self.gate_until is not None:
                 self.refused_applies += 1
                 self.errors.append('-200,"Execution error"')
+                self._refused_in_this_exchange = True
             else:
                 self.gate_until = self.clock.now + self.GATE_TIMEOUT
                 self.reinit_pending = True
                 self._tick()
         elif text == ERR_QUERY:
-            self._reply(self.errors.pop(0) if self.errors else '0,"No error"')
+            if self._late_errors and self._refused_in_this_exchange:
+                # The -200 trails the APPLY's echo past the read window.
+                pass
+            else:
+                self._reply(self.errors.pop(0) if self.errors else '0,"No error"')
         elif text == IDN:
             self._reply("DAQiFi,Nyquist1,0,3.8.0")
         if text == self._deliver_then_raise:
@@ -196,6 +211,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
 
     def execute_text_command(self, setup_action, response_timeout_ms=5000,
                              completion_timeout_ms=1000):
+        self._refused_in_this_exchange = False
         self._replies = []
         try:
             setup_action()
@@ -212,7 +228,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
 def test_a_successful_flash_enters_the_bridge_and_leaves_it_before_restoring_lan(clock) -> None:
     device = _FirmwareModel(clock)
     _update(device, _f._FakeExternalProcessRunner(_result()))
-    commands = [c for c in device.sent_commands if c not in (IDN, ERR_QUERY)]
+    commands = [c for c in device.sent_commands if c not in (IDN, ERR_QUERY, POWER_QUERY)]
     assert commands == [
         POWER_ON, FW_UPDATE, LAN_APPLY, BRIDGE_EXIT, LAN_ENABLE, LAN_APPLY, LAN_SAVE,
     ]
@@ -444,6 +460,62 @@ def test_a_silent_drain_still_sends_the_apply(clock) -> None:
     assert device.final_state() == ("normal", False)
 
 
+def test_a_refusal_whose_reply_is_late_is_not_taken_as_acceptance(clock) -> None:
+    # Audit r4 (1): the -200 trailed the read window, "no reply" was read as
+    # acceptance, and the tool launched against the SCPI console.
+    device = _FirmwareModel(clock, late_errors=True)
+    device.gate_until = clock.now + 10.0  # another APPLY still in progress
+    runner = _StateAtLaunch(device, _result())
+    _update(device, runner)
+    assert device.refused_applies > 0
+    assert runner.state_at_launch == ("ready", True)
+    assert device.final_state() == ("normal", False)
+
+
+def test_an_update_on_a_board_in_standby_is_refused_before_fwupdate(clock) -> None:
+    # Audit r4 (2): in standby APPLY doesn't restart WiFi
+    # (UpdateNetworkSettings' isPowered), so FWUpdate's request would linger.
+    device = _FirmwareModel(clock, powered=False)
+    options = _options()
+    options.power_on_wifi_module_before_lan_update_mode = False
+    service = DefaultFirmwareUpdateService(
+        hid_transport=_f._FakeHidTransport(),
+        firmware_download_service=_f._FakeFirmwareDownloadService(),
+        external_process_runner=_f._FakeExternalProcessRunner(_result()),
+        bootloader_protocol=_f._FakeBootloaderProtocol([bytes([0x10])]),
+        hid_device_enumerator=_f._FakeHidEnumerator([]),
+        options=options,
+    )
+    firmware_dir = _f._make_temp_wifi_dir()
+    try:
+        with pytest.raises(FirmwareUpdateException) as excinfo:
+            service.update_wifi_module(device, firmware_dir)
+    finally:
+        shutil.rmtree(firmware_dir, ignore_errors=True)
+    assert "standby" in str(excinfo.value.__cause__)
+    assert FW_UPDATE not in device.sent_commands
+    assert device.state == "normal"
+
+
+def test_recovery_on_a_board_that_dropped_to_standby_is_unconfirmed(clock) -> None:
+    # Audit r4 (2): an APPLY in standby returns 0 without consuming the
+    # request, so 40 s of answering console proved nothing.
+    cancel = threading.Event()
+    device = _FirmwareModel(clock)
+    real_send = device.send
+
+    def _send(message):
+        real_send(message)
+        if (getattr(message, "data", None) or str(message)) == FW_UPDATE:
+            device.powered = False
+            cancel.set()
+
+    device.send = _send
+    with pytest.raises(FirmwareUpdateException) as excinfo:
+        _update(device, _f._FakeExternalProcessRunner(_result()), cancel_event=cancel)
+    assert "power-cycle it" in str(excinfo.value)
+
+
 def test_a_failure_before_update_mode_sends_no_bridge_exit(clock, monkeypatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda *a, **k: None)
     device = _FirmwareModel(clock)
@@ -478,7 +550,7 @@ def test_power_on_can_be_turned_off(clock) -> None:
         service.update_wifi_module(device, firmware_dir)
     finally:
         shutil.rmtree(firmware_dir, ignore_errors=True)
-    assert [c for c in device.sent_commands if c not in (IDN, ERR_QUERY)][:2] == [FW_UPDATE, LAN_APPLY]
+    assert [c for c in device.sent_commands if c not in (IDN, ERR_QUERY, POWER_QUERY)][:2] == [FW_UPDATE, LAN_APPLY]
 
 
 @pytest.mark.parametrize(

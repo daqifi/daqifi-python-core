@@ -32,7 +32,8 @@ aims to follow [Semantic Versioning](https://semver.org/).
   with the bridge still on, so the commands went raw to the WiFi chip and
   the console stayed dead until a power cycle. The update now sends
   `POWer:STATe 1`, `FWUpdate`, `APPLY`, waits until the bridge is up
-  (on a board in WiFi retry backoff that takes up to 30 s), runs the tool,
+  (on a board in WiFi retry backoff that takes up to 30 s; the update is
+  refused up front on a board left in standby), runs the tool,
   then sends `SYSTem:USB:SetTransparentMode 0` before the LAN restore. After a failed
   or cancelled update it sends the bridge exit and `APPLY` until the error
   queue shows the APPLY was accepted, then watches the console for longer

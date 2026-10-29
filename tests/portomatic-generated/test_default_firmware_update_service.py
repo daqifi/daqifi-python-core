@@ -2126,10 +2126,10 @@ class TestUpdateWifiModule:
             shutil.rmtree(firmware_dir, ignore_errors=True)
 
         assert service.current_state == FirmwareUpdateState.COMPLETE
-        # The bridge handling's queries (SYSTem:ERRor?, *IDN?) aside.
+        # The bridge handling's queries aside.
         assert [
             c for c in device.sent_commands
-            if c not in ("SYSTem:ERRor?", "*IDN?")
+            if c not in ("SYSTem:ERRor?", "*IDN?", "SYSTem:POWer:STATe?")
         ] == [
             "SYSTem:POWer:STATe 1",
             "SYSTem:COMMUnicate:LAN:FWUpdate",
