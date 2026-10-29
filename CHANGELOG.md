@@ -79,7 +79,9 @@ aims to follow [Semantic Versioning](https://semver.org/).
   `get_sd_logging_state()` asked `SD:LOGging?`, which no firmware
   implements, after that same `SD:ENAble 1`. The firmware has no query
   for the logging state, so it now returns this session's state, the same
-  as `is_logging_to_sd_card`, without sending anything (#187).
+  as `is_logging_to_sd_card`, without sending anything. A recording started
+  by another client, another session or an earlier process reads `False`
+  (#187).
 - After a JSON or CSV SD logging session the device's stream format, one
   global setting shared with the live stream, stayed non-protobuf, so live
   streaming decoded nothing; `stop_sd_card_logging()` restores protobuf

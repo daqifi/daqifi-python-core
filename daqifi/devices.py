@@ -1807,6 +1807,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
     @property
     def is_logging_to_sd_card(self) -> bool:
+        """Whether THIS session started an SD recording that it hasn't
+        stopped. A recording started by another client, another session or
+        an earlier process reads ``False``: the firmware has no query for it
+        (#187)."""
         return self._is_logging_to_sd
 
     @property
@@ -1922,10 +1926,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._sd_card_files = parse_sd_card_file_list(lines)
 
     def get_sd_logging_state(self) -> bool:
-        """Whether this session has the device logging to the SD card.
+        """Whether THIS session has the device logging to the SD card.
 
         The same value as :attr:`is_logging_to_sd_card`, kept for API
-        compatibility. It sends nothing to the device (#187):
+        compatibility. Only recordings started through this object count: a
+        recording started by another client, another session or an earlier
+        process reads ``False``. It sends nothing to the device (#187):
 
         - the firmware has no SD logging-state query. ``SD:LOGging`` was only
           ever a setter, since renamed ``SD:FILE``, and there is no query for

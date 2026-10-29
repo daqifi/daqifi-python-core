@@ -274,6 +274,12 @@ except SdCardOperationException as e:
     print(f"Generic SD failure: {e}")
 ```
 
+Listing, downloading and deleting refuse while this session is logging to
+the SD card; stop logging first. `is_logging_to_sd_card` and
+`get_sd_logging_state()` report only recordings started through this
+device object. The firmware has no query for it, so a recording started by
+another client, another session or an earlier process reads `False`.
+
 ### Error Queue Inspection
 
 The device maintains a SCPI error queue. ``drain_errors`` empties
