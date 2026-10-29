@@ -28,7 +28,6 @@ class TestSimpleCommands:
             (scpi_commands.enable_device_echo, "SYSTem:ECHO 1"),
             (scpi_commands.enable_storage_sd, "SYSTem:STORage:SD:ENAble 1"),
             (scpi_commands.disable_storage_sd, "SYSTem:STORage:SD:ENAble 0"),
-            (scpi_commands.get_sd_logging_state, "SYSTem:STORage:SD:LOGging?"),
             (scpi_commands.get_sd_file_list, "SYSTem:STORage:SD:LIST?"),
             (scpi_commands.format_sd_card, "SYSTem:STORage:SD:FORmat"),
             (scpi_commands.get_sd_max_file_size, "SYSTem:STORage:SD:MAXSize?"),

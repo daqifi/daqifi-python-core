@@ -211,11 +211,13 @@ def test_a_longer_file_with_the_token_at_the_listed_boundary_is_an_error() -> No
         device.download_sd_card_file("log.bin", io.BytesIO(), expected_size=3)
 
 
-def test_a_listing_taken_while_logging_gives_no_sizes() -> None:
+def test_no_listing_is_taken_while_logging() -> None:
+    # A listing during a recording would end it (#187), so there are no
+    # sizes from one to go stale.
     device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b"log.bin 3\r\n"})
     device._is_logging_to_sd = True
-    device.request_sd_card_file_list()
-    assert device.sd_card_files[0].size is None
+    with pytest.raises(RuntimeError, match="while logging"):
+        device.request_sd_card_file_list()
 
 
 def test_stopping_a_recording_forgets_listed_sizes() -> None:
