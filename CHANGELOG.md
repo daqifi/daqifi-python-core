@@ -29,14 +29,16 @@ aims to follow [Semantic Versioning](https://semver.org/).
   the firmware ends every listing with `__END_OF_LIST__ OK`, `INCOMPLETE`
   or `FAILED`, and a listing marked INCOMPLETE or FAILED came back as if
   it were the whole card. A listing that timed out came back as an empty
-  card. The marker is no longer a file; INCOMPLETE, FAILED, or a reply that
-  never reached the `SYSTem:ERRor?` the listing now sends after `LIST?`,
-  raise `SdCardListIncompleteException` (the reply is retried once first,
-  except after a delete); a missing directory (`[Error:4]` / `[Error:5]
-  Failed to open directory`) raises `SdCardDirectoryNotFoundException`, a
-  `SdCardFilesystemException` subclass. A reply with no files and no
-  marker is refused too, rather than cached as an empty card. Echoes of
-  the listing's own commands are dropped. The legacy
+  card. The marker is no longer a file. The listing now empties the error
+  queue, then sends `SYSTem:ERRor?` after `LIST?` to mark the end of the
+  reply, and raises `SdCardListIncompleteException` when that answer never
+  comes, when it is an error (the firmware's answer to an aborted listing),
+  when the marker says INCOMPLETE or FAILED, or when the marker is missing
+  on firmware 3.8.0 and later (which always sends one) or from an empty
+  listing. It isn't retried automatically. A missing directory
+  (`[Error:4]` / `[Error:5] Failed to open directory`) raises
+  `SdCardDirectoryNotFoundException`, a `SdCardFilesystemException`
+  subclass. Echoes of the listing's own commands are dropped. The legacy
   `NyquistDevice.sd_list_files()` skips the marker and refuses a listing
   marked incomplete too (#188).
 - Every NQ3 DAC write was rejected by the firmware. The voltage setter sent

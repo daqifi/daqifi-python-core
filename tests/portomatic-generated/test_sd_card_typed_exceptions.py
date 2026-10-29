@@ -364,7 +364,9 @@ def _make_streaming_dev_with_canned_reply(reply_bytes: bytes):
     enqueued = {"value": False}
 
     def fake_send(message):
-        if not enqueued["value"]:
+        # Reply to the LIST? itself: the listing first drains the error
+        # queue with SYSTem:ERRor? queries (#188).
+        if not enqueued["value"] and "LIST" in getattr(message, "data", str(message)):
             # Plus the reply to the SYSTem:ERRor? the listing sends as its
             # end-of-reply terminator (#188).
             stream.feed(reply_bytes + b'0,"No error"\r\n')

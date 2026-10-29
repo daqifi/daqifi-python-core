@@ -104,7 +104,7 @@ def test_a_silent_device_is_not_an_empty_card(method) -> None:
     with pytest.raises(SdCardListIncompleteException):
         getattr(device, method)()
     sent = b"".join(device._transport.stream.written)
-    assert sent.count(b"SD:LIST?") == 2  # retried once
+    assert sent.count(b"SD:LIST?") == 1  # no automatic retry (audit r2)
 
 
 def test_an_empty_card_with_a_terminator_is_empty() -> None:
@@ -173,28 +173,65 @@ def test_an_echo_is_never_a_file(method) -> None:
     assert _names(device.sd_card_files) == ["log_a.bin"]
 
 
-def test_a_late_terminator_from_the_first_attempt_does_not_complete_the_retry() -> None:
-    # Audit r1: the timed-out attempt's '0,"No error"' arrived during the
-    # retry, was taken as its terminator, and () was cached as the card.
-    device = _fakes._make_device_with_serial_facade({b"SYSTem:ERRor?": b""})
-    stream = device._transport.stream
-    real_write = stream.write
-    lists = {"n": 0}
-
-    def _write(data):
-        n = real_write(data)
-        if b"SD:LIST?" in bytes(data):
-            lists["n"] += 1
-            if lists["n"] == 2:
-                # The first attempt's terminator, then this attempt's listing.
-                stream.feed(b'0,"No error"\r\nDaqifi/log_a.bin 3\r\n__END_OF_LIST__ OK\r\n')
-        return n
-
-    stream.write = _write
+def test_a_missing_terminator_is_not_retried() -> None:
+    # Audit r2: a timed-out attempt's tail could arrive during a retry and
+    # end it, and no quiet interval proves the first attempt finished, so
+    # there is no automatic retry; the caller decides.
+    device = _fakes._make_device_with_serial_facade(
+        {b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n__END_OF_LIST__ OK\r\n", b"SYSTem:ERRor?": b""}
+    )
     device._sd_card_files = ["sentinel"]
     with pytest.raises(SdCardListIncompleteException):
         device.get_sd_card_files()
+    assert b"".join(device._transport.stream.written).count(b"SD:LIST?") == 1
     assert device._sd_card_files == ["sentinel"]  # nothing cached
+
+
+def _with_error_queue(device, replies):
+    """Answer successive SYSTem:ERRor? queries from ``replies``, then 0."""
+    stream = device._transport.stream
+    stream.response_map.pop(b"SYSTem:ERRor?", None)
+    real_write = stream.write
+    queue = list(replies)
+
+    def _write(data):
+        n = real_write(data)
+        if b"SYSTem:ERRor?" in bytes(data):
+            stream.feed(queue.pop(0) if queue else b'0,"No error"\r\n')
+        return n
+
+    stream.write = _write
+
+
+@pytest.mark.parametrize("version", ["3.8.0", "3.9.1", ""])
+def test_an_aborted_listing_with_files_is_refused(version) -> None:
+    # Audit r2: the firmware sends no marker on abort and answers ERR? with
+    # -200; the files that did arrive were cached as the whole card.
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n"})
+    device._metadata.firmware_version = version
+    # Drain sees an empty queue; the listing's own terminator says -200.
+    _with_error_queue(device, [b'0,"No error"\r\n', b'-200,"Execution error"\r\n'])
+    with pytest.raises(SdCardListIncompleteException):
+        device.get_sd_card_files()
+
+
+def test_a_missing_marker_is_refused_on_firmware_that_always_sends_one() -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n"})
+    device._metadata.firmware_version = "3.8.0"
+    with pytest.raises(SdCardListIncompleteException):
+        device.get_sd_card_files()
+
+
+def test_a_listing_without_a_marker_from_older_firmware_is_accepted() -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n"})
+    device._metadata.firmware_version = "3.7.3"
+    assert _names(device.get_sd_card_files()) == ["log_a.bin"]
+
+
+def test_a_stale_error_is_drained_before_the_listing() -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OK})
+    _with_error_queue(device, [b'-200,"Execution error"\r\n'])
+    assert _names(device.get_sd_card_files()) == ["log_a.bin"]
 
 
 @pytest.mark.parametrize("terminator", [b'+0,"No error"\r\n', b"0,No error\r\n"])
