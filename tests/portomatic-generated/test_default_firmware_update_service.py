@@ -302,6 +302,8 @@ def _fast_options() -> FirmwareUpdateServiceOptions:
         power_on_wifi_module_settle_delay=0.005,
         post_lan_disconnect_port_release_delay=0.005,
         post_usb_transparent_mode_exit_delay=0.005,
+        post_lan_update_apply_delay=0.005,
+        wifi_bridge_entry_time=0.005,
     )
 
 
@@ -2108,6 +2110,7 @@ class TestUpdateWifiModule:
         assert device.sent_commands == [
             "SYSTem:POWer:STATe 1",
             "SYSTem:COMMUnicate:LAN:FWUpdate",
+            "SYSTem:COMMunicate:LAN:APPLY",
             "SYSTem:USB:SetTransparentMode 0",
             "SYSTem:COMMunicate:LAN:ENAbled 1",
             "SYSTem:COMMunicate:LAN:APPLY",

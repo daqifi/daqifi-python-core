@@ -757,7 +757,10 @@ class DefaultFirmwareUpdateService:
         cancel_event: Optional[threading.Event],
     ) -> None:
         total_bytes = 100
-        bridge_state = {"may_be_bridged": False}
+        # What may have reached the device, armed BEFORE each send: a send
+        # that raises can still have been delivered. See
+        # _try_leave_lan_update_mode.
+        bridge_state = {"update_requested": False, "apply_sent_at": None}
 
         try:
             # Honour cancellation BEFORE the WiFi version-check makes
@@ -809,13 +812,20 @@ class DefaultFirmwareUpdateService:
                         self._options.power_on_wifi_module_settle_delay, deadline
                     )
 
+                # FWUpdate only REQUESTS the update (SCPI_LANFwUpdate sets
+                # WIFI_FW_UPDATE_REQUESTED); the next LAN:APPLY is what
+                # enters the bridge and turns USB-transparent mode on. This is
+                # the firmware's documented sequence (firmware/utilities:
+                # POWer:STATe 1, FWUpdate, APPLY, then the flash tool).
+                bridge_state["update_requested"] = True
                 device.send(scpi_commands.set_lan_firmware_update_mode())
-                # From here the device may be bridged: the failure paths
-                # send the bridge exit. A redundant exit is harmless; a
-                # missed one leaves the console dead until a power cycle.
-                bridge_state["may_be_bridged"] = True
                 self._sleep_with_cancel(
                     self._options.post_lan_firmware_mode_delay, deadline
+                )
+                bridge_state["apply_sent_at"] = time.monotonic()
+                device.send(scpi_commands.apply_network_lan())
+                self._sleep_with_cancel(
+                    self._options.post_lan_update_apply_delay, deadline
                 )
                 device.disconnect()
                 # The OS frees the COM port some time after close; the
@@ -962,9 +972,7 @@ class DefaultFirmwareUpdateService:
         except _CancelledError as exc:
             failed_state = self._current_state
             failed_operation = "WiFi module update canceled."
-            self._try_leave_lan_update_mode(
-                device, bridge_state["may_be_bridged"]
-            )
+            self._try_leave_lan_update_mode(device, bridge_state)
             self._transition_to_state(
                 FirmwareUpdateState.FAILED, failed_operation
             )
@@ -985,9 +993,7 @@ class DefaultFirmwareUpdateService:
             failed_operation = self._current_operation
             # Captured first, so the failure names the step that failed, not
             # the recovery that follows.
-            self._try_leave_lan_update_mode(
-                device, bridge_state["may_be_bridged"]
-            )
+            self._try_leave_lan_update_mode(device, bridge_state)
             self._transition_to_state(
                 FirmwareUpdateState.FAILED, failed_operation
             )
@@ -1009,19 +1015,40 @@ class DefaultFirmwareUpdateService:
             ) from exc
 
     def _try_leave_lan_update_mode(
-        self, device: "DaqifiStreamingDevice", may_be_bridged: bool
+        self, device: "DaqifiStreamingDevice", bridge_state: dict
     ) -> None:
-        """Best effort: take the device out of the USB-transparent bridge
-        after a failed or cancelled WiFi update. Never raises.
+        """Best effort: return the device to normal after a failed or
+        cancelled WiFi update. Never raises.
 
-        Sends ``SetTransparentMode 0`` and then ``LAN:APPLY``, which kicks
-        the WiFi manager out of its bridge state, as upstream does. Not the
-        success path's ENAbled/APPLY/SAVE restore: nothing is persisted after
-        a flash that didn't complete. The reconnect wait gets its own budget
-        (the VERIFYING timeout), and ignores the caller's cancel, which is
+        The firmware's WiFi manager (``wifi_manager.c``) has three states
+        here, and ``LAN:APPLY`` does something different in each:
+
+        - normal: APPLY reinitialises WiFi;
+        - update REQUESTED (FWUpdate received): APPLY ENTERS the bridge and
+          turns USB-transparent mode on;
+        - bridge READY: APPLY leaves the bridge and clears both flags.
+
+        ``SetTransparentMode 0`` always reaches the console, and is a no-op
+        when transparent mode is off.
+
+        A send that raised may still have been delivered, so the device can
+        be in any of the three states once FWUpdate has been attempted.
+        Recovery is two rounds of {wait for the bridge to come up,
+        ``SetTransparentMode 0``, APPLY}. That ends in normal from every
+        state: from READY the first round leaves the bridge and the second
+        only reinitialises WiFi; from REQUESTED the first round enters the
+        bridge and the second leaves it; from normal both only reinitialise.
+        A single round would leave a REQUESTED device bridged. The wait is
+        ``wifi_bridge_entry_time``: the firmware waits up to 3 s twice for
+        the WINC driver on the way in, and an exit sent before the bridge is
+        READY would enter it again. Nothing is saved after a flash that
+        didn't complete.
+
+        The waits and the reconnect get their own budget (the VERIFYING
+        timeout for the reconnect) and ignore the caller's cancel, which is
         already set when this runs after a cancel.
         """
-        if not may_be_bridged:
+        if not bridge_state.get("update_requested"):
             return
         from daqifi._internal import scpi_commands
 
@@ -1036,15 +1063,21 @@ class DefaultFirmwareUpdateService:
                 "WiFi update mode."
             ),
         )
+        entry_time = self._options.wifi_bridge_entry_time
+        last_apply = bridge_state.get("apply_sent_at")
         try:
             self._wait_for_serial_reconnect(device, deadline)
-            device.send(scpi_commands.set_usb_transparency_mode(0))
-            # Uncancelled: stopping here would hand the console back with
-            # the WiFi manager still in its bridge state.
-            delay = self._options.post_usb_transparent_mode_exit_delay
-            if delay > 0:
-                time.sleep(delay)
-            device.send(scpi_commands.apply_network_lan())
+            for _ in range(2):
+                if last_apply is not None:
+                    remaining = last_apply + entry_time - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(remaining)
+                device.send(scpi_commands.set_usb_transparency_mode(0))
+                delay = self._options.post_usb_transparent_mode_exit_delay
+                if delay > 0:
+                    time.sleep(delay)
+                last_apply = time.monotonic()
+                device.send(scpi_commands.apply_network_lan())
             self._logger.info(
                 "Sent the WiFi bridge-exit sequence after a failed WiFi "
                 "module update."
@@ -1053,7 +1086,8 @@ class DefaultFirmwareUpdateService:
             self._logger.warning(
                 "Could not take the device out of WiFi update mode after a "
                 "failed update; it may still be in USB-transparent bridge "
-                "mode and need a power cycle: %s",
+                "mode, or hold a pending update request, and need a power "
+                "cycle: %s",
                 exc,
             )
 

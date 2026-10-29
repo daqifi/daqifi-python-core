@@ -1,15 +1,17 @@
 """#190 items 1-4: the WiFi module update and the USB-transparent bridge.
 
-LAN:FWUpdate makes the firmware forward the USB CDC port raw to the WINC
-(wifi_serial_bridge_interface.c, UsbCdc_SetTransparentMode(true)); only an
+LAN:FWUpdate only requests the update (SCPI_LANFwUpdate sets
+WIFI_FW_UPDATE_REQUESTED); the next LAN:APPLY enters the bridge, which forwards
+the USB CDC port raw to the WINC (UsbCdc_SetTransparentMode(true)); only an
 exact ``SYSTem:USB:SetTransparentMode 0`` reaches the console again
-(UsbCdc.c, UNSET_TRANSPARENT_FORMS). Reference: daqifi-core WifiModuleUpdater.
+(UsbCdc.c, UNSET_TRANSPARENT_FORMS), and APPLY from READY leaves the bridge.
 """
 
 import importlib.util
 import os
 import shutil
 import threading
+import time
 
 import pytest
 
@@ -64,6 +66,12 @@ def _options():
     options.power_on_wifi_module_settle_delay = 0.005
     options.post_lan_disconnect_port_release_delay = 0.005
     options.post_usb_transparent_mode_exit_delay = 0.005
+    # The flash tool runs for minutes on a real board, long after the bridge
+    # is up; here the bridge has to be up before the fake tool "succeeds".
+    options.post_lan_update_apply_delay = 0.05
+    # Longer than the model's bridge entry, as the real default is longer
+    # than the firmware's.
+    options.wifi_bridge_entry_time = 0.1
     return options
 
 
@@ -93,12 +101,67 @@ def _update(device, runner, cancel_event=None):
         shutil.rmtree(firmware_dir, ignore_errors=True)
 
 
-def test_a_successful_flash_leaves_the_bridge_before_restoring_lan() -> None:
-    device = _f._FakeStreamingDevice("fake-port-1")
+class _FirmwareModel(_f._FakeStreamingDevice):
+    """A device that follows the firmware's WiFi-update transitions.
+
+    wifi_manager.c / SCPILAN.c / UsbCdc.c (daqifi-nyquist-firmware main):
+    FWUpdate sets REQUESTED; APPLY enters the bridge from REQUESTED (READY
+    and transparent after the WINC init), leaves it from READY, and only
+    reinitialises otherwise; while transparent, everything but
+    SetTransparentMode 0 goes raw to the WINC.
+    """
+
+    ENTRY_DELAY = 0.03
+
+    def __init__(self, name="fake-port", deliver_then_raise=None, drop=None):
+        super().__init__(name)
+        self.state = "normal"
+        self.ready_at = None
+        self.transparent = False
+        self.raw_to_winc = []
+        self._deliver_then_raise = deliver_then_raise
+        self._drop = drop
+
+    def _settle(self):
+        if self.state == "entering" and time.monotonic() >= self.ready_at:
+            self.state, self.transparent = "ready", True
+
+    def send(self, message):
+        text = getattr(message, "data", None) or str(message)
+        if text == self._drop:
+            self._drop = None
+            raise OSError("write failed before delivery")
+        self.sent_commands.append(text)
+        self._settle()
+        if self.transparent and text != BRIDGE_EXIT:
+            self.raw_to_winc.append(text)
+        elif text == BRIDGE_EXIT:
+            self.transparent = False
+        elif text == FW_UPDATE and self.state == "normal":
+            self.state = "requested"
+        elif text == LAN_APPLY:
+            if self.state in ("requested", "entering"):
+                self.state, self.ready_at = "entering", time.monotonic() + self.ENTRY_DELAY
+            elif self.state == "ready":
+                self.state = "normal"
+        if text == self._deliver_then_raise:
+            self._deliver_then_raise = None
+            raise OSError("flush failed after delivery")
+
+    def final_state(self):
+        time.sleep(self.ENTRY_DELAY * 2)
+        self._settle()
+        return self.state, self.transparent
+
+
+def test_a_successful_flash_enters_the_bridge_and_leaves_it_before_restoring_lan() -> None:
+    device = _FirmwareModel()
     _update(device, _f._FakeExternalProcessRunner(_result()))
     assert device.sent_commands == [
-        POWER_ON, FW_UPDATE, BRIDGE_EXIT, LAN_ENABLE, LAN_APPLY, LAN_SAVE,
+        POWER_ON, FW_UPDATE, LAN_APPLY, BRIDGE_EXIT, LAN_ENABLE, LAN_APPLY, LAN_SAVE,
     ]
+    assert device.final_state() == ("normal", False)
+    assert device.raw_to_winc == []
 
 
 @pytest.mark.parametrize(
@@ -110,46 +173,68 @@ def test_a_successful_flash_leaves_the_bridge_before_restoring_lan() -> None:
     ids=["exit-0-no-output", "exit-0-other-failure-line"],
 )
 def test_success_needs_the_tools_own_success_line(result) -> None:
-    device = _f._FakeStreamingDevice("fake-port-2")
+    device = _FirmwareModel()
     with pytest.raises(FirmwareUpdateException) as excinfo:
         _update(device, _f._FakeExternalProcessRunner(result))
     assert SUCCESS in str(excinfo.value.__cause__)
+    assert device.final_state() == ("normal", False)
 
 
 def test_a_failed_flash_leaves_the_bridge_without_persisting() -> None:
-    device = _f._FakeStreamingDevice("fake-port-3")
+    device = _FirmwareModel()
     with pytest.raises(FirmwareUpdateException):
         _update(device, _f._FakeExternalProcessRunner(_result(lines=("x",), exit_code=1)))
-    after = device.sent_commands[device.sent_commands.index(FW_UPDATE) + 1:]
-    assert after == [BRIDGE_EXIT, LAN_APPLY]
+    assert device.final_state() == ("normal", False)
+    assert LAN_SAVE not in device.sent_commands
     assert device.is_connected
 
 
-def test_a_cancel_after_update_mode_leaves_the_bridge() -> None:
+def test_a_cancel_between_fwupdate_and_apply_does_not_leave_it_bridged() -> None:
+    # Audit r1 (1): recovery sent T0 then APPLY, and from REQUESTED that
+    # APPLY enters the bridge.
     cancel = threading.Event()
-    device = _f._FakeStreamingDevice("fake-port-4")
-    real_disconnect = device.disconnect
+    device = _FirmwareModel()
+    real_send = device.send
 
-    def _disconnect_then_cancel():
-        real_disconnect()
-        cancel.set()
+    def _send(message):
+        real_send(message)
+        if (getattr(message, "data", None) or str(message)) == FW_UPDATE:
+            cancel.set()
 
-    device.disconnect = _disconnect_then_cancel
+    device.send = _send
     with pytest.raises(FirmwareUpdateException):
         _update(device, _f._FakeExternalProcessRunner(_result()), cancel_event=cancel)
-    assert device.sent_commands[-2:] == [BRIDGE_EXIT, LAN_APPLY]
+    assert device.final_state() == ("normal", False)
+    assert device.raw_to_winc == []
+
+
+@pytest.mark.parametrize("command", [FW_UPDATE, LAN_APPLY])
+def test_a_send_that_raises_after_delivery_is_still_recovered(command) -> None:
+    # Audit r1 (2): the flag was armed only after send() returned.
+    device = _FirmwareModel(deliver_then_raise=command)
+    with pytest.raises(FirmwareUpdateException):
+        _update(device, _f._FakeExternalProcessRunner(_result()))
+    assert device.final_state() == ("normal", False)
+
+
+def test_an_apply_that_never_arrived_is_still_safe() -> None:
+    # Armed before the send, so recovery runs from REQUESTED.
+    device = _FirmwareModel(drop=LAN_APPLY)
+    with pytest.raises(FirmwareUpdateException):
+        _update(device, _f._FakeExternalProcessRunner(_result()))
+    assert device.final_state() == ("normal", False)
 
 
 def test_a_failure_before_update_mode_sends_no_bridge_exit(monkeypatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda *a, **k: None)
-    device = _f._FakeStreamingDevice("fake-port-5")
+    device = _FirmwareModel()
     with pytest.raises(FirmwareUpdateException):
         _update(device, _f._FakeExternalProcessRunner(_result()))
     assert device.sent_commands == []
 
 
 def test_a_device_that_never_returns_keeps_the_original_failure() -> None:
-    device = _f._FakeStreamingDevice("fake-port-6")
+    device = _FirmwareModel()
     device.connect_failures_before_success = 10**6
     with pytest.raises(FirmwareUpdateException) as excinfo:
         _update(device, _f._FakeExternalProcessRunner(_result(lines=(), exit_code=1)))
@@ -174,7 +259,7 @@ def test_power_on_can_be_turned_off() -> None:
         service.update_wifi_module(device, firmware_dir)
     finally:
         shutil.rmtree(firmware_dir, ignore_errors=True)
-    assert device.sent_commands[0] == FW_UPDATE
+    assert device.sent_commands[:2] == [FW_UPDATE, LAN_APPLY]
 
 
 @pytest.mark.parametrize(
@@ -184,6 +269,8 @@ def test_power_on_can_be_turned_off() -> None:
         ("post_lan_disconnect_port_release_delay", -0.1),
         ("post_usb_transparent_mode_exit_delay", -0.1),
         ("wifi_flash_success_marker", " "),
+        ("post_lan_update_apply_delay", -0.1),
+        ("wifi_bridge_entry_time", -1.0),
     ],
 )
 def test_options_reject_invalid_bridge_settings(field, value) -> None:

@@ -25,20 +25,24 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- After a successful WiFi module flash the device stayed in USB-transparent
-  bridge mode: the LAN restore commands went raw to the WiFi chip, the LAN
-  settings were not restored and the console stayed dead until a power
-  cycle. The update now sends `SYSTem:USB:SetTransparentMode 0` before the
-  restore, and after a failed or cancelled flash sends it and
-  `LAN:APPLY` (without saving anything). Success now needs the flash tool's
-  own success line, not just exit code 0; the WiFi module is powered on
-  before `LAN:FWUpdate`; and the update waits for the OS to release the
-  serial port before starting the tool. New options:
+- The WiFi module update didn't follow the firmware's sequence.
+  `LAN:FWUpdate` only requests the update; the following `LAN:APPLY` enters
+  the USB-transparent bridge, and `LAN:APPLY` from the bridge leaves it. The
+  update never sent that APPLY, and after a successful flash it restored LAN
+  with the bridge still on, so the commands went raw to the WiFi chip and
+  the console stayed dead until a power cycle. The update now sends
+  `POWer:STATe 1`, `FWUpdate`, `APPLY`, runs the tool, then sends
+  `SYSTem:USB:SetTransparentMode 0` before the LAN restore. After a failed
+  or cancelled update it sends two rounds of the bridge exit and `APPLY`,
+  which return the device to normal whichever state it was left in, and
+  saves nothing. Success now needs the flash tool's own success line, not
+  just exit code 0, and the update waits for the OS to release the serial
+  port before starting the tool. New options:
   `power_on_wifi_module_before_lan_update_mode`,
-  `power_on_wifi_module_settle_delay`,
+  `power_on_wifi_module_settle_delay`, `post_lan_update_apply_delay`,
   `post_lan_disconnect_port_release_delay`,
-  `post_usb_transparent_mode_exit_delay`, `wifi_flash_success_marker`
-  (#190).
+  `post_usb_transparent_mode_exit_delay`, `wifi_bridge_entry_time`,
+  `wifi_flash_success_marker` (#190).
 - SD CSV logs written at voltage precision 0 (integer millivolts) were read
   as raw ADC codes, and `SdCardParseOptions.integer_units` applied to JSON
   only. CSV now follows the same option through the shared firmware value

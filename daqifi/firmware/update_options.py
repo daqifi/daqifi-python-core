@@ -100,17 +100,22 @@ class FirmwareUpdateServiceOptions:
     application_vendor_id: int = 0x04D8
     application_product_id: int = 0xF794
 
-    # WiFi update mode and the USB-transparent bridge (port of daqifi-core
-    # WifiModuleUpdater, #190). LAN:FWUpdate makes the firmware forward the
-    # USB CDC port raw to the WINC until ``SYSTem:USB:SetTransparentMode 0``.
-    # The WINC is off in standby and right after a PIC32 reflash, so it is
-    # powered on first; the flash tool's success line, not its exit code,
-    # decides success. Delays may be zero.
+    # WiFi update mode and the USB-transparent bridge (#190). LAN:FWUpdate
+    # requests the update and the following LAN:APPLY enters the bridge,
+    # which forwards the USB CDC port raw to the WINC until
+    # ``SYSTem:USB:SetTransparentMode 0``. The WINC is off in standby and
+    # right after a PIC32 reflash, so it is powered on first; the flash
+    # tool's success line, not its exit code, decides success.
+    # ``wifi_bridge_entry_time`` is how long after an APPLY the failure path
+    # waits before the next bridge exit, so it doesn't catch the bridge
+    # half-way up. Delays may be zero.
     power_on_wifi_module_before_lan_update_mode: bool = True
     power_on_wifi_module_settle_delay: float = 1.0
     post_lan_disconnect_port_release_delay: float = 1.5
     post_usb_transparent_mode_exit_delay: float = 0.1
     wifi_flash_success_marker: str = "Operation completed successfully"
+    post_lan_update_apply_delay: float = 1.0
+    wifi_bridge_entry_time: float = 7.0
 
     # ------------------------------------------------------------------
     # Lookup helpers
@@ -200,6 +205,8 @@ class FirmwareUpdateServiceOptions:
             "power_on_wifi_module_settle_delay",
             "post_lan_disconnect_port_release_delay",
             "post_usb_transparent_mode_exit_delay",
+            "post_lan_update_apply_delay",
+            "wifi_bridge_entry_time",
         ):
             value = getattr(self, field_name)
             if value < 0:
