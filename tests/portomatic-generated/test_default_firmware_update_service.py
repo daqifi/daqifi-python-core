@@ -303,7 +303,8 @@ def _fast_options() -> FirmwareUpdateServiceOptions:
         post_lan_disconnect_port_release_delay=0.005,
         post_usb_transparent_mode_exit_delay=0.005,
         post_lan_update_apply_delay=0.005,
-        wifi_bridge_entry_time=0.005,
+        wifi_recovery_settle_time=0.05,
+        wifi_recovery_timeout=0.5,
     )
 
 
