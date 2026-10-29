@@ -124,12 +124,22 @@ class _SampleReceivedMixin:
                 )
 
 
+def _no_dac_enable() -> Exception:
+    from .exceptions import FeatureNotSupportedError
+
+    return FeatureNotSupportedError(
+        "DAC outputs have no enable/disable on current firmware "
+        "(ENAble:SOURce:DC was removed); an output drives the voltage last "
+        "set. Set voltage to 0.0 to stop driving it."
+    )
+
+
 class AnalogOutputChannel:
     """
     Single analog output (DAC) channel.
 
-    Provides voltage control and enable/disable functionality.
-    Available on NQ3 variant only.
+    Provides voltage control. Current firmware has no per-channel DAC
+    enable, so :attr:`enabled` raises. Available on NQ3 variant only.
     """
 
     def __init__(self, channel_id: int, comm: SerialInterface):
@@ -195,12 +205,17 @@ class AnalogOutputChannel:
             ConfigurationError: If voltage out of range
             CommandError: If command fails
         """
-        if not 0.0 <= value <= 10.0:
+        if isinstance(value, bool) or not 0.0 <= value <= 10.0:
             raise ConfigurationError(f"Voltage must be between 0.0 and 10.0V, got {value}V")
 
+        # The firmware takes ``SOURce:VOLTage:LEVel <ch>,<volts>``; with a
+        # space between them its parser answers -101 Invalid character and
+        # nothing is written (#189). Pre-formatted so send_set_with_error
+        # adds only the space after the header.
+        cmd_value = f"{self._channel},{value}"
         try:
             success, error_response = self._comm.send_set_with_error(
-                f"{scpi.AnalogOutput.VOLTAGE_SET} {self._channel}", value,
+                scpi.AnalogOutput.VOLTAGE_SET, cmd_value,
             )
             _check_setter_response(success, error_response, "set voltage")
         except CommandError as e:
@@ -217,43 +232,25 @@ class AnalogOutputChannel:
 
     @property
     def enabled(self) -> bool:
-        """
-        Get channel enable state.
+        """Not supported: the firmware has no per-channel DAC enable.
 
-        Returns:
-            True if channel enabled, False otherwise
+        ``ENAble:SOURce:DC`` was removed from the firmware (0af9efa86); a
+        DAC output drives whatever voltage was last set. Set ``voltage`` to
+        0.0 to stop driving an output (#189).
+
+        Raises:
+            FeatureNotSupportedError: always.
         """
-        try:
-            response = self._comm.send_query(f"{scpi.AnalogOutput.ENABLE_QUERY} {self._channel}")
-            return scpi.parse_bool(response)
-        except Exception as e:
-            raise CommandError(f"Failed to read enable state on channel {self._channel}: {e}")
+        raise _no_dac_enable()
 
     @enabled.setter
     def enabled(self, value: bool):
-        """
-        Enable or disable channel output.
-
-        Args:
-            value: True to enable, False to disable
-        """
-        try:
-            success, error_response = self._comm.send_set_with_error(
-                f"{scpi.AnalogOutput.ENABLE_SET} {self._channel}", value,
-            )
-            _check_setter_response(success, error_response, "set enable state")
-        except CommandError as e:
-            raise CommandError(
-                f"Failed to set enable state on channel {self._channel}: {e}"
-            ) from e
-        except Exception as e:
-            raise CommandError(f"Failed to set enable state on channel {self._channel}: {e}")
+        raise _no_dac_enable()
 
     def __repr__(self) -> str:
         try:
             v = self.voltage
-            e = self.enabled
-            return f"AnalogOutputChannel({self._channel}, voltage={v:.3f}V, enabled={e})"
+            return f"AnalogOutputChannel({self._channel}, voltage={v:.3f}V)"
         except:
             return f"AnalogOutputChannel({self._channel})"
 
@@ -722,14 +719,21 @@ class AnalogOutputs(ChannelCollection):
                 self._channels[channel_id].voltage = voltage
 
     def enable_all(self):
-        """Enable all channels"""
-        for channel in self._channels:
-            channel.enabled = True
+        """Not supported: the firmware has no DAC enable (#189).
+
+        Raises:
+            FeatureNotSupportedError: always.
+        """
+        raise _no_dac_enable()
 
     def disable_all(self):
-        """Disable all channels"""
-        for channel in self._channels:
-            channel.enabled = False
+        """Not supported: the firmware has no DAC enable. Use
+        ``set_voltages`` with 0.0 to stop driving outputs (#189).
+
+        Raises:
+            FeatureNotSupportedError: always.
+        """
+        raise _no_dac_enable()
 
     def __repr__(self) -> str:
         return f"AnalogOutputs({len(self._channels)} channels)"

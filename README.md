@@ -55,7 +55,6 @@ device.power_up()
 
 # Control DAC (NQ3 only)
 device.analog_outputs[0].voltage = 5.0
-device.analog_outputs[0].enabled = True
 
 # Configure ADC
 device.analog_inputs[0].range = "10V"
@@ -101,9 +100,8 @@ with NyquistDevice.connect("/dev/ttyACM0") as device:
 ### DAC Control (NQ3 Only)
 
 ```python
-# Single channel
+# Single channel; an output drives the voltage last set
 device.analog_outputs[0].voltage = 5.0
-device.analog_outputs[0].enabled = True
 
 # Multiple channels
 device.analog_outputs.set_voltages({
@@ -112,8 +110,8 @@ device.analog_outputs.set_voltages({
     2: 1.8
 })
 
-# Enable all
-device.analog_outputs.enable_all()
+# Stop driving outputs (there is no DAC enable/disable on current firmware)
+device.analog_outputs.set_voltages({0: 0.0, 1: 0.0, 2: 0.0})
 
 # Read back
 voltage = device.analog_outputs[0].voltage

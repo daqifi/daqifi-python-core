@@ -98,21 +98,16 @@ class AnalogInput:
 
 # Analog output (DAC) commands
 class AnalogOutput:
-    """DAC SCPI commands (NQ3 only)"""
-    # Voltage control
+    """DAC SCPI commands (NQ3 only).
+
+    Current firmware registers only ``SOURce:VOLTage:LEVel`` and its query
+    for the DAC. ``ENAble:SOURce:DC`` and ``CONFigure:DAC:RANGe`` were removed
+    (firmware 0af9efa86), and ``CONFigure:DAC:UPDATE`` is not registered.
+    The setter takes ``<ch>,<volts>``: a space between them is answered with
+    -101 Invalid character (#189).
+    """
     VOLTAGE_QUERY = "SOUR:VOLT:LEV?"
     VOLTAGE_SET = "SOUR:VOLT:LEV"
-
-    # Channel enable
-    ENABLE_QUERY = "ENAB:SOUR:DC?"
-    ENABLE_SET = "ENAB:SOUR:DC"
-
-    # Range configuration
-    RANGE_QUERY = "CONF:DAC:RANG?"
-    RANGE_SET = "CONF:DAC:RANG"
-
-    # Update outputs
-    UPDATE = "CONF:DAC:UPDATE"
 
     # Calibration
     CAL_SLOPE_SET = "CONF:DAC:chanCALM"
