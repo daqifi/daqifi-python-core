@@ -1056,6 +1056,29 @@ class DefaultFirmwareUpdateService:
             raise self._create_firmware_update_exception(
                 failed_state, failed_operation, exc
             ) from exc
+        except BaseException:
+            # KeyboardInterrupt / SystemExit, e.g. Ctrl-C while the flash
+            # tool runs: the device can be bridged all the same, so it gets
+            # the same recovery, and the service doesn't stay in its
+            # current state. The interrupt itself is re-raised unchanged.
+            failed_operation = self._current_operation
+            try:
+                if not self._try_leave_lan_update_mode(device, bridge_state):
+                    failed_operation += _NOT_RECOVERED
+            except BaseException:
+                # A second interrupt during recovery: say what it leaves.
+                failed_operation += _NOT_RECOVERED
+                self._logger.warning(
+                    "Interrupted while taking the device out of WiFi update "
+                    "mode; it may be in USB-transparent bridge mode, or hold "
+                    "a pending update request. Power-cycle it."
+                )
+                raise
+            finally:
+                self._transition_to_state(
+                    FirmwareUpdateState.FAILED, failed_operation
+                )
+            raise
 
     # -- WiFi bridge (#190) ----------------------------------------------
     #

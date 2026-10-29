@@ -516,6 +516,66 @@ def test_recovery_on_a_board_that_dropped_to_standby_is_unconfirmed(clock) -> No
     assert "power-cycle it" in str(excinfo.value)
 
 
+class _InterruptedTool(_f._FakeExternalProcessRunner):
+    def run(self, request):
+        self.last_request = request
+        raise KeyboardInterrupt
+
+
+def _service(runner):
+    return DefaultFirmwareUpdateService(
+        hid_transport=_f._FakeHidTransport(),
+        firmware_download_service=_f._FakeFirmwareDownloadService(),
+        external_process_runner=runner,
+        bootloader_protocol=_f._FakeBootloaderProtocol([bytes([0x10])]),
+        hid_device_enumerator=_f._FakeHidEnumerator([]),
+        options=_options(),
+    )
+
+
+def test_ctrl_c_during_the_flash_tool_still_leaves_the_bridge(clock) -> None:
+    # Audit r5: KeyboardInterrupt bypassed both handlers, leaving the device
+    # READY and transparent and the service in PROGRAMMING.
+    from daqifi.enums import FirmwareUpdateState
+
+    device = _FirmwareModel(clock)
+    service = _service(_InterruptedTool())
+    firmware_dir = _f._make_temp_wifi_dir()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            service.update_wifi_module(device, firmware_dir)
+    finally:
+        shutil.rmtree(firmware_dir, ignore_errors=True)
+    assert device.final_state() == ("normal", False)
+    assert service.current_state == FirmwareUpdateState.FAILED
+
+
+def test_a_second_ctrl_c_during_recovery_says_what_it_leaves(clock, caplog) -> None:
+    from daqifi.enums import FirmwareUpdateState
+
+    device = _FirmwareModel(clock)
+    real_send = device.send
+    exits = {"n": 0}
+
+    def _send(message):
+        if (getattr(message, "data", None) or str(message)) == BRIDGE_EXIT:
+            exits["n"] += 1
+            if exits["n"] == 1:
+                raise KeyboardInterrupt
+        real_send(message)
+
+    device.send = _send
+    service = _service(_InterruptedTool())
+    firmware_dir = _f._make_temp_wifi_dir()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            service.update_wifi_module(device, firmware_dir)
+    finally:
+        shutil.rmtree(firmware_dir, ignore_errors=True)
+    assert service.current_state == FirmwareUpdateState.FAILED
+    assert "Power-cycle it" in caplog.text
+
+
 def test_a_failure_before_update_mode_sends_no_bridge_exit(clock, monkeypatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda *a, **k: None)
     device = _FirmwareModel(clock)
