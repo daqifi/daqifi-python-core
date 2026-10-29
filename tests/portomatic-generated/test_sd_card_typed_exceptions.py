@@ -365,7 +365,9 @@ def _make_streaming_dev_with_canned_reply(reply_bytes: bytes):
 
     def fake_send(message):
         if not enqueued["value"]:
-            stream.feed(reply_bytes)
+            # Plus the reply to the SYSTem:ERRor? the listing sends as its
+            # end-of-reply terminator (#188).
+            stream.feed(reply_bytes + b'0,"No error"\r\n')
             enqueued["value"] = True
 
     dev.send = fake_send

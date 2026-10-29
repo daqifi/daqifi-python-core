@@ -17,6 +17,7 @@ import functools
 import logging
 import os
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -54,8 +55,8 @@ from .sdcard import (
     SdCardDownloadResult,
     SdCardFileInfo,
     SdCardTransferProgress,
+    check_sd_card_listing,
     parse_sd_card_file_list,
-    throw_if_sd_card_list_error,
 )
 from .transport import (
     HidLibraryTransport,
@@ -257,6 +258,24 @@ def _strip_prompt_prefixes(lines: Sequence[str]) -> List[str]:
         else:
             out.append(line)
     return out
+
+
+# The reply to the SYSTem:ERRor? sent after SD:LIST?, e.g. '0,"No error"'.
+_ERROR_QUEUE_REPLY = re.compile(r'^\s*-?\d+\s*,\s*"')
+
+
+def _split_at_list_terminator(lines: Sequence[str]) -> Optional[List[str]]:
+    """The listing before the ``SYSTem:ERRor?`` reply that ends it, or
+    ``None`` when that reply never came: the capture timed out or was cut
+    short, and what arrived can't be told from an empty card (#188).
+
+    The reply only marks the end. Its error code isn't attributed to the
+    listing, because the queue can hold entries from earlier commands.
+    """
+    for index in range(len(lines) - 1, -1, -1):
+        if _ERROR_QUEUE_REPLY.match(lines[index]):
+            return list(lines[:index])
+    return None
 
 
 def _exclusive_sd_operation(method):
@@ -1901,12 +1920,15 @@ class DaqifiStreamingDevice(DaqifiDevice):
             self.prepare_sd_interface()
             time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
             self.send(scpi_commands.get_sd_file_list())
+            self.send(scpi_commands.get_last_error())
 
         try:
-            lines = self.execute_text_command(
-                _setup_list,
-                response_timeout_ms=3000,
-                completion_timeout_ms=1500,
+            files = self._read_sd_listing(
+                lambda: self.execute_text_command(
+                    _setup_list,
+                    response_timeout_ms=3000,
+                    completion_timeout_ms=1500,
+                )
             )
         finally:
             if self.is_connected:
@@ -1917,13 +1939,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                         "Failed to restore LAN interface after SD list"
                     )
 
-        # Classify firmware error states (no card / filesystem failure /
-        # generic SCPI error) BEFORE handing to the parser, so callers
-        # get a typed exception instead of an empty list. Mirrors
-        # upstream daqifi-core PR #182.
-        lines = _strip_prompt_prefixes(lines)
-        throw_if_sd_card_list_error(lines)
-        self._sd_card_files = parse_sd_card_file_list(lines)
+        self._sd_card_files = files
 
     def get_sd_logging_state(self) -> bool:
         """Whether THIS session has the device logging to the SD card.
@@ -2090,16 +2106,21 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.stop_streaming())
         self._is_streaming = False
 
-        try:
-            lines = self._execute_raw_text_capture(
+        def _capture() -> List[str]:
+            return self._execute_raw_text_capture(
                 lambda: (
                     self.prepare_sd_interface(),
                     time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S),
                     self.send(scpi_commands.delete_sd_file(file_name)),
                     self.send(scpi_commands.get_sd_file_list()),
+                    self.send(scpi_commands.get_last_error()),
                 ),
                 response_timeout_s=3.0,
             )
+
+        try:
+            # No retry: it would send the DELete again.
+            files = self._read_sd_listing(_capture, attempts=1)
         finally:
             if self.is_connected:
                 try:
@@ -2107,8 +2128,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 except Exception:
                     pass
 
-        throw_if_sd_card_list_error(lines)
-        self._sd_card_files = parse_sd_card_file_list(lines)
+        self._sd_card_files = files
         if self._is_logging_to_sd:
             self._forget_sd_card_sizes()
 
@@ -2171,15 +2191,19 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.stop_streaming())
         self._is_streaming = False
 
-        try:
-            lines = self._execute_raw_text_capture(
+        def _capture() -> List[str]:
+            return self._execute_raw_text_capture(
                 lambda: (
                     self.prepare_sd_interface(),
                     time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S),
                     self.send(scpi_commands.get_sd_file_list()),
+                    self.send(scpi_commands.get_last_error()),
                 ),
                 response_timeout_s=3.0,
             )
+
+        try:
+            files = self._read_sd_listing(_capture)
         finally:
             if self.is_connected:
                 try:
@@ -2187,8 +2211,6 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 except Exception:
                     pass
 
-        throw_if_sd_card_list_error(lines)
-        files = parse_sd_card_file_list(lines)
         self._sd_card_files = files
         return tuple(files)
 
@@ -2321,6 +2343,34 @@ class DaqifiStreamingDevice(DaqifiDevice):
         )
 
     # ---- raw-capture helpers (consumer-pause pattern) --------------------
+
+    def _read_sd_listing(
+        self, capture: Callable[[], List[str]], attempts: int = 2
+    ) -> List[SdCardFileInfo]:
+        """Run a listing capture whose last command is ``SYSTem:ERRor?``,
+        and return the files (#188).
+
+        A reply that never reached that terminator is retried
+        (``attempts`` in all), then raised as
+        :class:`SdCardListIncompleteException` rather than returned as an
+        empty card. A terminated reply is then classified: no card,
+        filesystem errors, a missing directory, and an end-of-listing marker
+        of ``INCOMPLETE`` / ``FAILED`` all raise.
+        """
+        from .exceptions import SdCardListIncompleteException
+
+        lines: List[str] = []
+        for attempt in range(attempts):
+            if attempt:
+                time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+            lines = _strip_prompt_prefixes(capture())
+            listing = _split_at_list_terminator(lines)
+            if listing is not None:
+                check_sd_card_listing(listing)
+                return parse_sd_card_file_list(listing)
+        raise SdCardListIncompleteException(
+            lines, "the reply ended before the device answered SYSTem:ERRor?"
+        )
 
     def _execute_raw_text_capture(
         self,

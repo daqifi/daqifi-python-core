@@ -25,6 +25,18 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- SD listings on current firmware returned a file named `__END_OF_LIST__`:
+  the firmware ends every listing with `__END_OF_LIST__ OK`, `INCOMPLETE`
+  or `FAILED`, and a listing marked INCOMPLETE or FAILED came back as if
+  it were the whole card. A listing that timed out came back as an empty
+  card. The marker is no longer a file; INCOMPLETE, FAILED, or a reply that
+  never reached the `SYSTem:ERRor?` the listing now sends after `LIST?`,
+  raise `SdCardListIncompleteException` (the reply is retried once first,
+  except after a delete); a missing directory (`[Error:4]` / `[Error:5]
+  Failed to open directory`) raises `SdCardDirectoryNotFoundException`, a
+  `SdCardFilesystemException` subclass. The legacy
+  `NyquistDevice.sd_list_files()` skips the marker and refuses a listing
+  marked incomplete too (#188).
 - Every NQ3 DAC write was rejected by the firmware. The voltage setter sent
   `SOUR:VOLT:LEV <ch> <volts>`, which the firmware answers with -101
   Invalid character; it now sends `<ch>,<volts>`. The DAC enable commands
