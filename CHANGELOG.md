@@ -31,8 +31,9 @@ aims to follow [Semantic Versioning](https://semver.org/).
   update never sent that APPLY, and after a successful flash it restored LAN
   with the bridge still on, so the commands went raw to the WiFi chip and
   the console stayed dead until a power cycle. The update now sends
-  `POWer:STATe 1`, `FWUpdate`, `APPLY`, runs the tool, then sends
-  `SYSTem:USB:SetTransparentMode 0` before the LAN restore. After a failed
+  `POWer:STATe 1`, `FWUpdate`, `APPLY`, waits until the bridge is up
+  (on a board in WiFi retry backoff that takes up to 30 s), runs the tool,
+  then sends `SYSTem:USB:SetTransparentMode 0` before the LAN restore. After a failed
   or cancelled update it sends the bridge exit and `APPLY` until the error
   queue shows the APPLY was accepted, then watches the console for longer
   than the firmware's longest WiFi restart delay, exiting again if the
@@ -41,11 +42,18 @@ aims to follow [Semantic Versioning](https://semver.org/).
   tool's own success line, not just exit code 0, and the update waits for
   the OS to release the serial port before starting the tool. New options:
   `power_on_wifi_module_before_lan_update_mode`,
-  `power_on_wifi_module_settle_delay`, `post_lan_update_apply_delay`,
+  `power_on_wifi_module_settle_delay`,
   `post_lan_disconnect_port_release_delay`,
-  `post_usb_transparent_mode_exit_delay`, `wifi_recovery_settle_time`,
-  `wifi_recovery_timeout`,
-  `wifi_flash_success_marker` (#190).
+  `post_usb_transparent_mode_exit_delay`, `wifi_recovery_timeout` (at least
+  one 40 s bridge watch), `wifi_flash_success_marker` (#190).
+- Every NQ3 DAC write was rejected by the firmware. The voltage setter sent
+  `SOUR:VOLT:LEV <ch> <volts>`, which the firmware answers with -101
+  Invalid character; it now sends `<ch>,<volts>`. The DAC enable commands
+  (`ENAble:SOURce:DC`) no longer exist in the firmware, so
+  `AnalogOutputChannel.enabled` and `AnalogOutputs.enable_all()` /
+  `disable_all()` now raise `FeatureNotSupportedError` instead of a
+  `CommandError` from the device; an output drives the voltage last set
+  (#189).
 - SD CSV logs written at voltage precision 0 (integer millivolts) were read
   as raw ADC codes, and `SdCardParseOptions.integer_units` applied to JSON
   only. CSV now follows the same option through the shared firmware value
@@ -85,8 +93,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   is False (#163).
 - `get_sd_card_files()` ended an active SD logging session (it stops the
   stream and hands the bus back to LAN); it now refuses while logging, as
-  delete and download do. `request_sd_card_file_list()` keeps a session
-  running (#163).
+  delete and download do (#163).
+- `request_sd_card_file_list()` and `get_sd_logging_state()` sent
+  `SD:ENAble 1` during an SD recording, which the firmware handles by
+  tearing the write session down. The listing now refuses while logging.
+  `get_sd_logging_state()` asked `SD:LOGging?`, which no firmware
+  implements, after that same `SD:ENAble 1`. The firmware has no query
+  for the logging state, so it now returns this session's state, the same
+  as `is_logging_to_sd_card`, without sending anything (#187).
 - After a JSON or CSV SD logging session the device's stream format, one
   global setting shared with the live stream, stayed non-protobuf, so live
   streaming decoded nothing; `stop_sd_card_logging()` restores protobuf

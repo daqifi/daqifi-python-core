@@ -93,10 +93,6 @@ def disable_storage_sd() -> ScpiMessage:
     return ScpiMessage("SYSTem:STORage:SD:ENAble 0")
 
 
-def get_sd_logging_state() -> ScpiMessage:
-    return ScpiMessage("SYSTem:STORage:SD:LOGging?")
-
-
 def get_sd_file_list() -> ScpiMessage:
     return ScpiMessage("SYSTem:STORage:SD:LIST?")
 
@@ -139,7 +135,7 @@ def set_sd_logging_file_name(file_name: str) -> ScpiMessage:
         raise ValueError("Filename cannot be null or empty.")
     # Firmware #311 rename: SCPI command was renamed from
     # ``SYSTem:STORage:SD:LOGging`` to ``SYSTem:STORage:SD:FILE``
-    # (PR #5 on main). The query form (`?`) was NOT renamed.
+    # (PR #5 on main). There was never a query form (#187).
     return ScpiMessage(f"SYSTem:STORage:SD:FILE {_scpi_quote(file_name)}")
 
 

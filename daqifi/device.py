@@ -433,11 +433,9 @@ class NyquistDevice:
             FeatureNotSupportedError: If device doesn't have DAC (non-NQ3)
 
         Example:
-            # Set voltage
+            # Set voltage; an output drives the voltage last set
+            # (there is no DAC enable on current firmware)
             device.analog_outputs[0].voltage = 5.0
-
-            # Enable channel
-            device.analog_outputs[0].enabled = True
         """
         if self._analog_outputs is None:
             raise FeatureNotSupportedError(

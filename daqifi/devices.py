@@ -1820,6 +1820,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
         daqifi/daqifi-python-core#16. Callers can either inspect
         ``sd_card_files`` after the call OR keep using the higher-level
         :meth:`get_sd_card_files` (which returns the list directly).
+
+        Refused while logging to the SD card: the listing needs
+        ``SD:ENAble 1``, and the firmware handles that command by setting
+        the SD manager's mode to NONE, which tears down the write session.
+        The firmware also refuses ``SD:LIST?`` while a write session is
+        busy (#187).
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
@@ -1829,12 +1835,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 "The SD card and WiFi/LAN share the SPI bus, so SD "
                 "operations cannot be performed over a network connection."
             )
-
-        # Capture interface intent BEFORE muxing so the finally
-        # block doesn't tear down an SD-logging session by switching
-        # the SPI bus back to LAN. (prepare_lan_interface disables
-        # the SD storage module.)
-        was_logging_to_sd = self._is_logging_to_sd
+        if self._is_logging_to_sd:
+            raise RuntimeError(
+                "Cannot list SD card files while logging to the SD card; "
+                "stop logging first."
+            )
 
         def _setup_list() -> None:
             self.prepare_sd_interface()
@@ -1848,7 +1853,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 completion_timeout_ms=1500,
             )
         finally:
-            if self.is_connected and not was_logging_to_sd:
+            if self.is_connected:
                 try:
                     self.prepare_lan_interface()
                 except Exception:
@@ -1863,84 +1868,26 @@ class DaqifiStreamingDevice(DaqifiDevice):
         lines = _strip_prompt_prefixes(lines)
         throw_if_sd_card_list_error(lines)
         self._sd_card_files = parse_sd_card_file_list(lines)
-        if self._is_logging_to_sd:
-            self._forget_sd_card_sizes()
 
-    @_exclusive_sd_operation
     def get_sd_logging_state(self) -> bool:
-        """Query the device's current SD-logging state via ``SD:LOG?``.
+        """Whether this session has the device logging to the SD card.
 
-        Returns ``True`` if the device is currently logging to SD,
-        ``False`` otherwise. Uses :meth:`execute_text_command` so the
-        text reply is actually captured (was previously dropped by the
-        protobuf consumer — closes part of
-        daqifi/daqifi-python-core#16).
+        The same value as :attr:`is_logging_to_sd_card`, kept for API
+        compatibility. It sends nothing to the device (#187):
 
-        Distinct from the local :attr:`is_logging_to_sd_card` property,
-        which reflects what THIS Python session has commanded —
-        ``get_sd_logging_state`` asks the DEVICE.
-
-        SD/LAN share the SPI bus on Nyquist hardware. We mux to SD
-        for the query so the firmware can serve it; if we weren't
-        already logging to SD (in which case the bus is already SD),
-        we restore LAN afterwards. Active SD-logging sessions are
-        preserved.
+        - the firmware has no SD logging-state query. ``SD:LOGging`` was only
+          ever a setter, since renamed ``SD:FILE``, and there is no query for
+          the log file name;
+        - the firmware logs to SD whenever a stream starts on an interface
+          other than WiFi while SD is enabled with a file name set
+          (``SCPI_StartStreaming``'s ``sdLoggingRequested``), so the
+          streaming interface alone can't tell;
+        - the older ``SD:ENAble 1`` probe made the firmware tear down the
+          very recording it was asking about, and a text query during a USB
+          stream is mixed in with the binary samples.
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
-        if not self.is_usb_connection:
-            raise RuntimeError(
-                "SD operations require a USB/serial connection. "
-                "The SD card and WiFi/LAN share the SPI bus."
-            )
-
-        # Default to local cache for the restore decision; the
-        # device's actual response (parsed below) overrides it
-        # whenever we get a definitive 0/1.
-        restore_lan = not self._is_logging_to_sd
-        parsed_state: Optional[bool] = None
-        lines: List[str] = []
-
-        def _setup_log_query() -> None:
-            self.prepare_sd_interface()
-            time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
-            self.send(scpi_commands.get_sd_logging_state())
-
-        try:
-            lines = self.execute_text_command(
-                _setup_log_query,
-                response_timeout_ms=2000,
-                completion_timeout_ms=500,
-            )
-
-            # SYST:STOR:SD:LOG? returns a single integer line:
-            # 1 = logging, 0 = not. Parse before deciding restore so
-            # a stale local cache can't trick us into stopping an
-            # actually-active logging session.
-            for ln in lines:
-                stripped = ln.strip()
-                if stripped in ("0", "1"):
-                    parsed_state = stripped == "1"
-                    break
-
-            if parsed_state is True:
-                # Device confirms it's logging — keep SD muxed.
-                restore_lan = False
-            elif parsed_state is False:
-                # Device confirms not logging — safe to restore.
-                restore_lan = True
-            # else: unparseable — keep restore_lan from cache (above).
-        finally:
-            if self.is_connected and restore_lan:
-                try:
-                    self.prepare_lan_interface()
-                except Exception:
-                    _log.exception(
-                        "Failed to restore LAN interface after SD log query"
-                    )
-
-        if parsed_state is not None:
-            return parsed_state
         return self._is_logging_to_sd
 
     def delete_sd_file(self, file_name: str) -> None:
@@ -2157,10 +2104,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
         if self._is_logging_to_sd:
             # Listing stops the stream and hands the bus back to LAN, which
             # would end the recording; a call that looks read-only must not
-            # (#163). request_sd_card_file_list keeps a session running.
+            # (#163). No listing is safe during a recording (#187).
             raise RuntimeError(
-                "Cannot list files with get_sd_card_files while logging to the "
-                "SD card; stop logging first, or use request_sd_card_file_list."
+                "Cannot list SD card files while logging to the SD card; "
+                "stop logging first."
             )
 
         self.send(scpi_commands.stop_streaming())

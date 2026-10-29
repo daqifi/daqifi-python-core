@@ -4,8 +4,8 @@ Covers the two methods rewired (or added) in this PR:
 
 * ``request_sd_card_file_list`` now actually populates
   ``_sd_card_files`` (used to be fire-and-forget).
-* ``get_sd_logging_state`` is new — queries the device for its
-  current SD-logging flag instead of trusting local cached state.
+* ``get_sd_logging_state`` answers from session state: the firmware has
+  no query for it (#187).
 
 Both rely on ``execute_text_command`` (#22) to capture the text
 reply that the protobuf consumer would otherwise drop.
@@ -166,6 +166,10 @@ class TestRequestSdCardFileList:
 
 
 # ---- get_sd_logging_state -------------------------------------------------
+#
+# The firmware has no SD logging-state query (#187), so the method answers
+# from this session's state and sends nothing;
+# tests/test_sd_listing_during_recording.py covers it during a recording.
 
 
 class TestGetSdLoggingState:
@@ -174,89 +178,31 @@ class TestGetSdLoggingState:
         with pytest.raises(RuntimeError, match="not connected"):
             sd.get_sd_logging_state()
 
-    def test_requires_usb_transport(self) -> None:
-        sd = _make_device(usb=False)
-        try:
-            with pytest.raises(RuntimeError, match="USB"):
-                sd.get_sd_logging_state()
-        finally:
-            sd.disconnect()
-
-    def test_returns_true_for_one_response(self) -> None:
-        sd = _make_device(response_map={b"SD:LOGging?": b"DAQIFI>\r\n1\r\n"})
-        try:
-            assert sd.get_sd_logging_state() is True
-        finally:
-            sd.disconnect()
-
-    def test_returns_false_for_zero_response(self) -> None:
-        sd = _make_device(response_map={b"SD:LOGging?": b"DAQIFI>\r\n0\r\n"})
-        try:
-            assert sd.get_sd_logging_state() is False
-        finally:
-            sd.disconnect()
-
-    def test_falls_back_to_local_state_on_unparseable_response(self) -> None:
-        # No response_map entry — execute_text_command times out empty.
+    def test_matches_the_session_flag_without_device_io(self) -> None:
         sd = _make_device()
         try:
+            before = len(sd._transport.stream.written)
             sd._is_logging_to_sd = True
-            # No bytes ever fed, helper returns []. Method falls back
-            # to the local cached flag.
             assert sd.get_sd_logging_state() is True
             sd._is_logging_to_sd = False
             assert sd.get_sd_logging_state() is False
+            assert sd._transport.stream.written[before:] == []
         finally:
             sd.disconnect()
 
-    def test_query_muxes_to_sd_interface(self) -> None:
-        # The query must switch the SPI bus to SD before sending
-        # SD:LOGging? — otherwise the firmware can't serve it.
-        sd = _make_device(response_map={b"SD:LOGging?": b"DAQIFI>\r\n0\r\n"})
-        try:
-            sd.get_sd_logging_state()
-            written = b"".join(sd._transport.stream.written)
-            # Bus muxed to SD before the query, then back to LAN after.
-            assert b"LAN:ENAbled 0" in written
-            assert b"SD:LOGging?" in written
-            assert b"LAN:ENAbled 1" in written
-        finally:
-            sd.disconnect()
 
-    def test_query_preserves_active_sd_logging_session(self) -> None:
-        # When SD logging is active, the bus is already SD-muxed.
-        # Restoring LAN in finally would tear down the logging session.
-        # Verify the LAN-restore is skipped.
-        sd = _make_device(response_map={b"SD:LOGging?": b"DAQIFI>\r\n1\r\n"})
+# ---- listing during a recording -----------------------------------------
+
+
+class TestRequestSdCardFileListDuringRecording:
+    def test_refused_without_touching_the_bus(self) -> None:
+        # SD:ENAble 1 would end the recording (#187).
+        sd = _make_device(response_map={b"SD:LIST?": b"DAQIFI>\r\nactive_log.bin\r\n"})
         try:
             sd._is_logging_to_sd = True
-            assert sd.get_sd_logging_state() is True
-            written = b"".join(sd._transport.stream.written)
-            assert b"SD:LOGging?" in written
-            # No LAN-restore at the end — would have stopped logging.
-            assert b"LAN:ENAbled 1" not in written
-        finally:
-            sd.disconnect()
-
-
-# ---- bus-preservation across LIST? --------------------------------------
-
-
-class TestRequestSdCardFileListBusPreservation:
-    def test_preserves_active_sd_logging_session(self) -> None:
-        # request_sd_card_file_list during an SD-logging session must
-        # not call prepare_lan_interface in finally (that would stop
-        # logging by disabling the SD storage module).
-        listing = b"DAQIFI>\r\nactive_log.bin\r\n"
-        sd = _make_device(response_map={b"SD:LIST?": listing})
-        try:
-            sd._is_logging_to_sd = True
-            sd.request_sd_card_file_list()
-            written = b"".join(sd._transport.stream.written)
-            assert b"SD:LIST?" in written
-            # The "LAN:ENAbled 1" toggle must NOT be sent when logging
-            # was already active, because prepare_lan_interface stops
-            # SD logging.
-            assert b"LAN:ENAbled 1" not in written
+            before = len(sd._transport.stream.written)
+            with pytest.raises(RuntimeError, match="while logging"):
+                sd.request_sd_card_file_list()
+            assert sd._transport.stream.written[before:] == []
         finally:
             sd.disconnect()
