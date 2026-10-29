@@ -25,6 +25,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- SD CSV logs written at voltage precision 0 (integer millivolts) were read
+  as raw ADC codes, and `SdCardParseOptions.integer_units` applied to JSON
+  only. CSV now follows the same option through the shared firmware value
+  rule: `"millivolts"` reads integers as mV, unscaled; unset reads them as
+  raw codes with one warning per parse; each sample's `analog_units` says
+  which (#163).
 - SD JSON logs written by the firmware parsed to no samples: the parser
   expected one object per line with an `analog` key, but the firmware
   writes a `{"meta":...}` header and then each sample object across several

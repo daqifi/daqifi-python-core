@@ -1716,6 +1716,7 @@ class SdCardCsvFileParser:
         options = options if options is not None else SdCardParseOptions()
         if options.buffer_size <= 0:
             raise ValueError("options.buffer_size must be greater than zero")
+        _check_integer_units(options)
 
         # Same path-normalize trick as the protobuf parser so callers
         # can pass either a basename or a full path.
@@ -1977,6 +1978,7 @@ def _produce_csv_samples(
     bytes_read = 0
     progress = options.progress
     total_bytes = sum(len(line) + 1 for line in lines)
+    reader = _FirmwareValueReader(config, options.integer_units)
 
     for i in range(data_start, len(lines)):
         line = lines[i]
@@ -1987,17 +1989,11 @@ def _produce_csv_samples(
         if parsed is None:
             continue
         row_ts, raw_analog, digital_data, per_ch_ts = parsed
-        if any(isinstance(v, float) for v in raw_analog):
-            # Written with decimals: the firmware's voltage mode (precision
-            # >= 1, its default) already calibrated these to volts (#163).
-            analog_values = [float(v) for v in raw_analog]
-        else:
-            # Integers: raw ADC codes, or millivolts at precision 0, which
-            # the file can't tell apart (daqifi-nyquist-firmware#1179);
-            # scaled as codes.
-            analog_values = _scale_raw_analog_values(
-                raw_analog, config, layout.analog_channels or None
-            )
+        # The firmware value rule shared with the JSON parser (#163).
+        read = reader.read(raw_analog, layout.analog_channels or None)
+        if read is None:
+            continue  # a row mixing decimals and integers isn't firmware output
+        analog_values, units = read
 
         absolute_time = base_time
         # ``row_ts == 0`` is treated as "no timestamp" — matches the
@@ -2017,6 +2013,7 @@ def _produce_csv_samples(
             analog_values=tuple(analog_values),
             digital_data=digital_data,
             analog_timestamps=tuple(per_ch_ts) if per_ch_ts else None,
+            analog_units=units,
         )
 
         if lines_processed % 100 == 0:
