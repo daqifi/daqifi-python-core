@@ -757,6 +757,7 @@ class DefaultFirmwareUpdateService:
         cancel_event: Optional[threading.Event],
     ) -> None:
         total_bytes = 100
+        bridge_state = {"may_be_bridged": False}
 
         try:
             # Honour cancellation BEFORE the WiFi version-check makes
@@ -792,15 +793,37 @@ class DefaultFirmwareUpdateService:
 
             def _prepare(deadline: _Cancellation) -> None:
                 _ensure_device_connected(device)
+                # A cancel already requested must not still power the
+                # module on or switch the device into update mode.
+                deadline.check()
                 if device.is_streaming:
                     device.stop_streaming()
                 from daqifi._internal import scpi_commands
 
+                # The WINC is off in standby and right after a PIC32
+                # reflash, and LAN commands are refused then, so FWUpdate
+                # would not take effect.
+                if self._options.power_on_wifi_module_before_lan_update_mode:
+                    device.send(scpi_commands.turn_device_on())
+                    self._sleep_with_cancel(
+                        self._options.power_on_wifi_module_settle_delay, deadline
+                    )
+
                 device.send(scpi_commands.set_lan_firmware_update_mode())
+                # From here the device may be bridged: the failure paths
+                # send the bridge exit. A redundant exit is harmless; a
+                # missed one leaves the console dead until a power cycle.
+                bridge_state["may_be_bridged"] = True
                 self._sleep_with_cancel(
                     self._options.post_lan_firmware_mode_delay, deadline
                 )
                 device.disconnect()
+                # The OS frees the COM port some time after close; the
+                # flash tool can't open it before then.
+                self._sleep_with_cancel(
+                    self._options.post_lan_disconnect_port_release_delay,
+                    deadline,
+                )
 
             self._execute_with_state_timeout(
                 FirmwareUpdateState.PREPARING_DEVICE,
@@ -871,6 +894,21 @@ class DefaultFirmwareUpdateService:
                     + _build_process_log_excerpt(process_result)
                 )
 
+            # The exit code is not reliable in either direction: a tool that
+            # could not open the port can still exit 0. Its own success line
+            # is the authority.
+            if not _contains_marker(
+                list(process_result.standard_output_lines)
+                + list(process_result.standard_error_lines),
+                self._options.wifi_flash_success_marker,
+            ):
+                raise IOError(
+                    "WiFi flashing did not complete successfully: the flash "
+                    "tool never reported "
+                    f"'{self._options.wifi_flash_success_marker}'. "
+                    + _build_process_log_excerpt(process_result)
+                )
+
             self._transition_to_state(
                 FirmwareUpdateState.VERIFYING,
                 "Reconnecting device and restoring LAN configuration.",
@@ -891,6 +929,13 @@ class DefaultFirmwareUpdateService:
                 self._wait_for_serial_reconnect(device, deadline)
                 from daqifi._internal import scpi_commands
 
+                # Leave the bridge first: while it is on, the firmware
+                # forwards everything but this exact command to the WINC,
+                # so the LAN restore below would never reach the console.
+                device.send(scpi_commands.set_usb_transparency_mode(0))
+                self._sleep_with_cancel(
+                    self._options.post_usb_transparent_mode_exit_delay, deadline
+                )
                 device.send(scpi_commands.enable_network_lan())
                 device.send(scpi_commands.apply_network_lan())
                 device.send(scpi_commands.save_network_lan())
@@ -917,6 +962,9 @@ class DefaultFirmwareUpdateService:
         except _CancelledError as exc:
             failed_state = self._current_state
             failed_operation = "WiFi module update canceled."
+            self._try_leave_lan_update_mode(
+                device, bridge_state["may_be_bridged"]
+            )
             self._transition_to_state(
                 FirmwareUpdateState.FAILED, failed_operation
             )
@@ -935,6 +983,11 @@ class DefaultFirmwareUpdateService:
         except Exception as exc:
             failed_state = self._current_state
             failed_operation = self._current_operation
+            # Captured first, so the failure names the step that failed, not
+            # the recovery that follows.
+            self._try_leave_lan_update_mode(
+                device, bridge_state["may_be_bridged"]
+            )
             self._transition_to_state(
                 FirmwareUpdateState.FAILED, failed_operation
             )
@@ -954,6 +1007,55 @@ class DefaultFirmwareUpdateService:
             raise self._create_firmware_update_exception(
                 failed_state, failed_operation, exc
             ) from exc
+
+    def _try_leave_lan_update_mode(
+        self, device: "DaqifiStreamingDevice", may_be_bridged: bool
+    ) -> None:
+        """Best effort: take the device out of the USB-transparent bridge
+        after a failed or cancelled WiFi update. Never raises.
+
+        Sends ``SetTransparentMode 0`` and then ``LAN:APPLY``, which kicks
+        the WiFi manager out of its bridge state, as upstream does. Not the
+        success path's ENAbled/APPLY/SAVE restore: nothing is persisted after
+        a flash that didn't complete. The reconnect wait gets its own budget
+        (the VERIFYING timeout), and ignores the caller's cancel, which is
+        already set when this runs after a cancel.
+        """
+        if not may_be_bridged:
+            return
+        from daqifi._internal import scpi_commands
+
+        budget = self._options.get_state_timeout(FirmwareUpdateState.VERIFYING)
+        deadline = _Cancellation(
+            FirmwareUpdateState.VERIFYING,
+            "leave WiFi update mode",
+            budget,
+            None,
+            lambda seconds: (
+                f"Device did not reconnect within {seconds:.0f} s to leave "
+                "WiFi update mode."
+            ),
+        )
+        try:
+            self._wait_for_serial_reconnect(device, deadline)
+            device.send(scpi_commands.set_usb_transparency_mode(0))
+            # Uncancelled: stopping here would hand the console back with
+            # the WiFi manager still in its bridge state.
+            delay = self._options.post_usb_transparent_mode_exit_delay
+            if delay > 0:
+                time.sleep(delay)
+            device.send(scpi_commands.apply_network_lan())
+            self._logger.info(
+                "Sent the WiFi bridge-exit sequence after a failed WiFi "
+                "module update."
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "Could not take the device out of WiFi update mode after a "
+                "failed update; it may still be in USB-transparent bridge "
+                "mode and need a power cycle: %s",
+                exc,
+            )
 
     def _is_wifi_firmware_up_to_date(
         self,
@@ -2403,6 +2505,11 @@ def _try_parse_wifi_tool_percent(line: str) -> Optional[int]:
     if "begin verify operation" in lowered:
         return 90
     return None
+
+
+def _contains_marker(lines: Iterable[str], marker: str) -> bool:
+    lowered = marker.lower()
+    return any(lowered in line.lower() for line in lines)
 
 
 def _contains_wifi_programming_failure(lines: Iterable[str]) -> bool:
