@@ -50,12 +50,12 @@ def test_firmware_json_calibration_follows_the_named_channel() -> None:
     assert sample.analog_values == pytest.approx((100.0,))
 
 
-def test_firmware_json_digital_list_gives_the_latest_port_state() -> None:
+def test_a_digital_only_record_gives_one_sample_per_read() -> None:
     # di "ts" values are ages back from the trigger stamp, oldest element
-    # first (JSON_Encoder.c pops the queue in order), so ages decrease.
+    # first (JSON_Encoder.c pops the queue in order), so ages decrease. Each
+    # element is one sample period's DIO read (operator ruling AQ).
     data = b'{"ts":10, "di":[{"ts":10, "mask":15, "val":3},{"ts":9, "mask":15, "val":5}]}\n'
-    sample = list(_parse(data).samples)[0]
-    assert sample.digital_data == 5
+    assert [s.digital_data for s in _parse(data).samples] == [3, 5]
 
 
 def test_the_legacy_one_line_format_still_parses() -> None:
@@ -665,8 +665,10 @@ def test_a_digital_record_slightly_behind_the_analog_is_not_a_rollover() -> None
         b'{"ts":1420000,"ai":[{"ch":0,"val":2.0000}]}\n'
     )
     samples = list(_parse(data).samples)
+    # The record sits 1000 ticks behind the analog base (A1), and its one
+    # read 9000 ticks before that: -10000 ticks, not +102 s.
     assert [round((s.timestamp - samples[0].timestamp).total_seconds(), 6) for s in samples] == [
-        0.0, -0.000024, 0.01
+        0.0, -0.000238, 0.01
     ]
     assert [s.digital_data for s in samples] == [5, 5, 5]
 
@@ -681,3 +683,42 @@ def test_the_behind_window_is_one_second_of_ticks(behind, expected) -> None:
         b'{"ts":%d,"di":[{"ts":0,"mask":15,"val":5}]}\n' % (100000 - behind)
     )
     assert _offsets(list(_parse(data).samples)) == [0.0, expected]
+
+
+# Operator ruling AQ on #183: a digital-only record yields one sample per
+# sample period (per "di" element), at trigger minus age, with its value.
+
+def test_a_sole_read_just_after_the_trigger_is_its_own_sample() -> None:
+    data = b'{"meta":{"tick_hz":1000}}\n{"ts":110,"di":[{"ts":4294967295,"mask":15,"val":5}]}\n'
+    samples = list(_parse(data).samples)
+    assert [(s.digital_data, s.analog_values) for s in samples] == [(5, ())]
+
+
+def test_a_pulse_in_one_di_array_gives_every_read_in_order() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":120,"di":[{"ts":20,"mask":15,"val":0},{"ts":10,"mask":15,"val":5},'
+        b'{"ts":0,"mask":15,"val":0}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert [s.digital_data for s in samples] == [0, 5, 0]
+    assert _offsets(samples) == [0.0, 0.01, 0.02]
+
+
+def test_reads_keep_their_order_against_interleaved_analog_records() -> None:
+    data = (
+        b'{"meta":{"tick_hz":1000}}\n'
+        b'{"ts":100,"ai":[{"ch":0,"val":1.0000}]}\n'
+        b'{"ts":120,"di":[{"ts":10,"mask":15,"val":5},{"ts":0,"mask":15,"val":6}]}\n'
+        b'{"ts":130,"ai":[{"ch":0,"val":2.0000}]}\n'
+    )
+    samples = list(_parse(data).samples)
+    assert [(s.analog_values, s.digital_data) for s in samples] == [
+        ((1.0,), 0), ((), 5), ((), 6), ((2.0,), 6),
+    ]
+    assert _offsets(samples) == [0.0, 0.01, 0.02, 0.03]
+
+
+def test_an_empty_di_array_gives_no_sample() -> None:
+    data = b'{"ts":100,"ai":[{"ch":0,"val":1.0000}]}\n{"ts":110,"di":[]}\n'
+    assert [s.analog_values for s in _parse(data).samples] == [(1.0,)]

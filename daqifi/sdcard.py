@@ -2371,6 +2371,16 @@ def _signed32(value: int) -> int:
     return value - 0x100000000 if value & 0x80000000 else value
 
 
+def _is_digital_only_record(obj: Any, parsed_samples: List[Any], converted: Callable[[Any], Any]) -> bool:
+    """True for a firmware record of DIO reads only: one sample, in the
+    firmware shape, with no analog values, and a "di" array. Such a record
+    yields one sample per "di" element (one per sample period)."""
+    if len(parsed_samples) != 1 or not isinstance(obj, dict) or not isinstance(obj.get("di"), list):
+        return False
+    sample = converted(parsed_samples[0])
+    return sample is not None and sample[5]  # digital_only
+
+
 def _is_plain_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -2606,6 +2616,16 @@ def _produce_json_samples(
     for obj, end in _iter_json_objects(text):
         total_bytes = end
         parsed_samples, ages, reference = _try_parse_json_samples(obj)
+        if _is_digital_only_record(obj, parsed_samples, converted):
+            # One sample per sample period: each "di" element is one DIO
+            # read (DIO.c pushes one per streaming tick), at the record's
+            # trigger tick minus its age.
+            # Its ts is an integer (the sample parser checked), so it has a tick.
+            tick = clock.place(parsed_samples[0][0], analog=False)
+            for age, value in ages:
+                digital.add(tick - age, value)
+                ticks.append(tick - age)
+            continue
         # Every sample of the object is placed first: its digital ages are
         # measured back from its latest sample.
         last_ts, last_tick = None, None
@@ -2633,7 +2653,22 @@ def _produce_json_samples(
     for obj, end in _iter_json_objects(text):
         lines_processed += 1
         bytes_read = end
-        parsed_samples, _ages, _reference = _try_parse_json_samples(obj)
+        parsed_samples, ages, _reference = _try_parse_json_samples(obj)
+        if _is_digital_only_record(obj, parsed_samples, converted):
+            # One sample per DIO read, each with its own value and time.
+            for _age, value in ages:
+                tick = ticks[index]
+                index += 1
+                absolute_time = base_time
+                if tick_period > 0:
+                    absolute_time = base_time + timedelta(seconds=tick * tick_period)
+                yield SdCardLogEntry(
+                    timestamp=absolute_time,
+                    analog_values=(),
+                    digital_data=value,
+                    analog_timestamps=None,
+                )
+            parsed_samples = []
         for parsed in parsed_samples:
             sample = converted(parsed)
             if sample is None:
