@@ -15,6 +15,7 @@ import time
 
 import pytest
 
+from daqifi.firmware import update_options
 from daqifi.firmware.update_options import FirmwareUpdateServiceOptions
 from daqifi.firmware.external_process import ExternalProcessResult
 from daqifi.firmware.update_events import FirmwareUpdateException
@@ -52,25 +53,9 @@ def _pin_cmd_exe(monkeypatch):
 
 
 def _options():
-    # Built without the new fields' keywords, so the same tests run against
-    # a tree that predates them (where setattr just adds unused attributes).
-    options = FirmwareUpdateServiceOptions(
-        poll_interval=0.02,
-        preparing_device_timeout=30.0,
-        programming_timeout=5.0,
-        verifying_timeout=2.0,
-        post_lan_firmware_mode_delay=0.005,
-        post_wifi_reconnect_delay=0.005,
-        wifi_process_timeout=2.0,
-    )
-    options.power_on_wifi_module_settle_delay = 0.005
-    options.post_lan_disconnect_port_release_delay = 0.005
-    options.post_usb_transparent_mode_exit_delay = 0.005
-    # The flash tool runs for minutes on a real board, long after the bridge
-    # is up; here the bridge has to be up before the fake tool "succeeds".
-    # Virtual time (the clock fixture), so this costs nothing.
-    options.post_lan_update_apply_delay = 5.0
-    return options
+    # Production defaults: every wait runs on the virtual clock (the clock
+    # fixture), so nothing is shortened to make a test pass.
+    return FirmwareUpdateServiceOptions()
 
 
 def _result(lines=(SUCCESS,), exit_code=0):
@@ -144,7 +129,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
     GATE_TIMEOUT = 30.0
 
     def __init__(self, clock, name="fake-port", deliver_then_raise=None, drop=None,
-                 backoff_for=0.0):
+                 backoff_for=0.0, prompt=""):
         super().__init__(name)
         self.clock = clock
         self.state = "normal"
@@ -159,6 +144,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
         self._deliver_then_raise = deliver_then_raise
         self._drop = drop
         self._replies = None
+        self._prompt = prompt
 
     def _tick(self):
         now = self.clock.now
@@ -177,7 +163,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
 
     def _reply(self, line):
         if self._replies is not None:
-            self._replies.append(line)
+            self._replies.append(self._prompt + line)
 
     def send(self, message):
         text = getattr(message, "data", None) or str(message)
@@ -226,11 +212,13 @@ class _FirmwareModel(_f._FakeStreamingDevice):
 def test_a_successful_flash_enters_the_bridge_and_leaves_it_before_restoring_lan(clock) -> None:
     device = _FirmwareModel(clock)
     _update(device, _f._FakeExternalProcessRunner(_result()))
-    assert device.sent_commands == [
+    commands = [c for c in device.sent_commands if c not in (IDN, ERR_QUERY)]
+    assert commands == [
         POWER_ON, FW_UPDATE, LAN_APPLY, BRIDGE_EXIT, LAN_ENABLE, LAN_APPLY, LAN_SAVE,
     ]
     assert device.final_state() == ("normal", False)
-    assert device.raw_to_winc == []
+    # The probe that saw the console go silent is the only thing the WINC got.
+    assert set(device.raw_to_winc) <= {IDN}
 
 
 @pytest.mark.parametrize(
@@ -319,13 +307,15 @@ def test_a_cancel_before_apply_on_a_board_in_wifi_backoff_ends_normal(clock) -> 
     assert "power-cycle it" not in str(excinfo.value)
 
 
-def test_a_failed_tool_on_a_board_in_wifi_backoff_ends_normal(clock) -> None:
-    # The prepare APPLY is deferred by the backoff, so the tool finds no
-    # bridge; recovery's APPLY is refused until the gate clears.
+def test_an_apply_refused_by_the_gate_is_retried_and_recovery_ends_normal(clock) -> None:
+    # Another APPLY still in progress: the gate refuses ours with -200 until
+    # it clears. Then the tool fails and recovery runs.
     device = _FirmwareModel(clock, backoff_for=25.0)
-    with pytest.raises(FirmwareUpdateException):
+    device.gate_until = clock.now + 20.0
+    with pytest.raises(FirmwareUpdateException) as excinfo:
         _update(device, _f._FakeExternalProcessRunner(_result(lines=("x",), exit_code=1)))
     assert device.refused_applies > 0  # the gate path was exercised
+    assert "exited with code 1" in str(excinfo.value.__cause__)
     assert device.final_state() == ("normal", False)
 
 
@@ -342,6 +332,116 @@ def test_recovery_that_cannot_be_confirmed_is_reported(clock) -> None:
         _update(device, _f._FakeExternalProcessRunner(_result(lines=("x",), exit_code=1)))
     assert "power-cycle it" in str(excinfo.value)
     assert "exited with code 1" in str(excinfo.value.__cause__)
+
+
+class _StateAtLaunch(_f._FakeExternalProcessRunner):
+    def __init__(self, device, result):
+        super().__init__(result)
+        self.device = device
+        self.state_at_launch = None
+
+    def run(self, request):
+        self.device._tick()
+        self.state_at_launch = (self.device.state, self.device.transparent)
+        return super().run(request)
+
+
+def test_on_a_board_in_wifi_backoff_the_tool_starts_only_once_the_bridge_is_up(clock) -> None:
+    # Audit r3 (1): with production defaults the tool launched ~5 s after
+    # APPLY while the REINIT was still deferred, and found no bridge.
+    device = _FirmwareModel(clock, backoff_for=25.0)
+    runner = _StateAtLaunch(device, _result())
+    _update(device, runner)
+    assert runner.state_at_launch == ("ready", True)
+    assert device.final_state() == ("normal", False)
+
+
+class _NeverBridges(_FirmwareModel):
+    def _tick(self):
+        super()._tick()
+        if self.state == "entering":
+            self.ready_at = self.clock.now + 3600.0
+
+
+def test_a_bridge_that_never_comes_up_fails_before_the_tool(clock) -> None:
+    device = _NeverBridges(clock)
+    runner = _f._FakeExternalProcessRunner(_result())
+    start = clock.now
+    with pytest.raises(FirmwareUpdateException) as excinfo:
+        _update(device, runner)
+    assert runner.last_request is None
+    assert "did not come up" in str(excinfo.value.__cause__)
+    assert clock.now - start < 3600
+
+
+def test_the_recovery_watch_stops_at_the_overall_deadline(clock) -> None:
+    # Audit r3 (3): the watch ignored wifi_recovery_timeout and could return
+    # True after it. Here the late bridge entry needs a second watch that
+    # doesn't fit in 45 s, so recovery must end unconfirmed by then.
+    cancel = threading.Event()
+    device = _FirmwareModel(clock, backoff_for=25.0)
+    _cancel_after(device, FW_UPDATE, cancel)
+    service_options = _options()
+    service_options.wifi_recovery_timeout = 45.0
+    service = DefaultFirmwareUpdateService(
+        hid_transport=_f._FakeHidTransport(),
+        firmware_download_service=_f._FakeFirmwareDownloadService(),
+        external_process_runner=_f._FakeExternalProcessRunner(_result()),
+        bootloader_protocol=_f._FakeBootloaderProtocol([bytes([0x10])]),
+        hid_device_enumerator=_f._FakeHidEnumerator([]),
+        options=service_options,
+    )
+    firmware_dir = _f._make_temp_wifi_dir()
+    try:
+        with pytest.raises(FirmwareUpdateException) as excinfo:
+            service.update_wifi_module(device, firmware_dir, cancel_event=cancel)
+    finally:
+        shutil.rmtree(firmware_dir, ignore_errors=True)
+    assert "power-cycle it" in str(excinfo.value)
+
+
+def test_prompt_prefixed_replies_are_read(clock) -> None:
+    # Audit r3 (4): 'DAQIFI> 0,"No error"' was not recognised, so recovery
+    # looped to its timeout and told the user to power-cycle.
+    device = _FirmwareModel(clock, prompt="DAQIFI> ")
+    with pytest.raises(FirmwareUpdateException) as excinfo:
+        _update(device, _f._FakeExternalProcessRunner(_result(lines=("x",), exit_code=1)))
+    assert "power-cycle it" not in str(excinfo.value)
+    assert device.final_state() == ("normal", False)
+
+
+def test_a_stale_error_in_the_queue_is_not_read_as_the_applys_answer(clock) -> None:
+    # The firmware leaves -200s of its own in the queue around the bridge
+    # transition (bench log); one left over must not make an accepted APPLY
+    # look refused and be sent again.
+    device = _FirmwareModel(clock)
+    device.errors.append('-200,"Execution error"')
+    _update(device, _f._FakeExternalProcessRunner(_result()))
+    assert device.sent_commands.count(LAN_APPLY) == 2  # prepare + restore
+    assert device.final_state() == ("normal", False)
+
+
+class _QuietUntilApply(_FirmwareModel):
+    """Answers nothing to the first error-queue read (a slow console)."""
+
+    def __init__(self, clock):
+        super().__init__(clock)
+        self._swallow_next_error_query = True
+
+    def send(self, message):
+        text = getattr(message, "data", None) or str(message)
+        if text == ERR_QUERY and self._swallow_next_error_query:
+            self._swallow_next_error_query = False
+            self.sent_commands.append(text)
+            return
+        super().send(message)
+
+
+def test_a_silent_drain_still_sends_the_apply(clock) -> None:
+    device = _QuietUntilApply(clock)
+    _update(device, _f._FakeExternalProcessRunner(_result()))
+    assert device.sent_commands.count(LAN_APPLY) == 2
+    assert device.final_state() == ("normal", False)
 
 
 def test_a_failure_before_update_mode_sends_no_bridge_exit(clock, monkeypatch) -> None:
@@ -362,7 +462,7 @@ def test_a_device_that_never_returns_keeps_the_original_failure(clock) -> None:
 
 
 def test_power_on_can_be_turned_off(clock) -> None:
-    device = _f._FakeStreamingDevice("fake-port-7")
+    device = _FirmwareModel(clock)
     options = _options()
     options.power_on_wifi_module_before_lan_update_mode = False
     service = DefaultFirmwareUpdateService(
@@ -378,7 +478,7 @@ def test_power_on_can_be_turned_off(clock) -> None:
         service.update_wifi_module(device, firmware_dir)
     finally:
         shutil.rmtree(firmware_dir, ignore_errors=True)
-    assert device.sent_commands[:2] == [FW_UPDATE, LAN_APPLY]
+    assert [c for c in device.sent_commands if c not in (IDN, ERR_QUERY)][:2] == [FW_UPDATE, LAN_APPLY]
 
 
 @pytest.mark.parametrize(
@@ -388,9 +488,7 @@ def test_power_on_can_be_turned_off(clock) -> None:
         ("post_lan_disconnect_port_release_delay", -0.1),
         ("post_usb_transparent_mode_exit_delay", -0.1),
         ("wifi_flash_success_marker", " "),
-        ("post_lan_update_apply_delay", -0.1),
-        ("wifi_recovery_settle_time", -1.0),
-        ("wifi_recovery_timeout", -1.0),
+        ("wifi_recovery_timeout", 39.0),
     ],
 )
 def test_options_reject_invalid_bridge_settings(field, value) -> None:
@@ -398,6 +496,13 @@ def test_options_reject_invalid_bridge_settings(field, value) -> None:
     setattr(options, field, value)
     with pytest.raises(ValueError, match=field):
         options.validate()
+
+
+def test_the_bridge_watch_is_not_an_option() -> None:
+    # Audit r3 (2): a watch shorter than the firmware's REINIT deferral plus
+    # bridge entry confirms a still-pending request as recovered.
+    assert update_options.WIFI_BRIDGE_SETTLE_SECONDS >= 30.0 + 6.0
+    assert not hasattr(FirmwareUpdateServiceOptions(), "wifi_recovery_settle_time")
 
 
 def test_zero_delays_are_allowed() -> None:

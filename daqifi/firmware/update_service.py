@@ -78,7 +78,10 @@ from daqifi.firmware.update_events import (
     FirmwareUpdateProgress,
     FirmwareUpdateStateChangedEventArgs,
 )
-from daqifi.firmware.update_options import FirmwareUpdateServiceOptions
+from daqifi.firmware.update_options import (
+    WIFI_BRIDGE_SETTLE_SECONDS,
+    FirmwareUpdateServiceOptions,
+)
 from daqifi.firmware.version import FirmwareVersion
 
 
@@ -265,8 +268,8 @@ class _CancelledError(Exception):
     """Internal sentinel for cooperative cancellation."""
 
 
-_SCPI_ERROR_RE = re.compile(r"^\s*(-?\d+)\s*,")
-_RECOVERY_POLL_SECONDS = 1.0
+_BRIDGE_POLL_SECONDS = 1.0
+_ERROR_QUEUE_DRAIN_LIMIT = 16
 _NOT_RECOVERED = (
     " The device could not be confirmed out of WiFi update mode: it may be "
     "in USB-transparent bridge mode, or hold a pending update request; "
@@ -830,10 +833,30 @@ class DefaultFirmwareUpdateService:
                 self._sleep_with_cancel(
                     self._options.post_lan_firmware_mode_delay, deadline
                 )
-                device.send(scpi_commands.apply_network_lan())
-                self._sleep_with_cancel(
-                    self._options.post_lan_update_apply_delay, deadline
-                )
+
+            self._execute_with_state_timeout(
+                FirmwareUpdateState.PREPARING_DEVICE,
+                "prepare device for WiFi update mode",
+                _prepare,
+                cancel_event,
+            )
+
+            # The bridge has its own budget: on a board in STA retry backoff
+            # its entry waits up to 30 s, longer than the PREPARING_DEVICE
+            # timeout was sized for.
+            bridge_deadline = _Cancellation(
+                FirmwareUpdateState.PREPARING_DEVICE,
+                "enter the WiFi bridge",
+                WIFI_BRIDGE_SETTLE_SECONDS,
+                cancel_event,
+                lambda seconds: (
+                    f"The WiFi bridge did not come up within {seconds:.0f} s "
+                    "of LAN:APPLY, so the flash tool was not started."
+                ),
+            )
+            self._enter_wifi_bridge(device, bridge_deadline)
+
+            def _release_port(deadline: _Cancellation) -> None:
                 device.disconnect()
                 # The OS frees the COM port some time after close; the
                 # flash tool can't open it before then.
@@ -844,8 +867,8 @@ class DefaultFirmwareUpdateService:
 
             self._execute_with_state_timeout(
                 FirmwareUpdateState.PREPARING_DEVICE,
-                "prepare device for WiFi update mode",
-                _prepare,
+                "release the serial port for the WiFi flash tool",
+                _release_port,
                 cancel_event,
             )
 
@@ -1023,6 +1046,76 @@ class DefaultFirmwareUpdateService:
                 failed_state, failed_operation, exc
             ) from exc
 
+    # -- WiFi bridge (#190) ----------------------------------------------
+    #
+    # The firmware's WiFi manager (wifi_manager.c) has three states here, and
+    # LAN:APPLY does something different in each:
+    #   normal     - APPLY reinitialises WiFi;
+    #   REQUESTED  - (FWUpdate received) APPLY ENTERS the bridge and turns
+    #                USB-transparent mode on;
+    #   READY      - APPLY leaves the bridge and clears both flags.
+    # None of it can be queried, and the timing is open-ended: REINIT waits
+    # out STA retry backoff (up to 30 s) before it looks at the flags, and
+    # while one APPLY is in progress the apply gate refuses another with
+    # -200. What can be observed: the console doesn't answer while
+    # transparent mode is on, SetTransparentMode 0 always reaches it, and a
+    # refused APPLY leaves -200 in the error queue.
+
+    def _bridge_ask(self, device, *messages) -> List[str]:
+        return device.execute_text_command(
+            lambda: [device.send(m) for m in messages],
+            response_timeout_ms=1000,
+            completion_timeout_ms=200,
+        )
+
+    def _console_answers(self, device) -> bool:
+        from daqifi._internal.comm import ScpiMessage
+
+        return any(line.strip() for line in self._bridge_ask(device, ScpiMessage("*IDN?")))
+
+    def _send_apply(self, device) -> Optional[int]:
+        """Drain the error queue, send LAN:APPLY and read the queue again.
+        Returns the error code (0 = accepted, non-zero, e.g. -200 from the
+        apply gate, = refused, so retry), or ``None`` when the console didn't
+        answer: transparent mode is already on."""
+        from daqifi._internal import scpi as _scpi
+        from daqifi._internal import scpi_commands
+
+        # Drain stale entries first, so the code read after the APPLY is the
+        # APPLY's: the firmware leaves -200s of its own in the queue during
+        # the bridge transition.
+        for _ in range(_ERROR_QUEUE_DRAIN_LIMIT):
+            stale = _scpi.find_system_error_reply(
+                self._bridge_ask(device, scpi_commands.get_last_error())
+            )
+            # No reply ends the drain too; the APPLY is still sent, and its
+            # own reply decides.
+            if stale is None or _scpi.parse_system_error(stale)[0] == 0:
+                break
+        reply = _scpi.find_system_error_reply(
+            self._bridge_ask(
+                device,
+                scpi_commands.apply_network_lan(),
+                scpi_commands.get_last_error(),
+            )
+        )
+        return None if reply is None else _scpi.parse_system_error(reply)[0]
+
+    def _enter_wifi_bridge(self, device, deadline: _Cancellation) -> None:
+        """Send LAN:APPLY until it is accepted, then wait until the console
+        stops answering, i.e. the bridge is up, before the flash tool runs.
+        Raises TimeoutError at ``deadline``, which covers the longest REINIT
+        deferral plus the bridge entry."""
+        while True:
+            code = self._send_apply(device)
+            if code is None:
+                return
+            if code == 0:
+                break
+            self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)
+        while self._console_answers(device):
+            self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)
+
     def _try_leave_lan_update_mode(
         self, device: "DaqifiStreamingDevice", bridge_state: dict
     ) -> bool:
@@ -1030,31 +1123,18 @@ class DefaultFirmwareUpdateService:
         cancelled WiFi update. Never raises; returns whether the device was
         confirmed back to normal.
 
-        The firmware's WiFi manager (``wifi_manager.c``) has three states
-        here, and ``LAN:APPLY`` does something different in each:
-
-        - normal: APPLY reinitialises WiFi;
-        - update REQUESTED (FWUpdate received): APPLY ENTERS the bridge and
-          turns USB-transparent mode on;
-        - bridge READY: APPLY leaves the bridge and clears both flags.
-
-        None of this can be queried, and the timing is open-ended. A board
-        in STA retry backoff defers the REINIT, and with it the bridge entry,
-        by up to 30 s; meanwhile a second APPLY is refused with -200 by the
-        apply gate. A send that raised may also have been delivered. So
-        recovery closes the loop on what it can observe. The console doesn't
-        answer while transparent mode is on, ``SetTransparentMode 0`` always
-        reaches it, and a refused APPLY leaves -200 in the error queue:
+        Once FWUpdate has been attempted (a send that raised may still have
+        been delivered) the device can be in any of the three states, and a
+        deferred REINIT can still change it later. So:
 
         1. reconnect, then ``SetTransparentMode 0`` + APPLY until the error
            queue shows the APPLY was accepted;
-        2. watch the console for ``wifi_recovery_settle_time``: longer than
-           the longest REINIT deferral plus the bridge entry. If it stops
-           answering, the bridge came up, so go back to 1, where that APPLY
-           now leaves it;
-        3. a full watch with the console answering means the device is back
-           to normal. Running out of ``wifi_recovery_timeout`` first means it
-           may not be, and the caller says so.
+        2. watch the console for ``WIFI_BRIDGE_SETTLE_SECONDS``: the longest
+           REINIT deferral plus the bridge entry. It's a firmware bound, not
+           a preference. If the console goes silent, the bridge came up, so
+           go back to 1, where that APPLY now leaves it;
+        3. a full watch with the console answering is confirmation. Reaching
+           ``wifi_recovery_timeout`` first, at any step, means unconfirmed.
 
         Nothing is saved after a flash that didn't complete. Ignores the
         caller's cancel, which is already set when this runs after a cancel.
@@ -1062,58 +1142,35 @@ class DefaultFirmwareUpdateService:
         if not bridge_state.get("update_requested"):
             return True
         from daqifi._internal import scpi_commands
-        from daqifi._internal.comm import ScpiMessage
 
-        options = self._options
-        budget = options.wifi_recovery_timeout
-        end = time.monotonic() + budget
+        budget = self._options.wifi_recovery_timeout
         deadline = _Cancellation(
             FirmwareUpdateState.VERIFYING,
             "leave WiFi update mode",
             budget,
             None,
             lambda seconds: (
-                f"Device did not return to normal within {seconds:.0f} s "
-                "after a failed WiFi update."
+                f"Device not confirmed out of WiFi update mode within "
+                f"{seconds:.0f} s."
             ),
         )
-
-        def _ask(*messages: ScpiMessage) -> List[str]:
-            return device.execute_text_command(
-                lambda: [device.send(m) for m in messages],
-                response_timeout_ms=1000,
-                completion_timeout_ms=200,
-            )
-
-        def _console_answers() -> bool:
-            return any(line.strip() for line in _ask(ScpiMessage("*IDN?")))
-
-        def _apply_accepted() -> bool:
-            lines = _ask(
-                scpi_commands.apply_network_lan(), ScpiMessage("SYSTem:ERRor?")
-            )
-            codes = [m.group(1) for m in map(_SCPI_ERROR_RE.match, lines) if m]
-            return bool(codes) and codes[0] == "0"
-
+        exit_delay = self._options.post_usb_transparent_mode_exit_delay
         try:
             self._wait_for_serial_reconnect(device, deadline)
-            while time.monotonic() < end:
+            while True:
                 # The bridge can come up between attempts, so every APPLY
                 # is preceded by the exit that gets it to the console.
                 while True:
                     device.send(scpi_commands.set_usb_transparency_mode(0))
-                    if options.post_usb_transparent_mode_exit_delay > 0:
-                        time.sleep(options.post_usb_transparent_mode_exit_delay)
-                    if _apply_accepted():
+                    self._sleep_with_cancel(exit_delay, deadline)
+                    if self._send_apply(device) == 0:
                         break
-                    if time.monotonic() >= end:
-                        raise TimeoutError("LAN:APPLY was never accepted.")
-                    time.sleep(_RECOVERY_POLL_SECONDS)
-                watch_end = time.monotonic() + options.wifi_recovery_settle_time
+                    self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)
+                watch_end = time.monotonic() + WIFI_BRIDGE_SETTLE_SECONDS
                 bridged = False
                 while time.monotonic() < watch_end:
-                    time.sleep(_RECOVERY_POLL_SECONDS)
-                    if not _console_answers():
+                    self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)
+                    if not self._console_answers(device):
                         bridged = True
                         break
                 if not bridged:
@@ -1122,10 +1179,6 @@ class DefaultFirmwareUpdateService:
                         "module update."
                     )
                     return True
-            raise TimeoutError(
-                f"The device did not stay out of the WiFi bridge within "
-                f"{budget:.0f} s."
-            )
         except Exception as exc:
             self._logger.warning(
                 "Could not confirm the device left WiFi update mode after a "

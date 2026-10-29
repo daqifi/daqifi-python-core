@@ -29,6 +29,14 @@ ReadinessProbe = Callable[[Any, Any], bool]
 _DEFAULT_STATE_TIMEOUT_SECONDS: float = 5 * 60.0
 
 
+#: How long the WiFi bridge can take to come up after an accepted
+#: ``LAN:APPLY``, and so how long a watch must last to rule it out. A
+#: firmware bound, not a preference: the WiFi manager's REINIT first waits
+#: out STA retry backoff (``retryAfterTick``, up to 30 s, wifi_manager.c),
+#: then the bridge entry waits up to 3 s twice for the WINC driver.
+WIFI_BRIDGE_SETTLE_SECONDS = 30.0 + 2 * 3.0 + 4.0
+
+
 @dataclass
 class FirmwareUpdateServiceOptions:
     """Configuration knobs for the firmware update service.
@@ -106,18 +114,14 @@ class FirmwareUpdateServiceOptions:
     # ``SYSTem:USB:SetTransparentMode 0``. The WINC is off in standby and
     # right after a PIC32 reflash, so it is powered on first; the flash
     # tool's success line, not its exit code, decides success.
-    # After a failed or cancelled update, recovery watches the console for
-    # ``wifi_recovery_settle_time`` after its last accepted APPLY: longer
-    # than the firmware's longest REINIT deferral (30 s STA retry backoff)
-    # plus the bridge entry (up to 3 s twice). It gives up after
-    # ``wifi_recovery_timeout``. Delays may be zero.
+    # After a failed or cancelled update, recovery gives up after
+    # ``wifi_recovery_timeout``, which can't be shorter than one
+    # WIFI_BRIDGE_SETTLE_SECONDS watch. Delays may be zero.
     power_on_wifi_module_before_lan_update_mode: bool = True
     power_on_wifi_module_settle_delay: float = 1.0
     post_lan_disconnect_port_release_delay: float = 1.5
     post_usb_transparent_mode_exit_delay: float = 0.1
     wifi_flash_success_marker: str = "Operation completed successfully"
-    post_lan_update_apply_delay: float = 1.0
-    wifi_recovery_settle_time: float = 40.0
     wifi_recovery_timeout: float = 150.0
 
     # ------------------------------------------------------------------
@@ -208,15 +212,19 @@ class FirmwareUpdateServiceOptions:
             "power_on_wifi_module_settle_delay",
             "post_lan_disconnect_port_release_delay",
             "post_usb_transparent_mode_exit_delay",
-            "post_lan_update_apply_delay",
-            "wifi_recovery_settle_time",
-            "wifi_recovery_timeout",
         ):
             value = getattr(self, field_name)
             if value < 0:
                 raise ValueError(
                     f"{field_name} cannot be negative (got {value})."
                 )
+
+        if self.wifi_recovery_timeout < WIFI_BRIDGE_SETTLE_SECONDS:
+            raise ValueError(
+                "wifi_recovery_timeout must be at least "
+                f"{WIFI_BRIDGE_SETTLE_SECONDS:.0f} s, one full bridge watch "
+                f"(got {self.wifi_recovery_timeout})."
+            )
 
         marker = self.wifi_flash_success_marker
         if not marker or not marker.strip():
@@ -266,4 +274,4 @@ def _validate_positive(value: float, parameter_name: str) -> None:
         )
 
 
-__all__ = ["FirmwareUpdateServiceOptions", "ReadinessProbe"]
+__all__ = ["FirmwareUpdateServiceOptions", "ReadinessProbe", "WIFI_BRIDGE_SETTLE_SECONDS"]

@@ -1093,58 +1093,6 @@ class DaqifiDevice:
         consecutive_empty = 0
         saw_no_error = False
 
-        # A real SCPI error reply is ``<int>,"<msg>"``. Strip a leading
-        # ``DAQIFI>`` prompt if present so noisy streams (where the
-        # prompt prefixes the reply or arrives on its own line) don't
-        # falsely look like garbage. (Qodo /agentic_review on PR #101
-        # caught this — the prior code only inspected the first
-        # non-empty line, so a ``DAQIFI>`` prefix could push the real
-        # reply past the budget.)
-        def _find_scpi_reply(lines):
-            for raw in lines:
-                candidate = raw.strip()
-                if not candidate:
-                    continue
-                # Case-insensitive prompt strip — firmware variants may
-                # emit `Daqifi>` / `daqifi>` instead of the canonical
-                # `DAQIFI>`. (Qodo /agentic_review on PR #101 caught
-                # the case-sensitive original would treat those as
-                # garbage and burn the empty_budget.)
-                if candidate.upper().startswith("DAQIFI>"):
-                    candidate = candidate[len("DAQIFI>"):].strip()
-                    if not candidate:
-                        continue
-                code_str, sep, rest = candidate.partition(",")
-                if not sep:
-                    continue
-                try:
-                    code = int(code_str.strip())
-                except ValueError:
-                    continue
-                rest = rest.strip()
-                # The reply must have non-empty content after the
-                # comma — accept whether or not the description is
-                # quoted. SerialInterface.drain_errors and
-                # scpi.parse_system_error both accept unquoted
-                # descriptions (firmware variants exist that omit
-                # quotes), and an earlier strict-quote requirement
-                # here was found to silently reject real unquoted
-                # errors like ``-200,Execution error`` — see Qodo
-                # /agentic_review on PR #101 (the same review that
-                # earlier *suggested* the strict-quote check; this
-                # is the corrected position).
-                if not rest:
-                    continue
-                # Special-case the empty-queue terminator so
-                # slightly-nonconforming firmware that returns
-                # ``0,No error`` (description unquoted) is still
-                # normalized to the canonical quoted form so the
-                # downstream parser sees a consistent shape.
-                if code == 0 and rest.replace('"', "").strip().lower() == "no error":
-                    return f'{code},"No error"'
-                return candidate
-            return None
-
         iterations = 0
         for _ in range(max_iterations):
             iterations += 1
@@ -1153,7 +1101,7 @@ class DaqifiDevice:
                 response_timeout_ms=response_timeout_ms,
                 completion_timeout_ms=completion_timeout_ms,
             )
-            reply = _find_scpi_reply(lines)
+            reply = _scpi.find_system_error_reply(lines)
             if reply is None:
                 consecutive_empty += 1
                 if consecutive_empty >= empty_budget:

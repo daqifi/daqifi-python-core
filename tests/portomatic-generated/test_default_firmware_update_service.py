@@ -269,6 +269,14 @@ class _FakeStreamingDevice:
     def stop_streaming(self) -> None:
         self.is_streaming = False
 
+    def execute_text_command(
+        self, setup_action, response_timeout_ms=5000, completion_timeout_ms=1000
+    ):
+        # A console that never answers: to the WiFi update, the bridge is up
+        # as soon as LAN:APPLY is sent.
+        setup_action()
+        return []
+
 
 class _FakeLanChipInfoStreamingDevice(_FakeStreamingDevice):
     def __init__(self, name: str, chip_info: LanChipInfo) -> None:
@@ -280,6 +288,18 @@ class _FakeLanChipInfoStreamingDevice(_FakeStreamingDevice):
 
 
 # ---- Test scaffolding ----------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _short_wifi_bridge_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The WiFi bridge watch is a firmware bound (40 s) and the recovery
+    # timeout can't be set below it. These fakes have no bridge to wait
+    # for, so shrink the bound, letting _fast_options keep recovery short.
+    import daqifi.firmware.update_options as _update_options
+    import daqifi.firmware.update_service as _update_service
+
+    monkeypatch.setattr(_update_options, "WIFI_BRIDGE_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr(_update_service, "WIFI_BRIDGE_SETTLE_SECONDS", 0.05)
 
 
 def _fast_options() -> FirmwareUpdateServiceOptions:
@@ -302,9 +322,7 @@ def _fast_options() -> FirmwareUpdateServiceOptions:
         power_on_wifi_module_settle_delay=0.005,
         post_lan_disconnect_port_release_delay=0.005,
         post_usb_transparent_mode_exit_delay=0.005,
-        post_lan_update_apply_delay=0.005,
-        wifi_recovery_settle_time=0.05,
-        wifi_recovery_timeout=0.5,
+        wifi_recovery_timeout=0.2,
     )
 
 
@@ -2108,7 +2126,11 @@ class TestUpdateWifiModule:
             shutil.rmtree(firmware_dir, ignore_errors=True)
 
         assert service.current_state == FirmwareUpdateState.COMPLETE
-        assert device.sent_commands == [
+        # The bridge handling's queries (SYSTem:ERRor?, *IDN?) aside.
+        assert [
+            c for c in device.sent_commands
+            if c not in ("SYSTem:ERRor?", "*IDN?")
+        ] == [
             "SYSTem:POWer:STATe 1",
             "SYSTem:COMMUnicate:LAN:FWUpdate",
             "SYSTem:COMMunicate:LAN:APPLY",
