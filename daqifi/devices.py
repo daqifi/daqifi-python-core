@@ -260,10 +260,6 @@ def _strip_prompt_prefixes(lines: Sequence[str]) -> List[str]:
     return out
 
 
-# The reply to the SYSTem:ERRor? sent after SD:LIST?, e.g. '0,"No error"'.
-_ERROR_QUEUE_REPLY = re.compile(r'^\s*-?\d+\s*,\s*"')
-
-
 def _split_at_list_terminator(lines: Sequence[str]) -> Optional[List[str]]:
     """The listing before the ``SYSTem:ERRor?`` reply that ends it, or
     ``None`` when that reply never came: the capture timed out or was cut
@@ -272,8 +268,10 @@ def _split_at_list_terminator(lines: Sequence[str]) -> Optional[List[str]]:
     The reply only marks the end. Its error code isn't attributed to the
     listing, because the queue can hold entries from earlier commands.
     """
+    from ._internal import scpi as _scpi
+
     for index in range(len(lines) - 1, -1, -1):
-        if _ERROR_QUEUE_REPLY.match(lines[index]):
+        if _scpi.find_system_error_reply([lines[index]]) is not None:
             return list(lines[:index])
     return None
 
@@ -1112,58 +1110,6 @@ class DaqifiDevice:
         consecutive_empty = 0
         saw_no_error = False
 
-        # A real SCPI error reply is ``<int>,"<msg>"``. Strip a leading
-        # ``DAQIFI>`` prompt if present so noisy streams (where the
-        # prompt prefixes the reply or arrives on its own line) don't
-        # falsely look like garbage. (Qodo /agentic_review on PR #101
-        # caught this — the prior code only inspected the first
-        # non-empty line, so a ``DAQIFI>`` prefix could push the real
-        # reply past the budget.)
-        def _find_scpi_reply(lines):
-            for raw in lines:
-                candidate = raw.strip()
-                if not candidate:
-                    continue
-                # Case-insensitive prompt strip — firmware variants may
-                # emit `Daqifi>` / `daqifi>` instead of the canonical
-                # `DAQIFI>`. (Qodo /agentic_review on PR #101 caught
-                # the case-sensitive original would treat those as
-                # garbage and burn the empty_budget.)
-                if candidate.upper().startswith("DAQIFI>"):
-                    candidate = candidate[len("DAQIFI>"):].strip()
-                    if not candidate:
-                        continue
-                code_str, sep, rest = candidate.partition(",")
-                if not sep:
-                    continue
-                try:
-                    code = int(code_str.strip())
-                except ValueError:
-                    continue
-                rest = rest.strip()
-                # The reply must have non-empty content after the
-                # comma — accept whether or not the description is
-                # quoted. SerialInterface.drain_errors and
-                # scpi.parse_system_error both accept unquoted
-                # descriptions (firmware variants exist that omit
-                # quotes), and an earlier strict-quote requirement
-                # here was found to silently reject real unquoted
-                # errors like ``-200,Execution error`` — see Qodo
-                # /agentic_review on PR #101 (the same review that
-                # earlier *suggested* the strict-quote check; this
-                # is the corrected position).
-                if not rest:
-                    continue
-                # Special-case the empty-queue terminator so
-                # slightly-nonconforming firmware that returns
-                # ``0,No error`` (description unquoted) is still
-                # normalized to the canonical quoted form so the
-                # downstream parser sees a consistent shape.
-                if code == 0 and rest.replace('"', "").strip().lower() == "no error":
-                    return f'{code},"No error"'
-                return candidate
-            return None
-
         iterations = 0
         for _ in range(max_iterations):
             iterations += 1
@@ -1172,7 +1118,7 @@ class DaqifiDevice:
                 response_timeout_ms=response_timeout_ms,
                 completion_timeout_ms=completion_timeout_ms,
             )
-            reply = _find_scpi_reply(lines)
+            reply = _scpi.find_system_error_reply(lines)
             if reply is None:
                 consecutive_empty += 1
                 if consecutive_empty >= empty_budget:
@@ -1928,7 +1874,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     _setup_list,
                     response_timeout_ms=3000,
                     completion_timeout_ms=1500,
-                )
+                ),
+                sent=self._sd_listing_commands(),
+                drain=lambda: self.execute_text_command(
+                    lambda: None,
+                    response_timeout_ms=3000,
+                    completion_timeout_ms=1500,
+                ),
             )
         finally:
             if self.is_connected:
@@ -2120,7 +2072,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         try:
             # No retry: it would send the DELete again.
-            files = self._read_sd_listing(_capture, attempts=1)
+            files = self._read_sd_listing(
+                _capture,
+                sent=self._sd_listing_commands(
+                    scpi_commands.delete_sd_file(file_name)
+                ),
+                drain=self._drain_raw_text,
+                attempts=1,
+            )
         finally:
             if self.is_connected:
                 try:
@@ -2203,7 +2162,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
             )
 
         try:
-            files = self._read_sd_listing(_capture)
+            files = self._read_sd_listing(
+                _capture,
+                sent=self._sd_listing_commands(),
+                drain=self._drain_raw_text,
+            )
         finally:
             if self.is_connected:
                 try:
@@ -2344,30 +2307,66 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
     # ---- raw-capture helpers (consumer-pause pattern) --------------------
 
+    def _sd_listing_commands(self, *extra: ScpiMessage) -> List[ScpiMessage]:
+        """Every command a listing exchange sends, whose echoes it drops."""
+        return [
+            scpi_commands.disable_network_lan(),
+            scpi_commands.enable_storage_sd(),
+            *extra,
+            scpi_commands.get_sd_file_list(),
+            scpi_commands.get_last_error(),
+        ]
+
+    def _drain_raw_text(self) -> None:
+        """Swallow whatever the device still sends until it goes quiet."""
+        self._execute_raw_text_capture(lambda: None, response_timeout_s=3.0)
+
     def _read_sd_listing(
-        self, capture: Callable[[], List[str]], attempts: int = 2
+        self,
+        capture: Callable[[], List[str]],
+        sent: Sequence[ScpiMessage],
+        drain: Callable[[], Any],
+        attempts: int = 2,
     ) -> List[SdCardFileInfo]:
         """Run a listing capture whose last command is ``SYSTem:ERRor?``,
         and return the files (#188).
 
-        A reply that never reached that terminator is retried
-        (``attempts`` in all), then raised as
-        :class:`SdCardListIncompleteException` rather than returned as an
-        empty card. A terminated reply is then classified: no card,
-        filesystem errors, a missing directory, and an end-of-listing marker
-        of ``INCOMPLETE`` / ``FAILED`` all raise.
+        - Echoes of the commands in ``sent`` (with ``SYSTem:ECHO 1`` the
+          device repeats each command) are dropped, so they are neither
+          files nor content after the end-of-listing marker.
+        - A reply that never reached the terminator is retried
+          (``attempts`` in all), after ``drain`` has swallowed whatever the
+          timed-out attempt still delivers, so its late terminator can't end
+          the retry. It is then raised as
+          :class:`SdCardListIncompleteException`, not returned as an empty
+          card.
+        - A terminated reply is classified: no card, filesystem errors, a
+          missing directory, and an ``INCOMPLETE`` / ``FAILED`` marker raise.
+          So does a reply with no files and no marker at all: an empty card
+          is only believed when the device says the listing was complete.
         """
         from .exceptions import SdCardListIncompleteException
+        from .sdcard import sd_card_listing_status
 
+        echoes = {m.data.strip() for m in sent}
         lines: List[str] = []
         for attempt in range(attempts):
             if attempt:
-                time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
-            lines = _strip_prompt_prefixes(capture())
+                drain()
+            lines = [
+                line for line in _strip_prompt_prefixes(capture())
+                if line.strip() not in echoes
+            ]
             listing = _split_at_list_terminator(lines)
-            if listing is not None:
-                check_sd_card_listing(listing)
-                return parse_sd_card_file_list(listing)
+            if listing is None:
+                continue
+            check_sd_card_listing(listing)
+            files = parse_sd_card_file_list(listing)
+            if not files and sd_card_listing_status(listing) == "unterminated":
+                raise SdCardListIncompleteException(
+                    lines, "no files and no end-of-listing marker"
+                )
+            return files
         raise SdCardListIncompleteException(
             lines, "the reply ended before the device answered SYSTem:ERRor?"
         )

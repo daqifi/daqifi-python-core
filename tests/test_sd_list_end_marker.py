@@ -58,7 +58,8 @@ def test_a_file_named_like_the_marker_is_still_a_file() -> None:
         (["[Error:5]Failed to open directory [Daqifi]", "__END_OF_LIST__ FAILED"], "failed"),
         (["__END_OF_LIST__ WHATEVER"], "incomplete"),
         (["a.bin 1"], "unterminated"),
-        (["__END_OF_LIST__ OK", "b.bin 2"], "unterminated"),
+        # A status is final once seen; a later line (an echo, say) keeps it.
+        (["a.bin 1", "__END_OF_LIST__ INCOMPLETE", "SYSTem:ERRor?"], "incomplete"),
     ],
 )
 def test_the_listing_status_comes_from_the_last_marker(lines, status) -> None:
@@ -139,3 +140,70 @@ def test_the_legacy_listing_refuses_an_incomplete_one() -> None:
     device = _legacy("Daqifi/log_a.bin 3\r\n__END_OF_LIST__ INCOMPLETE\r\n")
     with pytest.raises(SdCardListIncompleteException):
         device.sd_list_files()
+
+
+# Audit r1 on #212.
+
+_ECHOED_TERMINATOR = b'DAQIFI> SYSTem:ERRor?\r\n0,"No error"\r\n'
+
+
+@pytest.mark.parametrize("method", ["get_sd_card_files", "request_sd_card_file_list", "delete"])
+def test_an_echo_of_the_terminator_query_does_not_hide_incomplete(method) -> None:
+    # With SYSTem:ECHO 1 the echo of SYSTem:ERRor? followed the INCOMPLETE
+    # marker, reset the status to "unterminated" and became a file.
+    device = _fakes._make_device_with_serial_facade(
+        {
+            b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n__END_OF_LIST__ INCOMPLETE\r\n",
+            b"SYSTem:ERRor?": _ECHOED_TERMINATOR,
+        }
+    )
+    with pytest.raises(SdCardListIncompleteException):
+        if method == "delete":
+            device.delete_sd_card_file("log_a.bin")
+        else:
+            getattr(device, method)()
+
+
+@pytest.mark.parametrize("method", ["get_sd_card_files", "request_sd_card_file_list"])
+def test_an_echo_is_never_a_file(method) -> None:
+    device = _fakes._make_device_with_serial_facade(
+        {b"SD:LIST?": b"DAQIFI> SYSTem:STORage:SD:LIST?\r\n" + OK, b"SYSTem:ERRor?": _ECHOED_TERMINATOR}
+    )
+    getattr(device, method)()
+    assert _names(device.sd_card_files) == ["log_a.bin"]
+
+
+def test_a_late_terminator_from_the_first_attempt_does_not_complete_the_retry() -> None:
+    # Audit r1: the timed-out attempt's '0,"No error"' arrived during the
+    # retry, was taken as its terminator, and () was cached as the card.
+    device = _fakes._make_device_with_serial_facade({b"SYSTem:ERRor?": b""})
+    stream = device._transport.stream
+    real_write = stream.write
+    lists = {"n": 0}
+
+    def _write(data):
+        n = real_write(data)
+        if b"SD:LIST?" in bytes(data):
+            lists["n"] += 1
+            if lists["n"] == 2:
+                # The first attempt's terminator, then this attempt's listing.
+                stream.feed(b'0,"No error"\r\nDaqifi/log_a.bin 3\r\n__END_OF_LIST__ OK\r\n')
+        return n
+
+    stream.write = _write
+    device._sd_card_files = ["sentinel"]
+    with pytest.raises(SdCardListIncompleteException):
+        device.get_sd_card_files()
+    assert device._sd_card_files == ["sentinel"]  # nothing cached
+
+
+@pytest.mark.parametrize("terminator", [b'+0,"No error"\r\n', b"0,No error\r\n"])
+def test_terminator_spellings_drain_errors_accepts_are_accepted(terminator) -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OK, b"SYSTem:ERRor?": terminator})
+    assert _names(device.get_sd_card_files()) == ["log_a.bin"]
+
+
+def test_no_files_and_no_marker_is_not_an_empty_card() -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b""})
+    with pytest.raises(SdCardListIncompleteException):
+        device.get_sd_card_files()

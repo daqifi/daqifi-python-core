@@ -34,7 +34,9 @@ aims to follow [Semantic Versioning](https://semver.org/).
   raise `SdCardListIncompleteException` (the reply is retried once first,
   except after a delete); a missing directory (`[Error:4]` / `[Error:5]
   Failed to open directory`) raises `SdCardDirectoryNotFoundException`, a
-  `SdCardFilesystemException` subclass. The legacy
+  `SdCardFilesystemException` subclass. A reply with no files and no
+  marker is refused too, rather than cached as an empty card. Echoes of
+  the listing's own commands are dropped. The legacy
   `NyquistDevice.sd_list_files()` skips the marker and refuses a listing
   marked incomplete too (#188).
 - Every NQ3 DAC write was rejected by the firmware. The voltage setter sent

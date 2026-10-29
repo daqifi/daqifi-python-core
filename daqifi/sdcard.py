@@ -188,9 +188,10 @@ def sd_card_listing_status(lines: Iterable[str]) -> str:
     status word this version doesn't know), ``"failed"`` (``FAILED``: the
     directory couldn't be opened) or ``"unterminated"``: no marker, as from
     firmware before it had one. That isn't an error, it just can't vouch
-    for the listing. The last marker wins, and any content after it means
-    that marker belonged to an earlier exchange, so the result is
-    ``"unterminated"``.
+    for the listing. A status is final once seen: a later line (an echo of
+    the next command, say) doesn't undo it, though a later marker replaces
+    it. Lines left over from an earlier exchange are the caller's to keep
+    out (the device drains them before retrying a listing).
     """
     status = "unterminated"
     for line in lines:
@@ -198,8 +199,6 @@ def sd_card_listing_status(lines: Iterable[str]) -> str:
             continue
         word = _list_end_status(line)
         if word is None:
-            if line.strip():
-                status = "unterminated"
             continue
         status = {"OK": "complete", "FAILED": "failed"}.get(
             word.upper(), "incomplete"
