@@ -25,6 +25,13 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- SD JSON logs written by the firmware parsed to no samples: the parser
+  expected one object per line with an `analog` key, but the firmware
+  writes a `{"meta":...}` header and then each sample object across several
+  lines with `"ai":[{"ch":n,"val":v},...]` and `"di":[...]`. The file is now
+  read as a sequence of JSON objects; the header supplies the tick rate
+  and device name, analog values are calibrated by their `ch` number, and
+  the old one-line `analog` form still parses (#163).
 - `StreamManager.start()` read and discarded everything the board sent with
   its START reply: the CSV/JSON metadata header (so the tick rate and the
   column-to-channel mapping were lost for the session) and the first
