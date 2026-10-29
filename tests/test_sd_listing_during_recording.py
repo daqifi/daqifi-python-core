@@ -41,29 +41,42 @@ def test_the_listing_advice_no_longer_points_at_another_listing() -> None:
     assert "request_sd_card_file_list" not in str(excinfo.value)
 
 
-@pytest.mark.parametrize(
-    "streaming, interface, expected",
-    [(b"1", b"2", True), (b"1", b"3", True), (b"1", b"0", False), (b"0", b"2", False)],
-)
-def test_the_logging_state_comes_from_the_streaming_queries(streaming, interface, expected) -> None:
-    device = _fakes._make_device_with_serial_facade(
-        {b"STReam:DATA?": streaming + b"\r\n", b"STReam:INTerface?": interface + b"\r\n"}
-    )
-    assert device.get_sd_logging_state() is expected
+# A protobuf frame captured from a USB+SD stream (interface 3). Its digital
+# bytes are ffff; a text reply that lands right after it fuses into one line.
+_FRAME = bytes.fromhex("1208c6ecd8e3041201002a020000aa0202ffff")
+_STREAM_REPLIES = {
+    b"STReam:DATA?": _FRAME + b"1\r\n" + _FRAME,
+    b"STReam:INTerface?": _FRAME + b"0\r\n" + _FRAME,
+}
 
 
-def test_the_logging_state_query_leaves_the_sd_bus_alone() -> None:
-    device, before = _recording_device(
-        {b"STReam:DATA?": b"1\r\n", b"STReam:INTerface?": b"2\r\n"}
+def test_the_logging_state_during_a_usb_and_sd_stream_sends_nothing() -> None:
+    # Audit r1: a text query during a live binary stream fused replies with
+    # frames, raised on valid answers and could hold the exchange lock.
+    device, before = _recording_device(_STREAM_REPLIES)
+    assert device.get_sd_logging_state() is True
+    assert device._transport.stream.written[before:] == []
+
+
+def test_a_recording_on_the_usb_interface_still_reads_as_logging() -> None:
+    # Audit r1: the firmware logs to SD on any non-WiFi interface when SD is
+    # enabled with a file name (SCPI_StartStreaming, sdLoggingRequested), so
+    # INTerface? 0 can be a recording.
+    device, _ = _recording_device(
+        {b"STReam:DATA?": b"1\r\n", b"STReam:INTerface?": b"0\r\n"}
     )
     assert device.get_sd_logging_state() is True
-    sent = b"".join(device._transport.stream.written[before:])
-    assert b"SD:ENAble" not in sent and b"LAN:ENAbled" not in sent
-    assert b"SD:LOGging?" not in sent
 
 
-def test_an_unanswered_state_query_raises_rather_than_echoing_the_cache() -> None:
-    device = _fakes._make_device_with_serial_facade()
-    device._is_logging_to_sd = True
-    with pytest.raises(RuntimeError, match="streaming state"):
-        device.get_sd_logging_state()
+def test_stopping_right_after_a_state_query_is_not_blocked() -> None:
+    device, _ = _recording_device(_STREAM_REPLIES)
+    device.get_sd_logging_state()
+    device.stop_sd_card_logging()
+    assert not device.is_logging_to_sd_card
+
+
+def test_not_logging_reads_false_without_asking() -> None:
+    device = _fakes._make_device_with_serial_facade(_STREAM_REPLIES)
+    before = len(device._transport.stream.written)
+    assert device.get_sd_logging_state() is False
+    assert device._transport.stream.written[before:] == []

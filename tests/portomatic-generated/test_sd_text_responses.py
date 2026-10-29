@@ -4,8 +4,8 @@ Covers the two methods rewired (or added) in this PR:
 
 * ``request_sd_card_file_list`` now actually populates
   ``_sd_card_files`` (used to be fire-and-forget).
-* ``get_sd_logging_state`` asks the device whether it is streaming to
-  the SD card instead of trusting local cached state.
+* ``get_sd_logging_state`` answers from session state: the firmware has
+  no query for it (#187).
 
 Both rely on ``execute_text_command`` (#22) to capture the text
 reply that the protobuf consumer would otherwise drop.
@@ -167,11 +167,9 @@ class TestRequestSdCardFileList:
 
 # ---- get_sd_logging_state -------------------------------------------------
 #
-# The firmware has no SD:LOGging? query (#187). The state is read from
-# SYSTem:STReam:DATA? and SYSTem:STReam:INTerface?, which don't touch the
-# SD/LAN bus; tests/test_sd_listing_during_recording.py covers the mapping.
-
-_STATE = {b"STReam:DATA?": b"DAQIFI>\r\n1\r\n", b"STReam:INTerface?": b"2\r\n"}
+# The firmware has no SD logging-state query (#187), so the method answers
+# from this session's state and sends nothing;
+# tests/test_sd_listing_during_recording.py covers it during a recording.
 
 
 class TestGetSdLoggingState:
@@ -180,22 +178,15 @@ class TestGetSdLoggingState:
         with pytest.raises(RuntimeError, match="not connected"):
             sd.get_sd_logging_state()
 
-    def test_works_over_any_transport(self) -> None:
-        # No SPI bus switch, so a network connection can ask too.
-        sd = _make_device(usb=False, response_map=_STATE)
+    def test_matches_the_session_flag_without_device_io(self) -> None:
+        sd = _make_device()
         try:
+            before = len(sd._transport.stream.written)
+            sd._is_logging_to_sd = True
             assert sd.get_sd_logging_state() is True
-        finally:
-            sd.disconnect()
-
-    def test_does_not_switch_the_bus(self) -> None:
-        sd = _make_device(response_map=_STATE)
-        try:
-            sd.get_sd_logging_state()
-            written = b"".join(sd._transport.stream.written)
-            assert b"STReam:DATA?" in written
-            assert b"LAN:ENAbled" not in written
-            assert b"SD:ENAble" not in written
+            sd._is_logging_to_sd = False
+            assert sd.get_sd_logging_state() is False
+            assert sd._transport.stream.written[before:] == []
         finally:
             sd.disconnect()
 

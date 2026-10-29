@@ -205,11 +205,6 @@ def get_stream_interface() -> ScpiMessage:
     return ScpiMessage("SYSTem:STReam:INTerface?")
 
 
-def get_streaming_state() -> ScpiMessage:
-    """``1`` while the device is streaming to any interface, else ``0``."""
-    return ScpiMessage("SYSTem:STReam:DATA?")
-
-
 def start_streaming(frequency: int) -> ScpiMessage:
     """Start streaming at ``frequency`` Hz (1-1000).
 

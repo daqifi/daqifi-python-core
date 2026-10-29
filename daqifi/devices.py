@@ -1922,52 +1922,25 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._sd_card_files = parse_sd_card_file_list(lines)
 
     def get_sd_logging_state(self) -> bool:
-        """Ask the device whether it is logging to the SD card.
+        """Whether this session has the device logging to the SD card.
 
-        Returns ``True`` when the device is streaming (``SYSTem:STReam:DATA?``
-        answers 1) to an interface that includes the SD card
-        (``SYSTem:STReam:INTerface?`` answers 2, SD, or 3, USB+SD).
+        The same value as :attr:`is_logging_to_sd_card`, kept for API
+        compatibility. It sends nothing to the device (#187):
 
-        Distinct from the local :attr:`is_logging_to_sd_card` property,
-        which reflects what THIS Python session has commanded —
-        ``get_sd_logging_state`` asks the DEVICE.
-
-        Neither query touches the SD/LAN bus, so an active recording is
-        left alone. The firmware has no SD logging-state query of its own:
-        ``SD:LOGging`` was only ever a setter, since renamed ``SD:FILE``
-        (#187).
-
-        Raises:
-            RuntimeError: not connected, or the device's replies could not
-                be parsed.
+        - the firmware has no SD logging-state query. ``SD:LOGging`` was only
+          ever a setter, since renamed ``SD:FILE``, and there is no query for
+          the log file name;
+        - the firmware logs to SD whenever a stream starts on an interface
+          other than WiFi while SD is enabled with a file name set
+          (``SCPI_StartStreaming``'s ``sdLoggingRequested``), so the
+          streaming interface alone can't tell;
+        - the older ``SD:ENAble 1`` probe made the firmware tear down the
+          very recording it was asking about, and a text query during a USB
+          stream is mixed in with the binary samples.
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
-
-        def _setup_query() -> None:
-            self.send(scpi_commands.get_streaming_state())
-            self.send(scpi_commands.get_stream_interface())
-
-        lines = self.execute_text_command(
-            _setup_query,
-            response_timeout_ms=2000,
-            completion_timeout_ms=500,
-        )
-        values = [
-            int(stripped)
-            for stripped in (ln.strip() for ln in _strip_prompt_prefixes(lines))
-            if stripped.isascii() and stripped.isdigit()
-        ]
-        if len(values) != 2:
-            raise RuntimeError(
-                "Could not read the device's streaming state: expected two "
-                f"integer replies, got {lines!r}."
-            )
-        streaming, interface = values
-        return streaming == 1 and interface in (
-            int(StreamInterface.SdCard),
-            int(StreamInterface.All),
-        )
+        return self._is_logging_to_sd
 
     def delete_sd_file(self, file_name: str) -> None:
         """Low-level helper — emit DELete only. Prefer
