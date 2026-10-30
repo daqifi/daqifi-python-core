@@ -141,6 +141,8 @@ class FirmwareUpdateServiceOptions:
             FirmwareUpdateState.PROGRAMMING: self.programming_timeout,
             FirmwareUpdateState.VERIFYING: self.verifying_timeout,
             FirmwareUpdateState.JUMPING_TO_APP: self.jumping_to_application_timeout,
+            # The cleanup re-erase is an erase: same budget.
+            FirmwareUpdateState.CLEANING_UP: self.erasing_flash_timeout,
         }
         return mapping.get(state, _DEFAULT_STATE_TIMEOUT_SECONDS)
 

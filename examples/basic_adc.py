@@ -11,7 +11,7 @@ from pathlib import Path
 # Add parent directory to path for local testing
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from daqifi import NyquistDevice
+from daqifi import BoardVariant, NyquistDevice
 
 
 def main():
@@ -27,7 +27,9 @@ def main():
     try:
         # Configure individual channel
         print("\nConfiguring ADC channel 0:")
-        device.analog_inputs[0].range = "10V"
+        if device.variant == BoardVariant.NQ3:
+            # NQ1/NQ2 have a fixed input range; setting it raises there.
+            device.analog_inputs[0].range = "10V"
         device.analog_inputs[0].enabled = True
         print(f"  Range: {device.analog_inputs[0].range}")
         print(f"  Enabled: {device.analog_inputs[0].enabled}")

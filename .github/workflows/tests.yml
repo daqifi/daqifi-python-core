@@ -82,15 +82,15 @@ jobs:
 
       # ⛔ AN UNEXPECTED SKIP FAILS THE JOB. A test that skips because its
       # dependency was not installed looks exactly like a pass in the summary
-      # line -- the drift test skips without grpcio-tools, for one. The only
-      # skips allowed here are the device smoke tests, which need a board this
-      # runner does not have.
+      # line -- the drift test skips without grpcio-tools, for one. No skip is
+      # allowed: the device smoke tests, which need a board, now live under
+      # tests/integration/hardware and aren't collected here (#205).
       - name: Check skips
         run: |
           python - <<'PY'
           import xml.etree.ElementTree as ET
 
-          ALLOWED = ("tests.integration.test_device_smoke",)
+          ALLOWED = ()
           unexpected = [
               f"{case.get('classname')}::{case.get('name')}: {skip.get('message')}"
               for case in ET.parse("pytest-results.xml").iter("testcase")

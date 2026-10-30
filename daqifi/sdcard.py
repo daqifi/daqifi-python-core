@@ -30,11 +30,9 @@ Includes the small value classes the parser surface needs:
   ``parse_stream`` / ``parse_file`` block until the whole file is
   read, and ``SdCardLogSession.samples`` is an
   ``Iterator[SdCardLogEntry]`` rather than ``IAsyncEnumerable``.
-- ``SdCardFileParserFactory`` only handles the protobuf format
-  today; CSV and JSON variants raise ``NotImplementedError`` until
-  their parsers are ported. ``detect_format`` already returns the
-  right enum for ``.csv`` / ``.json``, so callers can probe the
-  format without invoking a parser.
+- ``SdCardFileParserFactory`` picks the protobuf, CSV or JSON parser
+  (:class:`SdCardCsvFileParser`, :class:`SdCardJsonFileParser`) by
+  file extension.
 """
 from __future__ import annotations
 
@@ -85,6 +83,7 @@ __all__ = [
     "sd_card_listing_status",
     "check_sd_card_listing",
     "END_OF_FILE_MARKER",
+    "TRANSFER_ERROR_MARKER",
     "SD_LIST_END_MARKER",
 ]
 
@@ -94,6 +93,130 @@ __all__ = [
 # constant — kept module-level so test harnesses + receiver code share
 # the same bytes.
 END_OF_FILE_MARKER: bytes = b"__END_OF_FILE__"
+
+# What the firmware sends INSTEAD of the end-of-file marker when reading the
+# card fails part-way through a file (sd_card_manager.c, #725): the bytes
+# before it are real content, but the file is incomplete. An open failure
+# still ends with a bare END_OF_FILE_MARKER. Upstream: SdCardFileReceiver.
+TRANSFER_ERROR_MARKER: bytes = b"__TRANSFER_ERROR__"
+
+# A trailing window this long catches either marker split across reads.
+_TERMINAL_MARKER_WINDOW = max(len(END_OF_FILE_MARKER), len(TRANSFER_ERROR_MARKER))
+
+# What may follow a terminal marker: line endings and the console prompt,
+# in any order, at most this many bytes. The firmware sends the markers
+# bare (sd_card_manager.c); the console framing is tolerated.
+_MARKER_TRAILER_MAX = 16
+
+
+def _is_marker_trailer(trailer: bytes) -> bool:
+    """True if ``trailer`` can follow a terminal marker at the end of a
+    transfer: line endings and the console prompt, at most
+    ``_MARKER_TRAILER_MAX`` bytes, possibly ending part-way through a
+    prompt still arriving."""
+    if len(trailer) > _MARKER_TRAILER_MAX:
+        return False
+    rest = trailer.replace(b"DAQIFI> ", b"").replace(b"DAQIFI>", b"")
+    if not rest.strip(b"\r\n "):
+        return True
+    # A prompt still arriving at the very end ("DAQ").
+    for cut in range(1, len(b"DAQIFI>")):
+        if rest.endswith(b"DAQIFI>"[:cut]):
+            return not rest[: len(rest) - cut].strip(b"\r\n ")
+    return False
+
+
+class _SizedTransfer:
+    """The body of a download whose size is known, telling the device's
+    ``__TRANSFER_ERROR__`` from file content that happens to contain it.
+
+    The boundary is decided by what starts AT it: the size bytes followed
+    by an exact ``__END_OF_FILE__`` are success, whatever the content's tail
+    looks like (its last bytes and the marker's leading ``__`` can spell
+    ``__TRANSFER_ERROR__`` together). While the bytes past the boundary are
+    still a prefix of that marker, nothing is decided.
+
+    Before that, no byte is written from the first OPEN candidate on: a
+    place the marker could start that nothing but a line ending or prompt
+    follows (or a proper prefix of the marker at the end of what has
+    come). A candidate followed by real content was content. Past the
+    boundary, anything but the end-of-file marker: a complete transfer-error
+    marker there or across the boundary is the error, else a mismatch. A
+    candidate still open when the line goes idle, closes or the deadline
+    passes (:meth:`finish`) is the error, with the bytes before it, unless
+    the bytes past the boundary could be the start of the end-of-file
+    marker (then it can't be told; the caller's timeout stands). No quiet
+    window decides anything: content may pause.
+    """
+
+    def __init__(self, expected_size: int) -> None:
+        self.expected = expected_size
+        self.committed = 0
+        self.pending = bytearray()
+
+    def _open_candidate(self, limit: int) -> Optional[int]:
+        buf = bytes(self.pending)
+        marker = TRANSFER_ERROR_MARKER
+        i = buf.find(marker[:1])
+        while 0 <= i < limit:
+            tail = buf[i:]
+            if len(tail) < len(marker):
+                if marker.startswith(tail):
+                    return i
+            elif tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
+                return i
+            i = buf.find(marker[:1], i + 1)
+        return None
+
+    def feed(self, data: bytes) -> Tuple[bytes, Optional[Tuple[str, Any]]]:
+        """Take ``data``; return the bytes now safe to write and an outcome:
+        None (keep reading), ("eof", bytes after the marker),
+        ("transfer_error", bytes before it) or ("mismatch", None)."""
+        self.pending.extend(data)
+        boundary = self.expected - self.committed
+        undecided = True
+        if len(self.pending) >= boundary:
+            after = bytes(self.pending[boundary:])
+            if after.startswith(END_OF_FILE_MARKER):
+                # The whole body, then the exact marker: success.
+                out = bytes(self.pending[:boundary])
+                self.committed += boundary
+                self.pending = bytearray()
+                return out, ("eof", after[len(END_OF_FILE_MARKER):])
+            # Empty, or a prefix of the end-of-file marker: not yet known.
+            undecided = END_OF_FILE_MARKER.startswith(after)
+        limit = min(boundary, len(self.pending))
+        candidate = self._open_candidate(limit)
+        safe = limit if candidate is None else candidate
+        out = bytes(self.pending[:safe])
+        del self.pending[:safe]
+        self.committed += safe
+        return out, (None if undecided else self._outcome())
+
+    def _outcome(self) -> Optional[Tuple[str, Any]]:
+        # Called once the bytes past the boundary are known not to be (the
+        # start of) the end-of-file marker.
+        tail = bytes(self.pending)
+        marker = TRANSFER_ERROR_MARKER
+        if tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
+            return ("transfer_error", self.committed)
+        if marker.startswith(tail):
+            return None  # could still complete
+        return ("mismatch", None)
+
+    def finish(self) -> Optional[Tuple[str, Any]]:
+        """At idle, close or the deadline: an open complete candidate is the
+        device's marker."""
+        tail = bytes(self.pending)
+        marker = TRANSFER_ERROR_MARKER
+        if not (tail.startswith(marker) and _is_marker_trailer(tail[len(marker):])):
+            return None
+        boundary = self.expected - self.committed
+        if len(tail) >= boundary and END_OF_FILE_MARKER.startswith(tail[boundary:]):
+            # Its bytes past the boundary could be the end-of-file marker
+            # starting: content followed by a cut-off marker, or the error.
+            return None
+        return ("transfer_error", self.committed)
 
 
 _LOG_FILENAME_RE = re.compile(r"^log_(\d{8}_\d{6})", re.IGNORECASE)
@@ -555,6 +678,12 @@ class SdCardParseOptions:
     # warns once per parse. Values written with decimals are volts either
     # way.
     integer_units: Optional[str] = None
+    # The channel numbers of a protobuf log's analog values, in the order
+    # the firmware packs them (the enabled channels, ascending). The log
+    # doesn't record them, so without this calibration and range are applied
+    # by position and entries carry analog_channels=None. CSV and JSON logs
+    # name their channels and ignore this.
+    analog_channels: Optional[Sequence[int]] = None
 
 
 @dataclass(frozen=True)
@@ -756,21 +885,33 @@ class SdCardFileReceiver:
             or expected_size < 0
         ):
             raise ValueError(f"expected_size must be a non-negative int (got {expected_size!r})")
+        from .exceptions import SdCardTransferErrorException
+
         marker_len = len(END_OF_FILE_MARKER)
+        error_len = len(TRANSFER_ERROR_MARKER)
+        window = _TERMINAL_MARKER_WINDOW
         deadline = time.monotonic() + effective_timeout
         has_in_waiting = hasattr(self._source, "in_waiting")
         # Reset leftover so a re-used receiver doesn't expose stale
         # bytes from the previous receive() call.
         self._leftover = b""
 
-        # Trailing-byte window so the marker can be detected even
-        # when split across chunk boundaries — matches the upstream
-        # implementation. Sized to exactly the marker length.
+        # Trailing-byte window so a marker can be detected even when
+        # split across chunk boundaries — matches the upstream
+        # implementation. Sized to the longer of the two markers.
         trailing = bytearray()
         total_bytes = 0
+        # Known size: tells the device's __TRANSFER_ERROR__ from content.
+        sized = _SizedTransfer(expected_size) if expected_size is not None else None
+
+        def _transfer_error_if_open() -> None:
+            outcome = sized.finish() if sized is not None else None
+            if outcome is not None:
+                raise SdCardTransferErrorException(file_name, outcome[1])
 
         while True:
             if time.monotonic() >= deadline:
+                _transfer_error_if_open()
                 raise TimeoutError(
                     f"SD card file download timed out after "
                     f"{effective_timeout:.3f} seconds. Received "
@@ -801,39 +942,40 @@ class SdCardFileReceiver:
                     # deadline above decides when to give up.
                     continue
                 if not chunk:
+                    # Closed: nothing can follow, so an open transfer-error
+                    # candidate is the device's marker.
+                    _transfer_error_if_open()
                     raise TimeoutError(
                         f"Transport stream closed before receiving the EOF "
                         f"marker. Received {total_bytes} bytes."
                     )
-
             chunk_bytes = bytes(chunk)
-            if expected_size is not None:
-                remaining = expected_size - total_bytes
-                if remaining > 0:
-                    body = chunk_bytes[:remaining]
+            if sized is not None:
+                body, outcome = sized.feed(chunk_bytes)
+                if body:
                     _write_all(destination_stream, body, deadline)
                     total_bytes += len(body)
-                    chunk_bytes = chunk_bytes[remaining:]
                     _emit_transfer_progress(progress, total_bytes, file_name)
-                if total_bytes == expected_size:
-                    trailing.extend(chunk_bytes)
-                    if len(trailing) >= marker_len:
-                        if bytes(trailing[:marker_len]) != END_OF_FILE_MARKER:
-                            raise IOError(
-                                f"SD card file {file_name!r}: {expected_size} bytes "
-                                "received but no end-of-file marker after them; the "
-                                "file is longer than listed or the transfer is corrupt."
-                            )
-                        self._leftover = bytes(trailing[marker_len:])
+                if outcome is not None:
+                    kind, value = outcome
+                    if kind == "eof":
+                        self._leftover = value
                         return total_bytes
+                    if kind == "transfer_error":
+                        raise SdCardTransferErrorException(file_name, value)
+                    raise IOError(
+                        f"SD card file {file_name!r}: {expected_size} bytes "
+                        "received but no end-of-file marker after them; the "
+                        "file is longer than listed or the transfer is corrupt."
+                    )
                 continue
-            found, position = _find_eof_marker(trailing, chunk_bytes)
+            found, position, found_marker = _find_terminal_marker(trailing, chunk_bytes)
             if found:
                 # ``position`` is in the virtual [trailing + chunk] view.
                 # Write everything before it; preserve everything after
                 # in ``self._leftover`` so callers sharing the source
                 # stream can avoid silent data loss.
-                marker_end_in_combined = position + marker_len
+                marker_end_in_combined = position + len(found_marker)
                 # Index in the chunk where the marker ends. If the
                 # marker started in trailing, this is < len(chunk) when
                 # the marker spans the boundary.
@@ -860,14 +1002,20 @@ class SdCardFileReceiver:
                 else:
                     self._leftover = b""
                 _emit_transfer_progress(progress, total_bytes, file_name)
+                if found_marker == TRANSFER_ERROR_MARKER:
+                    # Everything written is real content, left in the
+                    # destination for a caller that can use a partial log;
+                    # but the file is incomplete, and that's what the
+                    # marker says (upstream SdCardFileReceiver).
+                    raise SdCardTransferErrorException(file_name, total_bytes)
                 return total_bytes
 
-            # No marker yet — write everything except the last
-            # markerLength bytes (those become the new trailing window
-            # for next iteration's spanning check).
+            # No marker yet — write everything except the last ``window``
+            # bytes (those become the new trailing window for next
+            # iteration's spanning check).
             combined_len = len(trailing) + len(chunk_bytes)
-            if combined_len >= marker_len:
-                safe_count = combined_len - marker_len
+            if combined_len >= window:
+                safe_count = combined_len - window
                 if safe_count > 0:
                     from_trailing = min(safe_count, len(trailing))
                     if from_trailing > 0:
@@ -877,25 +1025,29 @@ class SdCardFileReceiver:
                     if from_new > 0:
                         _write_all(destination_stream, chunk_bytes[:from_new], deadline)
                         total_bytes += from_new
-                # Rebuild trailing window: last marker_len bytes of
-                # the combined [trailing + chunk] sequence.
-                from_new_data = min(len(chunk_bytes), marker_len)
-                from_trailing_data = marker_len - from_new_data
-                new_trailing = bytearray()
-                if from_trailing_data > 0:
-                    new_trailing.extend(
-                        trailing[len(trailing) - from_trailing_data:]
-                    )
-                if from_new_data > 0:
-                    new_trailing.extend(
-                        chunk_bytes[len(chunk_bytes) - from_new_data:]
-                    )
-                trailing = new_trailing
+                # Rebuild trailing window: last ``window`` bytes of the
+                # combined [trailing + chunk] sequence.
+                trailing = bytearray((bytes(trailing) + chunk_bytes)[-window:])
             else:
-                # Combined data still shorter than the marker —
+                # Combined data still shorter than the window —
                 # accumulate and keep waiting.
                 trailing.extend(chunk_bytes)
             _emit_transfer_progress(progress, total_bytes, file_name)
+
+
+def _find_terminal_marker(
+    trailing: bytes, chunk: bytes
+) -> Tuple[bool, int, bytes]:
+    """The earliest end-of-file or transfer-error marker in the virtual
+    ``trailing + chunk`` buffer: ``(found, position, marker)``. Upstream
+    ``FindTerminalMarker``."""
+    combined = bytes(trailing) + bytes(chunk)
+    best = (False, -1, b"")
+    for marker in (END_OF_FILE_MARKER, TRANSFER_ERROR_MARKER):
+        position = combined.find(marker)
+        if position >= 0 and (not best[0] or position < best[1]):
+            best = (True, position, marker)
+    return best
 
 
 def _find_eof_marker(
@@ -1133,6 +1285,11 @@ class SdCardLogEntry:
     # said), or "raw-assumed" (integers read as raw codes because nobody
     # said; that case warns). None for formats without the distinction.
     analog_units: Optional[str] = None
+    # The channel number of each of analog_values, in the same order. The
+    # firmware logs only enabled channels, so position i is not channel i.
+    # None where the file doesn't say and the caller didn't either (a
+    # protobuf log without SdCardParseOptions.analog_channels).
+    analog_channels: Optional[Tuple[int, ...]] = None
 
     def __post_init__(self) -> None:
         # Coerce the iterable inputs to tuples so mutating the
@@ -1140,6 +1297,8 @@ class SdCardLogEntry:
         # entry — matches the frozen-dataclass guarantee already
         # used by ``SdCardDeviceConfiguration``.
         object.__setattr__(self, "analog_values", tuple(self.analog_values))
+        if self.analog_channels is not None:
+            object.__setattr__(self, "analog_channels", tuple(self.analog_channels))
         if self.analog_timestamps is not None:
             object.__setattr__(
                 self, "analog_timestamps", tuple(self.analog_timestamps)
@@ -1203,8 +1362,10 @@ def _scale_raw_analog_values(
 ) -> Tuple[float, ...]:
     """Apply calibration/range/scale factors to raw ADC integers.
 
-    Formula mirrors the upstream ``SdCardFileParser.ScaleRawAnalogValues``:
-    ``(raw / resolution * port_range * cal_m + cal_b) * internal_scale_m``.
+    Formula: ``raw / resolution * port_range * cal_m * internal_scale_m +
+    cal_b``, as the firmware converts (``MC12bADC.c``, ``AD7609Scale.h``)
+    and upstream ``SdCardAnalogScaling`` scales: ``cal_b`` is an offset in
+    volts, not multiplied by ``internal_scale_m``.
     Returns the raw values cast to ``float`` when no usable config is
     available.
     """
@@ -1229,7 +1390,7 @@ def _scale_raw_analog_values(
             int_scale[ch] if int_scale is not None and 0 <= ch < len(int_scale) else 1.0
         )
         normalized = raw / resolution
-        out.append((normalized * rng * cal_m + cal_b) * scale_m)
+        out.append(normalized * rng * cal_m * scale_m + cal_b)
     return tuple(out)
 
 
@@ -1519,6 +1680,7 @@ def _produce_samples(
     anchor_time: Optional[datetime],
     tick_period: float,
     config: Optional[SdCardDeviceConfiguration],
+    channels: Optional[Sequence[int]] = None,
 ) -> Iterator[SdCardLogEntry]:
     # Tz-naive UTC for parity with the C# port's DateTime.UtcNow.
     # ``utcnow()`` is deprecated; build the same tz-naive value via
@@ -1534,6 +1696,9 @@ def _produce_samples(
         base_time = anchor_time
     previous_timestamp: Optional[int] = None
     elapsed_seconds = 0.0
+    channels = tuple(channels) if channels is not None else None
+    warned_unscaled = False
+    warned_channel_count = False
 
     i = start_index
     while i < len(messages):
@@ -1588,12 +1753,33 @@ def _produce_samples(
                 previous_timestamp = int(msg.msg_time_stamp)
             timestamp = base_time + timedelta(seconds=elapsed_seconds)
 
+        count = len(analog_float) or len(analog_raw)
+        sample_channels = channels
+        if channels is not None and count and len(channels) != count:
+            if not warned_channel_count:
+                warned_channel_count = True
+                warnings.warn(
+                    f"SdCardParseOptions.analog_channels names {len(channels)} "
+                    f"channels but a protobuf sample has {count} values; "
+                    "calibration is applied by position and analog_channels "
+                    "is None for such samples.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            sample_channels = None
+        units: Optional[str] = None
         if analog_float:
             analog_values: Tuple[float, ...] = tuple(float(v) for v in analog_float)
+            units = "volts"
         elif analog_raw:
-            analog_values = _scale_raw_analog_values(analog_raw, config)
+            analog_values = _scale_raw_analog_values(analog_raw, config, sample_channels)
+            units = "raw"
+            if (config is None or config.resolution == 0) and not warned_unscaled:
+                warned_unscaled = True
+                warnings.warn(_UNSCALED_RAW_WARNING, UserWarning, stacklevel=2)
         else:
             analog_values = ()
+            sample_channels = ()
 
         digital_data = 0
         if digital:
@@ -1609,6 +1795,8 @@ def _produce_samples(
             analog_values=analog_values,
             digital_data=digital_data,
             analog_timestamps=analog_timestamps,
+            analog_units=units,
+            analog_channels=sample_channels,
         )
         i += 1
 
@@ -1691,6 +1879,7 @@ class SdCardFileParser:
             file_created_date,
             tick_period,
             config,
+            options.analog_channels,
         )
 
         return SdCardLogSession(
@@ -1863,8 +2052,10 @@ class SdCardCsvFileParser:
        ``# Timestamp Tick Rate:``).
     2. A column header row: ``ain0_ts,ain0_val,ain1_ts,ain1_val,...,dio_ts,dio_val``
     3. Data rows with interleaved per-channel ``timestamp,value``
-       pairs. Analog values are raw ADC counts that get scaled via
-       the device calibration (see :func:`_scale_raw_analog_values`).
+       pairs. Decimal values are already calibrated volts; integers are
+       millivolts or raw ADC counts, as ``options.integer_units`` says,
+       and raw counts are scaled via the device calibration (see
+       :class:`_FirmwareValueReader`).
 
     Like the protobuf parser, ``parse_stream`` reads the entire input
     before yielding samples; the returned :class:`SdCardLogSession`
@@ -2017,10 +2208,13 @@ def _parse_csv_header(
                     if 0 < rate <= _CSV_TICK_RATE_MAX:
                         timestamp_freq = rate
             continue
-        # First non-comment line — treat it as the column header iff
-        # it contains the firmware's per-channel naming convention.
-        lower = line.lower()
-        if "_ts," in lower or lower.startswith("ch") or lower.startswith("ain"):
+        if _is_csv_header_noise(line):
+            # A stray "ch" before the real header: skip it, so the header
+            # and its channel layout aren't lost (upstream 9aa83f5).
+            continue
+        # First other line — treat it as the column header iff it has the
+        # firmware's per-channel naming convention.
+        if _is_csv_column_header(line):
             cols = line.split(",")
             total_pairs = len(cols) // 2
             for p in range(total_pairs):
@@ -2058,13 +2252,7 @@ def _find_csv_data_start_index(lines: List[str]) -> int:
     for i, line in enumerate(lines):
         if line.startswith("#"):
             continue
-        lower = line.lower()
-        is_column_header = (
-            "_ts," in lower
-            or (lower.startswith("ch") and len(line) > 2 and not line[2].isdigit())
-            or lower.startswith("ain")
-        )
-        if is_column_header:
+        if _is_csv_column_header(line) or _is_csv_header_noise(line):
             continue
         return i
     return len(lines)
@@ -2072,6 +2260,26 @@ def _find_csv_data_start_index(lines: List[str]) -> int:
 
 # The firmware writes the tick rate from a uint32.
 _CSV_TICK_RATE_MAX = 2 ** 32 - 1
+
+
+def _is_csv_column_header(line: str) -> bool:
+    """A CSV column header (``ain0_ts,ain0_val,...,dio_ts,dio_val`` or a
+    ``ch...`` variant). Shared by the header parser and the data-start scan
+    so they agree on what a header is (upstream ``IsColumnHeaderLine``)."""
+    lower = line.lower()
+    return (
+        "_ts," in lower
+        or (lower.startswith("ch") and len(line) > 2 and not line[2].isdigit())
+        or lower.startswith("ain")
+    )
+
+
+def _is_csv_header_noise(line: str) -> bool:
+    """A line starting with "ch" that isn't a column header (a bare "ch").
+    A data row starts with a numeric timestamp, so it is never data
+    (upstream ``IsHeaderNoiseLine``)."""
+    return line.lower().startswith("ch") and not _is_csv_column_header(line)
+
 
 # An integer CSV value: optional sign, ASCII digits only.
 _CSV_INTEGER_VALUE = re.compile(r"[+-]?[0-9]+\Z")
@@ -2083,10 +2291,16 @@ _CSV_INT_LIMIT = 2 ** 53
 def _try_parse_csv_data_row(
     line: str,
     layout: _CsvColumnLayout,
-) -> Optional[Tuple[int, List[Union[int, float]], int, List[int]]]:
+) -> Optional[Tuple[int, List[Union[int, float]], int, List[int], List[int]]]:
     """Parse one CSV data row into ``(row_timestamp, analog_values,
-    digital_data, per_channel_timestamps)`` or None on malformed
+    digital_data, per_channel_timestamps, channels)`` or None on malformed
     input (mirrors the upstream ``TryParseCsvDataRow`` resilience).
+
+    An empty ``,,`` pair is a channel the firmware had no conversion for in
+    that period (its ``validMask`` bit clear, ``csv_encoder.c``), and a
+    DIO-only row has every analog pair empty: the channel is left out of
+    the row, not the row dropped. ``channels`` names the channel of each
+    value kept (its header number, else its column position).
 
     A value written as an integer stays an ``int`` (a raw ADC code, or
     millivolts at precision 0); one written with decimals is a ``float``,
@@ -2106,9 +2320,12 @@ def _try_parse_csv_data_row(
 
         analog_values: List[Union[int, float]] = []
         per_channel_ts: List[int] = []
+        channels: List[int] = []
         for ch in range(analog_pair_count):
             ts_col = cols[ch * 2].strip()
             val_col = cols[ch * 2 + 1].strip()
+            if not ts_col and not val_col:
+                continue  # no conversion for this channel in this period
             if not ts_col.isdigit():
                 return None
             ts = int(ts_col)
@@ -2125,22 +2342,28 @@ def _try_parse_csv_data_row(
                     return None
             per_channel_ts.append(ts)
             analog_values.append(val)
+            channels.append(
+                layout.analog_channels[ch] if ch < len(layout.analog_channels) else ch
+            )
 
         digital_data = 0
         dio_timestamp = 0
+        dio_read = False
         if layout.has_digital_pair and total_pairs > analog_pair_count:
             dio_index = analog_pair_count
             dio_ts_col = cols[dio_index * 2].strip()
             dio_val_col = cols[dio_index * 2 + 1].strip()
-            if dio_ts_col.isdigit():
+            # A DIO read needs both its stamp and its value: a truncated
+            # last row (",,1420000,") is not an all-low reading.
+            if dio_ts_col.isdigit() and dio_val_col.isdigit():
                 dio_timestamp = int(dio_ts_col)
-            if dio_val_col.isdigit():
                 digital_data = int(dio_val_col)
+                dio_read = True
 
         row_timestamp = per_channel_ts[0] if per_channel_ts else dio_timestamp
-        if not per_channel_ts and dio_timestamp == 0 and not layout.has_digital_pair:
-            return None
-        return row_timestamp, analog_values, digital_data, per_channel_ts
+        if not per_channel_ts and not dio_read:
+            return None  # nothing in the row: no analog value, no DIO read
+        return row_timestamp, analog_values, digital_data, per_channel_ts, channels
     except MemoryError:
         # Not a malformed row: the process is out of memory.
         raise
@@ -2160,8 +2383,12 @@ def _produce_csv_samples(
     timestamp_freq = config.timestamp_frequency if config else 0
     tick_period = 1.0 / timestamp_freq if timestamp_freq > 0 else 0.0
 
-    previous_timestamp: Optional[int] = None
-    elapsed_seconds = 0.0
+    # Analog and DIO stamps come from two queues (csv_encoder.c tryWriteRow
+    # peeks AInSampleList and DIOSampleList, writing each sample's own
+    # stamp), so a DIO-only row can sit a little before or after the
+    # analog rows around it. The JSON parser's clock places such records
+    # without letting them move the analog rollover base.
+    clock = _JsonClock(behind_window=timestamp_freq)
     lines_processed = 0
     bytes_read = 0
     progress = options.progress
@@ -2176,9 +2403,9 @@ def _produce_csv_samples(
         parsed = _try_parse_csv_data_row(line, layout)
         if parsed is None:
             continue
-        row_ts, raw_analog, digital_data, per_ch_ts = parsed
+        row_ts, raw_analog, digital_data, per_ch_ts, channels = parsed
         # The firmware value rule shared with the JSON parser (#163).
-        read = reader.read(raw_analog, layout.analog_channels or None)
+        read = reader.read(raw_analog, channels)
         if read is None:
             continue  # a row mixing decimals and integers isn't firmware output
         analog_values, units = read
@@ -2188,13 +2415,8 @@ def _produce_csv_samples(
         # protobuf parser's behavior so cross-format reconstruction
         # of the same physical log is consistent.
         if tick_period > 0 and row_ts != 0:
-            if previous_timestamp is None:
-                previous_timestamp = row_ts
-            else:
-                delta = _compute_tick_delta(previous_timestamp, row_ts)
-                elapsed_seconds += delta * tick_period
-                previous_timestamp = row_ts
-            absolute_time = base_time + timedelta(seconds=elapsed_seconds)
+            tick = clock.place(row_ts, analog=bool(per_ch_ts))
+            absolute_time = base_time + timedelta(seconds=tick * tick_period)
 
         yield SdCardLogEntry(
             timestamp=absolute_time,
@@ -2202,6 +2424,8 @@ def _produce_csv_samples(
             digital_data=digital_data,
             analog_timestamps=tuple(per_ch_ts) if per_ch_ts else None,
             analog_units=units,
+            # Without a column header nothing names the channels.
+            analog_channels=tuple(channels) if layout.analog_channels else None,
         )
 
         if lines_processed % 100 == 0:
@@ -2211,14 +2435,17 @@ def _produce_csv_samples(
 
 
 class SdCardJsonFileParser:
-    """Parses SD-card ``.json`` log files (JSONL format).
+    """Parses SD-card ``.json`` log files.
 
-    Ports ``Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs``. Each
-    line is a JSON object: ``{"ts": <uint32>, "analog": [...],
-    "digital": "<hex>"}``. Sync end-to-end per project convention.
+    Ports ``Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs``. The
+    firmware writes a ``{"meta": ...}`` header object, then one object
+    per record, each spread over several lines, with analog values under
+    ``"ai"`` and DIO reads under ``"di"``. The older one-line-per-sample
+    shape (``{"ts": <uint32>, "analog": [...], "digital": "<hex>"}``)
+    still parses. Sync end-to-end per project convention.
 
-    Configuration is *inferred* from the first line (analog channel
-    count = length of the ``analog`` array); merge with
+    Configuration is *inferred* from the header and the first sample
+    with analog values; merge with
     ``options.configuration_override`` to fill in missing fields like
     calibration / resolution / port range needed for raw-to-volts
     scaling.
@@ -2327,6 +2554,14 @@ def _json_meta(obj: Any) -> Optional[dict]:
 
 
 _INTEGER_UNITS = (None, "raw", "millivolts")
+_UNSCALED_RAW_WARNING = (
+    "This protobuf SD log's analog values are raw ADC codes and the log "
+    "carries no resolution, range or calibration, so they are returned "
+    "unscaled (analog_units='raw'). Pass "
+    "SdCardParseOptions(configuration_override=SdCardDeviceConfiguration(...)) "
+    "with resolution, port_range and calibration_values to get volts."
+)
+
 _INTEGER_UNITS_WARNING = (
     "SD log analog values are integers, read as raw ADC codes. If the log "
     "was written at voltage precision 0 they are millivolts: pass "
@@ -2447,7 +2682,9 @@ def _split_batched_samples(obj: Any) -> Tuple[List[Any], List[Tuple[int, int]], 
 
 
 class _JsonClock:
-    """Unwrapped ticks for a JSON parse's records, from their uint32 "ts".
+    """Unwrapped ticks for a JSON parse's records, from their uint32 "ts"
+    (and for a CSV parse's rows, whose DIO-only rows are digital-only
+    records: csv_encoder.c takes analog and DIO from separate queues).
 
     Anchored at tick 0 on the first record of any kind. An analog record
     moves the base: forward with rollover (as the other formats), or, when
@@ -2852,6 +3089,7 @@ def _produce_json_samples(
                     analog_values=(),
                     digital_data=value,
                     analog_timestamps=None,
+                    analog_channels=(),
                 )
             parsed_samples = []
         for parsed in parsed_samples:
@@ -2878,6 +3116,7 @@ def _produce_json_samples(
                 digital_data=digital_data,
                 analog_timestamps=None,  # JSON format carries one ts per row
                 analog_units=units,
+                analog_channels=tuple(channels) if channels is not None else None,
             )
 
         if lines_processed % 100 == 0:

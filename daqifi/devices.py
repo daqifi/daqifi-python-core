@@ -37,7 +37,7 @@ from ._internal.comm import (
     ScpiMessage,
     TransportStatusEventArgs,
 )
-from ._internal.scpi import ConnectionStatus, DeviceState, StreamInterface
+from ._internal.scpi import ChannelDirection, ConnectionStatus, DeviceState, StreamInterface
 from ._internal import scpi_commands
 from .channels import ChannelsPopulatedEventArgs
 from .communication import (
@@ -52,7 +52,13 @@ from .protocol import ProtobufProtocolHandler
 from .firmware.version import FirmwareVersion
 from .sdcard import _write_all
 from .sdcard import (
+    _MARKER_TRAILER_MAX,
+    _SizedTransfer,
+    _is_marker_trailer,
+)
+from .sdcard import (
     END_OF_FILE_MARKER,
+    TRANSFER_ERROR_MARKER,
     SdCardDownloadResult,
     SdCardFileInfo,
     SdCardTransferProgress,
@@ -202,33 +208,15 @@ class _LifecycleGate:
             self._lock.release()
         return True
 
-# What may follow the end-of-file marker at the end of a transfer: line
-# endings and the console prompt, in any order, at most this many bytes.
-_EOF_TRAILER_MAX = 16
+# What may follow a terminal marker at the end of a transfer (line endings
+# and the console prompt); shared with the SD receiver.
+_EOF_TRAILER_MAX = _MARKER_TRAILER_MAX
+_is_eof_trailer = _is_marker_trailer
 
 
-def _is_eof_trailer(trailer: bytes) -> bool:
-    """True if ``trailer`` can follow the end-of-file marker at the end of
-    a transfer: line endings and the console prompt, at most
-    ``_EOF_TRAILER_MAX`` bytes, possibly ending part-way through a prompt
-    still arriving."""
-    if len(trailer) > _EOF_TRAILER_MAX:
-        return False
-    rest = trailer.replace(b"DAQIFI> ", b"").replace(b"DAQIFI>", b"")
-    stripped = rest.rstrip(b"\r\n ")
-    if not stripped.strip(b"\r\n "):
-        return True
-    # A prompt still arriving at the very end ("DAQ").
-    for cut in range(1, len(b"DAQIFI>")):
-        if rest.endswith(b"DAQIFI>"[:cut]):
-            return not rest[: len(rest) - cut].strip(b"\r\n ")
-    return False
-
-
-def _eof_marker_start(buffer: bytes) -> int:
-    """Index of an end-of-file marker that ends ``buffer`` apart from a
-    trailer of line endings and prompt, or -1."""
-    marker = END_OF_FILE_MARKER
+def _eof_marker_start(buffer: bytes, marker: bytes = END_OF_FILE_MARKER) -> int:
+    """Index of ``marker`` (by default the end-of-file marker) ending
+    ``buffer`` apart from a trailer of line endings and prompt, or -1."""
     position = bytes(buffer).rfind(marker)
     while position >= 0:
         if _is_eof_trailer(bytes(buffer[position + len(marker):])):
@@ -301,6 +289,21 @@ def _split_at_list_terminator(
     elif not _QUOTED_ERROR_REPLY.match(content[-1].strip()):
         return None
     return content[:-1], reply
+
+
+class _SessionHealthSink:
+    """Forwards a consumer's read outcomes to the transport, tagged with
+    the connection the consumer reads (#191)."""
+
+    def __init__(self, transport: Any, session: Optional[int]) -> None:
+        self._transport = transport
+        self._session = session
+
+    def report_io_fault(self, error: BaseException) -> None:
+        self._transport.report_io_fault(error, session=self._session)
+
+    def report_io_success(self) -> None:
+        self._transport.report_io_success(session=self._session)
 
 
 def _exclusive_sd_operation(method):
@@ -599,6 +602,7 @@ class DaqifiDevice:
             consumer = StreamMessageConsumer[Any](
                 stream,
                 ProtobufMessageParser(message_factory=self._message_factory),
+                health_sink=self._transport_health_sink(session),
             )
             with self._state_lock:
                 superseded = (
@@ -973,10 +977,24 @@ class DaqifiDevice:
             raise RuntimeError(
                 "execute_text_command requires an active transport."
             )
-        stream = self._transport.stream
+        # The stream and the connection it belongs to are read together:
+        # a reconnect while this exchange is paused below opens a newer
+        # session, and the text reader's faults must count against the
+        # stream it actually reads, never the newer one (#191).
+        with self._state_lock:
+            stream = self._transport.stream
+            stream_session = self._transport_session
         if stream is None:
             raise RuntimeError(
                 "Transport reports no stream; cannot pause consumer."
+            )
+        # On a transport that numbers its connections, no current session
+        # means disconnect() is under way: the stream may be about to close,
+        # and a reader on it could only be blamed on whatever connects next.
+        if stream_session is None and hasattr(self._transport, "session"):
+            raise RuntimeError(
+                "execute_text_command cannot run while the device is "
+                "disconnecting."
             )
 
         was_running = self._consumer.is_running
@@ -996,7 +1014,11 @@ class DaqifiDevice:
 
         try:
             text_parser = LineBasedMessageParser(line_ending="\r\n")
-            text_consumer = StreamMessageConsumer[str](stream, text_parser)
+            text_consumer = StreamMessageConsumer[str](
+                stream,
+                text_parser,
+                health_sink=self._transport_health_sink(stream_session),
+            )
 
             def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
                 # Background-thread callback. Only push to the queue;
@@ -1469,6 +1491,9 @@ class DaqifiDevice:
             resolution = 0
         if resolution <= 0:
             resolution = 65535
+        # Field 22: bit n set = channel n enabled (little-endian bytes,
+        # firmware int2PBByteArray). Unreported (empty) reads as disabled.
+        enabled_mask = self._bit_mask(message, "analog_in_port_enabled", "AnalogInPortEnabled")
 
         for i in range(count):
             channel = AnalogChannel(
@@ -1479,7 +1504,7 @@ class DaqifiDevice:
                 calibration_m=self._with_default(cal_m, i, 1.0),
                 internal_scale_m=self._with_default(int_scale, i, 1.0),
                 port_range=self._with_default(ranges, i, 1.0),
-                is_enabled=False,
+                is_enabled=self._bit_set(enabled_mask, i),
             )
             self._channels.append(channel)
         return count
@@ -1497,11 +1522,39 @@ class DaqifiDevice:
             count = 0
         if count <= 0:
             return 0
+        # Field 37: bit n set = DIO n is an input, clear = output (the
+        # firmware's IsInput, little-endian bytes). A pin the mask doesn't
+        # cover is reported as Input, as before (upstream 5449896).
+        dir_mask = self._bit_mask(message, "digital_port_dir", "DigitalPortDir")
         for i in range(count):
+            covered = dir_mask is not None and i // 8 < len(dir_mask)
+            if covered and not self._bit_set(dir_mask, i):
+                direction = ChannelDirection.Output
+            else:
+                direction = ChannelDirection.Input
             self._channels.append(
-                DigitalChannel(index=i, name=f"DIO{i}", is_enabled=False)
+                DigitalChannel(
+                    index=i, name=f"DIO{i}", direction=int(direction), is_enabled=False
+                )
             )
         return count
+
+    @staticmethod
+    def _bit_mask(message: Any, snake: str, pascal: str) -> Optional[bytes]:
+        """A protobuf ``bytes`` bit mask, or None when it's absent or empty
+        (not reported)."""
+        value = getattr(message, snake, None) or getattr(message, pascal, None)
+        if isinstance(value, (bytes, bytearray, memoryview)) and len(value) > 0:
+            return bytes(value)
+        return None
+
+    @staticmethod
+    def _bit_set(mask: Optional[bytes], index: int) -> bool:
+        """Bit ``index`` of a little-endian byte mask (byte index // 8,
+        bit index % 8), as upstream reads it."""
+        if mask is None or index // 8 >= len(mask):
+            return False
+        return bool(mask[index // 8] & (1 << (index % 8)))
 
     @staticmethod
     def _field_list(message: Any, snake: str, pascal: str) -> Optional[list]:
@@ -1591,6 +1644,19 @@ class DaqifiDevice:
             except Exception:
                 pass
 
+    def _transport_health_sink(self, session: Optional[int]) -> Optional[Any]:
+        """A sink reporting reads on this connection's stream to the
+        transport, when it can be told (``report_io_fault`` /
+        ``report_io_success``): the serial transport uses that to notice an
+        unplugged device (#191). Bound to ``session``, so a reader of an
+        earlier connection can't count against a newer one."""
+        transport = self._transport
+        if callable(getattr(transport, "report_io_fault", None)) and callable(
+            getattr(transport, "report_io_success", None)
+        ):
+            return _SessionHealthSink(transport, session)
+        return None
+
     def _on_transport_status_changed(self, args: TransportStatusEventArgs) -> None:
         if args.is_connected:
             return
@@ -1666,6 +1732,15 @@ class DaqifiDevice:
                 if_stream_alive, "peer_closed", False
             ):
                 return False
+            # A loss reported while connecting (a serial transport counting
+            # read faults) wins over "Connected" too. The transport says so,
+            # not the reader: a reader paused by a text exchange isn't lost.
+            if (
+                if_consumer is not None
+                and self._transport is not None
+                and not getattr(self._transport, "is_connected", True)
+            ):
+                return False
             evt = self._change_status(value)
             if state is not None:
                 self._state = state
@@ -1735,11 +1810,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
     start/stop streaming, and SCPI-driven SD-card / network /
     LAN-chip-info facade methods on top of :class:`DaqifiDevice`.
 
-    SD-card list/download, network configuration apply, and similar
-    multi-step operations are intentionally simpler than upstream --
-    they send the corresponding SCPI command and rely on the consumer
-    to surface the response. Hardware-coupled retry/timeout polish
-    lives in :mod:`daqifi.device.NyquistDevice` for now.
+    Text replies (SD listings, error-queue entries, LAN queries) are read
+    through :meth:`execute_text_command`, which captures them without
+    losing them to the protobuf consumer (#16, #22).
     """
 
     _WIFI_MODULE_RESTART_DELAY_S = 2.0
@@ -2625,8 +2698,16 @@ class DaqifiStreamingDevice(DaqifiDevice):
         leading SCPI echo + ``DAQIFI>`` prompt from the head of the
         response so the destination only sees the file payload.
         """
+        from .exceptions import SdCardTransferErrorException
+
         marker = END_OF_FILE_MARKER
         marker_len = len(marker)
+        error_marker = TRANSFER_ERROR_MARKER
+        error_len = len(error_marker)
+        # Known size: tells the device's __TRANSFER_ERROR__ (a read failure
+        # part-way through the file) from content containing its text.
+        sized = _SizedTransfer(expected_size) if expected_size is not None else None
+        body_done = False
         # Two deadlines: a hard total cap (so a trickling stream can't
         # run forever) AND an idle cap (so a stuck stream gives up
         # quickly without waiting the full total).
@@ -2664,6 +2745,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
         while True:
             now = time.monotonic()
             if now >= total_deadline:
+                # As at the idle timeout: an open transfer-error candidate
+                # was the device's marker.
+                outcome = sized.finish() if sized is not None else None
+                if outcome is not None:
+                    raise SdCardTransferErrorException(file_name, outcome[1])
                 raise TimeoutError(
                     f"SD card file download exceeded total cap of "
                     f"{self._SD_DOWNLOAD_TIMEOUT_S:.0f}s "
@@ -2675,11 +2761,27 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 if in_waiting else b""
             )
             if not chunk:
+                quiet = now - last_data >= settle_s or now >= idle_deadline
+                # No size: the device's read-error marker ending what came,
+                # then quiet, as the end-of-file marker is taken. The bytes
+                # before it are real content, but the file is incomplete
+                # (firmware #725, upstream receiver). With a size, the
+                # sized-transfer rules decide (below).
+                error_at = (
+                    _eof_marker_start(trailing, error_marker)
+                    if expected_size is None and head_done else -1
+                )
+                if quiet and error_at >= 0:
+                    payload = bytes(trailing[:error_at])
+                    if payload:
+                        _write_all(destination_stream, payload, total_deadline)
+                        bytes_written += len(payload)
+                    raise SdCardTransferErrorException(file_name, bytes_written)
                 if (
                     expected_size is None
                     and head_done
                     and _ends_with_eof_marker(trailing)
-                    and (now - last_data >= settle_s or now >= idle_deadline)
+                    and quiet
                 ):
                     # The line went quiet with the marker at the end.
                     payload = bytes(trailing[: _eof_marker_start(trailing)])
@@ -2689,19 +2791,20 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     if progress is not None:
                         progress(SdCardTransferProgress(bytes_written, file_name))
                     return bytes_written
-                if (
-                    expected_size is not None
-                    and bytes_written == expected_size
-                    and len(trailing) >= marker_len
-                    and (now - last_data >= settle_s or now >= idle_deadline)
-                ):
-                    # The listed size, the marker, and then only a line
-                    # ending or prompt before the line went quiet.
+                if body_done and quiet:
+                    # The listed size, the exact marker, and then only a
+                    # line ending or prompt before the line went quiet.
                     return bytes_written
                 if now >= idle_deadline:
+                    # Idle with a transfer-error candidate still open: that
+                    # was the device's marker (content would have gone on).
+                    outcome = sized.finish() if sized is not None else None
+                    if outcome is not None:
+                        raise SdCardTransferErrorException(file_name, outcome[1])
+                    received = bytes_written + (len(sized.pending) if sized else 0)
                     short = (
-                        f" (short read: {bytes_written} of {expected_size} bytes)"
-                        if expected_size is not None and bytes_written < expected_size
+                        f" (short read: {received} of {expected_size} bytes)"
+                        if expected_size is not None and received < expected_size
                         else ""
                     )
                     raise TimeoutError(
@@ -2720,7 +2823,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             # echo + prompt prefix; only ~200 bytes are needed in practice.
             if not head_done:
                 head_buf.extend(chunk)
-                if len(head_buf) >= 256 or marker in head_buf:
+                if len(head_buf) >= 256 or marker in head_buf or error_marker in head_buf:
                     chunk = _strip_echo_prefix(head_buf)
                     head_buf = bytearray()
                     head_done = True
@@ -2731,32 +2834,38 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 # that many bytes, whatever they contain (the end-of-file
                 # token may occur inside it), and the marker must follow
                 # directly. Anything else is an error, not a success (#163).
-                data = bytes(chunk)
-                remaining = expected_size - bytes_written
-                if remaining > 0:
-                    body = data[:remaining]
-                    _write_all(destination_stream, body, total_deadline)
-                    bytes_written += len(body)
-                    data = data[remaining:]
-                    if progress is not None:
-                        progress(SdCardTransferProgress(bytes_written, file_name))
-                if bytes_written == expected_size:
-                    trailing.extend(data)
-                    # The marker must follow directly, then nothing but a
-                    # line ending or prompt: more data means the file is
-                    # longer than listed, even if the marker text happens
-                    # to sit at the listed boundary. The end is taken when
-                    # the line goes quiet (above).
-                    if len(trailing) >= marker_len and (
-                        bytes(trailing[:marker_len]) != marker
-                        or not _is_eof_trailer(bytes(trailing[marker_len:]))
-                    ):
+                if body_done:
+                    # Past the marker: nothing but a line ending or prompt.
+                    trailing.extend(chunk)
+                    if not _is_eof_trailer(bytes(trailing[marker_len:])):
                         raise IOError(
                             f"SD card file {file_name!r}: {expected_size} bytes "
                             "received but no end-of-file marker alone after them; "
                             "the file is longer than listed or the transfer is "
                             "corrupt."
                         )
+                else:
+                    body, outcome = sized.feed(bytes(chunk))
+                    if body:
+                        _write_all(destination_stream, body, total_deadline)
+                        bytes_written += len(body)
+                        if progress is not None:
+                            progress(SdCardTransferProgress(bytes_written, file_name))
+                    if outcome is not None:
+                        kind, value = outcome
+                        if kind == "transfer_error":
+                            raise SdCardTransferErrorException(file_name, value)
+                        if kind == "mismatch" or not _is_eof_trailer(value):
+                            raise IOError(
+                                f"SD card file {file_name!r}: {expected_size} bytes "
+                                "received but no end-of-file marker alone after "
+                                "them; the file is longer than listed or the "
+                                "transfer is corrupt."
+                            )
+                        # The exact marker: the end is taken when the line
+                        # goes quiet (above), so more data still fails.
+                        trailing = bytearray(marker + value)
+                        body_done = True
                 # Time spent waiting on the destination isn't the line
                 # being idle or quiet (#163 audit): restart both clocks.
                 last_data = time.monotonic()
@@ -2766,7 +2875,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             # trailer at the end; everything before that is file content,
             # even if it contains the marker.
             trailing.extend(chunk)
-            keep = marker_len + _EOF_TRAILER_MAX
+            keep = max(marker_len, error_len) + _EOF_TRAILER_MAX
             if len(trailing) > keep:
                 writable = bytes(trailing[: len(trailing) - keep])
                 _write_all(destination_stream, writable, total_deadline)
@@ -2790,13 +2899,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
         ``DaqifiStreamingDevice._networkConfiguration`` field which
         is similarly process-local.
 
-        ``DaqifiStreamingDevice`` cannot currently surface text-shaped
-        SCPI query replies (the streaming-device's protobuf consumer
-        eats them — see daqifi-python-core#16), so we cannot
-        round-trip ``SYST:COMM:LAN:SSID? / NETTYPE? / SECURITY?`` to
-        rebuild the configuration from the live device state. Once
-        #16 is resolved, this property should be reworked to query
-        and reconcile.
+        It does not query ``SYST:COMM:LAN:SSID? / NETTYPE? / SECURITY?``
+        to rebuild the configuration from the live device, although
+        :meth:`execute_text_command` could now read those replies (#16).
 
         Caveats — the snapshot can drift from the device's actual
         config if:
