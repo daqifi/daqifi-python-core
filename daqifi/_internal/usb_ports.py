@@ -16,12 +16,11 @@ from __future__ import annotations
 import os
 import re
 import threading
-from typing import Callable, Dict, List, Optional, TypeVar
+from typing import Callable, Dict, List, Optional, Set, TypeVar
 
 __all__ = [
     "DAQIFI_APPLICATION_PRODUCT_ID",
     "DAQIFI_VENDOR_ID",
-    "PORT_PROBE_HARD_TIMEOUT_S",
     "daqifi_serial_ports",
     "list_usb_serial_ports",
     "run_port_probe",
@@ -29,10 +28,6 @@ __all__ = [
 
 DAQIFI_VENDOR_ID = 0x04D8
 DAQIFI_APPLICATION_PRODUCT_ID = 0xF794
-
-# A probe opens the port, wakes the device and waits for its reply: about
-# 2 s here. Upstream allows 3 s per port; a probe past that is abandoned.
-PORT_PROBE_HARD_TIMEOUT_S = 3.0
 
 # USB CDC-ACM serial nodes, the class a DAQiFi board enumerates as (Linux
 # and macOS names). A built-in UART (ttyS0, COM1) has no USB IDs either but
@@ -77,31 +72,29 @@ def daqifi_serial_ports() -> List[str]:
     return list_usb_serial_ports(DAQIFI_VENDOR_ID, DAQIFI_APPLICATION_PRODUCT_ID) or []
 
 
-# Ports whose probe outlived its timeout, with the thread still running it.
-_abandoned: Dict[str, threading.Thread] = {}
-_abandoned_lock = threading.Lock()
+# Live probe threads per port: registered before a probe starts and removed
+# when it ends, so a running probe (on time or abandoned) is always known.
+_live: Dict[str, Set[threading.Thread]] = {}
+_live_lock = threading.Lock()
 
 
 def run_port_probe(
     port: str,
     probe: Callable[[str], Optional[T]],
-    timeout_s: Optional[float] = None,
+    timeout_s: float,
 ) -> Optional[T]:
-    """``probe(port)``, or None if it takes longer than ``timeout_s``
-    (default :data:`PORT_PROBE_HARD_TIMEOUT_S`).
+    """``probe(port)``, or None if it takes longer than ``timeout_s`` or
+    another probe of ``port`` is still running.
 
-    The probe runs on a daemon thread; one that overruns is abandoned (a
-    blocked open or read can't be interrupted from outside) and its port is
-    skipped by later calls until that thread finishes, so a wedged port
-    costs at most one stuck thread. An exception in the probe gives None.
+    ``timeout_s`` must exceed the probe's own worst healthy duration (its
+    open, waits and read timeouts), or a slow but healthy device would be
+    discarded; each caller derives it from its probe's bounds. The probe
+    runs on a daemon thread; one that overruns is abandoned (a blocked open
+    or read can't be interrupted from outside) and stays registered until
+    it ends, so a wedged port costs one stuck thread and isn't probed again
+    meanwhile, by this caller or a concurrent one. An exception in the
+    probe gives None.
     """
-    with _abandoned_lock:
-        stuck = _abandoned.get(port)
-        if stuck is not None:
-            if stuck.is_alive():
-                return None
-            del _abandoned[port]
-
     result: List[Optional[T]] = [None]
 
     def _run() -> None:
@@ -109,12 +102,22 @@ def run_port_probe(
             result[0] = probe(port)
         except Exception:
             result[0] = None
+        finally:
+            with _live_lock:
+                threads = _live.get(port)
+                if threads is not None:
+                    threads.discard(thread)
+                    if not threads:
+                        del _live[port]
 
     thread = threading.Thread(target=_run, name=f"daqifi-probe-{port}", daemon=True)
+    with _live_lock:
+        running = _live.setdefault(port, set())
+        if running:
+            return None
+        running.add(thread)
     thread.start()
-    thread.join(PORT_PROBE_HARD_TIMEOUT_S if timeout_s is None else timeout_s)
+    thread.join(timeout_s)
     if thread.is_alive():
-        with _abandoned_lock:
-            _abandoned[port] = thread
         return None
     return result[0]

@@ -40,10 +40,11 @@ aims to follow [Semantic Versioning](https://semver.org/).
   isn't probed again while its abandoned probe runs (#196).
 - `WiFiDeviceFinder` fills `DeviceInfo.local_interface_address` with the NIC
   a device answered on (#196).
-- `update_network_configuration` saves the configuration before applying
-  it. The apply restarts the WiFi module; over a WiFi/TCP control link the
-  save sent after it never arrived, and the old configuration came back at
-  the next reboot (#196).
+- `update_network_configuration` ends with `LAN:APPLY 1`, which applies the
+  configuration and, only if the apply is accepted, saves it, in one
+  firmware handler. The save it sent after the apply never arrived over a
+  WiFi/TCP control link (the apply restarts the WiFi module), and the old
+  configuration came back at the next reboot (#196).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than

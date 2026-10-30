@@ -156,8 +156,9 @@ class TestUpdateNetworkConfiguration:
             sd.update_network_configuration(cfg)
             written = b"".join(sd._transport.stream.written)
 
-            # Canonical .NET sequence (after daqifi-core#391: stage, save,
-            # then apply last) — verify ordering.
+            # Stage, then LAN:APPLY 1 last (apply, and save only if the
+            # apply is accepted; diverges from daqifi-core#391's SAVE-first
+            # on purpose, see update_network_configuration) — verify ordering.
             mode_idx = written.find(b"NETType 1")
             ssid_idx = written.find(b"LAN:SSID")
             sec_idx = written.find(b"SECurity 3")  # WPA = 3
@@ -166,6 +167,7 @@ class TestUpdateNetworkConfiguration:
             disable_sd_idx = written.find(b"SD:ENAble 0")
             enable_lan_idx = written.find(b"LAN:ENAbled 1")
             save_idx = written.find(b"LAN:SAVE")
+            apply_save_idx = written.find(b"LAN:APPLY 1")
 
             assert mode_idx >= 0
             assert ssid_idx > mode_idx, "SSID must come after mode"
@@ -177,12 +179,11 @@ class TestUpdateNetworkConfiguration:
             assert enable_lan_idx > disable_sd_idx, (
                 "EnableNetworkLan must come after DisableStorageSd"
             )
-            assert save_idx > enable_lan_idx, "Save must come after prepare_lan"
-            assert apply_idx > save_idx, (
-                "Apply comes last: it restarts the WiFi module and can drop "
-                "a TCP control link, so the save must already be sent"
+            assert save_idx == -1, "No separate save: APPLY 1 saves"
+            assert apply_save_idx > enable_lan_idx, (
+                "APPLY 1 comes last, after prepare_lan"
             )
-            assert written.rstrip().endswith(b"LAN:APPLY"), "Nothing after apply"
+            assert written.rstrip().endswith(b"LAN:APPLY 1"), "Nothing after apply"
         finally:
             sd.close()
 

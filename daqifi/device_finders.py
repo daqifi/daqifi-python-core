@@ -218,6 +218,22 @@ _SERIAL_RESPONSE_TIMEOUT_S = 4.0
 _SERIAL_MAX_RETRIES = 3
 _SERIAL_RETRY_INTERVAL_S = 1.0
 _SERIAL_POLL_INTERVAL_S = 0.1
+_SERIAL_INIT_COMMANDS = 4  # DisableEcho, StopStreaming, TurnOn, PB format
+_SERIAL_INIT_COMMAND_DELAY_S = 0.1
+# The probe's longest healthy run: wake-up, the init commands' waits, the
+# response loop, and one read that starts just before the loop's deadline
+# and runs its full read timeout, then a poll interval.
+_SERIAL_PROBE_WORST_HEALTHY_S = (
+    _SERIAL_DEVICE_WAKEUP_DELAY_S
+    + _SERIAL_INIT_COMMANDS * _SERIAL_INIT_COMMAND_DELAY_S
+    + _SERIAL_RESPONSE_TIMEOUT_S
+    + _SERIAL_PROBE_TIMEOUT_S
+    + _SERIAL_POLL_INTERVAL_S
+)
+# The hard timeout adds room for the port open itself (a fresh
+# enumeration can take seconds). A probe past it is abandoned.
+_SERIAL_PROBE_HARD_TIMEOUT_S = _SERIAL_PROBE_WORST_HEALTHY_S + 3.0
+assert _SERIAL_PROBE_HARD_TIMEOUT_S > _SERIAL_PROBE_WORST_HEALTHY_S
 
 
 class SerialDeviceFinder:
@@ -292,7 +308,9 @@ class SerialDeviceFinder:
             for port_name in ports:
                 # Failures and overruns give None (upstream: skip ports
                 # that fail).
-                info = run_port_probe(port_name, self._try_get_device_info)
+                info = run_port_probe(
+                    port_name, self._try_get_device_info, _SERIAL_PROBE_HARD_TIMEOUT_S
+                )
                 if info is not None:
                     discovered.append(info)
         # Fire callbacks OUTSIDE the lock — same deadlock concern
@@ -337,14 +355,14 @@ class SerialDeviceFinder:
                     pass
 
                 # SCPI init sequence (matches DaqifiDevice.initialize).
-                port.write(scpi_commands.disable_device_echo().get_bytes())
-                time.sleep(0.1)
-                port.write(scpi_commands.stop_streaming().get_bytes())
-                time.sleep(0.1)
-                port.write(scpi_commands.turn_device_on().get_bytes())
-                time.sleep(0.1)
-                port.write(scpi_commands.set_protobuf_stream_format().get_bytes())
-                time.sleep(0.1)
+                for command in (
+                    scpi_commands.disable_device_echo(),
+                    scpi_commands.stop_streaming(),
+                    scpi_commands.turn_device_on(),
+                    scpi_commands.set_protobuf_stream_format(),
+                ):
+                    port.write(command.get_bytes())
+                    time.sleep(_SERIAL_INIT_COMMAND_DELAY_S)
 
                 # GetDeviceInfo with retry. Use monotonic clock so a
                 # wall-clock jump (NTP / DST) can't corrupt the

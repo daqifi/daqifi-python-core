@@ -13,8 +13,10 @@
    to it, so a multi-homed host connected over the default route (upstream
    daqifi-core#187).
 5. update_network_configuration sent LAN:SAVE after LAN:APPLY; over a TCP
-   control link the APPLY drops the link and the SAVE never arrived (upstream
-   daqifi-core#391). The settings are now staged, saved, then applied.
+   control link the APPLY drops the link and the SAVE never arrived. It now
+   ends with LAN:APPLY 1, which applies and, only if the apply is accepted,
+   saves in one firmware handler (upstream daqifi-core#391 saves first, which
+   would persist a configuration the apply then rejects).
 """
 
 import importlib.util
@@ -67,7 +69,7 @@ def listing(monkeypatch):
 def _no_stuck_probes():
     yield
     if usb_ports is not None:
-        usb_ports._abandoned.clear()
+        usb_ports._live.clear()
 
 
 # ---- 1: VID/PID filter --------------------------------------------------
@@ -117,7 +119,9 @@ def _info(port):
 
 
 def test_a_hung_port_doesnt_block_discovery_and_isnt_probed_again(monkeypatch) -> None:
-    monkeypatch.setattr(usb_ports, "PORT_PROBE_HARD_TIMEOUT_S", 0.2)
+    import daqifi.device_finders as device_finders
+
+    monkeypatch.setattr(device_finders, "_SERIAL_PROBE_HARD_TIMEOUT_S", 0.2)
     monkeypatch.setattr(list_ports, "comports",
                         lambda: [_port("COM50", 0x04D8, 0xF794), _port("COM51", 0x04D8, 0xF794)])
     release = threading.Event()
@@ -143,8 +147,7 @@ def test_a_hung_port_doesnt_block_discovery_and_isnt_probed_again(monkeypatch) -
         release.set()
 
 
-def test_a_port_is_probed_again_once_its_stuck_probe_ends(monkeypatch) -> None:
-    monkeypatch.setattr(usb_ports, "PORT_PROBE_HARD_TIMEOUT_S", 0.1)
+def test_a_port_is_probed_again_once_its_stuck_probe_ends() -> None:
     release = threading.Event()
     calls = []
 
@@ -154,10 +157,62 @@ def test_a_port_is_probed_again_once_its_stuck_probe_ends(monkeypatch) -> None:
             release.wait(10)
         return port
 
-    assert usb_ports.run_port_probe("COM58", probe) is None
+    assert usb_ports.run_port_probe("COM58", probe, 0.1) is None
+    stuck = next(iter(usb_ports._live["COM58"]))
     release.set()
-    usb_ports._abandoned["COM58"].join(2)
-    assert usb_ports.run_port_probe("COM58", probe) == "COM58"
+    stuck.join(2)
+    assert usb_ports.run_port_probe("COM58", probe, 1.0) == "COM58"
+
+
+# ---- round 2 ------------------------------------------------------------
+
+
+def test_each_hard_timeout_exceeds_its_probes_worst_healthy_run() -> None:
+    import daqifi.device_finders as device_finders
+    import daqifi.discovery as discovery
+
+    assert device_finders._SERIAL_PROBE_HARD_TIMEOUT_S > device_finders._SERIAL_PROBE_WORST_HEALTHY_S
+    assert discovery._IDENTIFY_HARD_TIMEOUT_S > discovery._IDENTIFY_WORST_HEALTHY_S
+    # The SerialDeviceFinder probe can legitimately take: wake-up 1 s, init
+    # 0.4 s, the 4 s response loop, a straddling 1 s read, a 0.1 s poll.
+    assert device_finders._SERIAL_PROBE_WORST_HEALTHY_S >= 6.5
+
+
+def test_a_board_that_answers_on_its_retry_is_still_found(monkeypatch) -> None:
+    # A healthy probe that runs ~3.5 s (the device answers its second
+    # GetDeviceInfo) must not be abandoned.
+    monkeypatch.setattr(list_ports, "comports", lambda: [_port("COM52", 0x04D8, 0xF794)])
+
+    def slow_probe(self, port):
+        time.sleep(3.5)
+        return _info(port)
+
+    monkeypatch.setattr(SerialDeviceFinder, "_try_get_device_info", slow_probe)
+    assert [d.port_name for d in SerialDeviceFinder().discover()] == ["COM52"]
+
+
+def test_concurrent_probes_of_one_port_never_run_twice() -> None:
+    # Two discoveries racing on one port: the second sees the first's live
+    # probe and skips, even before the first times out; after the first is
+    # abandoned it stays tracked, so a third doesn't start either.
+    release = threading.Event()
+    started = threading.Event()
+    calls = []
+
+    def probe(port):
+        calls.append(port)
+        started.set()
+        release.wait(10)
+        return port
+
+    first = threading.Thread(target=usb_ports.run_port_probe, args=("COM53", probe, 0.3))
+    first.start()
+    started.wait(2)
+    assert usb_ports.run_port_probe("COM53", probe, 0.3) is None   # concurrent
+    first.join(2)
+    assert usb_ports.run_port_probe("COM53", probe, 0.3) is None   # after abandonment
+    assert calls == ["COM53"]
+    release.set()
 
 
 # ---- 3: macOS duplicates ------------------------------------------------
@@ -252,7 +307,7 @@ def test_connecting_from_device_info_leaves_by_the_discovering_nic(monkeypatch) 
     assert seen[0].local_interface == "192.168.7.2"
 
 
-# ---- 5: SAVE before APPLY -----------------------------------------------
+# ---- 5: APPLY 1 -----------------------------------------------------------
 
 _spec = importlib.util.spec_from_file_location(
     "net_fakes", Path(__file__).parent / "portomatic-generated" / "test_streaming_device_network_config.py"
@@ -261,7 +316,7 @@ _net = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_net)
 
 
-def test_the_configuration_is_saved_before_the_apply_that_can_drop_the_link() -> None:
+def test_the_configuration_is_applied_and_saved_in_one_command_sent_last() -> None:
     sd = _net._make_device()
     try:
         sd.update_network_configuration(NetworkConfiguration(
@@ -269,12 +324,12 @@ def test_the_configuration_is_saved_before_the_apply_that_can_drop_the_link() ->
             security_type=WifiSecurityType.WPA_PSK_PHRASE, password="pw"))
         commands = [w.decode().strip() for w in sd._transport.stream.written]
         lan = [c for c in commands if "LAN:" in c or "SD:ENAble" in c]
-        assert lan[-4:] == [
+        assert lan[-3:] == [
             "SYSTem:STORage:SD:ENAble 0",
             "SYSTem:COMMunicate:LAN:ENAbled 1",
-            "SYSTem:COMMunicate:LAN:SAVE",
-            "SYSTem:COMMunicate:LAN:APPLY",
+            "SYSTem:COMMunicate:LAN:APPLY 1",
         ]
-        assert commands[-1] == "SYSTem:COMMunicate:LAN:APPLY"
+        assert commands[-1] == "SYSTem:COMMunicate:LAN:APPLY 1"
+        assert "SYSTem:COMMunicate:LAN:SAVE" not in commands
     finally:
         sd.close()
