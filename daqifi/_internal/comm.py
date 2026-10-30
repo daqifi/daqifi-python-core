@@ -1189,6 +1189,46 @@ class PowerState(IntEnum):
     POWERED_UP_EXT_DOWN = 2  # Partial power, external power disabled (low battery mode)
 
 
+class PortCancelled(serial.SerialException):
+    """The port's user was cancelled (given up on); nothing more may be done
+    on the port but closing it."""
+
+
+class CancellablePort:
+    """A serial port that refuses every operation but ``close`` once
+    ``cancel_event`` is set.
+
+    A discovery probe abandoned after its hard timeout must not touch a port
+    a newer session may share (opens aren't exclusive): a write would reach
+    the board, and a read, ``in_waiting`` or buffer reset would take or
+    discard that session's bytes. Checking before each blocking call isn't
+    enough, since the call can return after the probe was abandoned; this
+    checks on every attribute access instead, so the first operation after
+    cancellation raises :class:`PortCancelled` (a SerialException, which the
+    probes already handle by stopping). Reads in the probes are of bytes
+    already waiting, never a blocking wait, so no read is in progress across
+    the cancellation.
+    """
+
+    _ALWAYS_ALLOWED = frozenset({"close", "is_open"})
+
+    def __init__(self, port: Any, cancel_event: threading.Event) -> None:
+        object.__setattr__(self, "_port", port)
+        object.__setattr__(self, "_cancel_event", cancel_event)
+
+    def _check(self, name: str) -> None:
+        if name not in self._ALWAYS_ALLOWED and self._cancel_event.is_set():
+            raise PortCancelled(f"port operation {name!r} after cancellation")
+
+    def __getattr__(self, name: str) -> Any:
+        self._check(name)
+        return getattr(self._port, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self._check(name)
+        setattr(self._port, name, value)
+
+
 class SerialInterface:
     """Low-level serial communication with Nyquist devices"""
 
@@ -1206,8 +1246,9 @@ class SerialInterface:
         self.timeout = timeout
         self._serial: Optional[serial.Serial] = None
         # Set by a caller that has given up on this interface (a discovery
-        # probe past its hard timeout): from then on nothing is written to
-        # the device, so a late open can't disturb a newer session on it.
+        # probe past its hard timeout): from then on the port is used for
+        # nothing but closing (see CancellablePort), so a late open or a
+        # stalled call can't disturb a newer session on it.
         self.cancel_event: Optional[threading.Event] = None
 
     def _cancelled(self) -> bool:
@@ -1251,6 +1292,8 @@ class SerialInterface:
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE
             )
+            if self.cancel_event is not None:
+                self._serial = CancellablePort(self._serial, self.cancel_event)
             if self._cancelled():
                 # Opened only after the caller gave up: close, send nothing.
                 self._serial.close()
@@ -1274,7 +1317,15 @@ class SerialInterface:
                 pass
             return True
         except (serial.SerialException, OSError) as e:
-            # Return False instead of raising to allow discovery to continue
+            # Return False instead of raising to allow discovery to continue.
+            # Close a port that opened before the failure (a cancelled one
+            # included), rather than leave its handle behind.
+            if self._serial is not None:
+                try:
+                    self._serial.close()
+                except (serial.SerialException, OSError):
+                    pass
+                self._serial = None
             return False
 
     def _send_disable_echo(self) -> None:
@@ -1292,7 +1343,7 @@ class SerialInterface:
         as belt-and-suspenders so a discovery flow's *IDN? right
         after open() can't pick up stale echo bytes.
         """
-        if self._serial is None or not self._serial.is_open or self._cancelled():
+        if self._serial is None or not self._serial.is_open:
             return
         # Use \r\n to match ScpiMessage.get_bytes() — the canonical
         # wire format. send_command() uses bare \r for legacy
@@ -1339,10 +1390,10 @@ class SerialInterface:
         port in a serial terminal afterward sees the prompt."""
         if self._serial and self._serial.is_open:
             try:
-                if not self._cancelled():  # a given-up caller sends nothing
-                    self._serial.write(b"SYSTem:ECHO 1\r\n")
-                    self._serial.flush()
-                    time.sleep(0.05)
+                # Refused by CancellablePort once the caller has given up.
+                self._serial.write(b"SYSTem:ECHO 1\r\n")
+                self._serial.flush()
+                time.sleep(0.05)
             except (serial.SerialException, OSError):
                 # Best-effort; the underlying port may already be gone.
                 pass
@@ -1372,8 +1423,6 @@ class SerialInterface:
         try:
             # Send command with CR terminator
             cmd_bytes = (command + "\r").encode('ascii')
-            if self._cancelled():
-                return ""
             self._serial.write(cmd_bytes)
             self._serial.flush()
 

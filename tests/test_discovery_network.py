@@ -436,3 +436,130 @@ def test_an_abandoned_idn_probe_sends_nothing_once_its_open_completes(monkeypatc
     (port,) = blocked_open.instances
     assert port.writes == []
     assert port.closed
+
+
+# ---- round 4 ------------------------------------------------------------
+
+_NEW_SESSION_FRAME = b"\x0a\x05FRAME-FOR-THE-NEW-SESSION"
+
+
+class _StallingSerial:
+    """An open port whose first blocking output call (``stall_on``: flush or
+    write) stalls until released, as a Linux tty flush can. Input is a real
+    buffer, so a read or reset that shouldn't happen is visible."""
+
+    stall_on = "flush"
+    release = None
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        _StallingSerial.instances.append(self)
+        self.input = bytearray()
+        self.writes = []
+        self.resets_after_injection = 0
+        self.injected = False
+        self.closed = False
+        self.is_open = True
+        self._stalled = False
+        self.dtr_value = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _maybe_stall(self, call):
+        if call == _StallingSerial.stall_on and not self._stalled:
+            self._stalled = True
+            _StallingSerial.release.wait(10)
+
+    @property
+    def dtr(self):
+        return self.dtr_value
+
+    @dtr.setter
+    def dtr(self, value):
+        self.dtr_value = value
+
+    def write(self, data):
+        self.writes.append(bytes(data))
+        self._maybe_stall("write")
+        return len(data)
+
+    def flush(self):
+        self._maybe_stall("flush")
+
+    @property
+    def in_waiting(self):
+        return len(self.input)
+
+    def read(self, n=1):
+        taken = bytes(self.input[:n])
+        del self.input[:n]
+        return taken
+
+    def reset_input_buffer(self):
+        if self.injected:
+            self.resets_after_injection += 1
+        self.input.clear()
+
+    def reset_output_buffer(self):
+        pass
+
+    def inject(self, data):
+        self.injected = True
+        self.input.extend(data)
+
+    def close(self):
+        self.closed = True
+        self.is_open = False
+
+
+@pytest.fixture
+def stalling(monkeypatch):
+    import serial
+
+    _StallingSerial.release = threading.Event()
+    _StallingSerial.instances = []
+    monkeypatch.setattr(serial, "Serial", _StallingSerial)
+    yield _StallingSerial
+    _StallingSerial.release.set()
+
+
+def test_an_abandoned_idn_probe_leaves_a_newer_sessions_input_alone(monkeypatch, stalling) -> None:
+    # The echo-off flush stalls past the hard timeout; discovery returns and a
+    # newer session's frame arrives on the shared port; then the flush returns.
+    # The abandoned probe must not read, drain or reset the input.
+    import daqifi.discovery as discovery
+
+    stalling.stall_on = "flush"
+    monkeypatch.setattr(discovery, "_IDENTIFY_HARD_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(list_ports, "comports", lambda: [_port("COM56", 0x04D8, 0xF794)])
+    assert DeviceFinder.discover() == []
+    (port,) = stalling.instances
+    port.inject(_NEW_SESSION_FRAME)
+    stalling.release.set()
+    _wait_for_probe_threads("COM56")
+    assert bytes(port.input) == _NEW_SESSION_FRAME
+    assert port.resets_after_injection == 0
+    assert port.closed
+
+
+def test_an_abandoned_serial_probe_leaves_a_newer_sessions_input_alone(monkeypatch, stalling) -> None:
+    # The same with SerialDeviceFinder, whose first write stalls.
+    import daqifi.device_finders as device_finders
+
+    stalling.stall_on = "write"
+    monkeypatch.setattr(device_finders, "_SERIAL_PROBE_HARD_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(device_finders, "_SERIAL_DEVICE_WAKEUP_DELAY_S", 0.0)
+    monkeypatch.setattr(list_ports, "comports", lambda: [_port("COM57", 0x04D8, 0xF794)])
+    assert SerialDeviceFinder().discover() == []
+    (port,) = stalling.instances
+    port.inject(_NEW_SESSION_FRAME)
+    stalling.release.set()
+    _wait_for_probe_threads("COM57")
+    assert bytes(port.input) == _NEW_SESSION_FRAME
+    assert port.resets_after_injection == 0
+    assert len(port.writes) == 1  # the stalled one; nothing after it
+    assert port.closed

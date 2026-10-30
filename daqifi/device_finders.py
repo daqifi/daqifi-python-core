@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any, Callable, List, Optional, Tuple
 
-from ._internal.comm import HidDeviceInfo
+from ._internal.comm import CancellablePort, HidDeviceInfo
 from ._internal.scpi import StreamInterface
 from ._internal import scpi_commands
 from ._internal.hid_enumerator import HidLibraryDeviceEnumerator
@@ -341,14 +341,15 @@ class SerialDeviceFinder:
                 baudrate=self._baud_rate,
                 timeout=_SERIAL_PROBE_TIMEOUT_S,
                 write_timeout=_SERIAL_PROBE_TIMEOUT_S,
-            ) as port:
-                def _abandoned() -> bool:
-                    # Given up on by discover() (run_port_probe): touch
-                    # nothing on the device; leaving the block closes it.
-                    return cancelled is not None and cancelled.is_set()
-
-                if _abandoned():
-                    return None
+            ) as raw_port:
+                # Once discover() gives up on this probe (run_port_probe sets
+                # the event), every operation on the port raises
+                # PortCancelled, a SerialException: the probe stops without
+                # touching the board or the input a newer session may share,
+                # and leaving the block closes the port.
+                port = (
+                    CancellablePort(raw_port, cancelled) if cancelled is not None else raw_port
+                )
                 # DTR-up wakes the device.
                 port.dtr = True
                 time.sleep(_SERIAL_DEVICE_WAKEUP_DELAY_S)
@@ -373,8 +374,6 @@ class SerialDeviceFinder:
                     scpi_commands.turn_device_on(),
                     scpi_commands.set_protobuf_stream_format(),
                 ):
-                    if _abandoned():
-                        return None
                     port.write(command.get_bytes())
                     time.sleep(_SERIAL_INIT_COMMAND_DELAY_S)
 
@@ -388,12 +387,13 @@ class SerialDeviceFinder:
                 while time.monotonic() < deadline:
                     now = time.monotonic()
                     if now - last_send >= _SERIAL_RETRY_INTERVAL_S and retry_count < _SERIAL_MAX_RETRIES:
-                        if _abandoned():
-                            return None
                         port.write(scpi_commands.get_device_info().get_bytes())
                         last_send = now
                         retry_count += 1
-                    chunk = port.read(256)
+                    # Only bytes already waiting: a read never blocks, so none
+                    # is in progress when the probe is abandoned.
+                    waiting = port.in_waiting
+                    chunk = port.read(waiting) if waiting else b""
                     if chunk:
                         received.extend(chunk)
                         # A protobuf-shaped response contains null bytes.
