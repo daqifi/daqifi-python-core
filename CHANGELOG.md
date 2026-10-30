@@ -28,6 +28,7 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+<<<<<<< Updated upstream
 - The WiFi module update didn't follow the firmware's sequence.
   `LAN:FWUpdate` only requests the update; the following `LAN:APPLY` enters
   the USB-transparent bridge, and `LAN:APPLY` from the bridge leaves it. The
@@ -51,6 +52,15 @@ aims to follow [Semantic Versioning](https://semver.org/).
   `post_lan_disconnect_port_release_delay`,
   `post_usb_transparent_mode_exit_delay`, `wifi_recovery_timeout` (at least
   one 40 s bridge watch), `wifi_flash_success_marker` (#190).
+=======
+- Live streaming timestamps jumped back to near zero every time the
+  device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
+  102 s at 42 MHz), in all three stream formats, so any session longer than
+  that had wrong times. `StreamManager` now unwraps ticks per session: each
+  is placed by its signed distance from the previous one, so time keeps
+  rising across a rollover, and the first sample of a session keeps its raw
+  time (#193).
+>>>>>>> Stashed changes
 - Every NQ3 DAC write was rejected by the firmware. The voltage setter sent
   `SOUR:VOLT:LEV <ch> <volts>`, which the firmware answers with -101
   Invalid character; it now sends `<ch>,<volts>`. The DAC enable commands
