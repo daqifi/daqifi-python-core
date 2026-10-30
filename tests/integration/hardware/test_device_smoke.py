@@ -20,7 +20,9 @@ from daqifi.firmware import (
 )
 
 
-pytestmark = pytest.mark.integration
+# Under tests/integration/hardware so the hardware-free run skips it: its
+# device fixture probes every serial port (#205 item 4).
+pytestmark = [pytest.mark.integration, pytest.mark.hardware]
 
 
 def test_device_basic_introspection(device):
