@@ -417,6 +417,17 @@ class Pic32BootloaderProtocol:
             raise ValueError(
                 "Firmware HEX file contains no data records to program."
             )
+        # Two records writing the same bytes leave flash holding neither
+        # image: programming only clears bits, and a programmed word can't be
+        # rewritten without an erase. No CRC could be expected for it, so an
+        # image with overlapping records is refused.
+        spans = sorted((r.address, r.address + r.data[0]) for r in data_records)
+        for (start_a, end_a), (start_b, _end_b) in zip(spans, spans[1:]):
+            if start_b < end_a:
+                raise ValueError(
+                    f"Firmware HEX file has overlapping data records "
+                    f"(0x{start_a:08X}-0x{end_a - 1:08X} and from 0x{start_b:08X})."
+                )
         for record in data_records:
             first = record.address
             end = first + record.data[0]

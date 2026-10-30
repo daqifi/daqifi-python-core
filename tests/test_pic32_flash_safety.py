@@ -548,3 +548,19 @@ def test_the_drain_before_each_crc_request_is_a_short_poll() -> None:
     _run(hid)
     drains = [t for t in timeouts if t is not None and t < timedelta(seconds=0.1)]
     assert drains and max(drains) <= timedelta(milliseconds=1)
+
+
+def test_overlapping_records_are_refused() -> None:
+    # 16 bytes at 0, then 4 at 4 and 4 at 16: the second rewrites bytes the
+    # first programmed, which flash can't do without an erase.
+    image = _image(_base(0x1D00), _data(0x0000, b"\x01" * 16), _data(0x0004, b"\x02" * 4),
+                   _data(0x0010, b"\x03" * 4))
+    with pytest.raises(ValueError, match="overlapping"):
+        Pic32BootloaderProtocol().parse_hex_file(image)
+    with pytest.raises(ValueError, match="overlapping"):
+        Pic32BootloaderProtocol().compute_crc_regions(image)
+
+
+def test_touching_records_are_not_overlapping() -> None:
+    image = _image(_base(0x1D00), _data(0x0000, b"\x01" * 16), _data(0x0010, b"\x02" * 16))
+    assert len(Pic32BootloaderProtocol().compute_crc_regions(image)) == 1
