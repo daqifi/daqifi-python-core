@@ -147,3 +147,106 @@ def test_a_malformed_record_doesnt_discard_the_good_ones_behind_it() -> None:
     finally:
         sm.stop()
     assert [s.channels for s in samples] == [{0: 1.0}, {0: 2.0}, {0: 3.0}]
+
+
+# ---- round 2 ------------------------------------------------------------
+
+
+def test_a_queued_backlog_is_read_within_the_default_deadline() -> None:
+    # 3000 records already waiting at 10 kHz: the default deadline (2x their
+    # duration + 1 s = 1.6 s) must cover taking them, so read() mustn't
+    # sleep between samples that are already there.
+    data = META + b"".join(_ai(1000 + i, 1000) for i in range(3000))
+    sm = _f._manager(_f._FakeSerial(on_start=data), channels=[0], sample_rate=10000, format=1)
+    sm.start()
+    try:
+        samples = sm.read(num_samples=3000)
+    finally:
+        sm.stop()
+    assert len(samples) == 3000
+
+
+def test_the_async_read_passes_its_timeout_through() -> None:
+    import asyncio
+
+    from daqifi.streaming import AsyncStreamManager
+
+    stream = AsyncStreamManager.__new__(AsyncStreamManager)
+    stream._stream = _manager(META)  # silent after the header
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            asyncio.run(stream.read(num_samples=40, timeout=0.05))
+        assert time.monotonic() - started < 0.5
+    finally:
+        stream._stream.stop()
+
+
+def test_an_export_never_pairs_a_value_with_another_samples_timestamp() -> None:
+    # A producer adds (and trims) while to_csv runs: every row's value must
+    # be its own timestamp. Each sample's value equals its timestamp.
+    import csv
+    import sys
+    import tempfile
+    import threading
+
+    buf = SampleBuffer(channels=[0], max_samples=200)
+    for i in range(220):
+        buf.add_sample(Sample(timestamp=float(i), channels={0: float(i)}))
+    stop = threading.Event()
+
+    def producer():
+        i = 220
+        while not stop.is_set():
+            buf.add_sample(Sample(timestamp=float(i), channels={0: float(i)}))
+            i += 1
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    thread = threading.Thread(target=producer, daemon=True)
+    thread.start()
+    bad = []
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "x.csv")
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not bad:
+                buf.to_csv(path)
+                with open(path) as f:
+                    rows = list(csv.reader(f))[1:]
+                bad = [r for r in rows if float(r[0]) != float(r[1])]
+    finally:
+        stop.set()
+        thread.join(2)
+        sys.setswitchinterval(old)
+    assert bad == []
+
+
+def test_read_all_keeps_channels_a_csv_header_names_later() -> None:
+    data = (b"# Timestamp Tick Rate: 1000 Hz\n" b"ain3_ts,ain3_val\n"
+            b"1000,2500\n" b"1100,2600\n")
+    sm = _f._manager(_f._FakeSerial(on_start=data), channels=[0], sample_rate=10, format=2)
+    sm.start()
+    try:
+        buffer = sm.read_all(duration=0.3)
+    finally:
+        sm.stop()
+    assert buffer.channels == [3]
+    assert buffer.to_dict()["channel_3"] == [2.5, 2.6]
+
+
+def test_to_json_writes_a_missing_value_as_null_and_stays_strict_json(tmp_path) -> None:
+    import json
+
+    buf = SampleBuffer(channels=[0, 1])
+    buf.add_sample(Sample(timestamp=0.0, channels={0: 1.0, 1: 2.0}))
+    buf.add_sample(Sample(timestamp=0.1, channels={0: 1.5}))  # no channel 1
+    path = tmp_path / "x.json"
+    buf.to_json(str(path))
+
+    def _reject(constant):
+        raise ValueError(f"non-standard JSON constant {constant}")
+
+    data = json.loads(path.read_text(), parse_constant=_reject)
+    assert data["channel_1"] == [2.0, None]
+    assert math.isnan(buf.to_dict()["channel_1"][1])  # numeric access keeps NaN

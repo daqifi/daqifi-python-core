@@ -10,7 +10,7 @@ import math
 import time
 import threading
 from collections import deque
-from typing import List, Dict, Optional, Callable, Any, Deque
+from typing import List, Dict, Optional, Callable, Any, Deque, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -77,27 +77,43 @@ class SampleBuffer:
     ``max_samples`` bounds it: once it holds more than ``max_samples`` plus a
     tenth again, the oldest samples are dropped down to ``max_samples`` (in
     chunks, so adding stays cheap). None keeps every sample.
+
+    A streaming thread may add samples while another thread exports them.
+    Adding and clearing hold the buffer's lock, and every export works on one
+    snapshot of the samples taken under it, so a trim during an export can't
+    pair a value with another sample's timestamp.
     """
     samples: List[Sample] = field(default_factory=list)
     channels: List[int] = field(default_factory=list)
     sample_rate: float = 0.0
     start_time: Optional[float] = None
     max_samples: Optional[int] = None
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     def add_sample(self, sample: Sample):
         """Add sample to buffer"""
-        if self.start_time is None:
-            self.start_time = sample.timestamp
-        self.samples.append(sample)
-        if self.max_samples is not None:
-            excess = len(self.samples) - self.max_samples
-            if excess > max(1, self.max_samples // 10):
-                del self.samples[:excess]
+        with self._lock:
+            if self.start_time is None:
+                self.start_time = sample.timestamp
+            self.samples.append(sample)
+            if self.max_samples is not None:
+                excess = len(self.samples) - self.max_samples
+                if excess > max(1, self.max_samples // 10):
+                    del self.samples[:excess]
 
     def clear(self):
         """Clear buffer"""
-        self.samples.clear()
-        self.start_time = None
+        with self._lock:
+            self.samples.clear()
+            self.start_time = None
+
+    def snapshot(self) -> "Tuple[Optional[float], List[Sample]]":
+        """``(start_time, samples)`` as of one moment: a copy taken under
+        the buffer's lock, safe to iterate while samples are added."""
+        with self._lock:
+            return self.start_time, list(self.samples)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -106,7 +122,7 @@ class SampleBuffer:
         return self.samples[index]
 
     def __iter__(self):
-        return iter(self.samples)
+        return iter(self.snapshot()[1])
 
     def get_channel_data(self, channel: int) -> List[float]:
         """
@@ -116,9 +132,9 @@ class SampleBuffer:
             channel: Channel index
 
         Returns:
-            List of voltage values
+            List of voltage values (NaN where a sample has no value for it)
         """
-        return [sample[channel] for sample in self.samples]
+        return [sample[channel] for sample in self.snapshot()[1]]
 
     def get_timestamps(self) -> List[float]:
         """
@@ -127,25 +143,26 @@ class SampleBuffer:
         Returns:
             List of timestamps (seconds since start)
         """
-        if self.start_time is None:
-            return []
-        return [s.timestamp - self.start_time for s in self.samples]
+        start, samples = self.snapshot()
+        return _relative_timestamps(start, samples)
 
     def to_dict(self) -> Dict[str, Any]:
         """
         Export to dictionary.
 
         Returns:
-            Dictionary with timestamps and channel data
+            Dictionary with timestamps and channel data (NaN where a sample
+            has no value for a channel)
         """
+        start, samples = self.snapshot()
         result = {
-            'timestamps': self.get_timestamps(),
+            'timestamps': _relative_timestamps(start, samples),
             'sample_rate': self.sample_rate,
-            'num_samples': len(self.samples),
+            'num_samples': len(samples),
         }
 
         for ch in self.channels:
-            result[f'channel_{ch}'] = self.get_channel_data(ch)
+            result[f'channel_{ch}'] = [sample[ch] for sample in samples]
 
         return result
 
@@ -162,6 +179,7 @@ class SampleBuffer:
         """
         import csv
 
+        start, samples = self.snapshot()
         with open(filename, 'w', newline='') as f:
             writer = csv.writer(f)
 
@@ -170,9 +188,8 @@ class SampleBuffer:
                 header = ['timestamp'] + [f'channel_{ch}' for ch in sorted(self.channels)]
                 writer.writerow(header)
 
-            # Write data
-            timestamps = self.get_timestamps()
-            for ts, sample in zip(timestamps, self.samples):
+            # Write data: each row from one sample of the same snapshot
+            for ts, sample in zip(_relative_timestamps(start, samples), samples):
                 row = [ts]
                 for ch in sorted(self.channels):
                     row.append(sample[ch])
@@ -190,8 +207,15 @@ class SampleBuffer:
         """
         import json
 
+        # A missing value is NaN for numeric use, but bare NaN isn't JSON:
+        # write it as null, and refuse any other non-finite value.
+        data = {
+            key: ([None if isinstance(v, float) and math.isnan(v) else v for v in value]
+                  if isinstance(value, list) else value)
+            for key, value in self.to_dict().items()
+        }
         with open(filename, 'w') as f:
-            json.dump(self.to_dict(), f, indent=2)
+            json.dump(data, f, indent=2, allow_nan=False)
 
     def to_dataframe(self):
         """
@@ -214,6 +238,13 @@ class SampleBuffer:
 
         data = self.to_dict()
         return pd.DataFrame(data)
+
+
+def _relative_timestamps(start: Optional[float], samples: List[Sample]) -> List[float]:
+    """Seconds since ``start`` for each of ``samples`` (empty without one)."""
+    if start is None:
+        return []
+    return [s.timestamp - start for s in samples]
 
 
 # Prompt forms that may lead the START reply, longest first so a prompt line
@@ -735,8 +766,11 @@ class StreamManager:
                 # — silently skipping it left polling-mode callers' channel
                 # handlers stuck on stale samples (Qodo PR #142 pass 3 #1).
                 self._dispatch_per_channel(sample)
-
-            time.sleep(0.001)  # Small delay to avoid busy loop
+            else:
+                # Wait only when nothing was there: samples already queued
+                # are taken at parse speed, so the deadline (sized from the
+                # sample rate) covers a backlog too.
+                time.sleep(0.001)
 
         return samples
 
@@ -760,7 +794,7 @@ class StreamManager:
         """
         if self._state != StreamState.RUNNING:
             raise RuntimeError("Not streaming")
-        collected = SampleBuffer(channels=list(self._channels), sample_rate=self._sample_rate)
+        collected = SampleBuffer(sample_rate=self._sample_rate)
         deadline = time.monotonic() + duration
         while time.monotonic() < deadline:
             sample = self._read_sample()
@@ -770,6 +804,11 @@ class StreamManager:
                 self._dispatch_per_channel(sample)
             else:
                 time.sleep(0.001)
+        # Channels as known now: a CSV stream names its channels in a header
+        # that arrives with the data. Without any, those the samples carry.
+        collected.channels = list(self._channels) or sorted(
+            {ch for sample in collected for ch in sample.channels}
+        )
         return collected
 
     def _read_sample(self) -> Optional[Sample]:
@@ -1348,12 +1387,14 @@ class AsyncStreamManager:
         import asyncio
         await asyncio.get_event_loop().run_in_executor(None, self._stream.stop)
 
-    async def read(self, num_samples: int = 1) -> List[Sample]:
+    async def read(self, num_samples: int = 1, timeout: Optional[float] = None) -> List[Sample]:
         """
         Read samples (async).
 
         Args:
             num_samples: Number of samples to read
+            timeout: Total seconds for all of them; see
+                :meth:`StreamManager.read`
 
         Returns:
             List of samples
@@ -1363,10 +1404,10 @@ class AsyncStreamManager:
                 samples = await stream.read(100)
         """
         import asyncio
+        import functools
         return await asyncio.get_event_loop().run_in_executor(
             None,
-            self._stream.read,
-            num_samples
+            functools.partial(self._stream.read, num_samples, timeout),
         )
 
     async def __aenter__(self):
