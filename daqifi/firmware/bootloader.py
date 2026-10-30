@@ -181,9 +181,10 @@ def decode_erase_flash_response(data: bytes) -> bool:
 
 def decode_read_crc_response(data: bytes) -> Optional[int]:
     """The flash CRC-16 a `read flash CRC` response reports, or None when the
-    frame is malformed, fails its CRC or answers a different command."""
+    frame is malformed, fails its CRC, answers a different command or isn't
+    exactly the command byte and the CRC (datastream.c, READ_CRC)."""
     payload = _decode_frame(data)
-    if payload is None or len(payload) < 3 or payload[0] != _READ_CRC_COMMAND:
+    if payload is None or len(payload) != 3 or payload[0] != _READ_CRC_COMMAND:
         return None
     return payload[1] | (payload[2] << 8)
 

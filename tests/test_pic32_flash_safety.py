@@ -281,10 +281,53 @@ def test_a_crc_mismatch_fails_verification_without_a_retry_and_re_erases() -> No
     assert "re-erased" in error.recovery_guidance
 
 
-def test_a_malformed_crc_reply_is_retried() -> None:
-    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, b"\x01\x99\x04", _crc(_REGION_CRCS[0]), _crc(_REGION_CRCS[1])])
+def test_a_reply_that_isnt_a_crc_reply_fails_verification_without_a_retry() -> None:
+    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, b"\x01\x99\x04", _ERASED])
     service, _states, error = _run(hid)
-    assert error is None and service.current_state == FirmwareUpdateState.COMPLETE
+    assert error.failed_state == FirmwareUpdateState.VERIFYING
+    assert "wasn't a CRC reply" in str(error.__cause__)
+    assert _commands(hid).count(0x04) == 1
+    assert service.current_state == _RECOVERED
+
+
+# Both regions hold the same bytes, so they expect the same CRC.
+_TWIN = bytes(range(16))
+_TWIN_IMAGE = _image(_base(0x1D00), _data(0x0000, _TWIN), _data(0x0480, _TWIN))
+
+
+class _PerWrite(_Bootloader):
+    """What becomes readable after each write, in order: one list per write."""
+
+    def __init__(self, per_write) -> None:
+        super().__init__([])
+        self._per_write = list(per_write)
+
+    def write(self, data) -> None:
+        _f._FakeHidTransport.write(self, data)
+        if self._per_write:
+            self._ready += self._per_write.pop(0)
+
+
+def test_a_late_program_ack_cant_make_a_corrupt_region_verify() -> None:
+    # The EOF record's first ack is late, so it is retried, and the retry takes
+    # the late ack; the retry's own ack then turns up only after verification's
+    # drain, as the reply to region 1's CRC request. A retry of that request
+    # would take region 1's real reply, and region 2 would read the retry's
+    # stale reply: the regions hold equal bytes, so a corrupt region 2 would
+    # verify. With no retries the stray ack fails the check as unknown.
+    good = Crc16(_TWIN).crc
+    hid = _PerWrite([
+        [_VERSION], [_ERASED], [_PROGRAMMED], [_PROGRAMMED], [_PROGRAMMED],
+        [],                                # EOF record: ack late
+        [_PROGRAMMED],                     # its retry reads the late ack
+        [_PROGRAMMED],                     # CRC 1: the retry's own ack, late
+        [_crc(good)],                      # (CRC 1 retry): region 1's real reply
+        [_crc(good), _crc(good ^ 0xFFFF)], # CRC 2: stale reply, then the bad one
+        [_ERASED], [_ERASED],
+    ])
+    service, _states, error = _run(hid, image=_TWIN_IMAGE)
+    assert error is not None and error.failed_state == FirmwareUpdateState.VERIFYING
+    assert service.current_state != FirmwareUpdateState.COMPLETE
 
 
 # ---- 3: re-erase after a failure ----------------------------------------

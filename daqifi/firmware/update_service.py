@@ -2007,7 +2007,14 @@ class DefaultFirmwareUpdateService:
     def _erase_flash_with_retry(self, deadline: _Cancellation) -> None:
         from datetime import timedelta
 
+        attempts = [0]
+
         def _attempt() -> None:
+            attempts[0] += 1
+            if attempts[0] > 1:
+                # The last attempt's reply may still arrive; a retry must not
+                # take it as its own (acks carry only the command byte).
+                self._drain_hid_reports()
             self._flash_touched = True
             self._hid_transport.write(
                 self._bootloader_protocol.create_erase_flash_message()
@@ -2042,7 +2049,15 @@ class DefaultFirmwareUpdateService:
         for index, record in enumerate(hex_records):
             deadline.check()
 
-            def _attempt(record=record, index=index) -> None:
+            attempts = [0]
+
+            def _attempt(record=record, index=index, attempts=attempts) -> None:
+                attempts[0] += 1
+                if attempts[0] > 1:
+                    # As for the erase: a late ack to the failed attempt would
+                    # otherwise be read as this one's and shift every later
+                    # record's ack by one.
+                    self._drain_hid_reports()
                 message = self._bootloader_protocol.create_program_flash_message(
                     record
                 )
@@ -2093,11 +2108,11 @@ class DefaultFirmwareUpdateService:
 
         A reply carries no address (datastream.c answers READ_CRC with the
         command byte and the CRC only), so a late reply to one request would
-        read as the answer to the next. Pending reports are therefore
-        drained before every request, and no reply at all fails the check
-        rather than being retried: a retry could take the late reply. A
-        malformed reply was this request's own, so it is retried. A CRC that
-        differs is not retried: the flash doesn't hold the image.
+        read as the answer to the next, and a late reply to an earlier
+        command (a PROGRAM ack) can arrive at any point. Pending reports are
+        drained before every request, and nothing is retried: a reply that
+        isn't a well-formed READ_CRC response, or no reply at all, leaves the
+        flash unconfirmed and fails the check, as a CRC that differs does.
         Without regions (a protocol that can't read a CRC back) only the
         bootloader's liveness is checked, as before.
         """
@@ -2116,40 +2131,34 @@ class DefaultFirmwareUpdateService:
             deadline.check()
             where = f"region {index + 1} at 0x{region.address:08X}"
 
-            def _attempt(region=region, where=where) -> None:
-                self._drain_hid_reports()
-                self._hid_transport.write(
-                    protocol.create_read_crc_message(region.address, region.length)
-                )
-                try:
-                    response = self._hid_transport.read(
-                        timedelta(seconds=self._options.bootloader_response_timeout)
-                    )
-                except TimeoutError:
-                    response = b""
-                if not response:
-                    raise _FlashVerificationError(
-                        f"The bootloader didn't answer the CRC request for {where}; "
-                        "the flash can't be confirmed."
-                    )
-                actual = protocol.decode_read_crc_response(response)
-                if actual is None:
-                    raise ValueError(f"Bootloader CRC reply for {where} was malformed.")
-                if actual != region.expected_crc:
-                    raise _FlashVerificationError(
-                        f"Flash CRC mismatch in {where} (length {region.length}): "
-                        f"expected 0x{region.expected_crc:04X}, bootloader "
-                        f"reported 0x{actual:04X}."
-                    )
-
-            self._execute_with_retry(
-                f"read flash CRC for {where}",
-                self._options.flash_write_retry_count,
-                self._options.flash_write_retry_delay,
-                _attempt,
-                _is_transient_hid_error,
-                deadline,
+            self._drain_hid_reports()
+            self._hid_transport.write(
+                protocol.create_read_crc_message(region.address, region.length)
             )
+            try:
+                response = self._hid_transport.read(
+                    timedelta(seconds=self._options.bootloader_response_timeout)
+                )
+            except TimeoutError:
+                response = b""
+            if not response:
+                raise _FlashVerificationError(
+                    f"The bootloader didn't answer the CRC request for {where}; "
+                    "the flash can't be confirmed."
+                )
+            actual = protocol.decode_read_crc_response(response)
+            if actual is None:
+                raise _FlashVerificationError(
+                    f"The reply to the CRC request for {where} wasn't a CRC reply "
+                    "(a late reply to an earlier command, or a damaged frame); "
+                    "the flash can't be confirmed."
+                )
+            if actual != region.expected_crc:
+                raise _FlashVerificationError(
+                    f"Flash CRC mismatch in {where} (length {region.length}): "
+                    f"expected 0x{region.expected_crc:04X}, bootloader "
+                    f"reported 0x{actual:04X}."
+                )
         self._logger.info("Flash verified: %d region(s) match the image.", len(crc_regions))
 
     def _drain_hid_reports(self, limit: int = 16) -> None:
