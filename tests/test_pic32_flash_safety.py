@@ -257,6 +257,8 @@ def _commands(hid):
 _REGION_CRCS = (Crc16(_RESET).crc, Crc16(_BULK).crc)
 # Every record of _GOOD is sent and acknowledged: address, 3 data, EOF.
 _ALL_PROGRAMMED = (_PROGRAMMED,) * 5
+# After a cleanup erase both regions read back blank (all 0xFF).
+_BLANKS = (_crc(Crc16(b"\xff" * 8).crc), _crc(Crc16(b"\xff" * 32).crc))
 
 
 def test_verifying_reads_every_region_crc_back() -> None:
@@ -270,23 +272,26 @@ def test_verifying_reads_every_region_crc_back() -> None:
 
 
 def test_a_crc_mismatch_fails_verification_without_a_retry_and_re_erases() -> None:
-    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, _crc(_REGION_CRCS[0]), _crc(_REGION_CRCS[1] ^ 0x0101), _ERASED])
+    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, _crc(_REGION_CRCS[0]), _crc(_REGION_CRCS[1] ^ 0x0101), _ERASED, *_BLANKS])
     service, states, error = _run(hid)
     assert error is not None and error.failed_state == FirmwareUpdateState.VERIFYING
     assert "CRC mismatch" in str(error.__cause__)
     # Second region asked once (no retry), then the cleanup erase; no jump.
-    assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x04, 0x02]
+    assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x04, 0x02, 0x04, 0x04]
     assert states[-2:] == [_CLEANING_UP, _RECOVERED]
     assert service.current_state == _RECOVERED
     assert "re-erased" in error.recovery_guidance
 
 
 def test_a_reply_that_isnt_a_crc_reply_fails_verification_without_a_retry() -> None:
-    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, b"\x01\x99\x04", _ERASED])
+    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, b"\x01\x99\x04", _ERASED, *_BLANKS])
     service, _states, error = _run(hid)
     assert error.failed_state == FirmwareUpdateState.VERIFYING
     assert "wasn't a CRC reply" in str(error.__cause__)
-    assert _commands(hid).count(0x04) == 1
+    # One CRC request in verification (no retry), then the cleanup erase and
+    # its two read-backs.
+    assert _commands(hid)[-4:] == [0x04, 0x02, 0x04, 0x04]
+    assert _commands(hid).count(0x04) == 3
     assert service.current_state == _RECOVERED
 
 
@@ -336,10 +341,10 @@ def test_a_late_program_ack_cant_make_a_corrupt_region_verify() -> None:
 def test_a_programming_failure_re_erases_to_a_clean_bootloader() -> None:
     # The second record is never acknowledged (both attempts), then the
     # cleanup erase is.
-    hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED])
+    hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED, *_BLANKS])
     service, states, error = _run(hid)
     assert error.failed_state == FirmwareUpdateState.PROGRAMMING
-    assert _commands(hid) == [0x01, 0x02, 0x03, 0x03, 0x03, 0x02]
+    assert _commands(hid) == [0x01, 0x02, 0x03, 0x03, 0x03, 0x02, 0x04, 0x04]
     assert states[-2:] == [_CLEANING_UP, _RECOVERED]
     assert "re-erased" in error.recovery_guidance
 
@@ -385,10 +390,10 @@ class _CancelsDuringProgramming(_Bootloader):
 
 def test_a_cancel_mid_flash_is_cleaned_up_too() -> None:
     cancel_event = threading.Event()
-    hid = _CancelsDuringProgramming(cancel_event, [_VERSION, _ERASED, _PROGRAMMED, _ERASED])
+    hid = _CancelsDuringProgramming(cancel_event, [_VERSION, _ERASED, _PROGRAMMED, _ERASED, *_BLANKS])
     service, states, error = _run(hid, cancel_event=cancel_event)
     assert "canceled" in str(error).lower()
-    assert _commands(hid) == [0x01, 0x02, 0x03, 0x02]
+    assert _commands(hid) == [0x01, 0x02, 0x03, 0x02, 0x04, 0x04]
     assert service.current_state == _RECOVERED
 
 
@@ -401,7 +406,7 @@ def test_a_failure_before_erase_doesnt_re_erase() -> None:
 
 
 def test_an_update_can_start_again_after_recovered() -> None:
-    hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED])
+    hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED, *_BLANKS])
     service, _states, _error = _run(hid)
     assert service.current_state == _RECOVERED
     path = _write(_GOOD)
@@ -439,11 +444,11 @@ def test_an_unanswered_crc_request_fails_without_a_retry_that_could_take_a_late_
     # leave its own reply queued for region 2 (replies carry no address). The
     # silence fails verification instead; the late reply is drained before the
     # cleanup erase.
-    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, _Late(_crc(_REGION_CRCS[0])), _ERASED])
+    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, _Late(_crc(_REGION_CRCS[0])), _ERASED, *_BLANKS])
     service, states, error = _run(hid)
     assert error.failed_state == FirmwareUpdateState.VERIFYING
     assert "didn't answer" in str(error.__cause__)
-    assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x02]
+    assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x02, 0x04, 0x04]
     assert service.current_state == _RECOVERED
 
 
@@ -465,3 +470,25 @@ def test_records_after_the_end_of_file_are_refused() -> None:
     image = [_base(0x1D00), _data(0x0480, b"\x01" * 4), _EOF, _data(0x0490, b"\x02" * 4)]
     with pytest.raises(ValueError, match="after its end-of-file"):
         Pic32BootloaderProtocol().parse_hex_file(image)
+
+
+# ---- round 4 ------------------------------------------------------------
+
+
+def test_recovered_needs_the_flash_read_back_blank_not_just_an_erase_ack() -> None:
+    # The bootloader acks ERASE when the NVM cycle completes, whatever the
+    # outcome (nvm.c APP_NVMOperation checks no error flag): an acked erase
+    # whose flash still reads back programmed is not RECOVERED.
+    hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED,
+                       _BLANKS[0], _crc(Crc16(_BULK).crc)])
+    service, states, error = _run(hid)
+    assert states[-2:] == [_CLEANING_UP, FirmwareUpdateState.FAILED]
+    assert service.current_state == FirmwareUpdateState.FAILED
+    assert "could not be re-erased" in error.recovery_guidance
+
+
+def test_an_unanswered_read_back_after_the_erase_is_not_recovered() -> None:
+    hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED, None])
+    service, states, error = _run(hid)
+    assert service.current_state == FirmwareUpdateState.FAILED
+    assert "could not be re-erased" in error.recovery_guidance

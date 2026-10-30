@@ -67,6 +67,7 @@ from daqifi.firmware.bootloader import (
     FlashCrcRegion,
     Pic32BootloaderProtocol,
 )
+from daqifi.firmware.crc16 import Crc16
 from daqifi.firmware.download_service import FirmwareDownloadService
 from daqifi.firmware.external_process import (
     ExternalProcessRequest,
@@ -539,6 +540,7 @@ class DefaultFirmwareUpdateService:
         # Set when the first ERASE or PROGRAM goes out: only then can the
         # flash be half-written, and only then is a re-erase due.
         self._flash_touched = False
+        self._crc_regions = crc_regions
         try:
             self._transition_to_state(
                 FirmwareUpdateState.PREPARING_DEVICE,
@@ -783,8 +785,9 @@ class DefaultFirmwareUpdateService:
         half-written application, which the bootloader starts on the next
         reset if its reset address was written (bootloader.c,
         BOOTLOADER_CHECK_FOR_TRIGGER). Then, while the bootloader is still
-        connected, the flash is re-erased: CLEANING_UP, then RECOVERED, and
-        the board stays in its bootloader. Port of daqifi-core 7c4b014.
+        connected, the flash is re-erased and read back blank: CLEANING_UP,
+        then RECOVERED, and the board stays in its bootloader. Port of
+        daqifi-core 7c4b014, plus the read-back.
 
         Returns _RECOVERED, _CLEANUP_FAILED, or None when no re-erase was
         due (the failure didn't touch flash).
@@ -826,10 +829,14 @@ class DefaultFirmwareUpdateService:
             # Its own deadline, without the caller's cancel event: a cancel
             # is what may have brought us here, and the re-erase must still
             # run.
+            def _erase_and_confirm(deadline: _Cancellation) -> None:
+                self._erase_flash_with_retry(deadline)
+                self._confirm_flash_erased(deadline)
+
             self._execute_with_state_timeout(
                 FirmwareUpdateState.CLEANING_UP,
-                "re-erase flash after the failed update",
-                self._erase_flash_with_retry,
+                "re-erase flash after the failed update and confirm it blank",
+                _erase_and_confirm,
                 None,
             )
         except Exception as exc:
@@ -841,8 +848,8 @@ class DefaultFirmwareUpdateService:
             )
             _end(
                 FirmwareUpdateState.FAILED,
-                "Re-erase after the failure also failed; the board may hold a "
-                "half-written application.",
+                "Re-erase after the failure failed or couldn't be confirmed; "
+                "the board may hold a half-written application.",
             )
             return _CLEANUP_FAILED
         _end(
@@ -2126,33 +2133,11 @@ class DefaultFirmwareUpdateService:
             )
             return
 
-        protocol = self._bootloader_protocol
         for index, region in enumerate(crc_regions):
             deadline.check()
             where = f"region {index + 1} at 0x{region.address:08X}"
 
-            self._drain_hid_reports()
-            self._hid_transport.write(
-                protocol.create_read_crc_message(region.address, region.length)
-            )
-            try:
-                response = self._hid_transport.read(
-                    timedelta(seconds=self._options.bootloader_response_timeout)
-                )
-            except TimeoutError:
-                response = b""
-            if not response:
-                raise _FlashVerificationError(
-                    f"The bootloader didn't answer the CRC request for {where}; "
-                    "the flash can't be confirmed."
-                )
-            actual = protocol.decode_read_crc_response(response)
-            if actual is None:
-                raise _FlashVerificationError(
-                    f"The reply to the CRC request for {where} wasn't a CRC reply "
-                    "(a late reply to an earlier command, or a damaged frame); "
-                    "the flash can't be confirmed."
-                )
+            actual = self._read_region_crc(region, where)
             if actual != region.expected_crc:
                 raise _FlashVerificationError(
                     f"Flash CRC mismatch in {where} (length {region.length}): "
@@ -2160,6 +2145,60 @@ class DefaultFirmwareUpdateService:
                     f"reported 0x{actual:04X}."
                 )
         self._logger.info("Flash verified: %d region(s) match the image.", len(crc_regions))
+
+    def _read_region_crc(self, region: FlashCrcRegion, where: str) -> int:
+        """One READ_CRC exchange for ``region``, after draining stale
+        reports; never retried. No reply, or a reply that isn't exactly a
+        READ_CRC response, raises _FlashVerificationError: the CRC is
+        unknown."""
+        from datetime import timedelta
+
+        protocol = self._bootloader_protocol
+        self._drain_hid_reports()
+        self._hid_transport.write(
+            protocol.create_read_crc_message(region.address, region.length)
+        )
+        try:
+            response = self._hid_transport.read(
+                timedelta(seconds=self._options.bootloader_response_timeout)
+            )
+        except TimeoutError:
+            response = b""
+        if not response:
+            raise _FlashVerificationError(
+                f"The bootloader didn't answer the CRC request for {where}; "
+                "the flash can't be confirmed."
+            )
+        actual = protocol.decode_read_crc_response(response)
+        if actual is None:
+            raise _FlashVerificationError(
+                f"The reply to the CRC request for {where} wasn't a CRC reply "
+                "(a late reply to an earlier command, or a damaged frame); "
+                "the flash can't be confirmed."
+            )
+        return actual
+
+    def _confirm_flash_erased(self, deadline: _Cancellation) -> None:
+        """Read every programmed region back after the cleanup erase and
+        require the CRC of erased (0xFF) flash. The ERASE ack proves nothing:
+        APP_NVMOperation (nvm.c) checks no NVM error flag, and
+        BOOTLOADER_WAIT_FOR_NVM acks once the write cycle completes."""
+        regions = self._crc_regions
+        if not regions:
+            raise _FlashVerificationError(
+                "The re-erase can't be confirmed: this bootloader protocol "
+                "can't read a CRC back."
+            )
+        for index, region in enumerate(regions):
+            deadline.check()
+            where = f"region {index + 1} at 0x{region.address:08X}"
+            blank = Crc16(b"\xff" * region.length).crc
+            actual = self._read_region_crc(region, where)
+            if actual != blank:
+                raise _FlashVerificationError(
+                    f"After the re-erase {where} isn't blank: CRC 0x{actual:04X}, "
+                    f"erased flash gives 0x{blank:04X}."
+                )
 
     def _drain_hid_reports(self, limit: int = 16) -> None:
         """Discard reports already waiting from the bootloader (a late reply
@@ -2676,9 +2715,10 @@ _CLEANUP_GUIDANCE = {
         "can't re-flash the board from there; program it through its bootloader "
         "with another tool, or with a programmer (PICkit and MPLAB IPE).",
     _CLEANUP_FAILED:
-        "The update failed partway and the flash could not be re-erased, so the "
-        "board may hold a half-written application that won't run. Reprogram it "
-        "with a programmer (PICkit and MPLAB IPE).",
+        "The update failed partway and the flash could not be re-erased, or the "
+        "re-erase couldn't be confirmed by reading the flash back, so the board "
+        "may hold a half-written application that won't run. Reprogram it with "
+        "a programmer (PICkit and MPLAB IPE).",
 }
 
 
