@@ -232,18 +232,12 @@ class ProtobufMessageParser:
 
     def __init__(self, message_factory: Callable[[bytes], object]) -> None:
         self._message_factory = message_factory
-        # Whether the last parse_messages call stopped at an incomplete
-        # frame (or length prefix) it is waiting to complete, as opposed
-        # to running out of bytes that could start one. Callers must not
-        # hand those bytes to another parser.
-        self.last_incomplete = False
 
     def parse_messages(
         self, data: bytes
     ) -> Tuple[List[ObjectInboundMessage], int]:
         messages: List[ObjectInboundMessage] = []
         consumed_bytes = 0
-        self.last_incomplete = False
         if len(data) == 0:
             return messages, consumed_bytes
 
@@ -273,7 +267,6 @@ class ProtobufMessageParser:
                     current_index += 1
                     consumed_bytes = current_index
                     continue
-                self.last_incomplete = True
                 break  # need more data for length prefix
 
             if message_length <= 0 or message_length > _MAX_MESSAGE_SIZE_BYTES:
@@ -344,23 +337,6 @@ class ProtobufMessageParser:
                     consumed_bytes = current_index
                     continue
 
-                # Echo noise reaches here too: an echoed command
-                # ("SYSTem:SYSInfoPB?\r\n") whose 'S' decodes as length 83
-                # with a plausible 'Y' after it, ahead of a short real frame
-                # (upstream ed605b8). A printable byte is also a valid length
-                # or field tag, so no character class tells echo from a frame
-                # still arriving. Only a complete echo line is skipped: text
-                # starting like a command and ending in CRLF, with a complete
-                # frame parsing right after it. Anything else waits. Only
-                # before the first frame of this call.
-                if not messages:
-                    after_echo = self._end_of_echo_line(data, current_index)
-                    if after_echo >= 0:
-                        current_index = after_echo
-                        consumed_bytes = current_index
-                        continue
-
-                self.last_incomplete = True
                 break  # legitimate partial frame — wait for more data
 
             try:
@@ -376,31 +352,6 @@ class ProtobufMessageParser:
                 consumed_bytes = current_index
 
         return messages, consumed_bytes
-
-    def _end_of_echo_line(self, data: bytes, start: int) -> int:
-        """If ``data[start:]`` begins with a complete echoed command line (a
-        letter or ``*``, then printable text, then CRLF) and a complete frame
-        that the factory parses starts right after it, the index after the
-        CRLF; else -1."""
-        if start >= len(data) or not (chr(data[start]).isalpha() or data[start] == 0x2A):
-            return -1
-        crlf = data.find(b"\r\n", start)
-        if crlf < 0 or not all(32 <= b <= 126 for b in data[start:crlf]):
-            return -1
-        frame_start = crlf + 2
-        remaining = data[frame_start:]
-        length, prefix_bytes, _ = _try_read_length_prefix(remaining)
-        if length is None or length <= 0 or length > _MAX_MESSAGE_SIZE_BYTES:
-            return -1
-        if len(remaining) < prefix_bytes + length:
-            return -1
-        if not _is_plausible_field_tag_byte(remaining[prefix_bytes]):
-            return -1
-        try:
-            self._message_factory(bytes(remaining[prefix_bytes : prefix_bytes + length]))
-        except Exception:
-            return -1
-        return frame_start
 
 
 class _MessageTypeHint:
@@ -425,20 +376,19 @@ def _detect_message_type(data: bytes) -> int:
     sample = data[:512]
     sample_len = len(sample)
 
-    # Binary evidence first, and it wins: the SYSInfoPB? reply ends in CRLF
-    # and, with echo on, starts with the echoed "SYST..." text, yet is ~40%
-    # null bytes; a float payload can be mostly printable bytes and CR/LF
-    # (upstream e8c4998, with null density moved ahead of the ratio).
+    printable = sum(1 for b in sample if 32 <= b <= 126)
+    if printable / sample_len > 0.8:
+        return _MessageTypeHint.LIKELY_TEXT
+
+    if sample_len > 3 and _is_likely_text_command(sample):
+        return _MessageTypeHint.LIKELY_TEXT
+
     null_ratio = sum(1 for b in sample if b == 0) / sample_len
     if null_ratio > 0.1:
         return _MessageTypeHint.LIKELY_PROTOBUF
 
-    printable_ratio = sum(1 for b in sample if 32 <= b <= 126) / sample_len
-    if printable_ratio > 0.8:
-        return _MessageTypeHint.LIKELY_TEXT
-
-    if sample_len > 3 and printable_ratio > 0.5 and _is_likely_text_command(sample):
-        return _MessageTypeHint.LIKELY_TEXT
+    if null_ratio > 0.05 and _is_likely_protobuf_data(sample):
+        return _MessageTypeHint.LIKELY_PROTOBUF
 
     return _MessageTypeHint.UNCERTAIN
 
@@ -453,15 +403,26 @@ def _is_likely_text_command(data: bytes) -> bool:
     # SCPI commands are case-insensitive — match on head_upper for
     # SYST/CONF/READ. `*` is literal (only standard form), so test
     # against `head` directly (Qodo PR 17 pass 30 #2).
-    # A leading SCPI marker only: a trailing line ending is no evidence
-    # of text, since binary frames end in CRLF or 0x0A too (upstream
-    # e8c4998; the dead protobuf-pattern heuristic went in 41dbf3d).
     return (
         head.startswith("*")
         or head_upper.startswith("SYST")
         or head_upper.startswith("CONF")
         or head_upper.startswith("READ")
+        or data.endswith(b"\r\n")
+        or data.endswith(b"\n")
     )
+
+
+def _is_likely_protobuf_data(data: bytes) -> bool:
+    if len(data) < 2:
+        return False
+    # Look for a plausible varint field tag in the first few bytes:
+    # wire type (low 3 bits) <= 5 and field number (high bits) > 0.
+    for i in range(min(len(data) - 1, 5)):
+        b = data[i]
+        if (b & 0x07) <= 5 and (b >> 3) > 0:
+            return True
+    return False
 
 
 class CompositeMessageParser:
@@ -502,33 +463,33 @@ class CompositeMessageParser:
 
         hint = _detect_message_type(data)
 
-        # The favoured parser runs first, the other only if it finds no
-        # message. Routing the wrong way isn't just slow: the line parser
-        # swallows a whole binary frame as one "line". Uncertain tries
-        # protobuf first: it failed the printable test, so it isn't
-        # plausibly text, and a small streaming frame can leave every
-        # ratio abstaining (upstream e8c4998).
-        #
-        # The other parser runs only when the first neither produced a
-        # message nor made progress, and (protobuf) isn't waiting on an
-        # incomplete frame: ([], n) from protobuf means it skipped noise
-        # and is waiting, and the bytes it's waiting on mustn't go to the
-        # line parser. Progress through ignorable bytes is returned as is,
-        # or the consumer's buffer grows without bound (Qodo PR 17 pass 6
-        # #1).
+        # Critical: return whenever EITHER messages OR consumed > 0.
+        # A parser may legitimately advance through ignorable bytes
+        # (blank lines, malformed prefixes) without producing a
+        # message; dropping that progress causes the consumer's
+        # buffer to grow without bound (Qodo PR 17 pass 6 #1).
+        if hint == _MessageTypeHint.LIKELY_PROTOBUF:
+            wrapped, consumed = self._try_protobuf(data)
+            if wrapped or consumed:
+                return wrapped, consumed
+
         if hint == _MessageTypeHint.LIKELY_TEXT:
             wrapped, consumed = self._try_text(data)
             if wrapped or consumed:
                 return wrapped, consumed
-            return self._try_protobuf(data)
-        wrapped, consumed = self._try_protobuf(data)
-        if wrapped or consumed or self._protobuf_parser_incomplete():
-            return wrapped, consumed
-        return self._try_text(data)
 
-    def _protobuf_parser_incomplete(self) -> bool:
-        # A caller-supplied parser without the flag is treated as complete.
-        return bool(getattr(self._protobuf_parser, "last_incomplete", False))
+        # Heuristics uncertain or first attempt failed -- try the other.
+        if hint != _MessageTypeHint.LIKELY_TEXT:
+            wrapped, consumed = self._try_text(data)
+            if wrapped or consumed:
+                return wrapped, consumed
+
+        if hint != _MessageTypeHint.LIKELY_PROTOBUF:
+            wrapped, consumed = self._try_protobuf(data)
+            if wrapped or consumed:
+                return wrapped, consumed
+
+        return [], 0
 
     def _try_text(self, data: bytes) -> Tuple[List[ObjectInboundMessage], int]:
         text_messages, consumed = self._text_parser.parse_messages(data)

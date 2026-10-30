@@ -31,14 +31,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- `ProtobufMessageParser` stalled on an echoed command ahead of a short
-  frame (the text decoded as a long length); it now skips a complete echo
-  line (a command, then CRLF) when a complete frame parses right after it,
-  and otherwise waits. It reports `last_incomplete` when waiting on a
-  frame. `CompositeMessageParser` read a binary frame ending in CRLF (the
-  status reply) as text; null density now decides first, a line ending is
-  no longer a text marker, uncertain data tries protobuf first, and the
-  line parser never gets bytes protobuf is waiting on (#204).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than

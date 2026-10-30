@@ -1,15 +1,16 @@
-"""#204: protocol parsing.
+"""#204.
 
-1. Echo text ahead of a short protobuf frame stalled ProtobufMessageParser:
-   the echo's 'S' (0x53) decodes as an 83-byte length with a plausible 'Y'
-   after it, so the parser waited for bytes that never came while the real
-   frame sat behind it (upstream ed605b8).
-2. CompositeMessageParser parsed a binary frame ending in CRLF (or 0x0A) as
-   text: a trailing line ending counted as a text marker, and it was checked
-   before null density; the line parser then swallowed the frame (upstream
-   e8c4998 / 41dbf3d).
 3. TimestampProcessor used a fixed 20 ns tick, not the device's
-   timestamp_freq (upstream 6f9677d).
+   timestamp_freq (upstream 6f9677d). Fixed here.
+
+Items 1 (echo text ahead of a short frame stalls ProtobufMessageParser) and
+2 (CompositeMessageParser reads a binary frame ending in CRLF as text) are
+deferred to #231: two audit rounds showed that without knowing whether the
+device is in text or streaming mode, no byte-level rule tells text from the
+start of a binary frame. Every attempt either ate partial frames or starved
+complete text. The eight audit repros below are the acceptance set for that
+ticket. The parser on main handles all of them, and they pin that it still
+does.
 """
 
 from datetime import timedelta
@@ -34,75 +35,48 @@ def _frame(message) -> bytes:
     return bytes(out) + body
 
 
-def _status():
-    # A status reply: 16 zero calibration offsets make it null-heavy, as the
-    # real SYSInfoPB? reply is (~40% null bytes).
-    return DaqifiOutMessage(
-        analog_in_port_num=16, device_sn=1234, analog_in_cal_b=[0.0] * 16
-    )
+def _composite():
+    return CompositeMessageParser(protobuf_factory=DaqifiOutMessage.FromString)
 
 
-SHORT = DaqifiOutMessage(msg_time_stamp=4, analog_in_data=[5])  # 05 08 04 12 01 0a (zigzag 5)
+def _protobuf():
+    return ProtobufMessageParser(DaqifiOutMessage.FromString)
 
 
-# ---- 1: echo ahead of a short frame -------------------------------------
-
-
-@pytest.mark.parametrize("noise", [b"SYSTem:SYSInfoPB?\r\n", b"*IDN?\r\n"])
-def test_an_echo_line_ahead_of_a_short_frame_is_skipped(noise) -> None:
-    data = noise + _frame(SHORT)
-    parser = ProtobufMessageParser(DaqifiOutMessage.FromString)
-    messages, consumed = parser.parse_messages(data)
-    assert [m.data for m in messages] == [SHORT]
-    assert consumed == len(data)
-
-
-def test_a_real_frame_arriving_in_chunks_still_waits() -> None:
-    # Its body holds nested fields that would parse as frames on their own;
-    # the look-ahead mustn't skip into them.
-    frame = _frame(DaqifiOutMessage(
-        analog_in_port_num=16, device_sn=1234, device_pn="Nq1",
-        analog_in_cal_m=[1.0] * 16, analog_in_cal_b=[0.5] * 16,
-    ))
-    parser = ProtobufMessageParser(DaqifiOutMessage.FromString)
-    for cut in range(3, len(frame), 7):
-        messages, consumed = parser.parse_messages(frame[:cut])
-        assert messages == [] and consumed == 0, cut
-    messages, consumed = parser.parse_messages(frame)
-    assert len(messages) == 1 and consumed == len(frame)
-
-
-# ---- audit r1: never discard bytes that could start a frame still arriving -
+# ---- the acceptance set for #231: never discard a partial frame, never
+# ---- starve complete text (audit rounds 1 and 2, exact bytes) -------------
 
 
 @pytest.mark.parametrize(
     "data",
     [
-        # First 5 bytes of 0a 2a 02 08 01 40 01 48 01 50 01 (digital_data,
-        # device/pwr/batt status): length 0x0a and tag 0x2a are printable.
+        # First 5 bytes of 0a 2a 02 08 01 40 01 48 01 50 01: a printable
+        # length (0x0a) and tag (0x2a).
         bytes.fromhex("0a2a020801"),
-        # First 10 bytes of a 0x24-length frame (msg_time_stamp=40, 16
-        # analog values).
+        # First 10 bytes of a 0x24-length frame.
         _frame(DaqifiOutMessage(
             msg_time_stamp=40, analog_in_data=[1, 4] * 3 + [8192] * 8 + [1, 4]
         ))[:10],
-        # Not a complete echo line: no frame parses right after its CRLF.
-        b"SYSTem:SYSInfoPB?\r\n" + _frame(SHORT)[:3],
+        # A partial frame whose digital payload starts "A*?abc\r\n" and then
+        # holds bytes that parse as a frame by themselves.
+        (bytes.fromhex("412a3f6162630d0a05080412010a") + b"x" * 52)[:14],
+        # The same with "A2?AAAA\r\n" (digital_data_ts).
+        _frame(DaqifiOutMessage(
+            digital_data_ts=[65] * 4 + [13, 10] + [5, 8, 4, 18, 1, 10] + [65] * 51
+        ))[:15],
     ],
-    ids=["printable-length-and-tag", "0x24-frame", "echo-then-partial"],
+    ids=["printable-length-and-tag", "0x24-frame", "A*?abc-payload", "A2?AAAA-payload"],
 )
-def test_an_incomplete_frame_is_never_skipped_into(data) -> None:
-    parser = ProtobufMessageParser(DaqifiOutMessage.FromString)
-    assert parser.parse_messages(data) == ([], 0)
+def test_a_partial_frame_is_never_skipped_into(data) -> None:
+    assert _protobuf().parse_messages(data) == ([], 0)
 
 
-def test_the_protobuf_parser_says_when_it_is_waiting_on_a_frame() -> None:
-    parser = ProtobufMessageParser(DaqifiOutMessage.FromString)
-    frame = _frame(SHORT)
-    parser.parse_messages(frame[:3])
-    assert parser.last_incomplete
-    parser.parse_messages(frame)
-    assert not parser.last_incomplete
+def test_a_partial_frame_completes_once_the_rest_arrives() -> None:
+    frame = bytes.fromhex("412a3f6162630d0a05080412010a") + b"x" * 52
+    parser = _protobuf()
+    assert parser.parse_messages(frame[:14]) == ([], 0)
+    messages, consumed = parser.parse_messages(frame)
+    assert len(messages) == 1 and consumed == len(frame)
 
 
 def test_a_float_payload_with_printable_bytes_and_crlf_is_one_protobuf_frame() -> None:
@@ -129,45 +103,26 @@ def test_the_line_parser_never_gets_a_frame_protobuf_is_waiting_on(data, waiting
     assert _composite().parse_messages(data) == ([], waiting_after)
 
 
-# ---- 2: binary frames ending in a line ending ---------------------------
+@pytest.mark.parametrize("reply, text", [(b"0\r\n", "0"), (b"1\r\n", "1"), (b"42\r\n", "42"), (b"OK\r\n", "OK")])
+def test_a_short_scpi_reply_is_returned_whole(reply, text) -> None:
+    messages, consumed = _composite().parse_messages(reply)
+    assert [m.data for m in messages] == [text]
+    assert consumed == len(reply)
 
 
-def _composite():
-    return CompositeMessageParser(protobuf_factory=DaqifiOutMessage.FromString)
+def test_a_real_frame_arriving_in_chunks_waits() -> None:
+    frame = _frame(DaqifiOutMessage(
+        analog_in_port_num=16, device_sn=1234, device_pn="Nq1",
+        analog_in_cal_m=[1.0] * 16, analog_in_cal_b=[0.5] * 16,
+    ))
+    parser = _protobuf()
+    for cut in range(3, len(frame), 7):
+        assert parser.parse_messages(frame[:cut]) == ([], 0), cut
+    messages, consumed = parser.parse_messages(frame)
+    assert len(messages) == 1 and consumed == len(frame)
 
 
-def test_a_status_frame_ending_in_crlf_is_parsed_as_protobuf() -> None:
-    data = _frame(_status()) + b"\r\n"
-    messages, consumed = _composite().parse_messages(data)
-    assert messages and isinstance(messages[0].data, DaqifiOutMessage)
-    assert messages[0].data.analog_in_port_num == 16
-
-
-def test_an_echoed_status_reply_is_parsed_as_protobuf() -> None:
-    # Echo on: the echoed command, the binary reply, then CRLF.
-    data = b"SYSTem:SYSInfoPB?\r\n" + _frame(_status()) + b"\r\n"
-    messages, consumed = _composite().parse_messages(data)
-    assert messages and isinstance(messages[0].data, DaqifiOutMessage)
-
-
-@pytest.mark.parametrize(
-    "message, ending",
-    [
-        (SHORT, b"\n"),
-        # 06 08 04 12 02 0d 0a: zigzag -7 and 5, a frame ending in CRLF.
-        (DaqifiOutMessage(msg_time_stamp=4, analog_in_data=[-7, 5]), b"\r\n"),
-    ],
-    ids=["lf", "crlf"],
-)
-def test_a_short_streaming_frame_ending_in_a_line_ending_is_parsed_as_protobuf(message, ending) -> None:
-    data = _frame(message)
-    assert data.endswith(ending) and 0 not in data
-    messages, consumed = _composite().parse_messages(data)
-    assert [m.data for m in messages] == [message]
-    assert consumed == len(data)
-
-
-def test_scpi_text_is_still_parsed_as_text() -> None:
+def test_scpi_text_is_parsed_as_text() -> None:
     messages, consumed = _composite().parse_messages(b'0,"No error"\r\n')
     assert [m.data for m in messages] == ['0,"No error"']
 
