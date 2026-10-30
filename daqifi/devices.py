@@ -1000,6 +1000,14 @@ class DaqifiDevice:
             raise RuntimeError(
                 "Transport reports no stream; cannot pause consumer."
             )
+        # On a transport that numbers its connections, no current session
+        # means disconnect() is under way: the stream may be about to close,
+        # and a reader on it could only be blamed on whatever connects next.
+        if stream_session is None and hasattr(self._transport, "session"):
+            raise RuntimeError(
+                "execute_text_command cannot run while the device is "
+                "disconnecting."
+            )
 
         was_running = self._consumer.is_running
         if was_running:
@@ -1706,13 +1714,12 @@ class DaqifiDevice:
             ):
                 return False
             # A loss reported while connecting (a serial transport counting
-            # read faults, its reader stopped) wins over "Connected" too.
-            if if_consumer is not None and (
-                not getattr(if_consumer, "is_running", True)
-                or (
-                    self._transport is not None
-                    and not getattr(self._transport, "is_connected", True)
-                )
+            # read faults) wins over "Connected" too. The transport says so,
+            # not the reader: a reader paused by a text exchange isn't lost.
+            if (
+                if_consumer is not None
+                and self._transport is not None
+                and not getattr(self._transport, "is_connected", True)
             ):
                 return False
             evt = self._change_status(value)

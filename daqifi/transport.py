@@ -584,10 +584,12 @@ class SerialStreamTransport:
         between, are taken as the device gone: the transport reports itself
         disconnected, once per connection, with that connection's
         ``session`` (#191, upstream daqifi-core ITransportHealthSink). A
-        report from an earlier connection (``session`` not current) is
-        ignored. Safe from any thread."""
+        report that doesn't name the current connection (an earlier
+        ``session``, or none) is ignored. Safe from any thread."""
         with self._io_lock:
-            if session is not None and session != self._session:
+            # A report must name the current connection: a missing id is no
+            # proof it isn't stale.
+            if session != self._session:
                 return
             if not self._loss_armed:
                 return
@@ -603,7 +605,7 @@ class SerialStreamTransport:
         """A read or write on :attr:`stream` succeeded; any run of
         failures on that connection is forgotten."""
         with self._io_lock:
-            if session is not None and session != self._session:
+            if session != self._session:
                 return
             self._io_faults = 0
 

@@ -215,3 +215,47 @@ def test_a_text_exchange_reading_an_old_stream_cannot_fail_the_new_connection(co
     device.execute_text_command(lambda: None, response_timeout_ms=1000, completion_timeout_ms=200)
     time.sleep(0.2)
     assert transport.is_connected
+
+
+# Audit r3 on #214.
+
+def test_a_text_exchange_without_a_current_session_is_refused(connected) -> None:
+    # disconnect() clears the session before it closes the port; an
+    # exchange caught in between used to carry session None past the filter.
+    device, transport, port, statuses = connected
+    device._transport_session = None
+    with pytest.raises(RuntimeError, match="disconnecting"):
+        device.execute_text_command(lambda: None, response_timeout_ms=200, completion_timeout_ms=100)
+
+
+def test_reports_that_name_no_connection_do_not_count(connected) -> None:
+    device, transport, port, statuses = connected
+    for _ in range(transport.IO_FAULT_LIMIT + 2):
+        transport.report_io_fault(serial.SerialException("unattributed"))
+    time.sleep(0.2)
+    assert device.status == ConnectionStatus.Connected and transport.is_connected
+
+
+def test_a_reader_paused_while_connecting_is_not_taken_for_a_loss(monkeypatch) -> None:
+    # A text exchange can pause the new reader before connect() publishes;
+    # paused is not lost, so connect() must still end Connected.
+    from daqifi import communication
+
+    monkeypatch.setattr(tmod.serial, "Serial", lambda **kw: _FakePort(**kw))
+    real_start = communication.StreamMessageConsumer.start
+
+    def _start_then_pause(self):
+        real_start(self)
+        self.stop()  # as execute_text_command's pause would
+
+    monkeypatch.setattr(communication.StreamMessageConsumer, "start", _start_then_pause)
+    transport = tmod.SerialStreamTransport("FAKE")
+    device = DaqifiDevice("fake", transport=transport, message_factory=lambda b: bytes(b))
+    try:
+        device.connect()
+        assert device.status == ConnectionStatus.Connected
+    finally:
+        try:
+            device.disconnect()
+        except Exception:
+            pass
