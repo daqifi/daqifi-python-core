@@ -14,19 +14,23 @@ The C# split into Producer / Consumer / Protocol classes maps to:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional, Protocol, runtime_checkable
 
 from daqifi.firmware.crc16 import Crc16
-from daqifi.firmware.intel_hex import IntelHexParser
+from daqifi.firmware.intel_hex import HexFileRecord, IntelHexParser
 
 
 __all__ = [
     "BootloaderProtocol",
+    "FlashCrcRegion",
     "Pic32BootloaderProtocol",
     "create_request_version_message",
     "create_erase_flash_message",
     "create_program_flash_message",
     "create_jump_to_application_message",
+    "create_read_crc_message",
+    "decode_read_crc_response",
     "decode_version_response",
     "decode_program_flash_response",
     "decode_erase_flash_response",
@@ -40,6 +44,7 @@ _DATA_LINK_ESCAPE = 0x10
 _REQUEST_VERSION_COMMAND = 0x01
 _ERASE_FLASH_COMMAND = 0x02
 _PROGRAM_FLASH_COMMAND = 0x03
+_READ_CRC_COMMAND = 0x04
 _JUMP_TO_APPLICATION_COMMAND = 0x05
 
 # One HID output report carries 64 bytes of frame (transport.py prepends the
@@ -75,6 +80,21 @@ def create_program_flash_message(hex_record: bytes) -> bytes:
 def create_jump_to_application_message() -> bytes:
     """Frame a `jump from bootloader to application` message."""
     return _construct_data_packet(bytes([_JUMP_TO_APPLICATION_COMMAND]))
+
+
+def create_read_crc_message(address: int, length: int) -> bytes:
+    """Frame a `read flash CRC` message for ``length`` bytes at ``address``.
+
+    ``address`` is the KSEG0 address (physical | 0x80000000): the bootloader
+    reads ``KVA0_TO_KVA1(Address)`` (datastream.c, READ_CRC). Both fields
+    go little-endian, as the bootloader memcpys them.
+    """
+    command = (
+        bytes([_READ_CRC_COMMAND])
+        + int(address).to_bytes(4, "little")
+        + int(length).to_bytes(4, "little")
+    )
+    return _construct_data_packet(command)
 
 
 def _construct_data_packet(command: bytes) -> bytes:
@@ -159,6 +179,15 @@ def decode_erase_flash_response(data: bytes) -> bool:
     return _is_ack_for(data, _ERASE_FLASH_COMMAND)
 
 
+def decode_read_crc_response(data: bytes) -> Optional[int]:
+    """The flash CRC-16 a `read flash CRC` response reports, or None when the
+    frame is malformed, fails its CRC or answers a different command."""
+    payload = _decode_frame(data)
+    if payload is None or len(payload) < 3 or payload[0] != _READ_CRC_COMMAND:
+        return None
+    return payload[1] | (payload[2] << 8)
+
+
 def split_oversized_records(
     hex_records: List[bytes], max_frame_length: int = _HID_REPORT_PAYLOAD_LENGTH
 ) -> List[bytes]:
@@ -198,6 +227,20 @@ def split_oversized_records(
     return result
 
 
+@dataclass(frozen=True)
+class FlashCrcRegion:
+    """One contiguous run of programmed flash, checked after programming by
+    asking the bootloader for its CRC-16 (``READ_CRC``) and comparing.
+
+    ``address`` is the KSEG0 address to send; ``expected_crc`` is computed
+    over the image's bytes with the bootloader's CRC (``APP_CalculateCrc``,
+    the same CRC-16 that frames every message)."""
+
+    address: int
+    length: int
+    expected_crc: int
+
+
 # -- protocol surface ----------------------------------------------------
 
 @runtime_checkable
@@ -219,7 +262,23 @@ class Pic32BootloaderProtocol:
 
     Delegates message framing to the module-level producer/consumer
     functions and bundles an `IntelHexParser` for hex-file input.
+
+    Beyond the `BootloaderProtocol` surface it can verify a flash
+    (`create_read_crc_message`, `decode_read_crc_response`,
+    `compute_crc_regions`); the update service uses them when present.
     """
+
+    # The flash the bootloader erases and programs: the lower program-flash
+    # panel, physical 0x1D000000-0x1D0FFFFF. Since daqifi-nyquist-firmware
+    # #909 ERASE_FLASH clears only that panel (nvm.c APP_FlashErase), and
+    # APP_ProgramHexRecord skips any byte outside APP_FLASH_BASE_ADDRESS..
+    # APP_FLASH_END_ADDRESS. Data elsewhere (the upper panel, boot flash)
+    # would be silently dropped or written over unerased flash, so an image
+    # holding any is refused before anything is sent; the firmware's own
+    # release script applies the same rule to every release image.
+    APP_FLASH_START: int = 0x1D000000
+    APP_FLASH_END: int = 0x1D100000  # exclusive
+    _KSEG0: int = 0x80000000
 
     def __init__(
         self,
@@ -249,19 +308,80 @@ class Pic32BootloaderProtocol:
     def decode_erase_flash_response(self, data: bytes) -> bool:
         return decode_erase_flash_response(data)
 
+    def create_read_crc_message(self, address: int, length: int) -> bytes:
+        return create_read_crc_message(address, length)
+
+    def decode_read_crc_response(self, data: bytes) -> Optional[int]:
+        return decode_read_crc_response(data)
+
     def parse_hex_file(self, hex_file_lines: List[str]) -> List[bytes]:
         """Parse an image into records ready to frame, one HID report each.
 
         Raises:
-            ValueError: if the image is malformed, or contains no data
-                record to program. An image of only address and EOF
-                records (or one whose data all lies in the protected range)
-                would otherwise pass the byte-count check and erase flash
-                with nothing to replace it.
+            ValueError: if the image is malformed, contains no data record
+                to program, or has data outside the flash the bootloader
+                erases (`APP_FLASH_START`..`APP_FLASH_END`). An image of
+                only address and EOF records (or one whose data all lies in
+                the protected range) would otherwise pass the byte-count
+                check and erase flash with nothing to replace it.
         """
-        records = self._hex_parser.parse_hex_records(hex_file_lines)
-        if not any(record[3] == 0x00 and record[0] > 0 for record in records):
+        records = self._data_checked_records(hex_file_lines)
+        return split_oversized_records([record.data for record in records])
+
+    def compute_crc_regions(self, hex_file_lines: List[str]) -> List[FlashCrcRegion]:
+        """The image's programmed bytes as contiguous regions, each with the
+        CRC the bootloader should report for it after programming.
+
+        Data records are ordered by address and merged where they touch; a
+        gap or overlap starts a new region. Protected-range records are
+        left out, as they are left out of programming.
+        """
+        data_records = sorted(
+            (
+                r for r in self._data_checked_records(hex_file_lines)
+                if r.record_type == 0x00 and r.data[0] > 0
+            ),
+            key=lambda r: r.address,
+        )
+        regions: List[FlashCrcRegion] = []
+        buffer = bytearray()
+        start = next_address = 0
+        for record in data_records:
+            if buffer and record.address != next_address:
+                regions.append(self._region(start, buffer))
+                buffer = bytearray()
+            if not buffer:
+                start = record.address
+            length = record.data[0]
+            buffer += record.data[4:4 + length]
+            next_address = record.address + length
+        if buffer:
+            regions.append(self._region(start, buffer))
+        return regions
+
+    def _region(self, start: int, data: bytes) -> FlashCrcRegion:
+        return FlashCrcRegion(
+            address=start | self._KSEG0,
+            length=len(data),
+            expected_crc=Crc16(bytes(data)).crc,
+        )
+
+    def _data_checked_records(self, hex_file_lines: List[str]) -> List[HexFileRecord]:
+        records = self._hex_parser.parse_records(hex_file_lines)
+        data_records = [r for r in records if r.record_type == 0x00 and r.data[0] > 0]
+        if not data_records:
             raise ValueError(
                 "Firmware HEX file contains no data records to program."
             )
-        return split_oversized_records(records)
+        for record in data_records:
+            first = record.address
+            end = first + record.data[0]
+            if first < self.APP_FLASH_START or end > self.APP_FLASH_END:
+                raise ValueError(
+                    f"Firmware HEX file has data at 0x{first:08X}-0x{end - 1:08X}, "
+                    "outside the flash the bootloader erases "
+                    f"(0x{self.APP_FLASH_START:08X}-0x{self.APP_FLASH_END - 1:08X}); "
+                    "it would be skipped or written over unerased flash. This "
+                    "is not a bootloader-linked application image."
+                )
+        return records

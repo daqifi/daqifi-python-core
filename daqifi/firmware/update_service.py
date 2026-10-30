@@ -64,6 +64,7 @@ from daqifi._internal.usb_location import (
 from daqifi.enums import FirmwareUpdateState
 from daqifi.firmware.bootloader import (
     BootloaderProtocol,
+    FlashCrcRegion,
     Pic32BootloaderProtocol,
 )
 from daqifi.firmware.download_service import FirmwareDownloadService
@@ -145,16 +146,23 @@ _ALLOWED_TRANSITIONS: dict = {
     },
     FirmwareUpdateState.ERASING_FLASH: {
         FirmwareUpdateState.PROGRAMMING,
+        FirmwareUpdateState.CLEANING_UP,
         FirmwareUpdateState.FAILED,
     },
     FirmwareUpdateState.PROGRAMMING: {
         FirmwareUpdateState.VERIFYING,
         FirmwareUpdateState.JUMPING_TO_APP,
+        FirmwareUpdateState.CLEANING_UP,
         FirmwareUpdateState.FAILED,
     },
     FirmwareUpdateState.VERIFYING: {
         FirmwareUpdateState.JUMPING_TO_APP,
         FirmwareUpdateState.COMPLETE,
+        FirmwareUpdateState.CLEANING_UP,
+        FirmwareUpdateState.FAILED,
+    },
+    FirmwareUpdateState.CLEANING_UP: {
+        FirmwareUpdateState.RECOVERED,
         FirmwareUpdateState.FAILED,
     },
     FirmwareUpdateState.JUMPING_TO_APP: {
@@ -163,7 +171,18 @@ _ALLOWED_TRANSITIONS: dict = {
     },
     FirmwareUpdateState.COMPLETE: {FirmwareUpdateState.IDLE},
     FirmwareUpdateState.FAILED: {FirmwareUpdateState.IDLE},
+    FirmwareUpdateState.RECOVERED: {FirmwareUpdateState.IDLE},
 }
+
+# PIC32 states whose failure can leave flash half-written, so a re-erase
+# follows (port of daqifi-core 7c4b014).
+_CLEANUP_STATES = frozenset({
+    FirmwareUpdateState.ERASING_FLASH,
+    FirmwareUpdateState.PROGRAMMING,
+    FirmwareUpdateState.VERIFYING,
+})
+_RECOVERED = "recovered"
+_CLEANUP_FAILED = "cleanup_failed"
 
 
 @runtime_checkable
@@ -412,7 +431,7 @@ class DefaultFirmwareUpdateService:
                 f"Firmware HEX file was not found: {hex_file_path!r}"
             )
 
-        hex_records = self._parse_hex_records(hex_file_path)
+        hex_records, crc_regions = self._parse_hex_records(hex_file_path)
         total_bytes = sum(len(record) for record in hex_records)
         if total_bytes <= 0:
             raise ValueError(
@@ -421,7 +440,8 @@ class DefaultFirmwareUpdateService:
 
         self._run_exclusive(
             lambda: self._run_pic32_update(
-                device, hex_records, total_bytes, progress, cancel_event
+                device, hex_records, total_bytes, progress, cancel_event,
+                crc_regions,
             ),
             cancel_event,
         )
@@ -514,6 +534,7 @@ class DefaultFirmwareUpdateService:
         total_bytes: int,
         progress: _PROGRESS_CALLBACK,
         cancel_event: Optional[threading.Event],
+        crc_regions: Optional[Sequence[FlashCrcRegion]] = None,
     ) -> None:
         try:
             self._transition_to_state(
@@ -663,7 +684,8 @@ class DefaultFirmwareUpdateService:
 
             self._transition_to_state(
                 FirmwareUpdateState.VERIFYING,
-                "Verifying bootloader response.",
+                "Verifying flash contents by CRC." if crc_regions
+                else "Verifying bootloader response.",
             )
             self._report_progress(
                 progress,
@@ -674,15 +696,11 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
             )
 
-            verification_version = self._execute_with_state_timeout(
+            self._execute_with_state_timeout(
                 FirmwareUpdateState.VERIFYING,
-                "verify bootloader response",
-                self._request_bootloader_version,
+                "verify flash contents",
+                lambda deadline: self._verify_flash(crc_regions, deadline),
                 cancel_event,
-            )
-
-            self._logger.info(
-                "Bootloader verification response: %s", verification_version
             )
 
             self._transition_to_state(
@@ -722,45 +740,107 @@ class DefaultFirmwareUpdateService:
         except _CancelledError as exc:
             failed_state = self._current_state
             failed_operation = "PIC32 firmware update canceled."
-            self._transition_to_state(
-                FirmwareUpdateState.FAILED, failed_operation
-            )
-            self._report_progress(
-                progress,
-                FirmwareUpdateState.FAILED,
-                self._last_reported_percent,
-                self._current_operation,
-                0,
-                total_bytes,
-            )
             self._logger.warning("PIC32 firmware update canceled.")
+            # A cancel mid-flash leaves the board half-written as surely as
+            # an error does, so it is cleaned up the same way.
+            outcome = self._end_failed_pic32_update(
+                failed_state, failed_operation, progress, total_bytes
+            )
             raise self._create_firmware_update_exception(
-                failed_state, failed_operation, exc
+                failed_state, failed_operation, exc, outcome
             ) from exc
         except Exception as exc:
             failed_state = self._current_state
             failed_operation = self._current_operation
-            self._transition_to_state(
-                FirmwareUpdateState.FAILED, failed_operation
-            )
-            self._report_progress(
-                progress,
-                FirmwareUpdateState.FAILED,
-                self._last_reported_percent,
-                failed_operation,
-                0,
-                total_bytes,
-            )
             self._logger.error(
                 "PIC32 firmware update failed in state %s: %s",
                 failed_state.name,
                 exc,
             )
+            outcome = self._end_failed_pic32_update(
+                failed_state, failed_operation, progress, total_bytes
+            )
             raise self._create_firmware_update_exception(
-                failed_state, failed_operation, exc
+                failed_state, failed_operation, exc, outcome
             ) from exc
         finally:
             self._safe_disconnect_hid()
+
+    def _end_failed_pic32_update(
+        self,
+        failed_state: FirmwareUpdateState,
+        failed_operation: str,
+        progress: _PROGRESS_CALLBACK,
+        total_bytes: int,
+    ) -> Optional[str]:
+        """Take a failed PIC32 update to its terminal state.
+
+        A failure while erasing, programming or verifying can leave a
+        half-written application, which the bootloader starts on the next
+        reset if its reset address was written (bootloader.c,
+        BOOTLOADER_CHECK_FOR_TRIGGER). Then, while the bootloader is still
+        connected, the flash is re-erased: CLEANING_UP, then RECOVERED, and
+        the board stays in its bootloader. Port of daqifi-core 7c4b014.
+
+        Returns _RECOVERED, _CLEANUP_FAILED, or None when no re-erase was
+        due (the failure didn't touch flash).
+        """
+        percent = self._last_reported_percent
+
+        def _end(state: FirmwareUpdateState, operation: str) -> None:
+            self._transition_to_state(state, operation)
+            self._report_progress(progress, state, percent, operation, 0, total_bytes)
+
+        if failed_state not in _CLEANUP_STATES:
+            _end(FirmwareUpdateState.FAILED, failed_operation)
+            return None
+        if not self._hid_transport.is_connected:
+            self._logger.warning(
+                "No re-erase after the failure in %s: the bootloader is no "
+                "longer connected; the board may hold a half-written "
+                "application.",
+                failed_state.name,
+            )
+            _end(
+                FirmwareUpdateState.FAILED,
+                "Re-erase skipped: the bootloader is no longer connected; the "
+                "board may hold a half-written application.",
+            )
+            return _CLEANUP_FAILED
+        try:
+            _end(
+                FirmwareUpdateState.CLEANING_UP,
+                "Re-erasing flash so the board isn't left with a half-written "
+                "application.",
+            )
+            # Its own deadline, without the caller's cancel event: a cancel
+            # is what may have brought us here, and the re-erase must still
+            # run.
+            self._execute_with_state_timeout(
+                FirmwareUpdateState.CLEANING_UP,
+                "re-erase flash after the failed update",
+                self._erase_flash_with_retry,
+                None,
+            )
+        except Exception as exc:
+            self._logger.error(
+                "Re-erase after the failure in %s failed: %s; the board may "
+                "hold a half-written application.",
+                failed_state.name,
+                exc,
+            )
+            _end(
+                FirmwareUpdateState.FAILED,
+                "Re-erase after the failure also failed; the board may hold a "
+                "half-written application.",
+            )
+            return _CLEANUP_FAILED
+        _end(
+            FirmwareUpdateState.RECOVERED,
+            "Flash re-erased; the board stays in its bootloader with no "
+            "application.",
+        )
+        return _RECOVERED
 
     # -- WiFi flow -------------------------------------------------------
 
@@ -1605,10 +1685,26 @@ class DefaultFirmwareUpdateService:
 
     # -- bootloader I/O --------------------------------------------------
 
-    def _parse_hex_records(self, hex_file_path: str) -> List[bytes]:
+    def _parse_hex_records(
+        self, hex_file_path: str
+    ) -> Tuple[List[bytes], Optional[List[FlashCrcRegion]]]:
+        """The image's records to program, and the flash regions to verify
+        by CRC afterwards (None when the protocol can't read a CRC back)."""
         with open(hex_file_path, "r", encoding="utf-8") as handle:
             lines = handle.read().splitlines()
-        return list(self._bootloader_protocol.parse_hex_file(lines))
+        protocol = self._bootloader_protocol
+        records = list(protocol.parse_hex_file(lines))
+        regions: Optional[List[FlashCrcRegion]] = None
+        if all(
+            callable(getattr(protocol, name, None))
+            for name in (
+                "compute_crc_regions",
+                "create_read_crc_message",
+                "decode_read_crc_response",
+            )
+        ):
+            regions = list(protocol.compute_crc_regions(lines))
+        return records, regions
 
     def _bootloader_enumerator(self) -> "HidDeviceEnumerator":
         from daqifi._internal.hid_enumerator import HidLibraryDeviceEnumerator
@@ -1973,6 +2069,62 @@ class DefaultFirmwareUpdateService:
                 bytes_written,
                 total_bytes,
             )
+
+    def _verify_flash(
+        self,
+        crc_regions: Optional[Sequence[FlashCrcRegion]],
+        deadline: _Cancellation,
+    ) -> None:
+        """Check every programmed region by asking the bootloader for its
+        CRC (READ_CRC) and comparing with the image's. Port of daqifi-core
+        2826b35.
+
+        A malformed reply is retried like any transient HID fault; a CRC
+        that differs is not retried: the flash doesn't hold the image.
+        Without regions (a protocol that can't read a CRC back) only the
+        bootloader's liveness is checked, as before.
+        """
+        from datetime import timedelta
+
+        if not crc_regions:
+            version = self._request_bootloader_version(deadline)
+            self._logger.info(
+                "No flash CRC readback available; bootloader still answers: %s",
+                version,
+            )
+            return
+
+        protocol = self._bootloader_protocol
+        for index, region in enumerate(crc_regions):
+            deadline.check()
+            where = f"region {index + 1} at 0x{region.address:08X}"
+
+            def _attempt(region=region, where=where) -> None:
+                self._hid_transport.write(
+                    protocol.create_read_crc_message(region.address, region.length)
+                )
+                response = self._hid_transport.read(
+                    timedelta(seconds=self._options.bootloader_response_timeout)
+                )
+                actual = protocol.decode_read_crc_response(response)
+                if actual is None:
+                    raise ValueError(f"Bootloader CRC reply for {where} was malformed.")
+                if actual != region.expected_crc:
+                    raise _FlashVerificationError(
+                        f"Flash CRC mismatch in {where} (length {region.length}): "
+                        f"expected 0x{region.expected_crc:04X}, bootloader "
+                        f"reported 0x{actual:04X}."
+                    )
+
+            self._execute_with_retry(
+                f"read flash CRC for {where}",
+                self._options.flash_write_retry_count,
+                self._options.flash_write_retry_delay,
+                _attempt,
+                _is_transient_hid_error,
+                deadline,
+            )
+        self._logger.info("Flash verified: %d region(s) match the image.", len(crc_regions))
 
     def _jump_to_application_and_reconnect(
         self,
@@ -2349,6 +2501,7 @@ class DefaultFirmwareUpdateService:
         if self._current_state in (
             FirmwareUpdateState.COMPLETE,
             FirmwareUpdateState.FAILED,
+            FirmwareUpdateState.RECOVERED,
         ):
             self._transition_to_state(
                 FirmwareUpdateState.IDLE,
@@ -2375,10 +2528,14 @@ class DefaultFirmwareUpdateService:
         failed_state: FirmwareUpdateState,
         failed_operation: str,
         exception: BaseException,
+        cleanup_outcome: Optional[str] = None,
     ) -> FirmwareUpdateException:
         if isinstance(exception, FirmwareUpdateException):
             return exception
-        recovery_guidance = _build_recovery_guidance(failed_state)
+        # When a re-erase ran, its outcome is what the user must act on.
+        recovery_guidance = _CLEANUP_GUIDANCE.get(
+            cleanup_outcome, None
+        ) or _build_recovery_guidance(failed_state)
         message = (
             f"Firmware update failed in state '{failed_state.name}' "
             f"while {failed_operation}."
@@ -2457,6 +2614,24 @@ def _ensure_device_connected(device: Any) -> None:
 
 class _WrongBootloaderError(Exception):
     """The opened bootloader is not the one selected. Never retried."""
+
+
+class _FlashVerificationError(Exception):
+    """The flash's CRC differs from the image's. Never retried."""
+
+
+_CLEANUP_GUIDANCE = {
+    _RECOVERED:
+        "The update did not complete, and the application flash was re-erased: "
+        "the board stays in its PIC32 bootloader and no longer starts a partial "
+        "application. This updater starts from the running application, so it "
+        "can't re-flash the board from there; program it through its bootloader "
+        "with another tool, or with a programmer (PICkit and MPLAB IPE).",
+    _CLEANUP_FAILED:
+        "The update failed partway and the flash could not be re-erased, so the "
+        "board may hold a half-written application that won't run. Reprogram it "
+        "with a programmer (PICkit and MPLAB IPE).",
+}
 
 
 def _is_transient_hid_error(exc: BaseException) -> bool:
