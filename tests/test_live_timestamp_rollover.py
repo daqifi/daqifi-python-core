@@ -23,10 +23,14 @@ WRAP = 2 ** 32
 TICKS = [WRAP - 75_000_000, WRAP - 25_000_000, 25_000_000, 75_000_000]
 
 
-def _run(fmt, on_start, n, tick_hz=None):
+def _run(fmt, on_start, n, tick_hz=None, host_times=None):
     sm = _f._manager(_f._FakeSerial(on_start=on_start), channels=[0], sample_rate=10, format=fmt)
     if tick_hz is not None:
         sm._tick_rate_hz = tick_hz
+    if host_times is not None:
+        # When each sample was received on the host (one value per sample).
+        times = iter(host_times)
+        sm._host_clock = lambda: next(times)
     sm.start()
     try:
         return sm, sm.read(num_samples=n, timeout=1.0)
@@ -95,3 +99,51 @@ def test_a_new_session_unwraps_from_its_own_first_tick() -> None:
     finally:
         sm.stop()
     assert samples[0].timestamp == pytest.approx(10.0)
+
+
+# Audit r1 on #213: a gap longer than half the counter period.
+
+def _json(ticks):
+    meta = b'{"meta":{"dev":"Nyquist 1","sn":"0","tick_hz":%d}}\n' % TICK_HZ
+    return meta + b"".join(b'{"ts":%d,"ai":[{"ch":0,"val":1000}]}\n' % t for t in ticks)
+
+
+def _csv(ticks):
+    header = b"# Timestamp Tick Rate: %d Hz\nain0_ts,ain0_val\n" % TICK_HZ
+    return header + b"".join(b"%d,1000\n" % t for t in ticks)
+
+
+def _pb(ticks):
+    return b"".join(_f._frame(msg_time_stamp=t, analog_in_data_float=[1.0]) for t in ticks)
+
+
+_FORMATS = {
+    "json": (1, _json, None),
+    "csv": (2, _csv, None),
+    "protobuf": (0, _pb, TICK_HZ),
+}
+
+
+@pytest.mark.parametrize("name", list(_FORMATS))
+def test_a_50_second_gap_is_a_50_second_step(name) -> None:
+    # The signed-distance rule read a forward gap over half a period
+    # (42.9 s at 50 MHz) as a step back: [1.0, -34.9, -33.9].
+    fmt, build, tick_hz = _FORMATS[name]
+    ticks = [50_000_000, 100_000_000, 2_600_000_000, 2_650_000_000]
+    _, samples = _run(fmt, build(ticks), 4, tick_hz=tick_hz, host_times=[0.0, 1.0, 51.0, 52.0])
+    assert _steps(samples) == [1.0, 50.0, 1.0]
+
+
+@pytest.mark.parametrize("name", list(_FORMATS))
+def test_a_gap_of_several_periods_is_counted(name) -> None:
+    fmt, build, tick_hz = _FORMATS[name]
+    gap_ticks = 200 * TICK_HZ  # 200 s: more than two whole periods
+    ticks = [50_000_000, (50_000_000 + gap_ticks) % WRAP]
+    _, samples = _run(fmt, build(ticks), 2, tick_hz=tick_hz, host_times=[0.0, 200.2])
+    assert _steps(samples) == [200.0]
+
+
+def test_an_older_tick_received_later_still_steps_back() -> None:
+    ticks = [100_000_000, 150_000_000, 125_000_000]
+    _, samples = _run(1, _json(ticks), 3, host_times=[0.0, 1.0, 1.01])
+    assert _steps(samples) == [1.0, -0.5]

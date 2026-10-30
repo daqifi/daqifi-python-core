@@ -280,7 +280,9 @@ class StreamManager:
         # 102 s at 42 MHz). Ticks are unwrapped per session; see
         # _unwrap_tick.
         self._last_raw_tick: Optional[int] = None
+        self._last_host_time = 0.0
         self._unwrapped_tick = 0
+        self._host_clock: Callable[[], float] = time.monotonic
         # Protobuf decode state. Lazily initialised on the first
         # _read_sample_protobuf call so callers using JSON/CSV pay
         # nothing for the import.
@@ -820,7 +822,10 @@ class StreamManager:
             # Get timestamp from firmware (new field: 'ts' not 'timestamp')
             if 'ts' in data and self._tick_rate_hz:
                 # Convert device ticks to seconds using tick rate from metadata
-                timestamp = self._unwrap_tick(data['ts']) / self._tick_rate_hz
+                timestamp = (
+                    self._unwrap_tick(data['ts'], self._tick_rate_hz)
+                    / self._tick_rate_hz
+                )
             else:
                 # Fallback to current time if no tick rate available yet
                 timestamp = time.time()
@@ -942,10 +947,13 @@ class StreamManager:
 
             # Use device timestamp (convert using tick rate from metadata)
             if first_timestamp is not None and self._tick_rate_hz:
-                timestamp = self._unwrap_tick(first_timestamp) / self._tick_rate_hz
+                timestamp = (
+                    self._unwrap_tick(first_timestamp, self._tick_rate_hz)
+                    / self._tick_rate_hz
+                )
             elif first_timestamp is not None:
                 # Fallback to 1MHz if tick rate not available
-                timestamp = self._unwrap_tick(first_timestamp) / 1_000_000.0
+                timestamp = self._unwrap_tick(first_timestamp, 1_000_000) / 1_000_000.0
             else:
                 timestamp = time.time()  # Fallback to PC time if no valid channels
 
@@ -1060,23 +1068,37 @@ class StreamManager:
             return self._pending_pb_samples.popleft()
         return None
 
-    def _unwrap_tick(self, raw_tick: int) -> int:
+    def _unwrap_tick(self, raw_tick: int, tick_hz: float) -> int:
         """Place a raw 32-bit device tick on this session's unbroken scale.
 
-        Each tick is placed by its signed 32-bit distance from the previous
-        one, so a rollover continues upwards instead of jumping back to
-        zero, and a slightly older tick (a sample queued earlier) steps back
-        a little. The session's first tick keeps its raw value (#193).
+        The counter is only 32 bits, so the step from the previous tick is
+        known only up to whole periods (2^32 ticks): its unsigned distance
+        ``d`` could mean ``d + k * 2^32`` for any whole ``k``. The host's
+        clock is the second source. The host time between receiving the two
+        ticks, times ``tick_hz``, gives the step to expect, and the ``k``
+        that comes closest to it is taken. So:
+
+        - a rollover continues upwards;
+        - a gap longer than half a period, or several, is counted;
+        - a slightly older tick (a sample queued earlier) steps back a
+          little.
+
+        Samples read in a burst have almost no host time between them, and
+        then this is the nearest-step rule: within half a period either way.
+
+        The session's first tick keeps its raw value (#193).
         """
         raw = int(raw_tick) & _TICK_MASK
+        now = self._host_clock()
         if self._last_raw_tick is None:
             self._unwrapped_tick = raw
         else:
-            delta = (raw - self._last_raw_tick) & _TICK_MASK
-            if delta >= _TICK_HALF_RANGE:
-                delta -= _TICK_RANGE
-            self._unwrapped_tick += delta
+            distance = (raw - self._last_raw_tick) & _TICK_MASK
+            expected = max(0.0, now - self._last_host_time) * tick_hz
+            k = round((expected - distance) / _TICK_RANGE)
+            self._unwrapped_tick += distance + k * _TICK_RANGE
         self._last_raw_tick = raw
+        self._last_host_time = now
         return self._unwrapped_tick
 
     def _samples_from_pb_message(self, message: Any) -> List["Sample"]:
@@ -1132,7 +1154,10 @@ class StreamManager:
 
         def _convert_ts(raw_ts: int) -> float:
             if self._tick_rate_hz and self._tick_rate_hz > 0:
-                return self._unwrap_tick(raw_ts) / float(self._tick_rate_hz)
+                return (
+                    self._unwrap_tick(raw_ts, self._tick_rate_hz)
+                    / float(self._tick_rate_hz)
+                )
             return time.time()
 
         samples: List[Sample] = []
