@@ -28,6 +28,24 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- SD listings on current firmware returned a file named `__END_OF_LIST__`:
+  the firmware ends every listing with `__END_OF_LIST__ OK`, `INCOMPLETE`
+  or `FAILED`, and a listing marked INCOMPLETE or FAILED came back as if
+  it were the whole card. A listing that timed out came back as an empty
+  card. The marker is no longer a file. The listing now empties the error
+  queue, then sends `SYSTem:ERRor?` after `LIST?` to mark the end of the
+  reply, and raises `SdCardListIncompleteException` when that answer never
+  comes, when it is an error (the firmware's answer to an aborted listing),
+  when the marker says INCOMPLETE or FAILED, or when the marker is missing
+  on firmware 3.8.0 and later (which always sends one). On older firmware
+  an empty listing is an empty directory only with a clean terminator. An
+  error queue that can't be emptied first raises rather than being blamed
+  on the listing. It isn't retried automatically. A missing directory
+  (`[Error:4]` / `[Error:5] Failed to open directory`) raises
+  `SdCardDirectoryNotFoundException`, a `SdCardFilesystemException`
+  subclass. Echoes of the listing's own commands are dropped. The legacy
+  `NyquistDevice.sd_list_files()` skips the marker and refuses a listing
+  marked incomplete too (#188).
 - The WiFi module update didn't follow the firmware's sequence.
   `LAN:FWUpdate` only requests the update; the following `LAN:APPLY` enters
   the USB-transparent bridge, and `LAN:APPLY` from the bridge leaves it. The

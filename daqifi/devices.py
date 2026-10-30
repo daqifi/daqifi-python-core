@@ -17,11 +17,12 @@ import functools
 import logging
 import os
 import queue
+import re
 import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import IO, Any, Callable, List, Optional, Sequence
+from typing import IO, Any, Callable, List, Optional, Sequence, Tuple
 
 _log = logging.getLogger(__name__)
 
@@ -48,14 +49,15 @@ from .enums import SdCardLogFormat, WifiMode, WifiSecurityType
 from .exceptions import DeviceUnresponsiveError
 from .network import NetworkConfiguration
 from .protocol import ProtobufProtocolHandler
+from .firmware.version import FirmwareVersion
 from .sdcard import _write_all
 from .sdcard import (
     END_OF_FILE_MARKER,
     SdCardDownloadResult,
     SdCardFileInfo,
     SdCardTransferProgress,
+    check_sd_card_listing,
     parse_sd_card_file_list,
-    throw_if_sd_card_list_error,
 )
 from .transport import (
     HidLibraryTransport,
@@ -257,6 +259,48 @@ def _strip_prompt_prefixes(lines: Sequence[str]) -> List[str]:
         else:
             out.append(line)
     return out
+
+
+# drain_errors' sentinel code for "queue not confirmed clean".
+_DRAIN_INCONCLUSIVE_CODE = 99999
+
+# Firmware that ends every SD listing with __END_OF_LIST__ (#794).
+_SD_LIST_MARKER_SINCE = FirmwareVersion(3, 8, 0)
+
+
+# A SYSTem:ERRor? reply with its description quoted, as the firmware sends
+# it: a listing line can't take this form by accident ('0,logs/b.bin 4').
+_QUOTED_ERROR_REPLY = re.compile(r'^\s*[+-]?\d+\s*,\s*"')
+
+
+def _split_at_list_terminator(
+    lines: Sequence[str], marker_expected: bool
+) -> Optional[Tuple[List[str], str]]:
+    """``(listing, terminator)``, where the terminator is the reply to the
+    ``SYSTem:ERRor?`` sent after ``SD:LIST?``; ``None`` when there is none.
+    That means the capture timed out or was cut short, and what arrived
+    can't be told from an empty card (#188).
+
+    The terminator is the last line, and it must not be mistakable for a
+    listing line. On firmware that marks its listings it must directly
+    follow the end-of-listing marker. On older firmware it must have the
+    quoted form the firmware sends.
+    """
+    from ._internal import scpi as _scpi
+    from .sdcard import _list_end_status
+
+    content = [line for line in lines if line and line.strip()]
+    if not content:
+        return None
+    reply = _scpi.find_system_error_reply([content[-1]])
+    if reply is None:
+        return None
+    if marker_expected:
+        if len(content) < 2 or _list_end_status(content[-2]) is None:
+            return None
+    elif not _QUOTED_ERROR_REPLY.match(content[-1].strip()):
+        return None
+    return content[:-1], reply
 
 
 def _exclusive_sd_operation(method):
@@ -1882,12 +1926,19 @@ class DaqifiStreamingDevice(DaqifiDevice):
             self.prepare_sd_interface()
             time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
             self.send(scpi_commands.get_sd_file_list())
+            self.send(scpi_commands.get_last_error())
 
         try:
-            lines = self.execute_text_command(
-                _setup_list,
-                response_timeout_ms=3000,
-                completion_timeout_ms=1500,
+            # Empty the error queue first, so the listing's terminator
+            # reply is the listing's own.
+            self._empty_error_queue_for_listing()
+            files = self._read_sd_listing(
+                lambda: self.execute_text_command(
+                    _setup_list,
+                    response_timeout_ms=3000,
+                    completion_timeout_ms=1500,
+                ),
+                sent=self._sd_listing_commands(),
             )
         finally:
             if self.is_connected:
@@ -1898,13 +1949,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                         "Failed to restore LAN interface after SD list"
                     )
 
-        # Classify firmware error states (no card / filesystem failure /
-        # generic SCPI error) BEFORE handing to the parser, so callers
-        # get a typed exception instead of an empty list. Mirrors
-        # upstream daqifi-core PR #182.
-        lines = _strip_prompt_prefixes(lines)
-        throw_if_sd_card_list_error(lines)
-        self._sd_card_files = parse_sd_card_file_list(lines)
+        self._sd_card_files = files
 
     def get_sd_logging_state(self) -> bool:
         """Whether THIS session has the device logging to the SD card.
@@ -2071,15 +2116,30 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.stop_streaming())
         self._is_streaming = False
 
-        try:
-            lines = self._execute_raw_text_capture(
+        def _capture() -> List[str]:
+            return self._execute_raw_text_capture(
                 lambda: (
                     self.prepare_sd_interface(),
                     time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S),
                     self.send(scpi_commands.delete_sd_file(file_name)),
+                    self.send(scpi_commands.get_last_error()),
                     self.send(scpi_commands.get_sd_file_list()),
+                    self.send(scpi_commands.get_last_error()),
                 ),
                 response_timeout_s=3.0,
+            )
+
+        try:
+            # No retry: it would send the DELete again.
+            # Empty the error queue first, so the listing's terminator
+            # reply is the listing's own.
+            self._empty_error_queue_for_listing()
+            files = self._read_sd_listing(
+                _capture,
+                sent=self._sd_listing_commands(
+                    scpi_commands.delete_sd_file(file_name)
+                ),
+                leading_reply=True,
             )
         finally:
             if self.is_connected:
@@ -2088,8 +2148,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 except Exception:
                     pass
 
-        throw_if_sd_card_list_error(lines)
-        self._sd_card_files = parse_sd_card_file_list(lines)
+        self._sd_card_files = files
         if self._is_logging_to_sd:
             self._forget_sd_card_sizes()
 
@@ -2152,14 +2211,24 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.stop_streaming())
         self._is_streaming = False
 
-        try:
-            lines = self._execute_raw_text_capture(
+        def _capture() -> List[str]:
+            return self._execute_raw_text_capture(
                 lambda: (
                     self.prepare_sd_interface(),
                     time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S),
                     self.send(scpi_commands.get_sd_file_list()),
+                    self.send(scpi_commands.get_last_error()),
                 ),
                 response_timeout_s=3.0,
+            )
+
+        try:
+            # Empty the error queue first, so the listing's terminator
+            # reply is the listing's own.
+            self._empty_error_queue_for_listing()
+            files = self._read_sd_listing(
+                _capture,
+                sent=self._sd_listing_commands(),
             )
         finally:
             if self.is_connected:
@@ -2168,8 +2237,6 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 except Exception:
                     pass
 
-        throw_if_sd_card_list_error(lines)
-        files = parse_sd_card_file_list(lines)
         self._sd_card_files = files
         return tuple(files)
 
@@ -2302,6 +2369,118 @@ class DaqifiStreamingDevice(DaqifiDevice):
         )
 
     # ---- raw-capture helpers (consumer-pause pattern) --------------------
+
+    def _sd_listing_commands(self, *extra: ScpiMessage) -> List[ScpiMessage]:
+        """Every command a listing exchange sends, whose echoes it drops."""
+        return [
+            scpi_commands.disable_network_lan(),
+            scpi_commands.enable_storage_sd(),
+            *extra,
+            scpi_commands.get_sd_file_list(),
+            scpi_commands.get_last_error(),
+        ]
+
+    def _empty_error_queue_for_listing(self) -> None:
+        """Drain the error queue before a listing, so the listing's
+        terminator code can be attributed to it. A drain that can't confirm
+        the queue empty (``drain_errors``' inconclusive sentinel) raises
+        rather than letting an old error be blamed on the listing."""
+        from ._internal import scpi as _scpi
+        from .exceptions import SdCardOperationException
+
+        popped = self.drain_errors(empty_budget=1)
+        if popped and _scpi.parse_system_error(popped[-1])[0] == _DRAIN_INCONCLUSIVE_CODE:
+            raise SdCardOperationException(
+                "The device's error queue could not be emptied before the SD "
+                "listing, so its result could not be attributed.",
+                popped,
+                popped[-1],
+            )
+
+    def _sd_listing_marker_expected(self) -> bool:
+        """Whether the firmware ends every listing with ``__END_OF_LIST__``:
+        since v3.8.0 (firmware #794). Unknown or older firmware is not
+        expected to, and a listing without one is judged on its own."""
+        version = FirmwareVersion.parse(self.metadata.firmware_version)
+        return version is not None and version >= _SD_LIST_MARKER_SINCE
+
+    def _read_sd_listing(
+        self,
+        capture: Callable[[], List[str]],
+        sent: Sequence[ScpiMessage],
+        leading_reply: bool = False,
+    ) -> List[SdCardFileInfo]:
+        """Run one listing capture whose last command is ``SYSTem:ERRor?``,
+        and return the files (#188).
+
+        There is no automatic retry. A timed-out attempt's tail can arrive
+        during a retry, and no quiet interval proves it has finished, so the
+        caller decides whether to try again.
+
+        - Echoes of the commands in ``sent`` (with ``SYSTem:ECHO 1`` the
+          device repeats each command) are dropped, and a reply glued to the
+          end-of-listing marker is split off it.
+        - ``leading_reply``: the delete path sends ``SYSTem:ERRor?`` straight
+          after ``DELete`` too, so the first reply is the DELete's, and the
+          listing's terminator stays the listing's own.
+        - No terminator reply means the reply never finished:
+          :class:`SdCardListIncompleteException`.
+        - The error queue was drained before the exchange, so a non-zero
+          terminator code is this listing's failure (the firmware answers an
+          aborted listing with -200).
+        - Then no card, filesystem errors, a missing directory and an
+          ``INCOMPLETE`` / ``FAILED`` marker raise. So does a missing
+          marker on firmware that always sends one (an aborted listing has
+          none). On older firmware an empty unmarked listing is an empty
+          directory only with a clean (0) terminator.
+        """
+        from ._internal import scpi as _scpi
+        from .exceptions import SdCardListIncompleteException
+        from .sdcard import (
+            sd_card_listing_status,
+            split_glued_error_reply,
+            split_glued_list_end,
+            throw_if_sd_card_reported_error,
+        )
+
+        echoes = {m.data.strip() for m in sent}
+        lines = [
+            line for line in _strip_prompt_prefixes(
+                split_glued_list_end(
+                    split_glued_error_reply(_strip_prompt_prefixes(capture()))
+                )
+            )
+            if line.strip() and line.strip() not in echoes
+        ]
+        # An explicit report (no card, a directory that can't be opened)
+        # comes without a marker, so it is classified before the reply's
+        # ending is judged.
+        throw_if_sd_card_reported_error(lines)
+        if leading_reply:
+            if not lines or _scpi.find_system_error_reply([lines[0]]) is None:
+                raise SdCardListIncompleteException(
+                    lines, "no reply to the SYSTem:ERRor? sent after DELete"
+                )
+            lines = lines[1:]
+        marker_expected = self._sd_listing_marker_expected()
+        split = _split_at_list_terminator(lines, marker_expected)
+        if split is None:
+            raise SdCardListIncompleteException(
+                lines, "the reply ended before the device answered SYSTem:ERRor?"
+            )
+        listing, terminator = split
+        code, _ = _scpi.parse_system_error(terminator)
+        check_sd_card_listing(listing)
+        if code != 0:
+            raise SdCardListIncompleteException(
+                lines, f"the device reported {terminator}"
+            )
+        # 3.8.0+ always marks a listing, so no marker means an abort. On
+        # older firmware the clean terminator checked above is the evidence,
+        # an empty unmarked listing included (an empty directory).
+        if marker_expected and sd_card_listing_status(listing) == "unterminated":
+            raise SdCardListIncompleteException(lines, "no end-of-listing marker")
+        return parse_sd_card_file_list(listing)
 
     def _execute_raw_text_capture(
         self,

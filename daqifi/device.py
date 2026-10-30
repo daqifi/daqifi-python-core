@@ -689,12 +689,27 @@ class NyquistDevice:
         else:
             cmd = scpi_commands.get_sd_file_list()
         response = self._comm.send_command(cmd.data)
+        lines = response.strip().split('\n')
+
+        # The firmware ends a listing with "__END_OF_LIST__ <status>"; a
+        # listing it marked INCOMPLETE or FAILED isn't the whole card (#188).
+        from .exceptions import SdCardListIncompleteException
+        from .sdcard import _list_end_status, sd_card_listing_status
+
+        status = sd_card_listing_status(lines)
+        if status in ("incomplete", "failed"):
+            raise SdCardListIncompleteException(
+                [ln.strip() for ln in lines],
+                f"the device marked the listing {status}",
+            )
 
         # Parse file list from response (format: path,size per line)
         files = []
         self._file_sizes = {}  # Store for later use
-        for line in response.strip().split('\n'):
+        for line in lines:
             line = line.strip()
+            if _list_end_status(line) is not None:
+                continue
             # Skip empty lines and prompts
             if line and not line.startswith('DAQIFI') and not line.startswith('#'):
                 parts = line.split()

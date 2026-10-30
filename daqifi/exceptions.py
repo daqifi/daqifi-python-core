@@ -170,6 +170,33 @@ class SdCardFilesystemException(SdCardOperationException):
         self.device_message = device_message
 
 
+class SdCardDirectoryNotFoundException(SdCardFilesystemException):
+    """Raised when the SD card's log directory doesn't exist: the firmware
+    answered ``[Error:4]`` or ``[Error:5]Failed to open directory ...``
+    (``SYS_FS_ERROR_NO_FILE`` / ``SYS_FS_ERROR_NO_PATH``), as on a new or
+    freshly formatted card. A subclass of
+    :class:`SdCardFilesystemException`, which it was raised as before."""
+
+
+class SdCardListIncompleteException(SdCardOperationException):
+    """Raised when an SD card listing can't be trusted as the whole card.
+
+    Either the device's end-of-listing marker said so
+    (``__END_OF_LIST__ INCOMPLETE`` or ``FAILED``, or a status word this
+    version doesn't know), or the reply never reached its end: the
+    ``SYSTem:ERRor?`` sent after the listing went unanswered, so a timed-out
+    listing isn't mistaken for an empty card.
+    """
+
+    def __init__(self, raw_device_response, reason: str):
+        super().__init__(
+            f"The SD card listing is incomplete: {reason}",
+            raw_device_response,
+            None,
+        )
+        self.reason = reason
+
+
 class SdCardNotPresentException(SdCardOperationException):
     """Raised when an SD card operation fails because no SD card is
     installed in the device. Detected from the firmware's
