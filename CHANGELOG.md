@@ -28,6 +28,15 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- Live streaming timestamps jumped back to near zero every time the
+  device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
+  102 s at 42 MHz), in all three stream formats, so any session longer than
+  that had wrong times. `StreamManager` now unwraps ticks per session: each
+  is placed by its signed distance from the previous one, so time keeps
+  rising across a rollover, a slightly older sample steps back a little,
+  and the first sample of a session keeps its raw time. Limit: a gap in the
+  device's own samples longer than half a period (42.9 s at 50 MHz) reads as
+  a step back; a running stream doesn't produce one (#193).
 - An unplugged serial (USB) device was never reported lost: pyserial's
   port stays open after an unplug, so the device stayed `Connected` while
   its reader logged a read error ten times a second forever. The reader
