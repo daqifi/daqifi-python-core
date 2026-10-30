@@ -111,9 +111,15 @@ class TimestampProcessor:
         # On the device's state, under its lock: a frequency change can't
         # land between a process_timestamp's reading of the period and its
         # use of the previous timestamp.
-        state = self._get_or_add_state(device_id)
-        with state.lock:
-            state.tick_period = None if frequency_hz == 0 else 1.0 / frequency_hz
+        while True:
+            state = self._get_or_add_state(device_id)
+            with state.lock:
+                # reset() may have dropped this state since we got it; the
+                # frequency must go on the device's current one.
+                if self._device_states.get(device_id) is not state:
+                    continue
+                state.tick_period = None if frequency_hz == 0 else 1.0 / frequency_hz
+                return
 
     def get_tick_period(self, device_id: str) -> float:
         """The tick period ``device_id``'s timestamps are converted with."""
@@ -123,7 +129,10 @@ class TimestampProcessor:
         return self._tick_period_of(state) if state is not None else self._tick_period
 
     def _tick_period_of(self, state: _DeviceTimestampState) -> float:
-        return state.tick_period if state.tick_period is not None else self._tick_period
+        # One read: get_tick_period calls this without the lock, and a
+        # concurrent clear between two reads would return None.
+        period = state.tick_period
+        return period if period is not None else self._tick_period
 
     def process_timestamp(self, device_id: str, device_timestamp: int) -> TimestampResult:
         """Process one device timestamp and compute its system-clock equivalent.
@@ -203,13 +212,20 @@ class TimestampProcessor:
     def reset(self, device_id: str) -> None:
         """Forget a device's timestamps, so its next one is a first message.
         No-op if unknown. Its frequency is kept: that's static device
-        configuration, not per-session state."""
+        configuration, not per-session state. A device with no frequency
+        set is dropped entirely, so only configured devices are retained."""
         if device_id is None:
             raise TypeError("device_id must not be None")
         state = self._device_states.get(device_id)
-        if state is not None:
-            with state.lock:
+        if state is None:
+            return
+        with state.lock:
+            if state.tick_period is not None:
                 state.clear_timestamps()
+                return
+            with self._states_lock:
+                if self._device_states.get(device_id) is state:
+                    del self._device_states[device_id]
 
     def reset_all(self) -> None:
         """Drop the state of every tracked device, frequencies included. A

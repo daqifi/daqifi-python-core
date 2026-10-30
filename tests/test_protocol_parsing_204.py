@@ -256,3 +256,34 @@ def test_reset_all_cant_pair_an_old_timestamp_with_the_fallback_period() -> None
     after = processor.process_timestamp("d", 90_000_000)
     assert after.is_first_message
     assert processor.get_tick_period("d") == TimestampProcessor.DEFAULT_TICK_PERIOD
+
+
+def test_get_tick_period_reads_the_frequency_once() -> None:
+    # Audit r5: a clear between a check and a second read returned None.
+    # A state whose field reads a period once, then None.
+    class _FlippingState:
+        def __init__(self):
+            self.reads = 0
+
+        @property
+        def tick_period(self):
+            self.reads += 1
+            return 1 / 80_000_000 if self.reads == 1 else None
+
+    processor = TimestampProcessor()
+    processor._device_states["d"] = _FlippingState()
+    assert processor.get_tick_period("d") == pytest.approx(1 / 80_000_000)
+
+
+def test_reset_keeps_only_devices_with_a_frequency() -> None:
+    # Audit r5: reset() retained every device's state forever.
+    processor = TimestampProcessor()
+    processor.set_timestamp_frequency("configured", 80_000_000)
+    for i in range(1000):
+        processor.process_timestamp(f"dev{i}", 0)
+        processor.reset(f"dev{i}")
+    processor.process_timestamp("configured", 0)
+    processor.reset("configured")
+    assert list(processor._device_states) == ["configured"]
+    assert processor.get_tick_period("configured") == pytest.approx(1 / 80_000_000)
+    assert processor.process_timestamp("configured", 5).is_first_message
