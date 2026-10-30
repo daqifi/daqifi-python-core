@@ -146,3 +146,38 @@ def test_memory_error_in_a_row_isnt_a_malformed_row(monkeypatch) -> None:
     )
     with pytest.raises(MemoryError):
         list(session.samples)
+
+
+# ---- 11, audit r2 ----------------------------------------------------------
+
+
+def _elapsed(processor, steps, cycles_per_step, device="d"):
+    first = processor.process_timestamp(device, 0)
+    ts = 0
+    for _ in range(steps):
+        ts = (ts + cycles_per_step) & 0xFFFFFFFF
+        last = processor.process_timestamp(device, ts)
+    return last.timestamp - first.timestamp
+
+
+def test_a_day_of_100_hz_steps_is_exactly_a_day() -> None:
+    # Audit r2: a float running sum of 8,640,000 steps of 0.01 s (500,000
+    # ticks at 50 MHz, through ~1000 rollovers) came to 23:59:59.999993.
+    assert _elapsed(TimestampProcessor(), 8_640_000, 500_000) == timedelta(days=1)
+
+
+def test_a_frequency_change_doesnt_rescale_the_time_before_it() -> None:
+    processor = TimestampProcessor()
+    first = processor.process_timestamp("d", 0)
+    processor.process_timestamp("d", 50_000_000)  # 1 s at 50 MHz
+    processor.set_timestamp_frequency("d", 1_000)
+    last = processor.process_timestamp("d", 50_001_000)  # + 1 s at 1 kHz
+    assert last.timestamp - first.timestamp == timedelta(seconds=2)
+
+
+def test_a_step_backwards_is_subtracted_exactly() -> None:
+    processor = TimestampProcessor()
+    first = processor.process_timestamp("d", 1_000_000_000)
+    processor.process_timestamp("d", 1_050_000_000)          # +1 s
+    last = processor.process_timestamp("d", 1_025_000_000)   # -0.5 s
+    assert last.timestamp - first.timestamp == timedelta(seconds=0.5)
