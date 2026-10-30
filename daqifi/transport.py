@@ -206,9 +206,16 @@ class TcpStreamTransport:
     # thread parked in a read can always be stopped promptly.
     OPERATIONAL_READ_TIMEOUT_S = 0.5
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(
+        self, host: str, port: int, local_interface: Optional[str] = None
+    ) -> None:
         self._host = host
         self._port = port
+        # The local IP to bind the outbound socket to, so the connection
+        # leaves by that NIC on a multi-homed host rather than whichever the
+        # routing table prefers (upstream ``localInterface``, daqifi-core#187).
+        # None lets the OS choose.
+        self._local_interface = local_interface or None
         self._socket: Optional[socket.socket] = None
         self._stream: Optional[IO[bytes]] = None
         self._disposed = False
@@ -238,6 +245,12 @@ class TcpStreamTransport:
         either a dotted-decimal IP or a DNS name.
         """
         return self._host
+
+    @property
+    def local_interface(self) -> Optional[str]:
+        """The local IP the outbound socket binds to, or None for the OS's
+        choice (C# ``TcpStreamTransport.LocalInterface``)."""
+        return self._local_interface
 
     @property
     def is_connected(self) -> bool:
@@ -411,6 +424,8 @@ class TcpStreamTransport:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(options.connection_timeout)
+            if self._local_interface is not None:
+                sock.bind((self._local_interface, 0))
             sock.connect((self._host, self._port))
             # Reads are bounded by _SocketStream (selector wait), not by a
             # socket timeout, so the socket itself goes back to blocking

@@ -156,7 +156,8 @@ class TestUpdateNetworkConfiguration:
             sd.update_network_configuration(cfg)
             written = b"".join(sd._transport.stream.written)
 
-            # Canonical 8-step .NET sequence — verify ordering.
+            # Canonical .NET sequence (after daqifi-core#391: stage, save,
+            # then apply last) — verify ordering.
             mode_idx = written.find(b"NETType 1")
             ssid_idx = written.find(b"LAN:SSID")
             sec_idx = written.find(b"SECurity 3")  # WPA = 3
@@ -170,14 +171,18 @@ class TestUpdateNetworkConfiguration:
             assert ssid_idx > mode_idx, "SSID must come after mode"
             assert sec_idx > ssid_idx, "Security must come after SSID"
             assert pass_idx > sec_idx, "Password must come after security"
-            assert apply_idx > pass_idx, "Apply must come after password"
-            assert disable_sd_idx > apply_idx, (
-                "prepare_lan_interface must come after apply (for SPI bus)"
+            assert disable_sd_idx > pass_idx, (
+                "prepare_lan_interface stages after the credentials"
             )
             assert enable_lan_idx > disable_sd_idx, (
                 "EnableNetworkLan must come after DisableStorageSd"
             )
             assert save_idx > enable_lan_idx, "Save must come after prepare_lan"
+            assert apply_idx > save_idx, (
+                "Apply comes last: it restarts the WiFi module and can drop "
+                "a TCP control link, so the save must already be sent"
+            )
+            assert written.rstrip().endswith(b"LAN:APPLY"), "Nothing after apply"
         finally:
             sd.close()
 

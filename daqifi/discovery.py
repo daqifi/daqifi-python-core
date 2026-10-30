@@ -45,49 +45,24 @@ class DeviceFinder:
     @staticmethod
     def get_serial_ports() -> List[str]:
         """
-        Get list of available serial ports.
+        Get the serial ports that may be a DAQiFi board.
+
+        Only USB serial ports with the DAQiFi application's VID/PID
+        (04D8:F794) are listed, plus CDC-ACM ports whose USB IDs can't be
+        read, so discovery never writes to an unrelated device. Each board
+        is listed once (on macOS as its ``/dev/cu.*`` node). Empty when the
+        ports can't be listed.
 
         Returns:
             List of serial port paths
 
         Example:
             ports = DeviceFinder.get_serial_ports()
-            # Linux: ['/dev/ttyACM0', '/dev/ttyACM1']
-            # Windows: ['COM3', 'COM4']
+            # Linux: ['/dev/ttyACM0']; Windows: the board's COM port
         """
-        system = platform.system()
+        from ._internal.usb_ports import daqifi_serial_ports
 
-        if system == "Linux":
-            # Look for USB CDC ACM devices (typical for Nyquist)
-            ports = glob.glob('/dev/ttyACM*')
-            # Also check for USB serial devices
-            ports.extend(glob.glob('/dev/ttyUSB*'))
-            return sorted(ports)
-
-        elif system == "Windows":
-            # Windows COM ports
-            ports = []
-            for i in range(1, 256):
-                port = f'COM{i}'
-                try:
-                    # Try to check if port exists (quick check)
-                    # Actual connection test will happen in discover()
-                    ports.append(port)
-                except:
-                    pass
-            return ports
-
-        elif system == "Darwin":  # macOS
-            # macOS USB devices
-            ports = glob.glob('/dev/tty.usbmodem*')
-            ports.extend(glob.glob('/dev/tty.usbserial*'))
-            ports.extend(glob.glob('/dev/cu.usbmodem*'))
-            ports.extend(glob.glob('/dev/cu.usbserial*'))
-            return sorted(ports)
-
-        else:
-            # Unknown system, return empty list
-            return []
+        return daqifi_serial_ports()
 
     @staticmethod
     def _identify_device(port: str) -> Optional[DeviceInfo]:
@@ -172,9 +147,12 @@ class DeviceFinder:
         # Get all serial ports
         ports = DeviceFinder.get_serial_ports()
 
-        # Try to identify device on each port
+        # Try to identify device on each port. Each probe is bounded: a port
+        # that hangs on open or read is abandoned, not waited on forever.
+        from ._internal.usb_ports import run_port_probe
+
         for port in ports:
-            device_info = DeviceFinder._identify_device(port)
+            device_info = run_port_probe(port, DeviceFinder._identify_device)
 
             if device_info:
                 # Apply variant filter if specified

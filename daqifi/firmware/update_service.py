@@ -56,6 +56,7 @@ from typing import (
     runtime_checkable,
 )
 
+from daqifi._internal.usb_ports import list_usb_serial_ports
 from daqifi._internal.usb_location import (
     canonical_port_name,
     hid_device_location,
@@ -304,36 +305,9 @@ def _list_serial_port_names() -> Optional[FrozenSet[str]]:
         return None
 
 
-# USB CDC-ACM serial nodes, the class a DAQiFi board enumerates as (Linux
-# and macOS names). A built-in UART (ttyS0, COM1) has no USB IDs either but
-# can't be a board.
-_CDC_ACM_NODE = re.compile(r"^(ttyACM\d+|(cu|tty)\.usbmodem.*)$")
-
-
-def _list_usb_serial_ports(
-    vendor_id: int, product_id: int
-) -> Optional[List[str]]:
-    """Serial ports of USB devices with this VID/PID, or None when they
-    can't be listed.
-
-    A CDC-ACM port whose USB IDs can't be read (sysfs hidden, e.g. in a
-    container) is included: it may be a board, and leaving it out would let
-    two boards pass as none.
-    """
-    try:
-        from serial.tools import list_ports
-
-        return sorted(
-            port.device
-            for port in list_ports.comports()
-            if (port.vid, port.pid) == (vendor_id, product_id)
-            or (
-                port.vid is None
-                and _CDC_ACM_NODE.match(os.path.basename(port.device or ""))
-            )
-        )
-    except Exception:
-        return None
+# Shared with discovery (daqifi._internal.usb_ports); kept under this name,
+# which tests patch.
+_list_usb_serial_ports = list_usb_serial_ports
 
 
 class DefaultFirmwareUpdateService:

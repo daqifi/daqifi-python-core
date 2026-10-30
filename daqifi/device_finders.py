@@ -23,7 +23,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -31,7 +31,8 @@ from ._internal.comm import HidDeviceInfo
 from ._internal.scpi import StreamInterface
 from ._internal import scpi_commands
 from ._internal.hid_enumerator import HidLibraryDeviceEnumerator
-from .transport import SerialStreamTransport, UdpTransport
+from ._internal.usb_ports import daqifi_serial_ports, run_port_probe
+from .transport import UdpTransport
 
 
 __all__ = [
@@ -269,10 +270,14 @@ class SerialDeviceFinder:
         self,
         port_filter: Optional[List[str]] = None,
     ) -> List[DeviceInfo]:
-        """Probe each available serial port; return DAQiFi candidates.
+        """Probe each DAQiFi serial port; return DAQiFi candidates.
 
-        ``port_filter`` overrides auto-enumeration -- pass an explicit
-        list to skip ports of known non-DAQiFi devices.
+        Auto-enumeration lists only USB serial ports with the DAQiFi
+        application's VID/PID (04D8:F794), plus CDC-ACM ports whose IDs
+        can't be read, so the probe's SCPI (including a power-on) never
+        goes to an unrelated device. ``port_filter`` overrides it: the
+        ports given are probed as they are. Each probe is bounded by a hard
+        timeout, so one hung port can't block discovery.
         """
         if self._disposed:
             raise RuntimeError("SerialDeviceFinder has been closed.")
@@ -281,15 +286,13 @@ class SerialDeviceFinder:
             if port_filter is not None:
                 ports = list(port_filter)
             else:
-                ports = SerialStreamTransport.get_available_port_names()
+                ports = daqifi_serial_ports()
 
             discovered: List[DeviceInfo] = []
             for port_name in ports:
-                try:
-                    info = self._try_get_device_info(port_name)
-                except Exception:
-                    # Mirrors upstream "skip ports that fail" comment.
-                    info = None
+                # Failures and overruns give None (upstream: skip ports
+                # that fail).
+                info = run_port_probe(port_name, self._try_get_device_info)
                 if info is not None:
                     discovered.append(info)
         # Fire callbacks OUTSIDE the lock — same deadlock concern
@@ -712,6 +715,7 @@ class WiFiDeviceFinder:
                     discovered,
                     dedup_lock,
                     broadcast_addr=nic.broadcast,
+                    local_interface_address=nic.ip,
                 )
             except Exception:
                 # Receive-loop crash on one NIC is non-fatal for the
@@ -732,12 +736,18 @@ class WiFiDeviceFinder:
         discovered: List[DeviceInfo],
         dedup_lock: threading.Lock,
         broadcast_addr: Optional[str],
+        local_interface_address: str = "",
     ) -> None:
         """Send the two finder queries and drain the receive loop on
         a single transport until ``deadline``. Shared seen_keys /
         discovered list let multiple per-NIC callers cooperate on
         de-duplication. ``broadcast_addr=None`` falls back to
         255.255.255.255 (legacy single-socket behavior).
+
+        ``local_interface_address`` is the IP the socket is bound to (the
+        NIC a reply arrived on), recorded on each DeviceInfo so a later TCP
+        connection can leave by the same NIC. Empty for a socket bound to
+        any interface.
         """
         if broadcast_addr is None:
             transport.send_broadcast(self.DAQIFI_FINDER_QUERY, self._discovery_port)
@@ -769,7 +779,10 @@ class WiFiDeviceFinder:
             ):
                 continue
 
-            info = self._build_device_info(data, text, ip)
+            info = replace(
+                self._build_device_info(data, text, ip),
+                local_interface_address=local_interface_address,
+            )
             key = (
                 f"mac:{info.mac_address}"
                 if info.mac_address

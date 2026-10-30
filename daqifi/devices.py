@@ -2826,16 +2826,25 @@ class DaqifiStreamingDevice(DaqifiDevice):
         3. Set SSID
         4. Set security type + password (security FIRST so the
            password write has a security context)
-        5. Apply (firmware schedules the WiFi module restart)
-        6. Wait ``_WIFI_MODULE_RESTART_DELAY_S`` for the module to come back
-        7. ``prepare_lan_interface`` — DisableStorageSd + EnableNetworkLan.
+        5. ``prepare_lan_interface`` - DisableStorageSd + EnableNetworkLan.
            SD card and LAN module SHARE THE SPI BUS on Nyquist hardware;
            this hands the bus to LAN so the WiFi chip can scan + associate.
-           Without this step, the WiFi module reports ``Disconnected``
-           with ``SignalStrength=0`` even when the config is correct
-           (verified on COM7 fw 3.4.6b1, 2026-04-26).
-        8. Save (persist across reboots)
+           ``LAN:ENAbled`` only sets the runtime enable flag (firmware
+           ``SCPI_LANEnabledSet``), so it is staged here, before the save
+           (to be persisted) and the apply (which restarts the module only
+           when it is set).
+        6. Save. ``LAN:SAVE`` copies the staged runtime settings to NVM
+           (``SCPI_LANSettingsSave``); they needn't be applied first.
+        7. Apply last: it restarts the WiFi module, which over a WiFi/TCP
+           control link drops the connection. Nothing is sent after it, so
+           nothing is lost; the configuration was already saved. A save
+           sent after the apply never arrived over TCP, and the old
+           settings came back at the next reboot (upstream daqifi-core#391).
+        8. Wait ``_WIFI_MODULE_RESTART_DELAY_S`` for the module restart.
         9. Update the locally-tracked ``_network_configuration`` snapshot.
+
+        Over a WiFi/TCP control connection, expect the connection to drop:
+        reconnect, typically at a new address on the new network.
 
         Raises:
             TypeError: if ``configuration`` is None.
@@ -2879,12 +2888,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 f"Unsupported WiFi security type: {configuration.security_type!r}"
             )
 
+        self.prepare_lan_interface()
+        self.send(scpi_commands.save_network_lan())
         self.send(scpi_commands.apply_network_lan())
         time.sleep(self._WIFI_MODULE_RESTART_DELAY_S)
-
-        self.prepare_lan_interface()
-
-        self.send(scpi_commands.save_network_lan())
 
         self._network_configuration = configuration.clone()
 
@@ -2895,7 +2902,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         and can't both drive it simultaneously. Call this before any
         network operation that requires the WiFi module to be active
         (scan, associate, transmit). ``update_network_configuration``
-        calls it automatically after ``APPLY``.
+        calls it before ``SAVE`` and ``APPLY``.
 
         Side effect — the SD card SCPI module is disabled, which also
         stops any active SD logging on the device. We update
@@ -2989,11 +2996,15 @@ class DaqifiDeviceFactory:
         retry_options: Optional[ConnectionRetryOptions] = None,
         initialize_device: bool = True,
         message_factory: Optional[Callable[[bytes], Any]] = None,
+        local_interface: Optional[str] = None,
     ) -> DaqifiStreamingDevice:
+        """Connect over TCP. ``local_interface`` binds the socket to that
+        local IP, so the connection leaves by that NIC (see
+        :class:`TcpStreamTransport`)."""
         if not host or not host.strip():
             raise ValueError("Host cannot be null or empty.")
         DaqifiDeviceFactory._validate_port(port)
-        transport = TcpStreamTransport(host, port)
+        transport = TcpStreamTransport(host, port, local_interface)
         return DaqifiDeviceFactory._connect_with_transport(
             transport, device_name, retry_options, initialize_device, message_factory,
         )
@@ -3104,6 +3115,9 @@ class DaqifiDeviceFactory:
             # Strip the host before forwarding so leading/trailing
             # whitespace can't pass connect_tcp's strip-validation
             # but still reach the transport unstripped.
+            # Leave by the NIC that discovered the device: on a multi-homed
+            # host the routing table may prefer another (daqifi-core#187).
+            local = str(getattr(device_info, "local_interface_address", "") or "").strip()
             return DaqifiDeviceFactory.connect_tcp(
                 host=str(ip).strip(),
                 port=port_int,
@@ -3111,6 +3125,7 @@ class DaqifiDeviceFactory:
                 retry_options=retry_options,
                 initialize_device=initialize_device,
                 message_factory=message_factory,
+                local_interface=local or None,
             )
 
         if connection_type == ConnectionType.SERIAL:

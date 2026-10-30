@@ -211,9 +211,9 @@ def wait_for_device_back(
     def _wait(*, timeout_s: float = 30.0) -> Optional[str]:
         original_port = device_info.port
         deadline = time.monotonic() + timeout_s
-        # `DeviceFinder.discover()` can be slow on Windows where
-        # `get_serial_ports()` returns COM1..COM255 and each port is
-        # probed via *IDN?. Cap discovery to a fraction of the budget
+        # `DeviceFinder.discover()` probes each DAQiFi port via *IDN?
+        # (each probe bounded by a hard timeout), which takes seconds
+        # with several boards. Cap discovery to a fraction of the budget
         # so the call can't blow past the deadline; scale interval
         # too so short budgets still get at least one discovery
         # attempt.
