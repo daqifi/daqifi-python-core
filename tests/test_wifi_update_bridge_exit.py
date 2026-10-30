@@ -147,6 +147,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
         self._replies = None
         self._prompt = prompt
         self.powered = powered
+        self.power_reply = True
         self._late_errors = late_errors
         self._refused_in_this_exchange = False
 
@@ -185,7 +186,10 @@ class _FirmwareModel(_f._FakeStreamingDevice):
         elif text == POWER_ON:
             self.powered = True
         elif text == POWER_QUERY:
-            self._reply("1" if self.powered else "0")
+            if self.power_reply:
+                self._reply("1" if self.powered else "0")
+            else:
+                self._reply(POWER_QUERY)  # only the echo gets through
         elif text == LAN_APPLY:
             if not self.powered:
                 pass  # UpdateNetworkSettings: no REINIT unless isPowered
@@ -574,6 +578,49 @@ def test_a_second_ctrl_c_during_recovery_says_what_it_leaves(clock, caplog) -> N
         shutil.rmtree(firmware_dir, ignore_errors=True)
     assert service.current_state == FirmwareUpdateState.FAILED
     assert "Power-cycle it" in caplog.text
+
+
+def test_ctrl_c_during_recovery_after_a_failed_tool_still_ends_failed(clock, caplog) -> None:
+    # Audit r6 (1): recovery started from the Exception handler; an
+    # interrupt inside it escaped that handler, so the sibling BaseException
+    # handler never ran and the service stayed in PROGRAMMING.
+    from daqifi.enums import FirmwareUpdateState
+
+    device = _FirmwareModel(clock)
+    real_send = device.send
+
+    def _send(message):
+        if (getattr(message, "data", None) or str(message)) == BRIDGE_EXIT:
+            raise KeyboardInterrupt
+        real_send(message)
+
+    device.send = _send
+    service = _service(_f._FakeExternalProcessRunner(_result(lines=("x",), exit_code=1)))
+    firmware_dir = _f._make_temp_wifi_dir()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            service.update_wifi_module(device, firmware_dir)
+    finally:
+        shutil.rmtree(firmware_dir, ignore_errors=True)
+    assert service.current_state == FirmwareUpdateState.FAILED
+    assert "Power-cycle it" in caplog.text
+
+
+def test_an_unreadable_power_state_makes_recovery_unconfirmed(clock) -> None:
+    # Audit r6 (2): an unknown power state was read as powered, and in
+    # standby an APPLY doesn't consume the request.
+    device = _FirmwareModel(clock)
+    runner = _f._FakeExternalProcessRunner(_result(lines=("x",), exit_code=1))
+    real_run = runner.run
+
+    def _run(request):
+        device.power_reply = False  # from here on only the echo comes back
+        return real_run(request)
+
+    runner.run = _run
+    with pytest.raises(FirmwareUpdateException) as excinfo:
+        _update(device, runner)
+    assert "power-cycle it" in str(excinfo.value)
 
 
 def test_a_failure_before_update_mode_sends_no_bridge_exit(clock, monkeypatch) -> None:

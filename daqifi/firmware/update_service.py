@@ -769,10 +769,44 @@ class DefaultFirmwareUpdateService:
         progress: _PROGRESS_CALLBACK,
         cancel_event: Optional[threading.Event],
     ) -> None:
+        # "update_requested" is armed BEFORE the FWUpdate send: a send that
+        # raises can still have been delivered. "recovered" is what
+        # _try_leave_lan_update_mode last concluded (None: it never finished).
+        bridge_state = {"update_requested": False, "recovered": None}
+        try:
+            self._run_wifi_update_steps(
+                device, firmware_path, progress, cancel_event, bridge_state
+            )
+        finally:
+            # Whatever ended the update, and wherever an interrupt landed
+            # (even inside the recovery a handler below started), it doesn't
+            # stay in its last state, and an unconfirmed device is named.
+            if self._current_state != FirmwareUpdateState.COMPLETE:
+                if self._current_state != FirmwareUpdateState.FAILED:
+                    self._transition_to_state(
+                        FirmwareUpdateState.FAILED,
+                        self._current_operation + _NOT_RECOVERED,
+                    )
+                if (
+                    bridge_state["update_requested"]
+                    and bridge_state["recovered"] is not True
+                ):
+                    self._logger.warning(
+                        "The WiFi update ended without confirming the device "
+                        "left WiFi update mode; it may be in USB-transparent "
+                        "bridge mode, or hold a pending update request. "
+                        "Power-cycle it."
+                    )
+
+    def _run_wifi_update_steps(
+        self,
+        device: "DaqifiStreamingDevice",
+        firmware_path: str,
+        progress: _PROGRESS_CALLBACK,
+        cancel_event: Optional[threading.Event],
+        bridge_state: dict,
+    ) -> None:
         total_bytes = 100
-        # Armed BEFORE the FWUpdate send: a send that raises can still have
-        # been delivered. See _try_leave_lan_update_mode.
-        bridge_state = {"update_requested": False}
 
         try:
             # Honour cancellation BEFORE the WiFi version-check makes
@@ -1059,25 +1093,13 @@ class DefaultFirmwareUpdateService:
         except BaseException:
             # KeyboardInterrupt / SystemExit, e.g. Ctrl-C while the flash
             # tool runs: the device can be bridged all the same, so it gets
-            # the same recovery, and the service doesn't stay in its
-            # current state. The interrupt itself is re-raised unchanged.
+            # the same recovery. The interrupt is re-raised unchanged; the
+            # caller's finally sets FAILED even if a second interrupt lands
+            # during this recovery.
             failed_operation = self._current_operation
-            try:
-                if not self._try_leave_lan_update_mode(device, bridge_state):
-                    failed_operation += _NOT_RECOVERED
-            except BaseException:
-                # A second interrupt during recovery: say what it leaves.
+            if not self._try_leave_lan_update_mode(device, bridge_state):
                 failed_operation += _NOT_RECOVERED
-                self._logger.warning(
-                    "Interrupted while taking the device out of WiFi update "
-                    "mode; it may be in USB-transparent bridge mode, or hold "
-                    "a pending update request. Power-cycle it."
-                )
-                raise
-            finally:
-                self._transition_to_state(
-                    FirmwareUpdateState.FAILED, failed_operation
-                )
+            self._transition_to_state(FirmwareUpdateState.FAILED, failed_operation)
             raise
 
     # -- WiFi bridge (#190) ----------------------------------------------
@@ -1214,7 +1236,9 @@ class DefaultFirmwareUpdateService:
         Nothing is saved after a flash that didn't complete. Ignores the
         caller's cancel, which is already set when this runs after a cancel.
         """
+        bridge_state["recovered"] = None
         if not bridge_state.get("update_requested"):
+            bridge_state["recovered"] = True
             return True
         from daqifi._internal import scpi_commands
 
@@ -1236,10 +1260,13 @@ class DefaultFirmwareUpdateService:
             # pending update request, and a quiet console proves nothing.
             device.send(scpi_commands.set_usb_transparency_mode(0))
             self._sleep_with_cancel(exit_delay, deadline)
-            if self._wifi_module_powered(device) is False:
+            # Unknown counts as standby: only a positive "powered" makes a
+            # quiet console evidence.
+            if self._wifi_module_powered(device) is not True:
                 raise RuntimeError(
-                    "the device is in standby, so LAN:APPLY doesn't restart "
-                    "WiFi and a pending update request can't be cleared"
+                    "the device is in standby, or its power state couldn't be "
+                    "read, so LAN:APPLY may not restart WiFi and a pending "
+                    "update request can't be confirmed cleared"
                 )
             while True:
                 # The bridge can come up between attempts, so every APPLY
@@ -1262,6 +1289,7 @@ class DefaultFirmwareUpdateService:
                         "The device is back to normal after a failed WiFi "
                         "module update."
                     )
+                    bridge_state["recovered"] = True
                     return True
         except Exception as exc:
             self._logger.warning(
@@ -1271,6 +1299,7 @@ class DefaultFirmwareUpdateService:
                 "cycle: %s",
                 exc,
             )
+            bridge_state["recovered"] = False
             return False
 
     def _is_wifi_firmware_up_to_date(
