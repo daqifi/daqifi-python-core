@@ -555,6 +555,12 @@ class SdCardParseOptions:
     # warns once per parse. Values written with decimals are volts either
     # way.
     integer_units: Optional[str] = None
+    # The channel numbers of a protobuf log's analog values, in the order
+    # the firmware packs them (the enabled channels, ascending). The log
+    # doesn't record them, so without this calibration and range are applied
+    # by position and entries carry analog_channels=None. CSV and JSON logs
+    # name their channels and ignore this.
+    analog_channels: Optional[Sequence[int]] = None
 
 
 @dataclass(frozen=True)
@@ -1133,6 +1139,11 @@ class SdCardLogEntry:
     # said), or "raw-assumed" (integers read as raw codes because nobody
     # said; that case warns). None for formats without the distinction.
     analog_units: Optional[str] = None
+    # The channel number of each of analog_values, in the same order. The
+    # firmware logs only enabled channels, so position i is not channel i.
+    # None where the file doesn't say and the caller didn't either (a
+    # protobuf log without SdCardParseOptions.analog_channels).
+    analog_channels: Optional[Tuple[int, ...]] = None
 
     def __post_init__(self) -> None:
         # Coerce the iterable inputs to tuples so mutating the
@@ -1140,6 +1151,8 @@ class SdCardLogEntry:
         # entry — matches the frozen-dataclass guarantee already
         # used by ``SdCardDeviceConfiguration``.
         object.__setattr__(self, "analog_values", tuple(self.analog_values))
+        if self.analog_channels is not None:
+            object.__setattr__(self, "analog_channels", tuple(self.analog_channels))
         if self.analog_timestamps is not None:
             object.__setattr__(
                 self, "analog_timestamps", tuple(self.analog_timestamps)
@@ -1203,8 +1216,10 @@ def _scale_raw_analog_values(
 ) -> Tuple[float, ...]:
     """Apply calibration/range/scale factors to raw ADC integers.
 
-    Formula mirrors the upstream ``SdCardFileParser.ScaleRawAnalogValues``:
-    ``(raw / resolution * port_range * cal_m + cal_b) * internal_scale_m``.
+    Formula: ``raw / resolution * port_range * cal_m * internal_scale_m +
+    cal_b``, as the firmware converts (``MC12bADC.c``, ``AD7609Scale.h``)
+    and upstream ``SdCardAnalogScaling`` scales: ``cal_b`` is an offset in
+    volts, not multiplied by ``internal_scale_m``.
     Returns the raw values cast to ``float`` when no usable config is
     available.
     """
@@ -1229,7 +1244,7 @@ def _scale_raw_analog_values(
             int_scale[ch] if int_scale is not None and 0 <= ch < len(int_scale) else 1.0
         )
         normalized = raw / resolution
-        out.append((normalized * rng * cal_m + cal_b) * scale_m)
+        out.append(normalized * rng * cal_m * scale_m + cal_b)
     return tuple(out)
 
 
@@ -1519,6 +1534,7 @@ def _produce_samples(
     anchor_time: Optional[datetime],
     tick_period: float,
     config: Optional[SdCardDeviceConfiguration],
+    channels: Optional[Sequence[int]] = None,
 ) -> Iterator[SdCardLogEntry]:
     # Tz-naive UTC for parity with the C# port's DateTime.UtcNow.
     # ``utcnow()`` is deprecated; build the same tz-naive value via
@@ -1534,6 +1550,9 @@ def _produce_samples(
         base_time = anchor_time
     previous_timestamp: Optional[int] = None
     elapsed_seconds = 0.0
+    channels = tuple(channels) if channels is not None else None
+    warned_unscaled = False
+    warned_channel_count = False
 
     i = start_index
     while i < len(messages):
@@ -1588,12 +1607,33 @@ def _produce_samples(
                 previous_timestamp = int(msg.msg_time_stamp)
             timestamp = base_time + timedelta(seconds=elapsed_seconds)
 
+        count = len(analog_float) or len(analog_raw)
+        sample_channels = channels
+        if channels is not None and count and len(channels) != count:
+            if not warned_channel_count:
+                warned_channel_count = True
+                warnings.warn(
+                    f"SdCardParseOptions.analog_channels names {len(channels)} "
+                    f"channels but a protobuf sample has {count} values; "
+                    "calibration is applied by position and analog_channels "
+                    "is None for such samples.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            sample_channels = None
+        units: Optional[str] = None
         if analog_float:
             analog_values: Tuple[float, ...] = tuple(float(v) for v in analog_float)
+            units = "volts"
         elif analog_raw:
-            analog_values = _scale_raw_analog_values(analog_raw, config)
+            analog_values = _scale_raw_analog_values(analog_raw, config, sample_channels)
+            units = "raw"
+            if (config is None or config.resolution == 0) and not warned_unscaled:
+                warned_unscaled = True
+                warnings.warn(_UNSCALED_RAW_WARNING, UserWarning, stacklevel=2)
         else:
             analog_values = ()
+            sample_channels = ()
 
         digital_data = 0
         if digital:
@@ -1609,6 +1649,8 @@ def _produce_samples(
             analog_values=analog_values,
             digital_data=digital_data,
             analog_timestamps=analog_timestamps,
+            analog_units=units,
+            analog_channels=sample_channels,
         )
         i += 1
 
@@ -1691,6 +1733,7 @@ class SdCardFileParser:
             file_created_date,
             tick_period,
             config,
+            options.analog_channels,
         )
 
         return SdCardLogSession(
@@ -2004,10 +2047,13 @@ def _parse_csv_header(
                 if rate_str.isdigit():
                     timestamp_freq = int(rate_str)
             continue
-        # First non-comment line — treat it as the column header iff
-        # it contains the firmware's per-channel naming convention.
-        lower = line.lower()
-        if "_ts," in lower or lower.startswith("ch") or lower.startswith("ain"):
+        if _is_csv_header_noise(line):
+            # A stray "ch" before the real header: skip it, so the header
+            # and its channel layout aren't lost (upstream 9aa83f5).
+            continue
+        # First other line — treat it as the column header iff it has the
+        # firmware's per-channel naming convention.
+        if _is_csv_column_header(line):
             cols = line.split(",")
             total_pairs = len(cols) // 2
             for p in range(total_pairs):
@@ -2045,16 +2091,29 @@ def _find_csv_data_start_index(lines: List[str]) -> int:
     for i, line in enumerate(lines):
         if line.startswith("#"):
             continue
-        lower = line.lower()
-        is_column_header = (
-            "_ts," in lower
-            or (lower.startswith("ch") and len(line) > 2 and not line[2].isdigit())
-            or lower.startswith("ain")
-        )
-        if is_column_header:
+        if _is_csv_column_header(line) or _is_csv_header_noise(line):
             continue
         return i
     return len(lines)
+
+
+def _is_csv_column_header(line: str) -> bool:
+    """A CSV column header (``ain0_ts,ain0_val,...,dio_ts,dio_val`` or a
+    ``ch...`` variant). Shared by the header parser and the data-start scan
+    so they agree on what a header is (upstream ``IsColumnHeaderLine``)."""
+    lower = line.lower()
+    return (
+        "_ts," in lower
+        or (lower.startswith("ch") and len(line) > 2 and not line[2].isdigit())
+        or lower.startswith("ain")
+    )
+
+
+def _is_csv_header_noise(line: str) -> bool:
+    """A line starting with "ch" that isn't a column header (a bare "ch").
+    A data row starts with a numeric timestamp, so it is never data
+    (upstream ``IsHeaderNoiseLine``)."""
+    return line.lower().startswith("ch") and not _is_csv_column_header(line)
 
 
 # An integer CSV value: optional sign, ASCII digits only.
@@ -2067,10 +2126,16 @@ _CSV_INT_LIMIT = 2 ** 53
 def _try_parse_csv_data_row(
     line: str,
     layout: _CsvColumnLayout,
-) -> Optional[Tuple[int, List[Union[int, float]], int, List[int]]]:
+) -> Optional[Tuple[int, List[Union[int, float]], int, List[int], List[int]]]:
     """Parse one CSV data row into ``(row_timestamp, analog_values,
-    digital_data, per_channel_timestamps)`` or None on malformed
+    digital_data, per_channel_timestamps, channels)`` or None on malformed
     input (mirrors the upstream ``TryParseCsvDataRow`` resilience).
+
+    An empty ``,,`` pair is a channel the firmware had no conversion for in
+    that period (its ``validMask`` bit clear, ``csv_encoder.c``), and a
+    DIO-only row has every analog pair empty: the channel is left out of
+    the row, not the row dropped. ``channels`` names the channel of each
+    value kept (its header number, else its column position).
 
     A value written as an integer stays an ``int`` (a raw ADC code, or
     millivolts at precision 0); one written with decimals is a ``float``,
@@ -2090,9 +2155,12 @@ def _try_parse_csv_data_row(
 
         analog_values: List[Union[int, float]] = []
         per_channel_ts: List[int] = []
+        channels: List[int] = []
         for ch in range(analog_pair_count):
             ts_col = cols[ch * 2].strip()
             val_col = cols[ch * 2 + 1].strip()
+            if not ts_col and not val_col:
+                continue  # no conversion for this channel in this period
             if not ts_col.isdigit():
                 return None
             ts = int(ts_col)
@@ -2109,22 +2177,27 @@ def _try_parse_csv_data_row(
                     return None
             per_channel_ts.append(ts)
             analog_values.append(val)
+            channels.append(
+                layout.analog_channels[ch] if ch < len(layout.analog_channels) else ch
+            )
 
         digital_data = 0
         dio_timestamp = 0
+        dio_read = False
         if layout.has_digital_pair and total_pairs > analog_pair_count:
             dio_index = analog_pair_count
             dio_ts_col = cols[dio_index * 2].strip()
             dio_val_col = cols[dio_index * 2 + 1].strip()
             if dio_ts_col.isdigit():
                 dio_timestamp = int(dio_ts_col)
+                dio_read = True
             if dio_val_col.isdigit():
                 digital_data = int(dio_val_col)
 
         row_timestamp = per_channel_ts[0] if per_channel_ts else dio_timestamp
-        if not per_channel_ts and dio_timestamp == 0 and not layout.has_digital_pair:
-            return None
-        return row_timestamp, analog_values, digital_data, per_channel_ts
+        if not per_channel_ts and not dio_read:
+            return None  # nothing in the row: no analog value, no DIO read
+        return row_timestamp, analog_values, digital_data, per_channel_ts, channels
     except Exception:
         return None
 
@@ -2157,9 +2230,9 @@ def _produce_csv_samples(
         parsed = _try_parse_csv_data_row(line, layout)
         if parsed is None:
             continue
-        row_ts, raw_analog, digital_data, per_ch_ts = parsed
+        row_ts, raw_analog, digital_data, per_ch_ts, channels = parsed
         # The firmware value rule shared with the JSON parser (#163).
-        read = reader.read(raw_analog, layout.analog_channels or None)
+        read = reader.read(raw_analog, channels)
         if read is None:
             continue  # a row mixing decimals and integers isn't firmware output
         analog_values, units = read
@@ -2183,6 +2256,8 @@ def _produce_csv_samples(
             digital_data=digital_data,
             analog_timestamps=tuple(per_ch_ts) if per_ch_ts else None,
             analog_units=units,
+            # Without a column header nothing names the channels.
+            analog_channels=tuple(channels) if layout.analog_channels else None,
         )
 
         if lines_processed % 100 == 0:
@@ -2308,6 +2383,14 @@ def _json_meta(obj: Any) -> Optional[dict]:
 
 
 _INTEGER_UNITS = (None, "raw", "millivolts")
+_UNSCALED_RAW_WARNING = (
+    "This protobuf SD log's analog values are raw ADC codes and the log "
+    "carries no resolution, range or calibration, so they are returned "
+    "unscaled (analog_units='raw'). Pass "
+    "SdCardParseOptions(configuration_override=SdCardDeviceConfiguration(...)) "
+    "with resolution, port_range and calibration_values to get volts."
+)
+
 _INTEGER_UNITS_WARNING = (
     "SD log analog values are integers, read as raw ADC codes. If the log "
     "was written at voltage precision 0 they are millivolts: pass "
@@ -2833,6 +2916,7 @@ def _produce_json_samples(
                     analog_values=(),
                     digital_data=value,
                     analog_timestamps=None,
+                    analog_channels=(),
                 )
             parsed_samples = []
         for parsed in parsed_samples:
@@ -2859,6 +2943,7 @@ def _produce_json_samples(
                 digital_data=digital_data,
                 analog_timestamps=None,  # JSON format carries one ts per row
                 analog_units=units,
+                analog_channels=tuple(channels) if channels is not None else None,
             )
 
         if lines_processed % 100 == 0:
