@@ -160,3 +160,48 @@ def test_zero_clears_a_device_frequency_and_reset_keeps_it() -> None:
 def test_an_invalid_frequency_is_refused(bad, error) -> None:
     with pytest.raises(error):
         TimestampProcessor().set_timestamp_frequency("nq1", bad)
+
+
+def test_a_frequency_change_cant_land_between_reading_the_period_and_using_it() -> None:
+    # Audit r3: A reads the 20 ns period and pauses; B sets 80 MHz and
+    # processes a later timestamp; A resumes. A must not apply its stale
+    # period to B's previous timestamp: the period is read under the
+    # device's lock, which B's frequency change waits for.
+    import threading
+
+    processor = TimestampProcessor()
+    first = processor.process_timestamp("d", 0)
+    a_read, a_resume = threading.Event(), threading.Event()
+    real_get = processor.get_tick_period
+    a_thread = {}
+
+    def _pausing_get(device_id):
+        period = real_get(device_id)
+        if threading.get_ident() == a_thread.get("ident") and not a_read.is_set():
+            a_read.set()
+            a_resume.wait(5)
+        return period
+
+    processor.get_tick_period = _pausing_get
+    results = {}
+
+    def _a():
+        a_thread["ident"] = threading.get_ident()
+        results["a"] = processor.process_timestamp("d", 100_000_000)
+
+    def _b():
+        processor.set_timestamp_frequency("d", 80_000_000)
+        results["b"] = processor.process_timestamp("d", 160_000_000)
+
+    a = threading.Thread(target=_a)
+    b = threading.Thread(target=_b)
+    a.start()
+    assert a_read.wait(5)
+    b.start()
+    b.join(0.5)  # B gets in now, if it can
+    a_resume.set()
+    a.join(5)
+    b.join(5)
+    # A: 100e6 cycles at 20 ns = 2.0 s. B: 60e6 more at 12.5 ns = 0.75 s.
+    assert (results["a"].timestamp - first.timestamp) / timedelta(seconds=1) == pytest.approx(2.0)
+    assert (results["b"].timestamp - first.timestamp) / timedelta(seconds=1) == pytest.approx(2.75)

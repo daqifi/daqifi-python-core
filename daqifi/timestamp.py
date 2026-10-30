@@ -98,7 +98,11 @@ class TimestampProcessor:
             raise TypeError(f"frequency_hz must be an int (got {frequency_hz!r})")
         if frequency_hz < 0:
             raise ValueError(f"frequency_hz must not be negative (got {frequency_hz})")
-        with self._states_lock:
+        # Under the device's processing lock, so a frequency change can't
+        # land between a process_timestamp's reading of the period and its
+        # use of the previous timestamp.
+        state = self._get_or_add_state(device_id)
+        with state.lock:
             if frequency_hz == 0:
                 self._device_tick_periods.pop(device_id, None)
             else:
@@ -128,9 +132,11 @@ class TimestampProcessor:
             raise TypeError("device_id must not be None")
 
         state = self._get_or_add_state(device_id)
-        tick_period = self.get_tick_period(device_id)
 
         with state.lock:
+            # Read in the same critical section as the previous timestamp
+            # (set_timestamp_frequency takes this lock too).
+            tick_period = self.get_tick_period(device_id)
             if not state.has_previous_timestamp:
                 now = datetime.now()
                 state.previous_system_timestamp = now
