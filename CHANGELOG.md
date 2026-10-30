@@ -28,11 +28,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- `NyquistDevice.create_stream` raised `NameError` instead of
-  `ConfigurationError` for an invalid channel (and for every call on a
-  board with no analog inputs, which now says so); `sd_get_file_size`
-  raised `AttributeError` before `sd_list_files` had run and now returns
-  0 (#203).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
