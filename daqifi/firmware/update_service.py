@@ -2185,14 +2185,17 @@ class DefaultFirmwareUpdateService:
         error flag, and BOOTLOADER_WAIT_FOR_NVM acks once the write cycle
         completes. The reset vector decides whether a stale application
         starts (app.c), and a sparse image's regions needn't cover it."""
-        reset_vector = getattr(self._bootloader_protocol, "reset_vector_region", None)
+        reset_vector = getattr(self._bootloader_protocol, "reset_vector_regions", None)
         regions = self._crc_regions
         if not regions or not callable(reset_vector):
             raise _FlashVerificationError(
                 "The re-erase can't be confirmed: this bootloader protocol "
                 "can't read the flash back."
             )
-        checks = [("the reset vector", reset_vector())] + [
+        checks = [
+            (f"the reset vector at 0x{region.address:08X}", region)
+            for region in reset_vector()
+        ] + [
             (f"region {index + 1} at 0x{region.address:08X}", region)
             for index, region in enumerate(regions)
         ]

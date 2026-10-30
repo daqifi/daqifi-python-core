@@ -257,8 +257,9 @@ def _commands(hid):
 _REGION_CRCS = (Crc16(_RESET).crc, Crc16(_BULK).crc)
 # Every record of _GOOD is sent and acknowledged: address, 3 data, EOF.
 _ALL_PROGRAMMED = (_PROGRAMMED,) * 5
-# After a cleanup erase the reset vector and both regions read back blank.
-_BLANKS = tuple(_crc(Crc16(b"\xff" * n).crc) for n in (4, 8, 32))
+# After a cleanup erase the reset vector (two halfwords) and both regions
+# read back blank.
+_BLANKS = tuple(_crc(Crc16(b"\xff" * n).crc) for n in (2, 2, 8, 32))
 
 
 def test_verifying_reads_every_region_crc_back() -> None:
@@ -277,7 +278,7 @@ def test_a_crc_mismatch_fails_verification_without_a_retry_and_re_erases() -> No
     assert error is not None and error.failed_state == FirmwareUpdateState.VERIFYING
     assert "CRC mismatch" in str(error.__cause__)
     # Second region asked once (no retry), then the cleanup erase; no jump.
-    assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x04, 0x02, 0x04, 0x04, 0x04]
+    assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x04, 0x02, 0x04, 0x04, 0x04, 0x04]
     assert states[-2:] == [_CLEANING_UP, _RECOVERED]
     assert service.current_state == _RECOVERED
     assert "re-erased" in error.recovery_guidance
@@ -289,9 +290,9 @@ def test_a_reply_that_isnt_a_crc_reply_fails_verification_without_a_retry() -> N
     assert error.failed_state == FirmwareUpdateState.VERIFYING
     assert "wasn't a CRC reply" in str(error.__cause__)
     # One CRC request in verification (no retry), then the cleanup erase and
-    # its three read-backs (reset vector, two regions).
-    assert _commands(hid)[-5:] == [0x04, 0x02, 0x04, 0x04, 0x04]
-    assert _commands(hid).count(0x04) == 4
+    # its four read-backs (reset vector halfwords, two regions).
+    assert _commands(hid)[-6:] == [0x04, 0x02, 0x04, 0x04, 0x04, 0x04]
+    assert _commands(hid).count(0x04) == 5
     assert service.current_state == _RECOVERED
 
 
@@ -344,7 +345,7 @@ def test_a_programming_failure_re_erases_to_a_clean_bootloader() -> None:
     hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED, *_BLANKS])
     service, states, error = _run(hid)
     assert error.failed_state == FirmwareUpdateState.PROGRAMMING
-    assert _commands(hid) == [0x01, 0x02, 0x03, 0x03, 0x03, 0x02, 0x04, 0x04, 0x04]
+    assert _commands(hid) == [0x01, 0x02, 0x03, 0x03, 0x03, 0x02, 0x04, 0x04, 0x04, 0x04]
     assert states[-2:] == [_CLEANING_UP, _RECOVERED]
     assert "re-erased" in error.recovery_guidance
 
@@ -393,7 +394,7 @@ def test_a_cancel_mid_flash_is_cleaned_up_too() -> None:
     hid = _CancelsDuringProgramming(cancel_event, [_VERSION, _ERASED, _PROGRAMMED, _ERASED, *_BLANKS])
     service, states, error = _run(hid, cancel_event=cancel_event)
     assert "canceled" in str(error).lower()
-    assert _commands(hid) == [0x01, 0x02, 0x03, 0x02, 0x04, 0x04, 0x04]
+    assert _commands(hid) == [0x01, 0x02, 0x03, 0x02, 0x04, 0x04, 0x04, 0x04]
     assert service.current_state == _RECOVERED
 
 
@@ -448,7 +449,7 @@ def test_an_unanswered_crc_request_fails_without_a_retry_that_could_take_a_late_
     service, states, error = _run(hid)
     assert error.failed_state == FirmwareUpdateState.VERIFYING
     assert "didn't answer" in str(error.__cause__)
-    assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x02, 0x04, 0x04, 0x04]
+    assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x02, 0x04, 0x04, 0x04, 0x04]
     assert service.current_state == _RECOVERED
 
 
@@ -480,7 +481,7 @@ def test_recovered_needs_the_flash_read_back_blank_not_just_an_erase_ack() -> No
     # outcome (nvm.c APP_NVMOperation checks no error flag): an acked erase
     # whose flash still reads back programmed is not RECOVERED.
     hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED,
-                       _BLANKS[0], _BLANKS[1], _crc(Crc16(_BULK).crc)])
+                       _BLANKS[0], _BLANKS[1], _BLANKS[2], _crc(Crc16(_BULK).crc)])
     service, states, error = _run(hid)
     assert states[-2:] == [_CLEANING_UP, FirmwareUpdateState.FAILED]
     assert service.current_state == FirmwareUpdateState.FAILED
@@ -503,21 +504,26 @@ def test_recovered_needs_the_reset_vector_read_back_blank_even_outside_the_image
     # The image's only region reads back blank (it always was), but the old
     # application's reset word survived an erase that was acked and did
     # nothing: the bootloader would start it (app.c checks APP_RESET_ADDRESS).
-    reset_programmed = _crc(Crc16(b"\x00\x10\x00\x0b").crc)
+    reset_programmed = _crc(Crc16(b"\x00\x10").crc)
     hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED,
-                       reset_programmed, _crc(Crc16(b"\xff" * 8).crc)])
+                       reset_programmed, _BLANKS[1], _crc(Crc16(b"\xff" * 8).crc)])
     service, states, error = _run(hid, image=_SPARSE)
     assert states[-2:] == [_CLEANING_UP, FirmwareUpdateState.FAILED]
     requests = [_decode_frame(w) for w in hid.writes if _decode_frame(w)[0] == 0x04]
-    assert int.from_bytes(requests[0][1:5], "little") == 0x9D000000
-    assert int.from_bytes(requests[0][5:9], "little") == 4
+    # The first read-back is the reset vector's first halfword; it isn't
+    # blank, so the check stops there.
+    assert (int.from_bytes(requests[0][1:5], "little"),
+            int.from_bytes(requests[0][5:9], "little")) == (0x9D000000, 2)
 
 
 def test_a_sparse_image_recovers_once_the_reset_vector_and_its_region_read_blank() -> None:
     hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED,
-                       _crc(Crc16(b"\xff" * 4).crc), _crc(Crc16(b"\xff" * 8).crc)])
+                       _BLANKS[0], _BLANKS[1], _crc(Crc16(b"\xff" * 8).crc)])
     service, _states, _error = _run(hid, image=_SPARSE)
     assert service.current_state == _RECOVERED
+    requests = [_decode_frame(w) for w in hid.writes if _decode_frame(w)[0] == 0x04]
+    assert [(int.from_bytes(r[1:5], "little"), int.from_bytes(r[5:9], "little"))
+            for r in requests] == [(0x9D000000, 2), (0x9D000002, 2), (0x9D0F0000, 8)]
 
 
 def test_regions_closer_than_the_merge_gap_share_one_crc_window_with_the_gap_blank() -> None:
@@ -564,3 +570,47 @@ def test_overlapping_records_are_refused() -> None:
 def test_touching_records_are_not_overlapping() -> None:
     image = _image(_base(0x1D00), _data(0x0000, b"\x01" * 16), _data(0x0010, b"\x02" * 16))
     assert len(Pic32BootloaderProtocol().compute_crc_regions(image)) == 1
+
+
+# ---- round 7 ------------------------------------------------------------
+
+
+def test_crc16_over_two_bytes_is_a_bijection() -> None:
+    # Why the reset word is read as two halfwords: over a 2-byte message this
+    # CRC (the bootloader's APP_CalculateCrc) takes 65,536 distinct values,
+    # so a halfword reads "blank" only if it is FF FF.
+    assert len({Crc16(bytes([a, b])).crc for a in range(256) for b in range(256)}) == 65536
+
+
+class _FlashModel(_Bootloader):
+    """Answers READ_CRC from simulated flash contents (erased, 0xFF, except
+    the bytes given), as APP_CalculateCrc would, for whatever window is
+    asked; other commands get the scripted replies."""
+
+    def __init__(self, replies, flash) -> None:
+        super().__init__(replies)
+        self._flash = flash
+
+    def write(self, data) -> None:
+        payload = _decode_frame(data)
+        if payload[0] != 0x04:
+            super().write(data)
+            return
+        _f._FakeHidTransport.write(self, data)
+        address = int.from_bytes(payload[1:5], "little")
+        length = int.from_bytes(payload[5:9], "little")
+        window = bytes(self._flash.get(address + i, 0xFF) for i in range(length))
+        self._ready.append(_crc(Crc16(window).crc))
+
+
+def test_a_reset_word_whose_4_byte_crc_collides_with_blank_is_not_recovered() -> None:
+    # The reset word survived the erase as 23 86 40 0B, whose CRC over 4 bytes
+    # equals that of FF FF FF FF: one 4-byte window reads it as erased and the
+    # stale application would start. Its halfwords don't collide.
+    word = bytes.fromhex("2386400B")
+    assert Crc16(word).crc == Crc16(b"\xff" * 4).crc
+    flash = {0x9D000000 + i: b for i, b in enumerate(word)}
+    hid = _FlashModel([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED], flash)
+    service, states, error = _run(hid, image=_SPARSE)
+    assert service.current_state == FirmwareUpdateState.FAILED
+    assert "could not be re-erased" in error.recovery_guidance

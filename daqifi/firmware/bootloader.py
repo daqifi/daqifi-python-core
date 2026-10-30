@@ -375,14 +375,21 @@ class Pic32BootloaderProtocol:
             regions.append(self._region(start, buffer))
         return regions
 
-    def reset_vector_region(self) -> FlashCrcRegion:
-        """The bootloader's start-or-stay word, with the CRC it gives when
-        erased: an erase isn't confirmed until this reads back blank."""
-        return FlashCrcRegion(
-            address=self.APP_RESET_ADDRESS,
-            length=4,
-            expected_crc=Crc16(b"\xff" * 4).crc,
-        )
+    def reset_vector_regions(self) -> List[FlashCrcRegion]:
+        """The bootloader's start-or-stay word as two 2-byte windows, each
+        with the CRC of erased flash: an erase isn't confirmed until both
+        read back blank.
+
+        Two halfwords, not one 4-byte window, because a CRC-16 over 4 bytes
+        can collide with the blank value (23 86 40 0B gives the CRC of
+        FF FF FF FF), while over 2 bytes it is a bijection: equal CRC means
+        equal halfword. READ_CRC takes any length (datastream.c passes it
+        to APP_CalculateCrc, a byte loop)."""
+        blank = Crc16(b"\xff\xff").crc
+        return [
+            FlashCrcRegion(address=self.APP_RESET_ADDRESS + offset, length=2, expected_crc=blank)
+            for offset in (0, 2)
+        ]
 
     def _region(self, start: int, data: bytes) -> FlashCrcRegion:
         return FlashCrcRegion(
