@@ -7,6 +7,13 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Typed errors (#201): `DeviceNotConnectedError` (a `RuntimeError`, as the
+  not-connected guards raised before; `is_shutting_down` when a disconnect
+  cut a send off), `ScpiInitializationError` (a `CommandError`), and
+  `SerialPortConnectError` with `reason` (`SerialPortConnectFailure`:
+  not found, in use, access denied, unknown; also a
+  `serial.SerialException`). `SerialInterface.last_open_error` keeps why
+  `open()` failed.
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -17,6 +24,20 @@ aims to follow [Semantic Versioning](https://semver.org/).
   enumerated device; `SerialStreamTransport.port_name` (#161).
 
 ### Changed
+- `DaqifiDevice.initialize()` checks its setup commands (a
+  `SYSTem:ERRor?` after them, retried once) and raises
+  `ScpiInitializationError` on an error that persists. It then re-sends
+  `SYSInfoPB?` every second until a status reports the channels, and
+  raises `DeviceUnresponsiveError` (now also a `TimeoutError`) on any
+  transport if none does: on serial it reported Ready with empty metadata
+  before. The serial default timeout is 8 s (#201).
+- `execute_text_command` caps every exchange at five times
+  `response_timeout_ms` when `max_total_ms` isn't given, reads LF-only
+  replies, and treats a blank-only reply as an answer instead of waiting
+  out the timeout (#201).
+- `ConnectionRetryOptions` rejects invalid values when set: fewer than one
+  attempt, negative delays, a backoff multiplier below 1, a connection
+  timeout under 1 ms (#201).
 - A PIC32 update now refuses to start while more than one DAQiFi board is
   connected over USB (application serial ports with 04D8:F794, plus boards
   already in bootloader mode), and says to disconnect the others; it also
@@ -28,6 +49,10 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- `send()` cut off by a `disconnect()` on another thread raised a raw
+  `ValueError` and overwrote Disconnected with Lost/Error; it now raises
+  `DeviceNotConnectedError(is_shutting_down=True)` and the status stays
+  Disconnected (#201).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than

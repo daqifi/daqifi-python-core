@@ -36,9 +36,24 @@ pytestmark = pytest.mark.portomatic_generated
 # ---- Fakes -------------------------------------------------------------------
 
 
+def _status_frame() -> bytes:
+    """A length-prefixed SYSInfoPB? reply reporting one analog channel."""
+    from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+
+    body = DaqifiOutMessage(analog_in_port_num=1, device_sn=1234).SerializeToString()
+    return bytes([len(body)]) + body
+
+
 class _FakeStream:
-    def __init__(self):
+    """Answers as a healthy device does: ``0,"No error"`` to
+    ``SYSTem:ERRor?`` (initialize()'s check of its setup commands) and a
+    status frame reporting a channel to ``SYSInfoPB?``. ``silent`` turns
+    both off, for a device that never replies."""
+
+    def __init__(self, silent: bool = False):
         self.written: list = []
+        self.silent = silent
+        self._rx = bytearray()
 
     def write(self, data: bytes) -> int:
         # Return the byte count so DaqifiDevice.send's write loop
@@ -46,17 +61,24 @@ class _FakeStream:
         # `None` from write() raise IOError).
         b = bytes(data)
         self.written.append(b)
+        if not self.silent:
+            if b.startswith(b"SYSTem:ERRor?"):
+                self._rx.extend(b'0,"No error"\r\n')
+            elif b.startswith(b"SYSTem:SYSInfoPB?"):
+                self._rx.extend(_status_frame())
         return len(b)
 
     def flush(self) -> None:
         pass
 
     def read(self, n: int) -> bytes:
-        return b""
+        out = bytes(self._rx[:n])
+        del self._rx[:n]
+        return out
 
     @property
     def in_waiting(self) -> int:
-        return 0
+        return len(self._rx)
 
 
 class _FakeTransport:
@@ -637,6 +659,7 @@ class TestSilentInitDetection:
         from daqifi.exceptions import DeviceUnresponsiveError
         from daqifi.transport import TcpStreamTransport
         t = _make_fake_transport(TcpStreamTransport)
+        t.stream.silent = True
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
         try:
@@ -648,18 +671,20 @@ class TestSilentInitDetection:
             except Exception:
                 pass
 
-    def test_serial_silent_init_does_not_raise(self):
-        """Serial fake never delivers SN either, but matches historical
-        behavior — no raise, just empty metadata. Backwards-compat
-        with existing fakes that don't run a real protobuf consumer."""
+    def test_serial_silent_init_raises_unresponsive(self):
+        """#201: a serial device that never reports its channels isn't
+        Ready with empty metadata either; it raises, as upstream's
+        InitializeAsync times out (8c97c47)."""
+        from daqifi.exceptions import DeviceUnresponsiveError
         from daqifi.transport import SerialStreamTransport
         t = _make_fake_transport(SerialStreamTransport)
+        t.stream.silent = True
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
         try:
-            # Should NOT raise, even though SN never arrives.
-            dev.initialize(response_timeout_s=0.1)
-            assert dev.metadata.serial_number == ""
+            with pytest.raises(DeviceUnresponsiveError, match="channel configuration"):
+                dev.initialize(response_timeout_s=0.1)
+            assert dev.state != DeviceState.Ready
         finally:
             try:
                 dev.close()
@@ -716,6 +741,7 @@ class TestSilentInitDetection:
         from daqifi.exceptions import DeviceUnresponsiveError
         from daqifi.transport import TcpStreamTransport
         t = _make_fake_transport(TcpStreamTransport)
+        t.stream.silent = True
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
         try:

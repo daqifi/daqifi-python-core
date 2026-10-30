@@ -32,6 +32,7 @@ from ._internal.comm import (
     HidDeviceInfo,
     TransportStatusEventArgs,
     UdpEndPoint,
+    serial_open_error,
 )
 from ._internal.hid_enumerator import HidApiPlatform, HidPlatform
 
@@ -665,8 +666,11 @@ class SerialStreamTransport:
                     )
                     continue
 
-                self._notify_status(False, exc)
-                raise
+                # Named (not found / in use / access denied), the original
+                # kept as the cause (daqifi-core da74a4c).
+                error = serial_open_error(self._port_name, exc)
+                self._notify_status(False, error)
+                raise error from exc
 
         self._notify_status(False, last_exc)
         raise RuntimeError("Connection failed after all retry attempts.")

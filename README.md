@@ -460,7 +460,10 @@ Base + general:
 - **`ConfigurationError`**: Invalid configuration parameter
 - **`FeatureNotSupportedError`**: Feature not available on this device variant
 - **`PowerStateError`**: Device not in the required power state for the operation
-- **`DeviceUnresponsiveError`**: TCP socket healthy but the device's SCPI listener never replied (typically after cumulative connect/disconnect cycles)
+- **`DeviceUnresponsiveError`**: the transport is up but the device never reported its channels to `initialize()` (over TCP, typically the SCPI listener wedged after cumulative connect/disconnect cycles); also a `TimeoutError`
+- **`DeviceNotConnectedError`**: the operation needs a connected device (a `RuntimeError`); `is_shutting_down` when a disconnect on another thread cut a send off
+- **`ScpiInitializationError`**: a `CommandError`: the device refused an `initialize()` setup command, even after a retry
+- **`SerialPortConnectError`**: a serial port wouldn't open; `reason` says whether it was not found, in use or access denied (also a `serial.SerialException`)
 
 SD card operations (port of upstream PR #182):
 

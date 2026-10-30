@@ -71,13 +71,24 @@ class LineBasedMessageParser:
     SCPI / DAQiFi text-protocol responses.
     """
 
-    def __init__(self, line_ending: str = "\r\n", encoding: str = "utf-8") -> None:
+    def __init__(
+        self,
+        line_ending: str = "\r\n",
+        encoding: str = "utf-8",
+        emit_empty_lines: bool = False,
+    ) -> None:
+        """``line_ending="\n"`` reads LF- and CRLF-terminated lines alike
+        (the CR is stripped with the line). ``emit_empty_lines`` emits a
+        complete line with no content as an empty message instead of
+        dropping it: the text exchange counts a lone CRLF as an answer
+        (upstream a57a86a)."""
         if not line_ending:
             # An empty line-ending would make `bytes.find` return 0 on every
             # iteration, putting `parse_messages` into an infinite loop.
             raise ValueError("line_ending must not be empty")
         self._encoding = encoding
         self._line_ending = line_ending.encode(encoding)
+        self._emit_empty_lines = emit_empty_lines
 
     def parse_messages(self, data: bytes) -> Tuple[List[InboundMessage[str]], int]:
         """Parse `data` into a list of text messages plus consumed-byte count.
@@ -102,6 +113,7 @@ class LineBasedMessageParser:
                 break
 
             line_length = line_end_index - search_start
+            cleaned = ""
             if line_length > 0:
                 line_data = data[search_start:line_end_index]
                 # Use errors="replace" so a malformed byte sequence in the
@@ -112,8 +124,8 @@ class LineBasedMessageParser:
                 # whitespace inside a SCPI response (e.g. \"  X1234\")
                 # isn't silently mangled (Qodo PR 17 pass 46 #1).
                 cleaned = message_text.rstrip("\r\n")
-                if cleaned:
-                    messages.append(InboundMessage(data=cleaned))
+            if cleaned or self._emit_empty_lines:
+                messages.append(InboundMessage(data=cleaned))
 
             search_start = line_end_index + line_ending_len
             consumed_bytes = search_start

@@ -1,0 +1,394 @@
+"""#201: device lifecycle drift from daqifi-core.
+
+1. initialize() on serial reported Ready with empty metadata (one
+   SYSInfoPB?, a 1 s poll, no error), and sent its setup commands
+   fire-and-forget, so a refused one passed silently. It now re-sends
+   SYSInfoPB? every second until a status reports channels (else raises,
+   upstream 8c97c47), and checks the setup commands with a SYSTem:ERRor?
+   terminator, retrying once (upstream 1ce13b2 / 1142893).
+2. send() racing disconnect() raised a raw ValueError and overwrote
+   Disconnected with Lost/Error (upstream baabf0c).
+3. execute_text_command had no overall cap (upstream caps every exchange
+   at 5x the first-response timeout), and a bare-LF or blank-only reply
+   waited out the timeout (upstream a57a86a / 5a9f917).
+4. Typed errors: serial open failures are named (upstream da74a4c),
+   not-connected guards raise DeviceNotConnectedError (d76b2f5), and
+   ConnectionRetryOptions rejects invalid values (14fb907).
+"""
+
+import errno
+import threading
+import time
+
+import pytest
+import serial
+
+import daqifi.exceptions as exc_mod
+from daqifi._internal.comm import ConnectionRetryOptions
+from daqifi._internal.scpi import ConnectionStatus, DeviceState
+from daqifi.devices import DaqifiStreamingDevice
+
+
+def _status_frame() -> bytes:
+    from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+
+    body = DaqifiOutMessage(analog_in_port_num=2, device_sn=1234).SerializeToString()
+    return bytes([len(body)]) + body
+
+
+class _Stream:
+    """A scripted device. ``err_replies`` are the answers to successive
+    SYSTem:ERRor? queries (then ``0,"No error"``); ``status_after`` is how
+    many SYSInfoPB? requests go unanswered before one is answered (None:
+    never); ``on_write`` maps a command prefix to bytes to send back."""
+
+    def __init__(self, err_replies=(), status_after=0, on_write=None):
+        self.written = []
+        self.err_replies = list(err_replies)
+        self.status_after = status_after
+        self.info_requests = 0
+        self.on_write = dict(on_write or {})
+        self._rx = bytearray()
+        self._lock = threading.Lock()
+
+    def feed(self, data: bytes) -> None:
+        with self._lock:
+            self._rx.extend(data)
+
+    def write(self, data) -> int:
+        b = bytes(data)
+        self.written.append(b)
+        if b.startswith(b"SYSTem:ERRor?"):
+            reply = self.err_replies.pop(0) if self.err_replies else b'0,"No error"'
+            self.feed(reply + b"\r\n")
+        elif b.startswith(b"SYSTem:SYSInfoPB?"):
+            self.info_requests += 1
+            if self.status_after is not None and self.info_requests > self.status_after:
+                self.feed(_status_frame())
+        for prefix, reply in self.on_write.items():
+            if b.startswith(prefix):
+                self.feed(reply)
+        return len(b)
+
+    def flush(self) -> None:
+        pass
+
+    def read(self, n: int) -> bytes:
+        with self._lock:
+            out = bytes(self._rx[:n])
+            del self._rx[:n]
+            return out
+
+    @property
+    def in_waiting(self) -> int:
+        with self._lock:
+            return len(self._rx)
+
+    def commands(self):
+        return [w.decode(errors="replace").strip() for w in self.written]
+
+
+def _device(stream):
+    from daqifi.transport import SerialStreamTransport
+
+    class _Transport(SerialStreamTransport):
+        def __init__(self):
+            self._stream_obj = stream
+            self._connected = False
+            self.handlers = []
+
+        @property
+        def stream(self):
+            return self._stream_obj
+
+        @property
+        def is_connected(self):
+            return self._connected
+
+        def add_status_changed(self, h):
+            self.handlers.append(h)
+
+        def remove_status_changed(self, h):
+            if h in self.handlers:
+                self.handlers.remove(h)
+
+        def connect(self, retry_options=None):
+            self._connected = True
+
+        def disconnect(self):
+            self._connected = False
+
+        def close(self):
+            self._connected = False
+
+    device = DaqifiStreamingDevice(name="d", transport=_Transport())
+    device.connect()
+    return device
+
+
+# ---- 1: initialize ------------------------------------------------------------
+
+
+def test_serial_initialize_without_a_status_raises_instead_of_reporting_ready() -> None:
+    device = _device(_Stream(status_after=None))
+    try:
+        with pytest.raises(TimeoutError, match="channel configuration"):
+            device.initialize(response_timeout_s=0.5)
+        assert device.state != DeviceState.Ready
+    finally:
+        device.disconnect()
+
+
+def test_initialize_re_requests_device_info_until_the_channels_arrive() -> None:
+    # The first SYSInfoPB? is missed (a serial port still settling).
+    stream = _Stream(status_after=1)
+    device = _device(stream)
+    try:
+        device.initialize(response_timeout_s=4.0)
+        assert device.state == DeviceState.Ready
+        assert len(device.channels) == 2
+        assert stream.info_requests >= 2
+    finally:
+        device.disconnect()
+
+
+def test_a_persistently_refused_init_command_raises_typed() -> None:
+    stream = _Stream(err_replies=[b'-200,"Execution error"', b'-200,"Execution error"'])
+    device = _device(stream)
+    try:
+        with pytest.raises(exc_mod.CommandError, match="-200") as info:
+            device.initialize(response_timeout_s=1.0)
+        assert type(info.value).__name__ == "ScpiInitializationError"
+        assert device.state == DeviceState.Error
+    finally:
+        device.disconnect()
+
+
+def test_a_volunteered_init_error_raises_too() -> None:
+    stream = _Stream(on_write={b"SYSTem:POWer:STATe 1": b"**ERROR: -200, Execution error\r\n"})
+    device = _device(stream)
+    try:
+        with pytest.raises(exc_mod.CommandError, match="ERROR"):
+            device.initialize(response_timeout_s=1.0)
+    finally:
+        device.disconnect()
+
+
+def test_a_transient_init_error_is_retried_once() -> None:
+    stream = _Stream(err_replies=[b'-200,"Execution error"'])
+    device = _device(stream)
+    try:
+        device.initialize(response_timeout_s=2.0)
+        assert device.state == DeviceState.Ready
+        power_on = [c for c in stream.commands() if c.startswith("SYSTem:POWer:STATe 1")]
+        assert len(power_on) == 2
+    finally:
+        device.disconnect()
+
+
+# ---- 2: send() racing disconnect() --------------------------------------------
+
+
+class _ClosingStream(_Stream):
+    """A write that blocks until released, then fails as a closed stream
+    does."""
+
+    def __init__(self):
+        super().__init__()
+        self.block = threading.Event()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def write(self, data) -> int:
+        if self.block.is_set():
+            self.entered.set()
+            self.release.wait(5)
+            raise ValueError("I/O operation on closed file.")
+        return super().write(data)
+
+
+def test_a_send_cut_off_by_disconnect_fails_typed_and_keeps_disconnected() -> None:
+    from daqifi._internal import scpi_commands
+
+    stream = _ClosingStream()
+    device = _device(stream)
+    stream.block.set()
+    outcome = {}
+
+    def _send():
+        try:
+            device.send(scpi_commands.get_last_error())
+        except BaseException as e:
+            outcome["error"] = e
+
+    sender = threading.Thread(target=_send, daemon=True)
+    sender.start()
+    assert stream.entered.wait(5)
+    device.disconnect()  # closes the stream under the blocked write
+    stream.release.set()
+    sender.join(5)
+    error = outcome.get("error")
+    assert type(error).__name__ == "DeviceNotConnectedError", error
+    assert isinstance(error, RuntimeError)
+    assert error.is_shutting_down
+    assert device.status == ConnectionStatus.Disconnected
+    assert device.state == DeviceState.Disconnected
+
+
+# ---- 3: execute_text_command --------------------------------------------------
+
+
+def test_a_text_exchange_is_capped_while_the_device_keeps_talking() -> None:
+    stream = _Stream()
+    device = _device(stream)
+    done = threading.Event()
+
+    def _chatter():
+        end = time.monotonic() + 6
+        while not done.is_set() and time.monotonic() < end:
+            stream.feed(b"line\r\n")
+            time.sleep(0.05)
+
+    feeder = threading.Thread(target=_chatter, daemon=True)
+    try:
+        feeder.start()
+        began = time.monotonic()
+        lines = device.execute_text_command(
+            lambda: None, response_timeout_ms=200, completion_timeout_ms=300
+        )
+        elapsed = time.monotonic() - began
+        assert lines
+        assert elapsed < 2.0, f"took {elapsed:.2f} s; upstream ends it at 1.0 s"
+    finally:
+        done.set()
+        feeder.join(7)
+        device.disconnect()
+
+
+def test_a_bare_lf_reply_is_read() -> None:
+    from daqifi._internal.scpi_commands import ScpiMessage
+
+    device = _device(_Stream(on_write={b"X?": b"value\n"}))
+    try:
+        began = time.monotonic()
+        lines = device.execute_text_command(
+            lambda: device.send(ScpiMessage("X?")),
+            response_timeout_ms=2000, completion_timeout_ms=200,
+        )
+        assert lines == ["value"]
+        assert time.monotonic() - began < 1.5
+    finally:
+        device.disconnect()
+
+
+def test_a_blank_only_reply_ends_the_wait_and_returns_nothing() -> None:
+    from daqifi._internal.scpi_commands import ScpiMessage
+
+    device = _device(_Stream(on_write={b"SYSTem:LOG?": b"\r\n"}))
+    try:
+        began = time.monotonic()
+        lines = device.execute_text_command(
+            lambda: device.send(ScpiMessage("SYSTem:LOG?")),
+            response_timeout_ms=3000, completion_timeout_ms=200,
+        )
+        assert lines == []
+        assert time.monotonic() - began < 1.5
+    finally:
+        device.disconnect()
+
+
+# ---- 4: typed errors -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error, platform, reason",
+    [
+        (serial.SerialException(errno.ENOENT, "could not open port: [Errno 2] No such file"), "linux", "NOT_FOUND"),
+        (serial.SerialException(errno.EBUSY, "could not open port: [Errno 16] Device or resource busy"), "linux", "IN_USE"),
+        (serial.SerialException(errno.EAGAIN, "Could not exclusively lock port"), "linux", "IN_USE"),
+        (serial.SerialException(errno.EACCES, "could not open port: [Errno 13] Permission denied"), "linux", "ACCESS_DENIED"),
+        (serial.SerialException("could not open port 'COM41': PermissionError(13, 'Access is denied.', None, 5)"), "win32", "IN_USE"),
+        (serial.SerialException("could not open port 'COM41': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)"), "win32", "NOT_FOUND"),
+        (serial.SerialException("could not open port 'COM41': OSError(22, 'The semaphore timeout period has expired.', None, 121)"), "win32", "UNKNOWN"),
+    ],
+)
+def test_a_serial_connect_failure_is_named(monkeypatch, error, platform, reason) -> None:
+    import sys
+
+    import daqifi.transport as transport_mod
+
+    def _fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(transport_mod.serial, "Serial", _fail)
+    monkeypatch.setattr(sys, "platform", platform)
+    t = transport_mod.SerialStreamTransport("COM41")
+    with pytest.raises(serial.SerialException) as info:
+        t.connect()
+    raised = info.value
+    assert type(raised).__name__ == "SerialPortConnectError"
+    assert raised.reason.name == reason
+    assert "COM41" in str(raised)
+    assert raised.__cause__ is error
+
+
+def test_nyquist_device_open_failure_names_the_cause(monkeypatch) -> None:
+    import daqifi._internal.comm as comm_mod
+    from daqifi.device import NyquistDevice
+
+    def _busy(*args, **kwargs):
+        raise serial.SerialException(errno.EBUSY, "could not open port COM50: busy")
+
+    monkeypatch.setattr(comm_mod.serial, "Serial", _busy)
+    with pytest.raises(exc_mod.ConnectionError) as info:
+        NyquistDevice.connect("COM50")
+    assert "in use" in str(info.value)
+    assert isinstance(info.value.__cause__, serial.SerialException)
+
+
+def test_not_connected_guards_raise_the_typed_error() -> None:
+    from daqifi._internal import scpi_commands
+
+    device = DaqifiStreamingDevice(name="d", transport=None)
+    for call in (
+        lambda: device.send(scpi_commands.get_last_error()),
+        device.initialize,
+        device.get_sd_card_files,
+    ):
+        with pytest.raises(RuntimeError) as info:
+            call()
+        assert type(info.value).__name__ == "DeviceNotConnectedError"
+        assert not info.value.is_shutting_down
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_attempts": 0},
+        {"max_attempts": -1},
+        {"connection_timeout": -1.0},
+        {"connection_timeout": 0.0},
+        {"initial_delay": -0.5},
+        {"max_delay": -1.0},
+        {"backoff_multiplier": 0.5},
+        {"connection_timeout": float("nan")},
+    ],
+)
+def test_invalid_retry_options_are_rejected(kwargs) -> None:
+    with pytest.raises(ValueError):
+        ConnectionRetryOptions(**kwargs)
+    options = ConnectionRetryOptions()
+    (name, value), = kwargs.items()
+    with pytest.raises(ValueError):
+        setattr(options, name, value)
+
+
+def test_valid_retry_options_still_work() -> None:
+    for options in (
+        ConnectionRetryOptions(),
+        ConnectionRetryOptions.no_retry(),
+        ConnectionRetryOptions.fast(),
+        ConnectionRetryOptions.resilient(),
+        ConnectionRetryOptions(initial_delay=0, max_delay=0, backoff_multiplier=1),
+    ):
+        assert options.max_attempts >= 1
