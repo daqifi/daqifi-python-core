@@ -252,23 +252,9 @@ with open("export.csv", "w") as f:
     )
 ```
 
-A parsed SD-card log exports through `SdCardLogSampleSource`; its naive-UTC
-timestamps become ticks via `datetime_to_ticks`. Analog columns are `AI<n>`
-when the channel numbers are known (pass `analog_channels`, or entries that
-carry them); otherwise they're named by position, `analog[0]`, … , since a
-log of only enabled channels doesn't say which input each value came from.
-Relative time defaults to 3 decimals (1 ms); set `relative_time_decimals` up
-to 7 for streams faster than 1 kHz.
-
-```python
-from daqifi.export import SdCardLogSampleSource
-from daqifi.sdcard import SdCardCsvFileParser
-
-session = SdCardCsvFileParser().parse_file("log_a.csv")
-with open("log_a_export.csv", "w") as f:
-    source = SdCardLogSampleSource.from_session(session, analog_channels=[0, 1])
-    CsvExporter().export(source, f)
-```
+Relative time defaults to 3 decimals (1 ms); set
+`CsvExportOptions(relative_time_decimals=...)` up to 7 for streams faster
+than 1 kHz.
 
 ### SD Card Operations
 

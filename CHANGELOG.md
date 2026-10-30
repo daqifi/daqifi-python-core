@@ -7,12 +7,7 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `daqifi.export.SdCardLogSampleSource` (and `.from_session`) feeds a
-  parsed SD-card log to `CsvExporter`, naming analog columns `AI<n>` when
-  the channel numbers are known and by position (`analog[0]`, ...)
-  otherwise; `datetime_to_ticks` converts a timestamp (naive taken as UTC)
-  to .NET ticks.
-  `CsvExportOptions.relative_time_decimals` (0–7, default 3) sets the
+- `CsvExportOptions.relative_time_decimals` (0–7, default 3) sets the
   relative-time resolution (#195).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
