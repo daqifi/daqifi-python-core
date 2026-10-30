@@ -24,6 +24,8 @@ from typing import Iterable, List, Optional
 
 import pytest
 
+from daqifi.exceptions import FeatureNotSupportedError
+
 from daqifi.devices import (
     DaqifiStreamingDevice,
     _validate_sd_card_file_name,
@@ -344,11 +346,11 @@ class TestFormatSdCard:
             sd.format_sd_card()
 
     def test_requires_usb_transport(self) -> None:
-        # Format disables LAN to take the SPI bus — refuse over LAN
-        # so the call doesn't sever its own control connection.
+        # Over WiFi, SD file operations need firmware v3.7.0+ (#200); with
+        # no known firmware version the call is refused, pointing at USB.
         sd = _make_device_with_serial_facade(usb=False)
         try:
-            with pytest.raises(RuntimeError, match="USB"):
+            with pytest.raises(FeatureNotSupportedError, match="v3.7.0"):
                 sd.format_sd_card()
         finally:
             sd.disconnect()
@@ -387,11 +389,11 @@ class TestDeleteSdCardFile:
             sd.delete_sd_card_file("x.bin")
 
     def test_requires_usb_transport(self) -> None:
-        # Delete uses prepare_sd_interface (disables LAN) — Qodo
-        # PR #41 finding 4.
+        # Over WiFi, SD file operations need firmware v3.7.0+ (#200); with
+        # no known firmware version the call is refused, pointing at USB.
         sd = _make_device_with_serial_facade(usb=False)
         try:
-            with pytest.raises(RuntimeError, match="USB"):
+            with pytest.raises(FeatureNotSupportedError, match="v3.7.0"):
                 sd.delete_sd_card_file("x.bin")
         finally:
             sd.disconnect()
@@ -452,11 +454,11 @@ class TestGetSdCardFiles:
             sd.get_sd_card_files()
 
     def test_requires_usb_transport(self) -> None:
-        # get_sd_card_files uses prepare_sd_interface (disables LAN)
-        # — Qodo PR #41 finding 4.
+        # Over WiFi, SD file operations need firmware v3.7.0+ (#200); with
+        # no known firmware version the call is refused, pointing at USB.
         sd = _make_device_with_serial_facade(usb=False)
         try:
-            with pytest.raises(RuntimeError, match="USB"):
+            with pytest.raises(FeatureNotSupportedError, match="v3.7.0"):
                 sd.get_sd_card_files()
         finally:
             sd.disconnect()
@@ -491,7 +493,7 @@ class TestDownloadSdCardFile:
         # for any non-SerialStreamTransport transport.
         sd = _make_device_with_serial_facade(usb=False)
         try:
-            with pytest.raises(RuntimeError, match="USB"):
+            with pytest.raises(FeatureNotSupportedError, match="v3.7.0"):
                 sd.download_sd_card_file("x.bin", BytesIO())
         finally:
             sd.disconnect()

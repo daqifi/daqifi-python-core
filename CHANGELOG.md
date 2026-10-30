@@ -7,6 +7,11 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- SD card listing, download, delete and format work over WiFi on firmware
+  v3.7.0 and later (the firmware routes the SD reply back over the TCP
+  connection), keeping the LAN interface up; older or unknown firmware is
+  refused with `FeatureNotSupportedError`. SD logging stays USB-only.
+  `start_sd_card_logging` returns the log file name (#200).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -28,6 +33,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- An SD operation (list, delete, format, download) that stopped a live
+  stream now resumes it; the stream stayed stopped while the device state
+  still said Streaming (#200).
+- `enable_adc_channels` (and `start_sd_card_logging(channel_mask=...)`) take
+  a decimal mask only: a hex mask like `"FF"` was sent, the firmware refused
+  it, and the recording ran with the previous channel set (#200).
+- `run_sd_benchmark` takes its size in KB, 1 to 1024, as the firmware does
+  (#200).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than

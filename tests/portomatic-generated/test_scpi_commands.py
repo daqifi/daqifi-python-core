@@ -121,7 +121,8 @@ class TestParameterizedCommands:
 
     @pytest.mark.parametrize("bad", [0, -1])
     def test_run_sd_benchmark_rejects_non_positive(self, bad):
-        with pytest.raises(ValueError, match="positive"):
+        # The firmware takes 1-1024 KB (#200).
+        with pytest.raises(ValueError, match="1 to 1024 KB"):
             scpi_commands.run_sd_benchmark(bad)
 
     def test_set_stream_interface_emits_int(self):

@@ -280,8 +280,10 @@ class TestPrepareLanInterface:
 
 
 class TestPrepareSdInterface:
-    def test_emits_disable_lan_then_enable_sd(self) -> None:
+    def test_emits_disable_lan_then_enable_sd(self, monkeypatch) -> None:
+        # Over USB; over WiFi LAN stays up (#200).
         sd = _make_device()
+        monkeypatch.setattr(DaqifiStreamingDevice, "is_usb_connection", property(lambda self: True))
         try:
             sd._transport.stream.written.clear()
             sd.prepare_sd_interface()

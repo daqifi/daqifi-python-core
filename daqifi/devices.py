@@ -46,7 +46,7 @@ from .communication import (
     StreamMessageConsumer,
 )
 from .enums import SdCardLogFormat, WifiMode, WifiSecurityType
-from .exceptions import DeviceUnresponsiveError
+from .exceptions import DeviceUnresponsiveError, FeatureNotSupportedError
 from .network import NetworkConfiguration
 from .protocol import ProtobufProtocolHandler
 from .firmware.version import FirmwareVersion
@@ -266,6 +266,8 @@ _DRAIN_INCONCLUSIVE_CODE = 99999
 
 # Firmware that ends every SD listing with __END_OF_LIST__ (#794).
 _SD_LIST_MARKER_SINCE = FirmwareVersion(3, 8, 0)
+# SD file operations over WiFi/TCP (firmware #598/#599).
+_SD_OVER_WIFI_SINCE = FirmwareVersion(3, 7, 0)
 
 
 # A SYSTem:ERRor? reply with its description quoted, as the firmware sends
@@ -1910,17 +1912,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
-        if not self.is_usb_connection:
-            raise RuntimeError(
-                "SD card operations require a USB/serial connection. "
-                "The SD card and WiFi/LAN share the SPI bus, so SD "
-                "operations cannot be performed over a network connection."
-            )
+        self._ensure_sd_transfer_supported()
         if self._is_logging_to_sd:
             raise RuntimeError(
                 "Cannot list SD card files while logging to the SD card; "
                 "stop logging first."
             )
+
+        was_streaming = self._pause_streaming_for_sd()
 
         def _setup_list() -> None:
             self.prepare_sd_interface()
@@ -1948,6 +1947,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     _log.exception(
                         "Failed to restore LAN interface after SD list"
                     )
+            self._restore_streaming(was_streaming)
 
         self._sd_card_files = files
 
@@ -1985,21 +1985,28 @@ class DaqifiStreamingDevice(DaqifiDevice):
         file_name: Optional[str] = None,
         channel_mask: Optional[str] = None,
         format: SdCardLogFormat = SdCardLogFormat.PROTOBUF,
-    ) -> None:
-        """Begin logging to the SD card.
+    ) -> str:
+        """Begin logging to the SD card, and return the log file's name
+        (the generated one when ``file_name`` isn't given).
 
         Mirrors the canonical C# ``StartSdCardLoggingAsync`` flow
         (``Daqifi.Core/Device/DaqifiStreamingDevice.cs``). LAN is
         disabled before SD is enabled because the SD card and WiFi/LAN
         share the SPI bus on Nyquist hardware.
+
+        ``channel_mask`` is a decimal bitmask of the ADC channels to log
+        (``"84"`` enables channels 2, 4 and 6).
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
         if not self.is_usb_connection:
             raise RuntimeError(
-                "SD card logging requires a USB/serial connection. "
-                "The SD card and WiFi/LAN share the SPI bus, so SD "
-                "operations cannot be performed over a network connection."
+                "SD card logging requires a USB/serial connection: starting "
+                "a logging session disables the LAN interface to give the "
+                "SD card the shared SPI bus, which over a network connection "
+                "would drop the link the command arrived on. Listing, "
+                "downloading, deleting and formatting work over WiFi on "
+                "firmware v3.7.0 and later."
             )
 
         ext_by_format = {
@@ -2057,6 +2064,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._forget_sd_card_sizes()
         self._is_streaming = True
         self._set_state(DeviceState.Streaming)
+        return log_file_name
 
     @_exclusive_sd_operation
     def stop_sd_card_logging(self) -> None:
@@ -2097,24 +2105,16 @@ class DaqifiStreamingDevice(DaqifiDevice):
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
-        # SD ops disable LAN to grab the shared SPI bus — refusing on
-        # non-USB transports keeps the call from severing the caller's
-        # control connection mid-operation.
-        if not self.is_usb_connection:
-            raise RuntimeError(
-                "SD card operations require a USB/serial connection. "
-                "The SD card and WiFi/LAN share the SPI bus, so SD "
-                "operations cannot be performed over a network connection."
-            )
+        self._ensure_sd_transfer_supported()
         if self._is_logging_to_sd:
             raise RuntimeError("Cannot delete files while logging to SD card.")
         if file_name is None or not file_name.strip():
             raise ValueError("file_name must not be empty.")
         _validate_sd_card_file_name(file_name)
 
-        # Defensive: stop any active streaming before reusing the consumer.
-        self.send(scpi_commands.stop_streaming())
-        self._is_streaming = False
+        # Defensive: stop any active streaming before reusing the consumer;
+        # resumed afterwards if it was running.
+        was_streaming = self._pause_streaming_for_sd()
 
         def _capture() -> List[str]:
             return self._execute_raw_text_capture(
@@ -2147,6 +2147,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     self.prepare_lan_interface()
                 except Exception:
                     pass
+            self._restore_streaming(was_streaming)
 
         self._sd_card_files = files
         if self._is_logging_to_sd:
@@ -2162,17 +2163,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
-        if not self.is_usb_connection:
-            raise RuntimeError(
-                "SD card operations require a USB/serial connection. "
-                "The SD card and WiFi/LAN share the SPI bus, so SD "
-                "operations cannot be performed over a network connection."
-            )
+        self._ensure_sd_transfer_supported()
         if self._is_logging_to_sd:
             raise RuntimeError("Cannot format SD card while logging.")
 
-        self.send(scpi_commands.stop_streaming())
-        self._is_streaming = False
+        was_streaming = self._pause_streaming_for_sd()
 
         try:
             self.prepare_sd_interface()
@@ -2187,18 +2182,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     self.prepare_lan_interface()
                 except Exception:
                     pass
+            self._restore_streaming(was_streaming)
 
     @_exclusive_sd_operation
     def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
         """Fetch + return the SD-card file listing (and refresh the cache)."""
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
-        if not self.is_usb_connection:
-            raise RuntimeError(
-                "SD card operations require a USB/serial connection. "
-                "The SD card and WiFi/LAN share the SPI bus, so SD "
-                "operations cannot be performed over a network connection."
-            )
+        self._ensure_sd_transfer_supported()
         if self._is_logging_to_sd:
             # Listing stops the stream and hands the bus back to LAN, which
             # would end the recording; a call that looks read-only must not
@@ -2208,8 +2199,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 "stop logging first."
             )
 
-        self.send(scpi_commands.stop_streaming())
-        self._is_streaming = False
+        was_streaming = self._pause_streaming_for_sd()
 
         def _capture() -> List[str]:
             return self._execute_raw_text_capture(
@@ -2236,6 +2226,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     self.prepare_lan_interface()
                 except Exception:
                     pass
+            self._restore_streaming(was_streaming)
 
         self._sd_card_files = files
         return tuple(files)
@@ -2273,12 +2264,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
-        if not self.is_usb_connection:
-            raise RuntimeError(
-                "SD card file download is only supported over USB "
-                "(serial) connections. The SD card and WiFi/LAN share "
-                "the SPI bus, so file downloads require a USB connection."
-            )
+        self._ensure_sd_transfer_supported()
         if file_name is None or not file_name.strip():
             raise ValueError("file_name must not be empty.")
         if destination_stream is None:
@@ -2296,8 +2282,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         ):
             raise ValueError(f"expected_size must be a non-negative int (got {expected_size!r})")
 
-        self.send(scpi_commands.stop_streaming())
-        self._is_streaming = False
+        was_streaming = self._pause_streaming_for_sd()
 
         start_time = time.monotonic()
         bytes_written = 0
@@ -2322,6 +2307,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     self.prepare_lan_interface()
                 except Exception:
                     pass
+            self._restore_streaming(was_streaming)
 
         elapsed = timedelta(seconds=time.monotonic() - start_time)
         return SdCardDownloadResult(
@@ -2396,6 +2382,56 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 popped,
                 popped[-1],
             )
+
+    def _ensure_sd_transfer_supported(self) -> None:
+        """Refuse an SD file operation (list, download, delete, format) the
+        firmware can't serve on this transport.
+
+        Over USB they always work. Over WiFi/TCP they need firmware v3.7.0
+        or later, which arbitrates the shared SPI bus and routes the SD reply
+        back over the requesting TCP connection (firmware #598/#599,
+        ``SCPIStorageSD.c``); before that the command would stall the bus.
+        An unknown firmware version is refused too. Port of daqifi-core
+        6baace2 / 2521fac.
+        """
+        if not self.is_connected:
+            raise RuntimeError("Device is not connected.")
+        if self.is_usb_connection:
+            return
+        version = FirmwareVersion.parse(self.metadata.firmware_version)
+        if version is None or version < _SD_OVER_WIFI_SINCE:
+            raise FeatureNotSupportedError(
+                "SD card file operations over WiFi need firmware v3.7.0 or "
+                "later; this device reports "
+                f"{self.metadata.firmware_version or 'no firmware version'}. "
+                "Use a USB connection, or update the firmware."
+            )
+
+    def _pause_streaming_for_sd(self) -> bool:
+        """Stop the stream for an SD operation; return whether one was
+        running, so :meth:`_restore_streaming` can resume it. The stop is
+        sent even if the flag says idle (it may be stale)."""
+        was_streaming = self._is_streaming
+        self.send(scpi_commands.stop_streaming())
+        self._is_streaming = False
+        if self._state == DeviceState.Streaming:
+            self._set_state(DeviceState.Ready)
+        return was_streaming
+
+    def _restore_streaming(self, was_streaming: bool) -> None:
+        """Resume a stream an SD operation paused (port of daqifi-core
+        874c5fb / 9717b32). Best-effort, from a finally: a failure must not
+        replace the operation's own outcome, and leaves the device marked
+        not streaming."""
+        if not was_streaming or not self.is_connected:
+            return
+        try:
+            self.start_streaming()
+        except Exception:
+            _log.exception("Failed to resume streaming after an SD operation")
+            self._is_streaming = False
+            if self._state == DeviceState.Streaming:
+                self._set_state(DeviceState.Ready)
 
     def _sd_listing_marker_expected(self) -> bool:
         """Whether the firmware ends every listing with ``__END_OF_LIST__``:
@@ -2930,8 +2966,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
         that call, not here, since enabling the SD interface alone
         doesn't restart logging on the firmware side.
         """
-        self.send(scpi_commands.disable_network_lan())
-        time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
+        if self.is_usb_connection:
+            # Over WiFi/TCP (firmware v3.7.0+, #598/#599) LAN must stay
+            # up: the firmware arbitrates the shared bus and routes the SD
+            # reply back over the very connection, which disabling LAN
+            # would drop.
+            self.send(scpi_commands.disable_network_lan())
+            time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
         self.send(scpi_commands.enable_storage_sd())
         time.sleep(self._SD_INTERFACE_SETTLE_DELAY_S)
 

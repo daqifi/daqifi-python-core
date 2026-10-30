@@ -175,11 +175,15 @@ def get_sd_max_file_size() -> ScpiMessage:
 
 
 def run_sd_benchmark(size: int) -> ScpiMessage:
-    """Run an SD-card write-speed benchmark of ``size`` bytes."""
+    """Run an SD-card write-speed benchmark writing ``size`` KB.
+
+    The firmware takes the size in KB, 1 to 1024
+    (``SCPI_StorageSDBenchmark``'s ``testSizeKB``), and refuses others.
+    """
     if isinstance(size, bool) or not isinstance(size, int):
         raise TypeError("size must be an int.")
-    if size <= 0:
-        raise ValueError("Benchmark size must be positive.")
+    if not 1 <= size <= 1024:
+        raise ValueError(f"Benchmark size must be 1 to 1024 KB (got {size}).")
     return ScpiMessage(f"SYSTem:STORage:SD:BENCHmark {size}")
 
 
@@ -257,10 +261,13 @@ def enable_adc_channels(channel_set_string: str) -> ScpiMessage:
         raise ValueError("channel_set_string must not be empty.")
     if "\r" in s or "\n" in s:
         raise ValueError("channel_set_string must not contain CR/LF.")
-    # Accept hex digits since callers commonly pass "FF" / "FFFF".
-    if not all(c in "0123456789abcdefABCDEF" for c in s):
+    # Decimal only: the firmware parses this with SCPI_ParamInt32, which
+    # rejects bare hex ("FF" -> -104 Data type error) while the device keeps
+    # its previous channel set, and "10" would be ambiguous.
+    if not s.isascii() or not s.isdigit():
         raise ValueError(
-            "channel_set_string must be a decimal or hex bitmask string."
+            "channel_set_string must be a decimal bitmask string "
+            f"(e.g. \"255\" for channels 0-7), got {channel_set_string!r}."
         )
     return ScpiMessage(f"ENAble:VOLTage:DC {s}")
 
