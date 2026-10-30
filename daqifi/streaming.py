@@ -28,6 +28,12 @@ class StreamState(Enum):
     ERROR = "ERROR"
 
 
+
+# How long a reader waits when a poll found nothing to deliver. Short enough
+# to keep up with the firmware's fastest rates; a reader never waits while
+# samples are waiting (#192).
+_IDLE_POLL_SECONDS = 0.001
+
 @dataclass
 class Sample:
     """Single sample across all enabled channels.
@@ -688,8 +694,11 @@ class StreamManager:
                 # — silently skipping it left polling-mode callers' channel
                 # handlers stuck on stale samples (Qodo PR #142 pass 3 #1).
                 self._dispatch_per_channel(sample)
-
-            time.sleep(0.001)  # Small delay to avoid busy loop
+            else:
+                # Back off only when idle: a delay after every sample made
+                # the reader fall behind a board at its configured rate
+                # (#192).
+                time.sleep(_IDLE_POLL_SECONDS)
 
         return samples
 
@@ -1131,8 +1140,12 @@ class StreamManager:
                     self._dispatch_per_channel(sample)
                     if self._callback is not None:
                         self._callback(sample)
-
-                time.sleep(1.0 / self._sample_rate)
+                else:
+                    # Wait only when there was nothing to deliver. Pacing
+                    # every sample by the sample period, as before, could
+                    # never keep up: reading a sample takes time too, so the
+                    # backlog grew for the whole session (#192).
+                    time.sleep(_IDLE_POLL_SECONDS)
 
             except Exception:
                 import logging
