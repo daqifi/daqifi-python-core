@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import re
 import runpy
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,10 +55,11 @@ def _run(source: str, **names) -> dict:
     return namespace
 
 
+_real_sleep = time.sleep
+
+
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    import time
-
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
 
@@ -314,3 +317,44 @@ def test_streaming_callback_example_reports_device_time_duration(monkeypatch, ca
     duration = re.search(r"Duration: ([0-9.]+) seconds", capsys.readouterr().out)
     assert duration is not None
     assert float(duration.group(1)) == pytest.approx(0.999, abs=0.01)
+
+
+def _stream_fakes():
+    spec = importlib.util.spec_from_file_location(
+        "stream_fakes", REPO_ROOT / "tests" / "test_stream_manager_startup_data.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_streaming_callback_example_duration_spans_a_tick_rollover(monkeypatch, capsys, tmp_path):
+    # A real StreamManager reads four JSON records one second apart that
+    # straddle the device's 32-bit tick rollover; the unwrap (#193) keeps
+    # the timestamps rising, so the example reports 3 s, not a negative time.
+    fakes = _stream_fakes()
+    tick_hz, wrap = 50_000_000, 2 ** 32
+    ticks = [wrap - 75_000_000, wrap - 25_000_000, 25_000_000, 75_000_000]
+    data = b'{"meta":{"dev":"Nyquist 3","sn":"0","tick_hz":%d}}\n' % tick_hz + b"".join(
+        b'{"ts":%d,"ai":[{"ch":0,"val":1000},{"ch":1,"val":1000}]}\n' % t for t in ticks
+    )
+
+    def create_stream(channels, sample_rate=1000, format=1):
+        fake = fakes._FakeSerial(enabled_mask=0b11, on_start=data)
+        return fakes._manager(fake, channels=channels, sample_rate=sample_rate, format=format)
+
+    device = _example_device(BoardVariant.NQ3)
+    device.create_stream = create_stream
+    monkeypatch.setattr(NyquistDevice, "connect", classmethod(lambda cls, *a, **k: device))
+    monkeypatch.chdir(tmp_path)
+    # The example's 10 s wait: long enough here for the reader to deliver all four.
+    real_sleep = _real_sleep
+    monkeypatch.setattr(time, "sleep", lambda seconds: real_sleep(min(seconds, 0.5)))
+
+    runpy.run_path(str(REPO_ROOT / "examples" / "streaming_callback.py"), run_name="__main__")
+
+    out = capsys.readouterr().out
+    assert "Total samples: 4" in out
+    duration = re.search(r"Duration: (-?[0-9.]+) seconds", out)
+    assert duration is not None
+    assert float(duration.group(1)) == pytest.approx(3.0, abs=0.01)
