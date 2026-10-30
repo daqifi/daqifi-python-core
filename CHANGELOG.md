@@ -26,8 +26,11 @@ aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - `DaqifiDevice.initialize()` checks its setup commands: each attempt stops
-  any stream, empties the error queue, then sends them with a
-  `SYSTem:ERRor?` after them, retried once. A refusal that persists raises
+  any stream, waits for the line to go quiet, empties the error queue one
+  query at a time, then sends them and one `SYSTem:ERRor?`, retried once.
+  At most one query is outstanding, and after any unanswered one the line
+  must go quiet again before a reply is attributed (replies up to 1 s late
+  are accepted). A refusal that persists raises
   `ScpiInitializationError`; an outcome it can't read (no reply, a reply
   garbled by stream bytes, a queue that won't empty) raises
   `InitializationUnconfirmedError` and leaves the device out of Error. It then sends

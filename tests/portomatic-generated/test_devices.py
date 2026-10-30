@@ -718,13 +718,12 @@ class TestSilentInitDetection:
             t0 = time.monotonic()
             dev.initialize(response_timeout_s=5.0)
             elapsed = time.monotonic() - t0
-            # Pre-init SCPI sleeps total ~0.5 s; SN-wait loop returns
-            # immediately on first iteration (synthetic_send already
-            # populated SN), so total should be well under the 5 s
-            # ceiling.
-            assert elapsed < 1.5, (
+            # Init's SCPI settles (~0.6 s) plus the quiet it waits for
+            # before its first query (1.25 s, #201); the status reply then
+            # arrives at once, so well under the 5 s ceiling.
+            assert elapsed < 3.5, (
                 f"TCP init with synthetic SN took {elapsed:.2f} s; "
-                f"poll-loop should have returned in well under 1.5 s"
+                f"it should have returned in well under 3.5 s"
             )
         finally:
             try:

@@ -801,7 +801,7 @@ class DaqifiDevice:
                     # A closed transport's getter raises.
                     stream = None
             if stream is None:
-                if self._shutting_down_since(transport, generation):
+                if self._shutting_down_since(transport, generation, None):
                     raise DeviceNotConnectedError(
                         "The message could not be sent: a disconnect completed "
                         "while it was in flight.",
@@ -849,7 +849,7 @@ class DaqifiDevice:
                 # generation with, so no disconnect/reconnect can land
                 # between the check and the Lost transition.
                 with self._state_lock:
-                    stale = self._shutting_down_since(transport, generation)
+                    stale = self._shutting_down_since(transport, generation, stream)
                     evt = None
                     if not stale:
                         evt = self._change_status(ConnectionStatus.Lost)
@@ -873,19 +873,36 @@ class DaqifiDevice:
                 "not yet implemented."
             )
 
-    def _shutting_down_since(self, transport: Any, generation: int) -> bool:
+    def _shutting_down_since(
+        self, transport: Any, generation: int, stream: Any
+    ) -> bool:
         """Whether a disconnect, or a new connection (even on the same
         transport object), has replaced the connection a send started on.
         A link that dropped by itself (status Lost) isn't one: that send
-        failure is the loss. Reads only device fields: a closed
-        transport's ``stream`` getter raises."""
-        return (
+        failure is the loss.
+
+        Called under ``_state_lock``. The generation alone isn't enough:
+        connect() bumps it before ``transport.connect()`` installs the new
+        stream, so a send can capture the new generation with the old
+        stream. The stream's identity settles it: the transport's current
+        stream no longer being the captured one means it was replaced. The
+        device fields come first, and a getter that raises (a closed
+        transport) counts as replaced."""
+        if (
             self._disposed
             or self._is_disconnecting
-            or self._status == ConnectionStatus.Disconnected
+            or self._status in (ConnectionStatus.Disconnected, ConnectionStatus.Connecting)
             or self._transport is not transport
             or self._connect_generation != generation
-        )
+        ):
+            return True
+        if stream is None:
+            return False
+        try:
+            current = transport.stream
+        except Exception:
+            return True
+        return current is not stream
 
     def _acquire_text_exchange_lock(self, operation: str) -> None:
         """Take the text-exchange lock; from the consumer thread, only if free.
@@ -1450,27 +1467,111 @@ class DaqifiDevice:
     _INIT_SCPI_RETRIES = 1
     _INIT_SCPI_RETRY_DELAY_S = 0.15
     _INIT_SCPI_SETTLE_S = 0.1
+    # The slowest SYSTem:ERRor? reply init accepts, and the quiet it waits
+    # for (longer than that) before attributing replies, within a bound.
+    _INIT_REPLY_TIMEOUT_MS = 1000
+    _INIT_QUIET_MS = 1250
+    _INIT_QUIET_MAX_MS = 4000
 
     def _run_init_sequence(self) -> None:
         """Send upstream's init commands (echo off, stream stop, power on,
-        protobuf format) as one text exchange ending in ``SYSTem:ERRor?``,
-        and judge only what that attempt produced.
+        protobuf format) and confirm them through the error queue, never
+        attributing a reply to the wrong question.
 
-        Each attempt first stops any stream (so no binary frames share the
-        pipe with the replies) and empties the error queue, so errors left
-        over from earlier commands or attempts aren't taken for this
-        attempt's. Three outcomes: accepted (a ``0`` reply, nothing
-        volunteered), refused (a volunteered ``**ERROR`` or a non-zero
-        reply), or unknown (the queue couldn't be emptied, or no readable
-        reply: a merged or missing line is never success). One retry;
-        then a refusal raises :class:`ScpiInitializationError` and an
-        unknown outcome :class:`InitializationUnconfirmedError`.
+        After a query times out, which reply belongs to which question is
+        no longer known. So: at most one query is ever outstanding; before
+        the first, and after any query that wasn't answered by exactly one
+        reply within ``_INIT_REPLY_TIMEOUT_MS`` (the slowest reply
+        accepted), the line must go quiet for longer than that before
+        anything is attributed again. Each attempt:
+
+        1. echo off and stream stop, then wait for quiet (stream bytes,
+           replies still due from before);
+        2. empty the error queue, one ``SYSTem:ERRor?`` at a time, so
+           earlier errors aren't taken for this attempt's;
+        3. send the setup commands, then one ``SYSTem:ERRor?``: its reply,
+           the only one outstanding, confirms (``0``) or refuses them.
+
+        An attempt is accepted, refused, or unknown (no quiet, a query
+        unanswered or answered more than once, an unreadable line): unknown
+        is never success. One retry; then a refusal raises
+        :class:`ScpiInitializationError` and an unknown outcome
+        :class:`InitializationUnconfirmedError`.
         """
         from ._internal import scpi as _scpi
 
         settle = self._INIT_SCPI_SETTLE_S
+        reply_ms = self._INIT_REPLY_TIMEOUT_MS
 
-        def _setup() -> None:
+        def _classify(lines: List[str]):
+            replies, volunteered, other = [], [], []
+            for raw in lines:
+                s = raw.strip()
+                if not s or s.upper() == "DAQIFI>":
+                    continue
+                reply = _scpi.find_system_error_reply([s])
+                if reply is not None:
+                    replies.append(reply)
+                elif _scpi.contains_scpi_error([s]):
+                    volunteered.append(s)
+                else:
+                    other.append(s)
+            return replies, volunteered, other
+
+        def _quiet() -> bool:
+            # Discards whatever arrives; quiet once nothing has for longer
+            # than the slowest reply accepted, within a bound.
+            cap_ms = self._INIT_QUIET_MAX_MS
+            began = time.monotonic()
+            self.execute_text_command(
+                lambda: None,
+                response_timeout_ms=self._INIT_QUIET_MS,
+                completion_timeout_ms=self._INIT_QUIET_MS,
+                max_total_ms=cap_ms,
+            )
+            return (time.monotonic() - began) * 1000 < cap_ms - 50
+
+        def _ask() -> Tuple[Optional[str], List[str], List[str]]:
+            """One SYSTem:ERRor?: (its reply or None if it wasn't answered
+            by exactly one readable reply, volunteered errors, lines)."""
+            lines = self.execute_text_command(
+                lambda: self.send(scpi_commands.get_last_error()),
+                response_timeout_ms=reply_ms,
+                completion_timeout_ms=150,
+                max_total_ms=reply_ms + 300,
+            )
+            replies, volunteered, other = _classify(lines)
+            if len(replies) != 1 or other:
+                return None, volunteered, lines
+            return replies[0], volunteered, lines
+
+        lines: List[str] = []
+        refused: Optional[str] = None
+        unknown = ""
+        for attempt in range(self._INIT_SCPI_RETRIES + 1):
+            if attempt:
+                time.sleep(self._INIT_SCPI_RETRY_DELAY_S)
+            refused, unknown = None, ""
+            self.send(scpi_commands.disable_device_echo())
+            time.sleep(settle)
+            self.send(scpi_commands.stop_streaming())
+            time.sleep(settle)
+            if not _quiet():
+                unknown = "the line never went quiet"
+                continue
+            # Empty the error queue, one query at a time.
+            drained = False
+            for _ in range(16):
+                reply, volunteered, lines = _ask()
+                if reply is None or volunteered:
+                    break
+                if _scpi.parse_system_error(reply)[0] == 0:
+                    drained = True
+                    break
+            if not drained:
+                unknown = "the device's error queue couldn't be emptied first"
+                _quiet()
+                continue
             self.send(scpi_commands.disable_device_echo())
             time.sleep(settle)
             self.send(scpi_commands.stop_streaming())
@@ -1482,50 +1583,15 @@ class DaqifiDevice:
             # something: the device must have acted on the last command
             # and queued any complaint first.
             time.sleep(settle)
-            self.send(scpi_commands.get_last_error())
-
-        def _volunteered(lines: List[str]) -> Optional[str]:
-            return next((l for l in lines if _scpi.contains_scpi_error([l])), None)
-
-        def _last_reply(lines: List[str]) -> Optional[str]:
-            for line in reversed(lines):
-                reply = _scpi.find_system_error_reply([line])
-                if reply is not None:
-                    return reply
-            return None
-
-        lines: List[str] = []
-        refused: Optional[str] = None
-        unknown = ""
-        for attempt in range(self._INIT_SCPI_RETRIES + 1):
-            if attempt:
-                time.sleep(self._INIT_SCPI_RETRY_DELAY_S)
-            refused, unknown = None, ""
-            # Quiet first: a stream left running (or another session's)
-            # would put frames in the middle of the text replies.
-            self.send(scpi_commands.disable_device_echo())
-            time.sleep(settle)
-            self.send(scpi_commands.stop_streaming())
-            time.sleep(settle)
-            popped = self.drain_errors(max_iterations=16, empty_budget=2)
-            if any(
-                _scpi.parse_system_error(entry)[0] == _DRAIN_INCONCLUSIVE_CODE
-                for entry in popped
-            ):
-                lines = list(popped)
-                unknown = "the device's error queue couldn't be emptied first"
+            reply, volunteered, lines = _ask()
+            if reply is None:
+                unknown = "no single readable reply to SYSTem:ERRor?"
+                _quiet()
                 continue
-            lines = self.execute_text_command(
-                _setup, response_timeout_ms=1000, completion_timeout_ms=500
-            )
-            refused = _volunteered(lines)
-            if refused is None:
-                reply = _last_reply(lines)
-                if reply is None:
-                    unknown = "no readable reply to SYSTem:ERRor?"
-                    continue
-                if _scpi.parse_system_error(reply)[0] != 0:
-                    refused = reply
+            if volunteered:
+                refused = volunteered[0]
+            elif _scpi.parse_system_error(reply)[0] != 0:
+                refused = reply
             if refused is None:
                 return
         if refused is not None:

@@ -47,7 +47,7 @@ class _Stream:
     SYSTem:ERRor? reply (a stream still running)."""
 
     def __init__(self, stale_errors=0, refuse=None, status_after=0, on_write=None,
-                 frame_before_replies=b"", status_delay=0.0):
+                 frame_before_replies=b"", status_delay=0.0, reply_delay=0.0):
         self.written = []
         self.queue = [b'-200,"Execution error"'] * stale_errors
         self.refuse = dict(refuse or {})
@@ -56,6 +56,7 @@ class _Stream:
         self.on_write = dict(on_write or {})
         self.frame_before_replies = frame_before_replies
         self.status_delay = status_delay
+        self.reply_delay = reply_delay
         self._rx = bytearray()
         self._lock = threading.Lock()
 
@@ -73,7 +74,13 @@ class _Stream:
                     self.refuse[prefix] = times - 1
         if b.startswith(b"SYSTem:ERRor?"):
             reply = self.queue.pop(0) if self.queue else b'0,"No error"'
-            self.feed(self.frame_before_replies + reply + b"\r\n")
+            data = self.frame_before_replies + reply + b"\r\n"
+            if self.reply_delay:
+                timer = threading.Timer(self.reply_delay, self.feed, (data,))
+                timer.daemon = True
+                timer.start()
+            else:
+                self.feed(data)
         elif b.startswith(b"SYSTem:SYSInfoPB?"):
             self.info_requests += 1
             if self.status_after is not None and self.info_requests > self.status_after:
@@ -196,11 +203,16 @@ def test_a_persistently_refused_init_command_raises_typed() -> None:
         device.disconnect()
 
 
-def test_a_volunteered_init_error_raises_too() -> None:
-    stream = _Stream(on_write={b"SYSTem:POWer:STATe 1": b"**ERROR: -200, Execution error\r\n"})
+def test_a_refusal_the_device_also_volunteers_raises() -> None:
+    # The firmware's SCPI_ErrorPush both queues the error and writes
+    # "**ERROR: ..." to the wire (SCPI_USB_Error / SCPI_TCP_Error).
+    stream = _Stream(
+        refuse={b"SYSTem:POWer:STATe 1": None},
+        on_write={b"SYSTem:POWer:STATe 1": b"**ERROR: -200, \"Execution error\"\r\n"},
+    )
     device = _device(stream)
     try:
-        with pytest.raises(exc_mod.CommandError, match="ERROR"):
+        with pytest.raises(exc_mod.CommandError, match="-200"):
             device.initialize(response_timeout_s=1.0)
     finally:
         device.disconnect()
@@ -310,6 +322,47 @@ def test_no_status_reply_is_left_owed_to_corrupt_the_next_text_reply() -> None:
             response_timeout_ms=2500, completion_timeout_ms=1500,
         )
         assert lines == ["VALUE"]
+    finally:
+        device.disconnect()
+
+
+def test_late_error_replies_dont_confirm_a_refused_init_command() -> None:
+    # Every SYSTem:ERRor? reply comes 650 ms late and power-on is always
+    # refused. A query answered after its window must not leave its reply
+    # to satisfy the next question: the refusal must be seen.
+    stream = _Stream(refuse={b"SYSTem:POWer:STATe 1": None}, reply_delay=0.65)
+    device = _device(stream)
+    try:
+        with pytest.raises(exc_mod.CommandError, match="-200"):
+            device.initialize(response_timeout_s=3.0)
+        assert device.state != DeviceState.Ready
+    finally:
+        device.disconnect()
+
+
+def test_late_error_replies_dont_corrupt_the_status_reply() -> None:
+    # Every command accepted, every SYSTem:ERRor? reply 600 ms late: no
+    # reply may still be outstanding when the status query goes out.
+    stream = _Stream(reply_delay=0.6)
+    device = _device(stream)
+    try:
+        device.initialize(response_timeout_s=3.0)
+        assert device.state == DeviceState.Ready
+        assert len(device.channels) == 2
+    finally:
+        device.disconnect()
+
+
+def test_error_replies_slower_than_accepted_end_unconfirmed_never_ready() -> None:
+    # Replies 1.3 s late, past the 1 s init accepts: no reply can be
+    # attributed, so the outcome is unknown, not Ready and not Error.
+    stream = _Stream(reply_delay=1.3)
+    device = _device(stream)
+    try:
+        with pytest.raises(exc_mod.DAQiFiError) as info:
+            device.initialize(response_timeout_s=3.0)
+        assert type(info.value).__name__ == "InitializationUnconfirmedError"
+        assert device.state not in (DeviceState.Ready, DeviceState.Error)
     finally:
         device.disconnect()
 
@@ -500,6 +553,83 @@ def test_a_reconnect_after_the_shutdown_check_isnt_marked_lost(monkeypatch) -> N
         assert second.written
     finally:
         resume.set()
+        first.release.set()
+        device.disconnect()
+
+
+class _PausingDevice(DaqifiStreamingDevice):
+    """Pauses one chosen thread just after send()'s connected check."""
+
+    pause = None  # (thread ident, paused Event, resume Event)
+
+    @property
+    def is_connected(self):
+        result = super().is_connected
+        pause = self.pause
+        if pause and threading.get_ident() == pause[0] and not pause[1].is_set():
+            pause[1].set()
+            pause[2].wait(5)
+        return result
+
+
+def test_a_send_that_captured_the_old_stream_after_the_bump_spares_the_reconnect(monkeypatch) -> None:
+    # Codex's three-pause schedule: A passes its connected check and
+    # pauses; the port dies and B's connect() bumps the generation, then
+    # pauses before the transport installs the new port; A captures (new
+    # generation, old port) and its write blocks; B finishes; A's write
+    # fails. The reconnected device must stay Connected.
+    import daqifi.transport as transport_mod
+    from daqifi._internal import scpi_commands
+
+    first, second = _FakeSerial(block_writes=True), _FakeSerial()
+    ports = iter([first, second])
+    monkeypatch.setattr(transport_mod.serial, "Serial", lambda *a, **k: next(ports))
+    transport = transport_mod.SerialStreamTransport("COM58")
+    device = _PausingDevice(name="d", transport=transport)
+    device.connect()
+
+    a_paused, a_resume = threading.Event(), threading.Event()
+    b_paused, b_resume = threading.Event(), threading.Event()
+    real_connect = transport.connect
+
+    def _pausing_connect(*args, **kwargs):
+        b_paused.set()
+        b_resume.wait(5)
+        return real_connect(*args, **kwargs)
+
+    outcome = {}
+
+    def _send():
+        device.pause = (threading.get_ident(), a_paused, a_resume)
+        try:
+            device.send(scpi_commands.get_last_error())
+        except BaseException as e:
+            outcome["error"] = e
+
+    sender = threading.Thread(target=_send, daemon=True)
+    reconnecter = threading.Thread(target=device.connect, daemon=True)
+    try:
+        sender.start()
+        assert a_paused.wait(5)                # 1: A past its connected check
+        first.is_open = False                  # the port dies
+        monkeypatch.setattr(transport, "connect", _pausing_connect)
+        reconnecter.start()
+        assert b_paused.wait(5)                # 2: B bumped, new port not yet in
+        a_resume.set()
+        assert first.entered.wait(5)           # A captured the old port, writing
+        b_resume.set()
+        reconnecter.join(5)                    # 3: B finishes the reconnect
+        assert device.status == ConnectionStatus.Connected
+        first.release.set()                    # A's write on the old port fails
+        sender.join(5)
+        assert type(outcome.get("error")).__name__ == "DeviceNotConnectedError", outcome
+        assert device.status == ConnectionStatus.Connected
+        assert device.state != DeviceState.Error
+        device.send(scpi_commands.get_last_error())
+        assert second.written
+    finally:
+        a_resume.set()
+        b_resume.set()
         first.release.set()
         device.disconnect()
 
