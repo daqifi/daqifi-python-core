@@ -8,6 +8,8 @@ import importlib.util
 import os
 import time
 
+import pytest
+
 _HERE = os.path.dirname(__file__)
 _spec = importlib.util.spec_from_file_location(
     "sd_fakes", os.path.join(_HERE, "portomatic-generated", "test_sd_card_operations_impl.py")
@@ -62,6 +64,44 @@ def test_a_first_line_later_than_the_cap_is_not_captured() -> None:
         lambda: None, response_timeout_ms=1200, completion_timeout_ms=200, max_total_ms=50
     )
     assert lines == []
+
+
+@pytest.mark.parametrize("cap", [None, 5000])
+def test_a_zero_timeout_still_drains_lines_already_queued(cap) -> None:
+    # Audit r9 (2): get(timeout=0) used to drain what had arrived; the
+    # clamp's "wait <= 0" stop dropped it, even with no cap set.
+    device = _fakes._make_device_with_serial_facade(
+        {b"*IDN?": b"first\r\nsecond\r\nthird\r\n"}
+    )
+    from daqifi._internal.comm import ScpiMessage
+
+    def _setup():
+        device.send(ScpiMessage("*IDN?"))
+        time.sleep(0.3)  # let all three lines reach the queue
+
+    # Without a cap the call is the original signature, so the same test
+    # runs against a tree that predates max_total_ms.
+    extra = {} if cap is None else {"max_total_ms": cap}
+    lines = device.execute_text_command(
+        _setup, response_timeout_ms=500, completion_timeout_ms=0, **extra
+    )
+    assert lines == ["first", "second", "third"]
+
+
+def test_lines_already_queued_when_the_cap_runs_out_are_kept() -> None:
+    device = _fakes._make_device_with_serial_facade(
+        {b"*IDN?": b"first\r\nsecond\r\nthird\r\n"}
+    )
+    from daqifi._internal.comm import ScpiMessage
+
+    def _setup():
+        device.send(ScpiMessage("*IDN?"))
+        time.sleep(0.3)
+
+    lines = device.execute_text_command(
+        _setup, response_timeout_ms=500, completion_timeout_ms=200, max_total_ms=100
+    )
+    assert lines == ["first", "second", "third"]
 
 
 def test_without_a_cap_the_inactivity_rules_are_unchanged() -> None:

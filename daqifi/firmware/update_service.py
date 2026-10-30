@@ -1275,17 +1275,24 @@ class DefaultFirmwareUpdateService:
         try:
             self._wait_for_serial_reconnect(device, deadline)
             # In standby APPLY doesn't restart WiFi, so it can't consume a
-            # pending update request, and a quiet console proves nothing.
-            device.send(scpi_commands.set_usb_transparency_mode(0))
-            self._sleep_with_cancel(exit_delay, deadline)
-            # Unknown counts as standby: only a positive "powered" makes a
-            # quiet console evidence.
-            if self._wifi_module_powered(device) is not True:
-                raise RuntimeError(
-                    "the device is in standby, or its power state couldn't be "
-                    "read, so LAN:APPLY may not restart WiFi and a pending "
-                    "update request can't be confirmed cleared"
-                )
+            # pending update request, and a quiet console proves nothing:
+            # only a positive "powered" lets recovery go on. No answer at all
+            # can mean the bridge came up a moment ago, so it is retried
+            # behind a fresh exit; the budget running out (the deadline
+            # raises) is what makes it unconfirmed.
+            while True:
+                device.send(scpi_commands.set_usb_transparency_mode(0))
+                self._sleep_with_cancel(exit_delay, deadline)
+                powered = self._wifi_module_powered(device)
+                if powered is True:
+                    break
+                if powered is False:
+                    raise RuntimeError(
+                        "the device is in standby, so LAN:APPLY doesn't "
+                        "restart WiFi and a pending update request can't be "
+                        "cleared"
+                    )
+                self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)
             while True:
                 # The bridge can come up between attempts, so every APPLY
                 # is preceded by the exit that gets it to the console.

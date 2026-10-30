@@ -127,11 +127,12 @@ class _FirmwareModel(_f._FakeStreamingDevice):
       WINC, and queries get no reply.
     """
 
-    ENTRY_DELAY = 3.0
+    ENTRY_DELAY = 3.0  # per instance via entry_delay=
     GATE_TIMEOUT = 30.0
 
     def __init__(self, clock, name="fake-port", deliver_then_raise=None, drop=None,
-                 backoff_for=0.0, prompt="", powered=True, late_errors=False):
+                 backoff_for=0.0, prompt="", powered=True, late_errors=False,
+                 entry_delay=None):
         super().__init__(name)
         self.clock = clock
         self.state = "normal"
@@ -149,6 +150,8 @@ class _FirmwareModel(_f._FakeStreamingDevice):
         self._prompt = prompt
         self.powered = powered
         self.power_reply = True
+        if entry_delay is not None:
+            self.ENTRY_DELAY = entry_delay
         self._late_errors = late_errors
         self._refused_in_this_exchange = False
 
@@ -643,6 +646,19 @@ def test_a_device_on_tcp_is_refused_before_anything_is_sent(clock) -> None:
         _update(device, _f._FakeExternalProcessRunner(_result()))
     assert "USB serial" in str(excinfo.value.__cause__)
     assert device.sent_commands == []
+
+
+def test_a_bridge_that_comes_up_during_recoverys_first_exit_is_still_left(clock) -> None:
+    # Audit r9 (1): the bridge came up during the exit delay, the power
+    # query went into it unanswered, and recovery stopped with the board
+    # bridged and most of its budget left.
+    cancel = threading.Event()
+    device = _FirmwareModel(clock, entry_delay=0.05)
+    _cancel_after(device, LAN_APPLY, cancel)
+    with pytest.raises(FirmwareUpdateException) as excinfo:
+        _update(device, _f._FakeExternalProcessRunner(_result()), cancel_event=cancel)
+    assert device.final_state() == ("normal", False)
+    assert "power-cycle it" not in str(excinfo.value)
 
 
 def test_a_failure_before_update_mode_sends_no_bridge_exit(clock, monkeypatch) -> None:

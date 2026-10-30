@@ -965,27 +965,32 @@ class DaqifiDevice:
             text_consumer.start()
 
             try:
-                # Optional absolute cap, measured from setup_action and
-                # applied to every wait: a device that keeps sending lines
-                # (a stream left running) would otherwise keep phase 2 going.
+                # Optional absolute cap, measured from setup_action: a
+                # device that keeps sending lines (a stream left running)
+                # would otherwise keep phase 2 going. Without one, the waits
+                # below are exactly as they always were.
                 total_deadline = (
                     None if max_total_ms is None
                     else time.monotonic() + max_total_ms / 1000.0
                 )
 
-                def _wait(budget: float) -> float:
-                    if total_deadline is None:
-                        return budget
-                    return min(budget, total_deadline - time.monotonic())
+                def _drain_queued() -> None:
+                    while True:
+                        try:
+                            captured.append(line_queue.get_nowait())
+                        except queue.Empty:
+                            return
 
                 setup_action()
 
                 # Phase 1: block up to response_timeout_ms for the first
                 # line. Returns immediately as soon as a line arrives,
                 # so we don't waste cycles polling.
-                first_wait = _wait(response_timeout_ms / 1000.0)
-                if first_wait <= 0:
-                    return []
+                first_wait = response_timeout_ms / 1000.0
+                if total_deadline is not None:
+                    first_wait = max(
+                        0.0, min(first_wait, total_deadline - time.monotonic())
+                    )
                 try:
                     captured.append(line_queue.get(timeout=first_wait))
                 except queue.Empty:
@@ -999,9 +1004,14 @@ class DaqifiDevice:
                 # queue.Empty, we've hit the inactivity gap.
                 inactivity_threshold = completion_timeout_ms / 1000.0
                 while True:
-                    wait = _wait(inactivity_threshold)
-                    if wait <= 0:
-                        break
+                    wait = inactivity_threshold
+                    if total_deadline is not None:
+                        remaining = total_deadline - time.monotonic()
+                        if remaining <= 0:
+                            # Cap reached: keep what has already arrived.
+                            _drain_queued()
+                            break
+                        wait = min(wait, remaining)
                     try:
                         captured.append(line_queue.get(timeout=wait))
                     except queue.Empty:
