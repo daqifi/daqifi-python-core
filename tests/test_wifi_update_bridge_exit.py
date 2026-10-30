@@ -36,6 +36,7 @@ BRIDGE_EXIT = "SYSTem:USB:SetTransparentMode 0"
 LAN_ENABLE = "SYSTem:COMMunicate:LAN:ENAbled 1"
 LAN_APPLY = "SYSTem:COMMunicate:LAN:APPLY"
 LAN_SAVE = "SYSTem:COMMunicate:LAN:SAVE"
+LAN_APPLY_SAVE = "SYSTem:COMMunicate:LAN:APPLY 1"
 SUCCESS = "Operation completed successfully"
 
 
@@ -124,7 +125,11 @@ class _FirmwareModel(_f._FakeStreamingDevice):
       it (READY and transparent after the WINC init), and otherwise it's an
       ordinary reinit;
     - while transparent, everything but SetTransparentMode 0 goes raw to the
-      WINC, and queries get no reply.
+      WINC, and queries get no reply;
+    - LAN:SAVE copies the runtime settings to NVM whatever the last apply
+      did (SCPI_LANSettingsSave); APPLY 1 saves only when its apply is
+      accepted (SCPI_LANSettingsApply). ``persisted`` records each save as
+      True (the settings had applied) or False (they hadn't).
     """
 
     ENTRY_DELAY = 3.0  # per instance via entry_delay=
@@ -132,7 +137,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
 
     def __init__(self, clock, name="fake-port", deliver_then_raise=None, drop=None,
                  backoff_for=0.0, prompt="", powered=True, late_errors=False,
-                 entry_delay=None):
+                 entry_delay=None, reinit_on_bridge_exit=False):
         super().__init__(name)
         self.clock = clock
         self.state = "normal"
@@ -155,6 +160,11 @@ class _FirmwareModel(_f._FakeStreamingDevice):
             self.ENTRY_DELAY = entry_delay
         self._late_errors = late_errors
         self._refused_in_this_exchange = False
+        self.persisted = []
+        self._last_apply_accepted = None
+        # A REINIT in flight as the bridge is left: the apply gate is engaged
+        # when the restore's apply arrives.
+        self._reinit_on_bridge_exit = reinit_on_bridge_exit
 
     def _tick(self):
         now = self.clock.now
@@ -191,6 +201,13 @@ class _FirmwareModel(_f._FakeStreamingDevice):
             self.raw_to_winc.append(text)
         elif text == BRIDGE_EXIT:
             self.transparent = False
+            if self._reinit_on_bridge_exit:
+                self.gate_until = self.clock.now + self.GATE_TIMEOUT
+        elif text == LAN_SAVE:
+            self.persisted.append(bool(self._last_apply_accepted))
+        elif text == LAN_APPLY_SAVE:
+            if self._apply():
+                self.persisted.append(True)
         elif text == FW_UPDATE and self.state == "normal":
             self.state = "requested"
         elif text == POWER_ON:
@@ -201,16 +218,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
             else:
                 self._reply(POWER_QUERY)  # only the echo gets through
         elif text == LAN_APPLY:
-            if not self.powered:
-                pass  # UpdateNetworkSettings: no REINIT unless isPowered
-            elif self.gate_until is not None:
-                self.refused_applies += 1
-                self.errors.append('-200,"Execution error"')
-                self._refused_in_this_exchange = True
-            else:
-                self.gate_until = self.clock.now + self.GATE_TIMEOUT
-                self.reinit_pending = True
-                self._tick()
+            self._apply()
         elif text == ERR_QUERY:
             if self._late_errors and self._refused_in_this_exchange:
                 # The -200 trails the APPLY's echo past the read window.
@@ -222,6 +230,23 @@ class _FirmwareModel(_f._FakeStreamingDevice):
         if text == self._deliver_then_raise:
             self._deliver_then_raise = None
             raise OSError("flush failed after delivery")
+
+    def _apply(self) -> bool:
+        """LAN:APPLY; True when accepted."""
+        if not self.powered:
+            accepted = False  # UpdateNetworkSettings: no REINIT unless isPowered
+        elif self.gate_until is not None:
+            self.refused_applies += 1
+            self.errors.append('-200,"Execution error"')
+            self._refused_in_this_exchange = True
+            accepted = False
+        else:
+            self.gate_until = self.clock.now + self.GATE_TIMEOUT
+            self.reinit_pending = True
+            self._tick()
+            accepted = True
+        self._last_apply_accepted = accepted
+        return accepted
 
     def execute_text_command(self, setup_action, response_timeout_ms=5000,
                              completion_timeout_ms=1000, max_total_ms=None):
@@ -244,11 +269,26 @@ def test_a_successful_flash_enters_the_bridge_and_leaves_it_before_restoring_lan
     _update(device, _f._FakeExternalProcessRunner(_result()))
     commands = [c for c in device.sent_commands if c not in (IDN, ERR_QUERY, POWER_QUERY, STREAM_STOP)]
     assert commands == [
-        POWER_ON, FW_UPDATE, LAN_APPLY, BRIDGE_EXIT, LAN_ENABLE, LAN_APPLY, LAN_SAVE,
+        POWER_ON, FW_UPDATE, LAN_APPLY, BRIDGE_EXIT, LAN_ENABLE, LAN_APPLY_SAVE,
     ]
+    assert device.persisted == [True]
     assert device.final_state() == ("normal", False)
     # The probe that saw the console go silent is the only thing the WINC got.
     assert set(device.raw_to_winc) <= {IDN}
+
+
+def test_a_refused_restore_apply_is_not_persisted(clock) -> None:
+    # #220: a REINIT in flight when the bridge is left makes the restore's
+    # apply refused (-200). A separate LAN:SAVE would persist the unapplied
+    # settings anyway; APPLY 1 persists only an accepted apply.
+    device = _FirmwareModel(clock, reinit_on_bridge_exit=True)
+    try:
+        _update(device, _f._FakeExternalProcessRunner(_result()))
+    except FirmwareUpdateException:
+        pass  # whether the update reports it is not what this pins
+    assert device.refused_applies >= 1
+    assert False not in device.persisted
+    assert LAN_SAVE not in device.sent_commands
 
 
 @pytest.mark.parametrize(
@@ -447,7 +487,8 @@ def test_a_stale_error_in_the_queue_is_not_read_as_the_applys_answer(clock) -> N
     device = _FirmwareModel(clock)
     device.errors.append('-200,"Execution error"')
     _update(device, _f._FakeExternalProcessRunner(_result()))
-    assert device.sent_commands.count(LAN_APPLY) == 2  # prepare + restore
+    assert device.sent_commands.count(LAN_APPLY) == 1  # prepare
+    assert device.sent_commands.count(LAN_APPLY_SAVE) == 1  # restore
     assert device.final_state() == ("normal", False)
 
 
@@ -470,7 +511,8 @@ class _QuietUntilApply(_FirmwareModel):
 def test_a_silent_drain_still_sends_the_apply(clock) -> None:
     device = _QuietUntilApply(clock)
     _update(device, _f._FakeExternalProcessRunner(_result()))
-    assert device.sent_commands.count(LAN_APPLY) == 2
+    assert device.sent_commands.count(LAN_APPLY) == 1
+    assert device.sent_commands.count(LAN_APPLY_SAVE) == 1
     assert device.final_state() == ("normal", False)
 
 
