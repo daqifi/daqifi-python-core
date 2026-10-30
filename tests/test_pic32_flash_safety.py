@@ -167,6 +167,42 @@ def _crc(value: int) -> bytes:
     return _reply(0x04, value & 0xFF, value >> 8)
 
 
+class _Late:
+    """A reply that arrives only after the read for it has given up."""
+
+    def __init__(self, reply: bytes) -> None:
+        self.reply = reply
+
+
+class _Bootloader(_f._FakeHidTransport):
+    """Answers each write with the next scripted reply, as the bootloader
+    does: nothing is readable before the request it answers. None scripts
+    silence; _Late(reply) a reply that turns up just after the read for it
+    timed out."""
+
+    def __init__(self, replies) -> None:
+        super().__init__()
+        self._script = list(replies)
+        self._ready = []
+        self._late = []
+
+    def write(self, data) -> None:
+        super().write(data)
+        reply = self._script.pop(0) if self._script else None
+        if isinstance(reply, _Late):
+            self._late.append(reply.reply)
+        elif reply is not None:
+            self._ready.append(reply)
+
+    def read(self, timeout=None) -> bytes:
+        if not self._ready:
+            # A late reply lands just after the read waiting for it gave up.
+            self._ready += self._late
+            self._late = []
+            raise TimeoutError("No HID report.")
+        return self._ready.pop(0)
+
+
 def _write(lines) -> str:
     fd, path = tempfile.mkstemp(suffix=".hex")
     with os.fdopen(fd, "w") as handle:
@@ -192,11 +228,17 @@ def _bootloader():
     return _f._FakeHidEnumerator([[], [HidDeviceInfo(0x04D8, 0x003C, "path-1", "", "Bootloader")]])
 
 
-def _run(hid, image=_GOOD, cancel_event=None):
+def _run(hid, image=_GOOD, cancel_event=None, on_state=None):
     device = _f._FakeStreamingDevice()
     service = _service(hid, _bootloader())
     states = []
-    service.state_changed = lambda args: states.append(args.current_state)
+
+    def _changed(args):
+        states.append(args.current_state)
+        if on_state is not None:
+            on_state(args.current_state)
+
+    service.state_changed = _changed
     path = _write(image)
     try:
         service.update_firmware(device, path, cancel_event=cancel_event)
@@ -218,9 +260,7 @@ _ALL_PROGRAMMED = (_PROGRAMMED,) * 5
 
 
 def test_verifying_reads_every_region_crc_back() -> None:
-    hid = _f._FakeHidTransport()
-    for r in (_VERSION, _ERASED, *_ALL_PROGRAMMED, *map(_crc, _REGION_CRCS)):
-        hid.enqueue_read(r)
+    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, *map(_crc, _REGION_CRCS)])
     service, states, error = _run(hid)
     assert error is None and service.current_state == FirmwareUpdateState.COMPLETE
     assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x04, 0x05]
@@ -230,10 +270,7 @@ def test_verifying_reads_every_region_crc_back() -> None:
 
 
 def test_a_crc_mismatch_fails_verification_without_a_retry_and_re_erases() -> None:
-    hid = _f._FakeHidTransport()
-    for r in (_VERSION, _ERASED, *_ALL_PROGRAMMED,
-              _crc(_REGION_CRCS[0]), _crc(_REGION_CRCS[1] ^ 0x0101), _ERASED):
-        hid.enqueue_read(r)
+    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, _crc(_REGION_CRCS[0]), _crc(_REGION_CRCS[1] ^ 0x0101), _ERASED])
     service, states, error = _run(hid)
     assert error is not None and error.failed_state == FirmwareUpdateState.VERIFYING
     assert "CRC mismatch" in str(error.__cause__)
@@ -245,10 +282,7 @@ def test_a_crc_mismatch_fails_verification_without_a_retry_and_re_erases() -> No
 
 
 def test_a_malformed_crc_reply_is_retried() -> None:
-    hid = _f._FakeHidTransport()
-    for r in (_VERSION, _ERASED, *_ALL_PROGRAMMED,
-              b"\x01\x99\x04", _crc(_REGION_CRCS[0]), _crc(_REGION_CRCS[1])):
-        hid.enqueue_read(r)
+    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, b"\x01\x99\x04", _crc(_REGION_CRCS[0]), _crc(_REGION_CRCS[1])])
     service, _states, error = _run(hid)
     assert error is None and service.current_state == FirmwareUpdateState.COMPLETE
 
@@ -257,11 +291,9 @@ def test_a_malformed_crc_reply_is_retried() -> None:
 
 
 def test_a_programming_failure_re_erases_to_a_clean_bootloader() -> None:
-    hid = _f._FakeHidTransport()
     # The second record is never acknowledged (both attempts), then the
     # cleanup erase is.
-    for r in (_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED):
-        hid.enqueue_read(r)
+    hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED])
     service, states, error = _run(hid)
     assert error.failed_state == FirmwareUpdateState.PROGRAMMING
     assert _commands(hid) == [0x01, 0x02, 0x03, 0x03, 0x03, 0x02]
@@ -270,9 +302,7 @@ def test_a_programming_failure_re_erases_to_a_clean_bootloader() -> None:
 
 
 def test_a_failed_re_erase_ends_failed_and_says_the_board_may_be_half_written() -> None:
-    hid = _f._FakeHidTransport()
-    for r in (_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", b"\x00", b"\x00"):
-        hid.enqueue_read(r)
+    hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", b"\x00", b"\x00"])
     service, states, error = _run(hid)
     assert states[-2:] == [_CLEANING_UP, FirmwareUpdateState.FAILED]
     assert service.current_state == FirmwareUpdateState.FAILED
@@ -280,7 +310,7 @@ def test_a_failed_re_erase_ends_failed_and_says_the_board_may_be_half_written() 
     assert "could not be re-erased" in error.recovery_guidance
 
 
-class _DropsDuringProgramming(_f._FakeHidTransport):
+class _DropsDuringProgramming(_Bootloader):
     """The bootloader goes away while the second record is programmed."""
 
     def read(self, timeout=None):
@@ -291,9 +321,7 @@ class _DropsDuringProgramming(_f._FakeHidTransport):
 
 
 def test_no_re_erase_when_the_bootloader_is_gone() -> None:
-    hid = _DropsDuringProgramming()
-    for r in (_VERSION, _ERASED, _PROGRAMMED):
-        hid.enqueue_read(r)
+    hid = _DropsDuringProgramming([_VERSION, _ERASED, _PROGRAMMED])
     service, states, error = _run(hid)
     assert _CLEANING_UP not in states
     assert service.current_state == FirmwareUpdateState.FAILED
@@ -301,9 +329,9 @@ def test_no_re_erase_when_the_bootloader_is_gone() -> None:
     assert "could not be re-erased" in error.recovery_guidance
 
 
-class _CancelsDuringProgramming(_f._FakeHidTransport):
-    def __init__(self, cancel_event):
-        super().__init__()
+class _CancelsDuringProgramming(_Bootloader):
+    def __init__(self, cancel_event, replies):
+        super().__init__(replies)
         self._cancel_event = cancel_event
 
     def write(self, data):
@@ -314,9 +342,7 @@ class _CancelsDuringProgramming(_f._FakeHidTransport):
 
 def test_a_cancel_mid_flash_is_cleaned_up_too() -> None:
     cancel_event = threading.Event()
-    hid = _CancelsDuringProgramming(cancel_event)
-    for r in (_VERSION, _ERASED, _PROGRAMMED, _ERASED):
-        hid.enqueue_read(r)
+    hid = _CancelsDuringProgramming(cancel_event, [_VERSION, _ERASED, _PROGRAMMED, _ERASED])
     service, states, error = _run(hid, cancel_event=cancel_event)
     assert "canceled" in str(error).lower()
     assert _commands(hid) == [0x01, 0x02, 0x03, 0x02]
@@ -324,8 +350,7 @@ def test_a_cancel_mid_flash_is_cleaned_up_too() -> None:
 
 
 def test_a_failure_before_erase_doesnt_re_erase() -> None:
-    hid = _f._FakeHidTransport()
-    hid.enqueue_read(b"\x00")  # an unreadable version reply
+    hid = _Bootloader([b"\x00"])  # an unreadable version reply
     service, states, error = _run(hid)
     assert error.failed_state == FirmwareUpdateState.CONNECTING
     assert _CLEANING_UP not in states
@@ -333,9 +358,7 @@ def test_a_failure_before_erase_doesnt_re_erase() -> None:
 
 
 def test_an_update_can_start_again_after_recovered() -> None:
-    hid = _f._FakeHidTransport()
-    for r in (_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED):
-        hid.enqueue_read(r)
+    hid = _Bootloader([_VERSION, _ERASED, _PROGRAMMED, b"\x00", b"\x00", _ERASED])
     service, _states, _error = _run(hid)
     assert service.current_state == _RECOVERED
     path = _write(_GOOD)
@@ -346,3 +369,56 @@ def test_an_update_can_start_again_after_recovered() -> None:
         os.remove(path)
     # It ran (and failed waiting for a bootloader), rather than refusing to start.
     assert exc_info.value.failed_state == FirmwareUpdateState.WAITING_FOR_BOOTLOADER
+
+
+# ---- round 2 ------------------------------------------------------------
+
+
+def test_a_cancel_before_the_erase_goes_out_doesnt_erase() -> None:
+    # Cancelled as ERASING_FLASH is announced: no ERASE has been sent, the
+    # application is intact, and no cleanup erase may destroy it.
+    cancel_event = threading.Event()
+    hid = _Bootloader([_VERSION, _ERASED])
+
+    def on_state(state):
+        if state == FirmwareUpdateState.ERASING_FLASH:
+            cancel_event.set()
+
+    service, states, error = _run(hid, cancel_event=cancel_event, on_state=on_state)
+    assert "canceled" in str(error).lower()
+    assert 0x02 not in _commands(hid)
+    assert _CLEANING_UP not in states
+    assert service.current_state == FirmwareUpdateState.FAILED
+
+
+def test_an_unanswered_crc_request_fails_without_a_retry_that_could_take_a_late_reply() -> None:
+    # Region 1's reply comes late. A retry would read it as its own answer and
+    # leave its own reply queued for region 2 (replies carry no address). The
+    # silence fails verification instead; the late reply is drained before the
+    # cleanup erase.
+    hid = _Bootloader([_VERSION, _ERASED, *_ALL_PROGRAMMED, _Late(_crc(_REGION_CRCS[0])), _ERASED])
+    service, states, error = _run(hid)
+    assert error.failed_state == FirmwareUpdateState.VERIFYING
+    assert "didn't answer" in str(error.__cause__)
+    assert _commands(hid) == [0x01, 0x02, *[0x03] * 5, 0x04, 0x02]
+    assert service.current_state == _RECOVERED
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        (_line(bytes([2, 0, 0, 2, 0x00, 0x00])), "type-02"),  # extended segment address
+        (_line(bytes([2, 0, 0, 3, 0x00, 0x00])), "type-03"),
+        (_line(bytes([4, 0, 0, 5, 0x9D, 0x00, 0x04, 0x80])), "type-05"),
+    ],
+)
+def test_record_types_the_address_model_doesnt_implement_are_refused(extra, message) -> None:
+    image = [_base(0x1D00), _data(0x0480, b"\x01" * 4), extra, _data(0x0490, b"\x02" * 4), _EOF]
+    with pytest.raises(ValueError, match=message):
+        Pic32BootloaderProtocol().parse_hex_file(image)
+
+
+def test_records_after_the_end_of_file_are_refused() -> None:
+    image = [_base(0x1D00), _data(0x0480, b"\x01" * 4), _EOF, _data(0x0490, b"\x02" * 4)]
+    with pytest.raises(ValueError, match="after its end-of-file"):
+        Pic32BootloaderProtocol().parse_hex_file(image)

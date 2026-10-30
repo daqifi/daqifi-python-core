@@ -536,6 +536,9 @@ class DefaultFirmwareUpdateService:
         cancel_event: Optional[threading.Event],
         crc_regions: Optional[Sequence[FlashCrcRegion]] = None,
     ) -> None:
+        # Set when the first ERASE or PROGRAM goes out: only then can the
+        # flash be half-written, and only then is a re-erase due.
+        self._flash_touched = False
         try:
             self._transition_to_state(
                 FirmwareUpdateState.PREPARING_DEVICE,
@@ -775,7 +778,8 @@ class DefaultFirmwareUpdateService:
     ) -> Optional[str]:
         """Take a failed PIC32 update to its terminal state.
 
-        A failure while erasing, programming or verifying can leave a
+        Once an ERASE or PROGRAM has been sent, a failure while erasing,
+        programming or verifying can leave a
         half-written application, which the bootloader starts on the next
         reset if its reset address was written (bootloader.c,
         BOOTLOADER_CHECK_FOR_TRIGGER). Then, while the bootloader is still
@@ -791,7 +795,10 @@ class DefaultFirmwareUpdateService:
             self._transition_to_state(state, operation)
             self._report_progress(progress, state, percent, operation, 0, total_bytes)
 
-        if failed_state not in _CLEANUP_STATES:
+        if failed_state not in _CLEANUP_STATES or not self._flash_touched:
+            # Nothing was erased or programmed (a cancel can land as
+            # ERASING_FLASH is announced, before the erase goes out): the
+            # application is intact and must not be erased now.
             _end(FirmwareUpdateState.FAILED, failed_operation)
             return None
         if not self._hid_transport.is_connected:
@@ -1998,6 +2005,9 @@ class DefaultFirmwareUpdateService:
         from datetime import timedelta
 
         def _attempt() -> None:
+            # A cleanup erase can follow a request whose reply came late.
+            self._drain_hid_reports()
+            self._flash_touched = True
             self._hid_transport.write(
                 self._bootloader_protocol.create_erase_flash_message()
             )
@@ -2035,6 +2045,7 @@ class DefaultFirmwareUpdateService:
                 message = self._bootloader_protocol.create_program_flash_message(
                     record
                 )
+                self._flash_touched = True
                 self._hid_transport.write(message)
                 response = self._hid_transport.read(
                     timedelta(seconds=self._options.bootloader_response_timeout)
@@ -2079,8 +2090,13 @@ class DefaultFirmwareUpdateService:
         CRC (READ_CRC) and comparing with the image's. Port of daqifi-core
         2826b35.
 
-        A malformed reply is retried like any transient HID fault; a CRC
-        that differs is not retried: the flash doesn't hold the image.
+        A reply carries no address (datastream.c answers READ_CRC with the
+        command byte and the CRC only), so a late reply to one request would
+        read as the answer to the next. Pending reports are therefore
+        drained before every request, and no reply at all fails the check
+        rather than being retried: a retry could take the late reply. A
+        malformed reply was this request's own, so it is retried. A CRC that
+        differs is not retried: the flash doesn't hold the image.
         Without regions (a protocol that can't read a CRC back) only the
         bootloader's liveness is checked, as before.
         """
@@ -2100,12 +2116,21 @@ class DefaultFirmwareUpdateService:
             where = f"region {index + 1} at 0x{region.address:08X}"
 
             def _attempt(region=region, where=where) -> None:
+                self._drain_hid_reports()
                 self._hid_transport.write(
                     protocol.create_read_crc_message(region.address, region.length)
                 )
-                response = self._hid_transport.read(
-                    timedelta(seconds=self._options.bootloader_response_timeout)
-                )
+                try:
+                    response = self._hid_transport.read(
+                        timedelta(seconds=self._options.bootloader_response_timeout)
+                    )
+                except TimeoutError:
+                    response = b""
+                if not response:
+                    raise _FlashVerificationError(
+                        f"The bootloader didn't answer the CRC request for {where}; "
+                        "the flash can't be confirmed."
+                    )
                 actual = protocol.decode_read_crc_response(response)
                 if actual is None:
                     raise ValueError(f"Bootloader CRC reply for {where} was malformed.")
@@ -2125,6 +2150,19 @@ class DefaultFirmwareUpdateService:
                 deadline,
             )
         self._logger.info("Flash verified: %d region(s) match the image.", len(crc_regions))
+
+    def _drain_hid_reports(self, limit: int = 16) -> None:
+        """Discard reports already waiting from the bootloader (a late reply
+        to an earlier request). A read that times out (``b""``, or
+        TimeoutError from some transports) means nothing is waiting."""
+        from datetime import timedelta
+
+        for _ in range(limit):
+            try:
+                if not self._hid_transport.read(timedelta(milliseconds=20)):
+                    return
+            except TimeoutError:
+                return
 
     def _jump_to_application_and_reconnect(
         self,

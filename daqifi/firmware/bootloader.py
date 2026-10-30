@@ -368,6 +368,25 @@ class Pic32BootloaderProtocol:
 
     def _data_checked_records(self, hex_file_lines: List[str]) -> List[HexFileRecord]:
         records = self._hex_parser.parse_records(hex_file_lines)
+        # The address model here knows data (00), end of file (01) and
+        # extended linear address (04) records, all an XC32 image has. The
+        # bootloader also reads 02 as a segment base and resets its base on
+        # 01, 03 and 05 (nvm.c APP_ProgramHexRecord), so with any other type,
+        # or a record after the end of file, the addresses checked here could
+        # differ from the ones written. Such an image is refused.
+        seen_end = False
+        for record in records:
+            if seen_end:
+                raise ValueError(
+                    "Firmware HEX file has records after its end-of-file record."
+                )
+            if record.record_type not in (0x00, 0x01, 0x04):
+                raise ValueError(
+                    f"Firmware HEX file has a type-{record.record_type:02X} record, "
+                    "which this updater doesn't model; only data, end-of-file "
+                    "and extended linear address records are accepted."
+                )
+            seen_end = record.record_type == 0x01
         data_records = [r for r in records if r.record_type == 0x00 and r.data[0] > 0]
         if not data_records:
             raise ValueError(
