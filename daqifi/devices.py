@@ -37,7 +37,7 @@ from ._internal.comm import (
     ScpiMessage,
     TransportStatusEventArgs,
 )
-from ._internal.scpi import ConnectionStatus, DeviceState, StreamInterface
+from ._internal.scpi import ChannelDirection, ConnectionStatus, DeviceState, StreamInterface
 from ._internal import scpi_commands
 from .channels import ChannelsPopulatedEventArgs
 from .communication import (
@@ -1469,6 +1469,9 @@ class DaqifiDevice:
             resolution = 0
         if resolution <= 0:
             resolution = 65535
+        # Field 22: bit n set = channel n enabled (little-endian bytes,
+        # firmware int2PBByteArray). Unreported (empty) reads as disabled.
+        enabled_mask = self._bit_mask(message, "analog_in_port_enabled", "AnalogInPortEnabled")
 
         for i in range(count):
             channel = AnalogChannel(
@@ -1479,7 +1482,7 @@ class DaqifiDevice:
                 calibration_m=self._with_default(cal_m, i, 1.0),
                 internal_scale_m=self._with_default(int_scale, i, 1.0),
                 port_range=self._with_default(ranges, i, 1.0),
-                is_enabled=False,
+                is_enabled=self._bit_set(enabled_mask, i),
             )
             self._channels.append(channel)
         return count
@@ -1497,11 +1500,39 @@ class DaqifiDevice:
             count = 0
         if count <= 0:
             return 0
+        # Field 37: bit n set = DIO n is an input, clear = output (the
+        # firmware's IsInput, little-endian bytes). A pin the mask doesn't
+        # cover is reported as Input, as before (upstream 5449896).
+        dir_mask = self._bit_mask(message, "digital_port_dir", "DigitalPortDir")
         for i in range(count):
+            covered = dir_mask is not None and i // 8 < len(dir_mask)
+            if covered and not self._bit_set(dir_mask, i):
+                direction = ChannelDirection.Output
+            else:
+                direction = ChannelDirection.Input
             self._channels.append(
-                DigitalChannel(index=i, name=f"DIO{i}", is_enabled=False)
+                DigitalChannel(
+                    index=i, name=f"DIO{i}", direction=int(direction), is_enabled=False
+                )
             )
         return count
+
+    @staticmethod
+    def _bit_mask(message: Any, snake: str, pascal: str) -> Optional[bytes]:
+        """A protobuf ``bytes`` bit mask, or None when it's absent or empty
+        (not reported)."""
+        value = getattr(message, snake, None) or getattr(message, pascal, None)
+        if isinstance(value, (bytes, bytearray, memoryview)) and len(value) > 0:
+            return bytes(value)
+        return None
+
+    @staticmethod
+    def _bit_set(mask: Optional[bytes], index: int) -> bool:
+        """Bit ``index`` of a little-endian byte mask (byte index // 8,
+        bit index % 8), as upstream reads it."""
+        if mask is None or index // 8 >= len(mask):
+            return False
+        return bool(mask[index // 8] & (1 << (index % 8)))
 
     @staticmethod
     def _field_list(message: Any, snake: str, pascal: str) -> Optional[list]:
