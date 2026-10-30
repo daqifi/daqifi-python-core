@@ -7,10 +7,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `TcpStreamTransport(..., local_interface=...)` and
-  `DaqifiDeviceFactory.connect_tcp(..., local_interface=...)` bind the TCP
-  connection to a local IP; `connect_from_device_info` passes the
-  discovering NIC (#196).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -21,12 +17,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   enumerated device; `SerialStreamTransport.port_name` (#161).
 
 ### Changed
-- python-core opens serial ports exclusively (`exclusive=True`: an advisory
-  `flock` on POSIX; Windows COM ports already were), in `SerialInterface`,
-  `SerialStreamTransport` and serial discovery. A second python-core open of
-  a port in use now fails instead of sharing it. Clients that don't take the
-  lock (a terminal program, a raw file descriptor) can still share a port on
-  POSIX (#196).
 - A PIC32 update now refuses to start while more than one DAQiFi board is
   connected over USB (application serial ports with 04D8:F794, plus boards
   already in bootloader mode), and says to disconnect the others; it also
@@ -38,19 +28,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- Serial discovery (`DeviceFinder`, `SerialDeviceFinder`) probes only DAQiFi
-  application ports (USB 04D8:F794, plus CDC-ACM ports whose IDs can't be
-  read) instead of every port, so it no longer writes SCPI (including a
-  power-on) to unrelated devices; on macOS a board is listed once. Each
-  probe has a hard timeout: one hung port no longer blocks discovery, and
-  isn't probed again while its abandoned probe runs (#196).
-- `WiFiDeviceFinder` fills `DeviceInfo.local_interface_address` with the NIC
-  a device answered on (#196).
-- `update_network_configuration` ends with `LAN:APPLY 1`, which applies the
-  configuration and, only if the apply is accepted, saves it, in one
-  firmware handler. The save it sent after the apply never arrived over a
-  WiFi/TCP control link (the apply restarts the WiFi module), and the old
-  configuration came back at the next reboot (#196).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
