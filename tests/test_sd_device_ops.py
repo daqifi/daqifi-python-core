@@ -16,6 +16,7 @@
 import importlib.util
 import io
 import os
+import time
 
 import pytest
 
@@ -32,12 +33,37 @@ _spec.loader.exec_module(_fakes)
 LISTING = b"Daqifi/log_a.bin 3\r\n"
 
 
-def _device(**kwargs):
-    # FORmat? answers "done": format_sd_card waits for the format to finish
-    # before it resumes anything.
-    return _fakes._make_device_with_serial_facade(
-        {b"SD:LIST?": LISTING, b"SD:FORmat?": b"2,100\r\n"}, **kwargs
+def _frame(**fields) -> bytes:
+    from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+
+    body = DaqifiOutMessage(**fields).SerializeToString()
+    return bytes([len(body)]) + body
+
+
+# One sample, as the device streams it once START is accepted.
+SAMPLE = _frame(msg_time_stamp=100, analog_in_data_float=[1.0])
+
+
+def _live(device):
+    """Wire the protobuf pipeline as initialize() does, so the device sees
+    the samples a resumed stream sends (the restore waits for one)."""
+    from daqifi.protocol import ProtobufProtocolHandler
+
+    device._protocol_handler = ProtobufProtocolHandler(
+        status_message_handler=device._on_status_message_received,
+        stream_message_handler=device._on_stream_message_received,
     )
+    device._consumer.add_message_received(device._on_inbound_message)
+    return device
+
+
+def _device(response_map=None, **kwargs):
+    # FORmat? answers "done": format_sd_card waits for the format to finish
+    # before it resumes anything. An accepted START streams a sample.
+    responses = {b"SD:LIST?": LISTING, b"SD:FORmat?": b"2,100\r\n",
+                 b"SYSTem:STReam:START": SAMPLE}
+    responses.update(response_map or {})
+    return _live(_fakes._make_device_with_serial_facade(responses, **kwargs))
 
 
 def _written(device):
@@ -46,6 +72,11 @@ def _written(device):
 
 def _streaming(device):
     device.start_streaming()
+    # Let the reader take the sample that START streamed before the test
+    # pauses the stream.
+    deadline = time.monotonic() + 2
+    while device._transport.stream.in_waiting and time.monotonic() < deadline:
+        time.sleep(0.01)
     device._transport.stream.written.clear()
     return device
 
@@ -65,17 +96,16 @@ def test_an_sd_operation_resumes_the_stream_it_paused(op) -> None:
         }[op]()
         commands = _written(device)
         assert commands[0].startswith("SYSTem:STReam:STOP")
-        # Resumed, and confirmed: START, then the error query that checks it.
-        assert commands[-2:][0].startswith("SYSTem:STReam:START")
-        assert commands[-1].startswith("SYSTem:ERRor?")
+        # Resumed with START, confirmed by the sample it streamed; nothing
+        # is queried as text once the stream runs.
+        assert commands[-1].startswith("SYSTem:STReam:START")
         assert device.is_streaming and device.state == DeviceState.Streaming
     finally:
         device.disconnect()
 
 
 def test_a_download_resumes_the_stream_it_paused() -> None:
-    device = _streaming(_fakes._make_device_with_serial_facade(
-        {b"SD:GET": b"abc__END_OF_FILE__\r\n"}))
+    device = _streaming(_device({b"SD:GET": b"abc__END_OF_FILE__\r\n"}))
     try:
         device.download_sd_card_file("log_a.bin", io.BytesIO(), expected_size=3)
         assert any(c.startswith("SYSTem:STReam:START") for c in _written(device))
@@ -192,8 +222,6 @@ def test_the_benchmark_size_is_1_to_1024_kb(size, ok) -> None:
 
 # ---- audit r2: a restore during the format's busy window ---------------------
 
-import time
-
 
 class _BusyAfterFormat:
     """Models the firmware around an asynchronous format: for ``busy_s``
@@ -226,9 +254,12 @@ class _BusyAfterFormat:
         elif command.startswith("SYSTem:STORage:SD:ENAble 0") and self.busy():
             self.errors.append(b'-200,"Execution error"')
             self.refused.append(command)
-        elif command.startswith("SYSTem:STReam:START") and (self.busy() or self.refuse_start_always):
-            self.errors.append(b'-200,"Execution error"')
-            self.refused.append(command)
+        elif command.startswith("SYSTem:STReam:START"):
+            if self.busy() or self.refuse_start_always:
+                self.errors.append(b'-200,"Execution error"')
+                self.refused.append(command)
+            else:
+                self.stream.feed(SAMPLE)
         elif command.startswith("SYSTem:ERRor?"):
             self.stream.feed((self.errors.pop(0) if self.errors else b'0,"No error"') + b"\r\n")
         return len(b)
@@ -266,6 +297,108 @@ def test_a_failed_format_raises_and_doesnt_resume() -> None:
         with pytest.raises(SdCardOperationException, match="format failed"):
             device.format_sd_card()
         assert not device.is_streaming
+    finally:
+        device.disconnect()
+
+
+# ---- audit r3: the resume is confirmed by the stream, not by text -------------
+
+import threading
+
+
+def test_a_sample_ahead_of_any_text_reply_doesnt_undo_a_good_resume() -> None:
+    # The resumed stream's first frame lands ahead of the reply to a text
+    # query sent after START; read as text, the two fuse into one line with
+    # no parsable reply, and a stream that started fine was stopped again.
+    device = _streaming(_device())
+    try:
+        assert [f.file_name for f in device.get_sd_card_files()] == ["log_a.bin"]
+        assert device.is_streaming and device.state == DeviceState.Streaming
+        assert _written(device)[-1].startswith("SYSTem:STReam:START")
+    finally:
+        device.disconnect()
+
+
+class _StreamsUntilStopped:
+    """After START, streams frames whose bytes include CR LF, every 20 ms,
+    until STOP: a peer that never goes quiet for a text reader."""
+
+    def __init__(self, device, frame):
+        self.stream = device._transport.stream
+        self.frame = frame
+        self.running = threading.Event()
+        self.done = threading.Event()
+        self._write = self.stream.write
+        self.stream.write = self.write
+        self.thread = threading.Thread(target=self._pump, daemon=True)
+        self.thread.start()
+
+    def write(self, data):
+        command = bytes(data).decode(errors="replace").strip()
+        if command.startswith("SYSTem:STReam:START"):
+            self.running.set()
+        elif command.startswith("SYSTem:STReam:STOP"):
+            self.running.clear()
+        return self._write(data)
+
+    def _pump(self):
+        while not self.done.is_set():
+            if self.running.is_set():
+                self.stream.feed(self.frame)
+            time.sleep(0.02)
+
+    def close(self):
+        self.done.set()
+        self.running.clear()
+        self.thread.join(2)
+
+
+def test_a_resume_returns_promptly_while_the_stream_runs_and_keeps_its_samples() -> None:
+    frame = _frame(msg_time_stamp=100, digital_data=b"\r\n")
+    assert b"\r\n" in frame
+    device = _streaming(_device({b"SYSTem:STReam:START": b""}))
+    fake = _StreamsUntilStopped(device, frame)
+    samples = []
+    device.add_message_received(lambda args: samples.append(args))
+    outcome = {}
+
+    def _run():
+        try:
+            outcome["files"] = device.get_sd_card_files()
+        except Exception as exc:  # pragma: no cover - reported below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_run, daemon=True)
+    try:
+        fake.running.set()  # the stream the listing pauses
+        samples.clear()
+        worker.start()
+        worker.join(8)  # bounds the test: the listing must return
+        assert not worker.is_alive(), "the SD listing never returned while the stream ran"
+        assert "error" not in outcome, outcome
+        assert [f.file_name for f in outcome["files"]] == ["log_a.bin"]
+        assert device.is_streaming and device.state == DeviceState.Streaming
+        # The resumed stream's samples reach subscribers, not a text reader.
+        deadline = time.monotonic() + 2
+        while not samples and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert samples
+    finally:
+        fake.close()
+        worker.join(5)
+        device.disconnect()
+
+
+def test_a_start_that_streams_nothing_isnt_a_resume() -> None:
+    # START accepted (no error queued) but no sample ever arrives: the
+    # device isn't streaming, and the wait is bounded.
+    device = _streaming(_device({b"SYSTem:STReam:START": b""}))
+    try:
+        began = time.monotonic()
+        device.get_sd_card_files()
+        assert time.monotonic() - began < 15
+        assert not device.is_streaming and device.state != DeviceState.Streaming
+        assert _written(device)[-1].startswith("SYSTem:STReam:STOP")
     finally:
         device.disconnect()
 

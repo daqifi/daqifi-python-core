@@ -395,6 +395,9 @@ class DaqifiDevice:
         self._channels_populated_handlers: List[
             Callable[[ChannelsPopulatedEventArgs], None]
         ] = []
+        # Set by _on_stream_message_received while _restore_streaming waits
+        # for the resumed stream's first sample.
+        self._stream_sample_seen: Optional[threading.Event] = None
 
         # Serializes execute_text_command calls device-wide. Plain
         # Lock (not RLock) is intentional: re-entrant calls from
@@ -1578,6 +1581,9 @@ class DaqifiDevice:
         self._fire_message(message)
 
     def _on_stream_message_received(self, message: Any) -> None:
+        seen = self._stream_sample_seen
+        if seen is not None:
+            seen.set()
         self._fire_message(message)
 
     def _fire_message(self, payload: Any) -> None:
@@ -2451,12 +2457,17 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         ``send()`` doesn't check acceptance, and the firmware can refuse the
         restore (``SD:ENAble 0`` or a START that arms SD logging, while the
-        SD module is busy). So the error queue is emptied first (an error
-        there, or a queue that can't be emptied, means the restore isn't
-        confirmed), then START is sent with ``SYSTem:ERRor?`` right after
-        it, and only a ``0`` reply marks the device streaming. Anything else
-        sends STOP and leaves it Ready, with a warning: a restore that
-        couldn't be confirmed never lands in the streaming state.
+        SD module is busy). So the error queue is emptied first, while the
+        device is still quiet (an error there, or a queue that can't be
+        emptied, means the restore isn't confirmed). Then START is sent and
+        confirmed by the stream itself: the device is marked streaming only
+        once the protobuf reader parses a sample, within two sample periods
+        plus a second. No text is read after START: once the stream runs,
+        its binary frames share the pipe with any text reply, can split or
+        swallow it, and (carrying CR LF bytes) keep a text capture from ever
+        going quiet. A START with no sample in the window sends STOP and
+        leaves the device Ready, with a warning: a restore that couldn't be
+        confirmed never lands in the streaming state.
         Best-effort, from a finally: a failure must not replace the
         operation's own outcome.
         """
@@ -2483,22 +2494,18 @@ class DaqifiStreamingDevice(DaqifiDevice):
             if codes:
                 _not_resumed(f"the device reported {popped!r}")
                 return
-            lines = self.execute_text_command(
-                lambda: (
-                    self.send(scpi_commands.start_streaming(self._streaming_frequency)),
-                    self.send(scpi_commands.get_last_error()),
-                ),
-                response_timeout_ms=1000,
-                completion_timeout_ms=300,
-            )
-            reply = _scpi.find_system_error_reply(lines)
-            if reply is None:
-                _not_resumed("the START wasn't confirmed (no reply)")
-                return
-            code, _description = _scpi.parse_system_error(reply)
-            if code != 0:
-                _not_resumed(f"the device refused START: {reply}")
-                return
+            seen = threading.Event()
+            self._stream_sample_seen = seen
+            try:
+                self.send(scpi_commands.start_streaming(self._streaming_frequency))
+                window_s = 2.0 / max(self._streaming_frequency, 1) + 1.0
+                if not seen.wait(window_s):
+                    _not_resumed(
+                        f"no stream data arrived within {window_s:.1f} s of START"
+                    )
+                    return
+            finally:
+                self._stream_sample_seen = None
         except Exception as exc:
             _not_resumed(f"{exc}")
             return
