@@ -17,12 +17,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   enumerated device; `SerialStreamTransport.port_name` (#161).
 
 ### Changed
-- `StreamManager.read()`'s `timeout` is the total for all samples, not per
-  sample; its default allows twice the samples' duration at the configured
-  rate plus 1 s. `read_all(duration)` collects for `duration` seconds and
-  returns just those samples, even on a stalled stream. The stream buffer
-  keeps the newest `buffer_size` samples (default 100,000; `None` for
-  unbounded). A channel absent from a `Sample` reads NaN, not 0.0 (#199).
 - A PIC32 update now refuses to start while more than one DAQiFi board is
   connected over USB (application serial ports with 04D8:F794, plus boards
   already in bootloader mode), and says to disconnect the others; it also
@@ -34,10 +28,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- Live JSON streaming: a digital-only record no longer becomes a fake 0 V
-  sample; one malformed record no longer discards the good ones buffered
-  behind it; records are logged at debug level instead of printed to stdout
-  (#199).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
