@@ -82,7 +82,10 @@ __all__ = [
     "SdCardFileParserFactory",
     "SdCardFileReceiver",
     "parse_sd_card_file_list",
+    "sd_card_listing_status",
+    "check_sd_card_listing",
     "END_OF_FILE_MARKER",
+    "SD_LIST_END_MARKER",
 ]
 
 
@@ -153,6 +156,160 @@ def _is_non_result_line(line: str) -> bool:
     )
 
 
+#: The marker the firmware appends to a listing (``sd_card_manager.c``,
+#: ``SD_LIST_END_OK`` / ``_INCOMPLETE`` / ``_FAILED``), followed by the
+#: status word.
+SD_LIST_END_MARKER = "__END_OF_LIST__"
+
+_DIRECTORY_NOT_FOUND_RE = re.compile(
+    r"\[Error:(\d+)\]\s*Failed to open directory", re.IGNORECASE
+)
+# SYS_FS_ERROR_NO_FILE, SYS_FS_ERROR_NO_PATH.
+_DIRECTORY_NOT_FOUND_CODES = ("4", "5")
+
+
+# The marker, then optionally whitespace and the status word, and then
+# whatever followed it on the wire. The firmware writes the marker with no
+# line ending (SD_LIST_END_OK = "\r\n__END_OF_LIST__ OK"), so the reply to
+# the next command is glued to it: '__END_OF_LIST__ OK0,"No error"'.
+# The firmware's own status words come first, so a glued echo
+# ('__END_OF_LIST__ OKDAQIFI> SYSTem:ERRor?') doesn't run into the word.
+_LIST_END_RE = re.compile(
+    r"^__END_OF_LIST__(?:(\s+)(OK|INCOMPLETE|FAILED|[A-Za-z]+))?(.*)$", re.DOTALL
+)
+
+
+def _list_end_parts(line: str) -> Optional[Tuple[str, str]]:
+    """``(status word, glued remainder)`` if ``line`` starts with the
+    end-of-listing marker, else ``None``. The marker must stand alone or be
+    followed by whitespace: ``__END_OF_LIST__notes.csv`` is a file."""
+    match = _LIST_END_RE.match(line.strip())
+    if match is None:
+        return None
+    if match.group(1) is None:
+        return ("", "") if not match.group(3) else None
+    return match.group(2), match.group(3).strip()
+
+
+def _list_end_status(line: str) -> Optional[str]:
+    """The status word if ``line`` is the end-of-listing marker ("" when it
+    has none), else ``None``."""
+    parts = _list_end_parts(line)
+    return None if parts is None else parts[0]
+
+
+# A SYSTem:ERRor? reply glued to the end of the line before it. The firmware
+# strips the final CR/LF of a listing's last chunk (ListFilesInDirectoryChunked,
+# v3.7.3 and main), so on firmware without the end-of-listing marker the
+# reply lands on the last file line: 'Daqifi/log_a.bin 30,"No error"'. A
+# file's size digits can't be told from a code's, so only forms that are
+# unambiguous at the end of the line are split: a negative code, or 0 (or
+# +0) with "No error".
+_GLUED_ERROR_REPLY_RE = re.compile(r'(-\d+\s*,\s*"[^"]*"|\+?0\s*,\s*"No error")\s*$')
+
+
+def split_glued_error_reply(lines: Sequence[str]) -> List[str]:
+    """Split a ``SYSTem:ERRor?`` reply glued onto the end of the last line
+    onto a line of its own."""
+    out = list(lines)
+    while out and not (out[-1] or "").strip():
+        out.pop()
+    if not out:
+        return out
+    last = out[-1]
+    match = _GLUED_ERROR_REPLY_RE.search(last)
+    if match and match.start() > 0 and last[:match.start()].strip():
+        out[-1:] = [last[:match.start()], match.group(1)]
+    return out
+
+
+def throw_if_sd_card_reported_error(lines: Sequence[str]) -> None:
+    """Raise for an explicit device report in a listing reply ("No SD Card
+    Detected", "Failed to open directory"), before any judgement about how
+    the reply ended: those replies carry no end-of-listing marker."""
+    from .exceptions import (
+        SdCardDirectoryNotFoundException,
+        SdCardFilesystemException,
+        SdCardNotPresentException,
+    )
+
+    lines_list = [ln for ln in lines if ln is not None]
+    last_scpi_error = None
+    for line in reversed(lines_list):
+        if _is_scpi_error_line(line):
+            last_scpi_error = line.strip()
+            break
+    for line in lines_list:
+        if "no sd card detected" in line.lower():
+            raise SdCardNotPresentException(lines_list, last_scpi_error)
+    for line in lines_list:
+        if "failed to open directory" in line.lower():
+            match = _DIRECTORY_NOT_FOUND_RE.search(line)
+            if match and match.group(1) in _DIRECTORY_NOT_FOUND_CODES:
+                raise SdCardDirectoryNotFoundException(
+                    lines_list, last_scpi_error, line.strip()
+                )
+            raise SdCardFilesystemException(
+                lines_list, last_scpi_error, line.strip()
+            )
+
+
+def split_glued_list_end(lines: Iterable[str]) -> List[str]:
+    """Split a reply glued onto the end-of-listing marker onto its own line,
+    as it would be if the firmware ended the marker with CR/LF."""
+    out: List[str] = []
+    for line in lines:
+        parts = _list_end_parts(line) if line is not None else None
+        if parts and parts[1]:
+            out.append(f"{SD_LIST_END_MARKER} {parts[0]}".rstrip())
+            out.append(parts[1])
+        else:
+            out.append(line)
+    return out
+
+
+def sd_card_listing_status(lines: Iterable[str]) -> str:
+    """How a listing ended, from the firmware's end-of-listing marker.
+
+    Returns ``"complete"`` (``OK``), ``"incomplete"`` (``INCOMPLETE``, or a
+    status word this version doesn't know), ``"failed"`` (``FAILED``: the
+    directory couldn't be opened) or ``"unterminated"``: no marker, as from
+    firmware before it had one. That isn't an error, it just can't vouch
+    for the listing. A status is final once seen: a later line (an echo of
+    the next command, say) doesn't undo it, though a later marker replaces
+    it. Lines left over from an earlier exchange are the caller's to keep
+    out (the device drains them before retrying a listing).
+    """
+    status = "unterminated"
+    for line in lines:
+        if line is None:
+            continue
+        word = _list_end_status(line)
+        if word is None:
+            continue
+        status = {"OK": "complete", "FAILED": "failed"}.get(
+            word.upper(), "incomplete"
+        )
+    return status
+
+
+def check_sd_card_listing(lines: Sequence[str]) -> None:
+    """Raise the typed exception a listing reply calls for, if any.
+
+    Runs :func:`throw_if_sd_card_list_error`, then refuses a listing whose
+    end-of-listing marker says it isn't the whole card
+    (:class:`~daqifi.exceptions.SdCardListIncompleteException`).
+    """
+    from .exceptions import SdCardListIncompleteException
+
+    throw_if_sd_card_list_error(lines)
+    status = sd_card_listing_status(lines)
+    if status in ("incomplete", "failed"):
+        raise SdCardListIncompleteException(
+            list(lines), f"the device marked the listing {status}"
+        )
+
+
 def throw_if_sd_card_list_error(lines):
     """Inspect the final response from a ``SYSTem:STORage:SD:LISt?``
     exchange and raise a typed exception when the device reported a real
@@ -167,12 +324,16 @@ def throw_if_sd_card_list_error(lines):
 
     Raises:
         SdCardNotPresentException: device emitted ``"No SD Card Detected"``.
-        SdCardFilesystemException: device emitted
+        SdCardDirectoryNotFoundException: device emitted
+            ``"[Error:4]"`` or ``"[Error:5]Failed to open directory ..."``
+            (no such directory).
+        SdCardFilesystemException: device emitted any other
             ``"Failed to open directory ..."``.
         SdCardOperationException: any other classification fallback
             (SCPI error with no content, non-result line with no SCPI error).
     """
     from .exceptions import (
+        SdCardDirectoryNotFoundException,
         SdCardFilesystemException,
         SdCardNotPresentException,
         SdCardOperationException,
@@ -206,6 +367,11 @@ def throw_if_sd_card_list_error(lines):
 
     for line in lines_list:
         if "failed to open directory" in line.lower():
+            match = _DIRECTORY_NOT_FOUND_RE.search(line)
+            if match and match.group(1) in _DIRECTORY_NOT_FOUND_CODES:
+                raise SdCardDirectoryNotFoundException(
+                    lines_list, last_scpi_error, line.strip()
+                )
             raise SdCardFilesystemException(
                 lines_list, last_scpi_error, line.strip()
             )
@@ -269,6 +435,9 @@ def parse_sd_card_file_list(lines: Iterable[str]) -> List["SdCardFileInfo"]:
         if upper in ("DAQIFI>", "OK"):
             continue
         if upper.startswith("**ERROR") or upper.startswith("ERROR"):
+            continue
+        # The end-of-listing marker is framing, not a file (#188).
+        if _list_end_status(line) is not None:
             continue
         # The firmware lists "<path> <size>" (sd_card_manager.c) — the
         # first whitespace token is the path, a decimal second one the size.

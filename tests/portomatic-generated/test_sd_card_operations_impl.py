@@ -68,7 +68,10 @@ class _ScriptedSerialStream:
         self.written: List[bytes] = []
         self._buf = bytearray()
         self._lock = threading.Lock()
-        self.response_map = dict(response_map or {})
+        # A real device always answers SYSTem:ERRor?, which the SD listing
+        # sends as its end-of-reply terminator (#188).
+        self.response_map = {b"SYSTem:ERRor?": b'0,"No error"\r\n'}
+        self.response_map.update(response_map or {})
         # Cap bytes returned per ``read()`` call so tests can force
         # multi-chunk delivery of a single response (exercises the
         # trailing-window EOF-marker straddle path).
