@@ -820,6 +820,9 @@ class DefaultFirmwareUpdateService:
                 "Re-erasing flash so the board isn't left with a half-written "
                 "application.",
             )
+            # A request may have gone unanswered (that may be the failure),
+            # and its reply could arrive now: clear it before the erase.
+            self._drain_hid_reports()
             # Its own deadline, without the caller's cancel event: a cancel
             # is what may have brought us here, and the re-erase must still
             # run.
@@ -2005,8 +2008,6 @@ class DefaultFirmwareUpdateService:
         from datetime import timedelta
 
         def _attempt() -> None:
-            # A cleanup erase can follow a request whose reply came late.
-            self._drain_hid_reports()
             self._flash_touched = True
             self._hid_transport.write(
                 self._bootloader_protocol.create_erase_flash_message()
