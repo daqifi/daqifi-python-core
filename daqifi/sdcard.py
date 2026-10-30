@@ -168,17 +168,48 @@ _DIRECTORY_NOT_FOUND_RE = re.compile(
 _DIRECTORY_NOT_FOUND_CODES = ("4", "5")
 
 
+# The marker, then optionally whitespace and the status word, and then
+# whatever followed it on the wire. The firmware writes the marker with no
+# line ending (SD_LIST_END_OK = "\r\n__END_OF_LIST__ OK"), so the reply to
+# the next command is glued to it: '__END_OF_LIST__ OK0,"No error"'.
+# The firmware's own status words come first, so a glued echo
+# ('__END_OF_LIST__ OKDAQIFI> SYSTem:ERRor?') doesn't run into the word.
+_LIST_END_RE = re.compile(
+    r"^__END_OF_LIST__(?:(\s+)(OK|INCOMPLETE|FAILED|[A-Za-z]+))?(.*)$", re.DOTALL
+)
+
+
+def _list_end_parts(line: str) -> Optional[Tuple[str, str]]:
+    """``(status word, glued remainder)`` if ``line`` starts with the
+    end-of-listing marker, else ``None``. The marker must stand alone or be
+    followed by whitespace: ``__END_OF_LIST__notes.csv`` is a file."""
+    match = _LIST_END_RE.match(line.strip())
+    if match is None:
+        return None
+    if match.group(1) is None:
+        return ("", "") if not match.group(3) else None
+    return match.group(2), match.group(3).strip()
+
+
 def _list_end_status(line: str) -> Optional[str]:
-    """The status word if ``line`` IS the end-of-listing marker ("" when it
-    has none), else ``None``. Exact: a file named
-    ``__END_OF_LIST__notes.csv`` is a file."""
-    trimmed = line.strip()
-    if not trimmed.startswith(SD_LIST_END_MARKER):
-        return None
-    rest = trimmed[len(SD_LIST_END_MARKER):]
-    if rest and not rest[0].isspace():
-        return None
-    return rest.strip()
+    """The status word if ``line`` is the end-of-listing marker ("" when it
+    has none), else ``None``."""
+    parts = _list_end_parts(line)
+    return None if parts is None else parts[0]
+
+
+def split_glued_list_end(lines: Iterable[str]) -> List[str]:
+    """Split a reply glued onto the end-of-listing marker onto its own line,
+    as it would be if the firmware ended the marker with CR/LF."""
+    out: List[str] = []
+    for line in lines:
+        parts = _list_end_parts(line) if line is not None else None
+        if parts and parts[1]:
+            out.append(f"{SD_LIST_END_MARKER} {parts[0]}".rstrip())
+            out.append(parts[1])
+        else:
+            out.append(line)
+    return out
 
 
 def sd_card_listing_status(lines: Iterable[str]) -> str:

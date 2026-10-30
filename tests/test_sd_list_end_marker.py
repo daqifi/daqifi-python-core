@@ -35,7 +35,14 @@ _spec = importlib.util.spec_from_file_location(
 _fakes = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_fakes)
 
-OK = b"Daqifi/log_a.bin 3\r\n__END_OF_LIST__ OK\r\n"
+# The firmware's own bytes (sd_card_manager.c, daqifi-nyquist-firmware main
+# 2f8a5d5c9): each entry is "%s %u\r\n", and the marker has a leading CR/LF
+# and NO line ending, so the next reply is glued to it.
+SD_LIST_END_OK = b"\r\n__END_OF_LIST__ OK"
+SD_LIST_END_INCOMPLETE = b"\r\n__END_OF_LIST__ INCOMPLETE"
+SD_LIST_END_FAILED = b"\r\n__END_OF_LIST__ FAILED"
+ENTRY = b"Daqifi/log_a.bin 3\r\n"
+OK = ENTRY + SD_LIST_END_OK
 
 
 def _names(files):
@@ -76,14 +83,14 @@ def test_a_complete_listing_has_no_marker_entry(method) -> None:
 @pytest.mark.parametrize("method", ["get_sd_card_files", "request_sd_card_file_list"])
 @pytest.mark.parametrize("word", [b"INCOMPLETE", b"FAILED"])
 def test_a_listing_marked_incomplete_or_failed_raises(method, word) -> None:
-    reply = b"Daqifi/log_a.bin 3\r\n__END_OF_LIST__ " + word + b"\r\n"
+    reply = ENTRY + b"\r\n__END_OF_LIST__ " + word
     device = _fakes._make_device_with_serial_facade({b"SD:LIST?": reply})
     with pytest.raises(SdCardListIncompleteException):
         getattr(device, method)()
 
 
 def test_a_missing_directory_raises_directory_not_found() -> None:
-    reply = b"\r\n[Error:5]Failed to open directory [Daqifi]\r\n__END_OF_LIST__ FAILED\r\n"
+    reply = b"\r\n[Error:5]Failed to open directory [Daqifi]\r\n" + SD_LIST_END_FAILED
     device = _fakes._make_device_with_serial_facade({b"SD:LIST?": reply})
     with pytest.raises(SdCardDirectoryNotFoundException) as excinfo:
         device.get_sd_card_files()
@@ -91,7 +98,7 @@ def test_a_missing_directory_raises_directory_not_found() -> None:
 
 
 def test_another_open_failure_stays_a_filesystem_error() -> None:
-    reply = b"\r\n[Error:3]Failed to open directory [Daqifi]\r\n__END_OF_LIST__ FAILED\r\n"
+    reply = b"\r\n[Error:3]Failed to open directory [Daqifi]\r\n" + SD_LIST_END_FAILED
     device = _fakes._make_device_with_serial_facade({b"SD:LIST?": reply})
     with pytest.raises(SdCardFilesystemException) as excinfo:
         device.get_sd_card_files()
@@ -110,7 +117,7 @@ def test_a_silent_device_is_not_an_empty_card(method) -> None:
 
 
 def test_an_empty_card_with_a_terminator_is_empty() -> None:
-    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b"__END_OF_LIST__ OK\r\n"})
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": SD_LIST_END_OK})
     assert device.get_sd_card_files() == ()
 
 
@@ -135,12 +142,12 @@ def _legacy(reply):
 
 
 def test_the_legacy_listing_skips_the_marker() -> None:
-    device = _legacy("Daqifi/log_a.bin 3\r\n__END_OF_LIST__ OK\r\n")
+    device = _legacy("Daqifi/log_a.bin 3\r\n\r\n__END_OF_LIST__ OK")
     assert device.sd_list_files() == ["Daqifi/log_a.bin"]
 
 
 def test_the_legacy_listing_refuses_an_incomplete_one() -> None:
-    device = _legacy("Daqifi/log_a.bin 3\r\n__END_OF_LIST__ INCOMPLETE\r\n")
+    device = _legacy("Daqifi/log_a.bin 3\r\n\r\n__END_OF_LIST__ INCOMPLETE")
     with pytest.raises(SdCardListIncompleteException):
         device.sd_list_files()
 
@@ -156,7 +163,7 @@ def test_an_echo_of_the_terminator_query_does_not_hide_incomplete(method) -> Non
     # marker, reset the status to "unterminated" and became a file.
     device = _fakes._make_device_with_serial_facade(
         {
-            b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n__END_OF_LIST__ INCOMPLETE\r\n",
+            b"SD:LIST?": ENTRY + SD_LIST_END_INCOMPLETE,
             b"SYSTem:ERRor?": _ECHOED_TERMINATOR,
         }
     )
@@ -181,7 +188,7 @@ def test_a_missing_terminator_is_not_retried() -> None:
     # end it, and no quiet interval proves the first attempt finished, so
     # there is no automatic retry; the caller decides.
     device = _fakes._make_device_with_serial_facade(
-        {b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n__END_OF_LIST__ OK\r\n"}
+        {b"SD:LIST?": OK}
     )
     _with_error_queue(device, [b'0,"No error"\r\n', b""], then=b"")
     device._sd_card_files = ["sentinel"]
@@ -239,8 +246,9 @@ def test_a_stale_error_is_drained_before_the_listing() -> None:
 
 
 @pytest.mark.parametrize("terminator", [b'+0,"No error"\r\n', b"0,No error\r\n"])
-def test_terminator_spellings_drain_errors_accepts_are_accepted(terminator) -> None:
+def test_terminator_spellings_drain_errors_accepts_are_accepted_after_the_marker(terminator) -> None:
     device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OK, b"SYSTem:ERRor?": terminator})
+    device._metadata.firmware_version = "3.8.0"
     assert _names(device.get_sd_card_files()) == ["log_a.bin"]
 
 
@@ -285,3 +293,54 @@ def test_an_error_queue_that_cannot_be_emptied_is_not_blamed_on_the_listing() ->
     assert "could not be emptied" in str(excinfo.value)
     assert not isinstance(excinfo.value, SdCardListIncompleteException)
     assert b"SD:LIST?" not in b"".join(device._transport.stream.written)
+
+
+# Audit r4 on #212.
+
+@pytest.mark.parametrize("method", ["get_sd_card_files", "request_sd_card_file_list"])
+def test_the_firmwares_marker_with_the_reply_glued_on_is_a_complete_listing(method) -> None:
+    # The marker has no line ending, so '__END_OF_LIST__ OK0,"No error"'
+    # arrives as one line; every successful listing used to raise.
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OK})
+    device._metadata.firmware_version = "3.8.0"
+    getattr(device, method)()
+    assert _names(device.sd_card_files) == ["log_a.bin"]
+
+
+def test_a_filename_shaped_like_a_reply_does_not_end_a_marked_listing() -> None:
+    device = _fakes._make_device_with_serial_facade(
+        {b"SD:LIST?": ENTRY + b"0,logs/b.bin 4\r\n" + SD_LIST_END_INCOMPLETE}
+    )
+    device._metadata.firmware_version = "3.8.0"
+    with pytest.raises(SdCardListIncompleteException):
+        device.get_sd_card_files()
+
+
+def test_a_filename_shaped_like_a_reply_is_not_a_terminator_on_older_firmware() -> None:
+    # Old firmware has no marker; only the quoted form the firmware sends
+    # counts, so an unanswered SYSTem:ERRor? isn't faked by a filename.
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": ENTRY + b"0,logs/b.bin 4\r\n"})
+    device._metadata.firmware_version = "3.7.3"
+    _with_error_queue(device, [b'0,"No error"\r\n', b""], then=b"")
+    with pytest.raises(SdCardListIncompleteException):
+        device.get_sd_card_files()
+
+
+def test_a_failed_delete_does_not_hide_an_aborted_relisting() -> None:
+    # The DELete's own error is read by its own SYSTem:ERRor?, so the
+    # listing's -200 is the listing's again (it was ignored on this path).
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": ENTRY})
+    device._metadata.firmware_version = "3.7.3"
+    _with_error_queue(
+        device,
+        [b'0,"No error"\r\n', b'-256,"File name not found"\r\n', b'-200,"Execution error"\r\n'],
+    )
+    with pytest.raises(SdCardListIncompleteException):
+        device.delete_sd_card_file("log_a.bin")
+
+
+def test_a_successful_delete_relists_the_rest() -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b"Daqifi/log_b.bin 5\r\n" + SD_LIST_END_OK})
+    device._metadata.firmware_version = "3.8.0"
+    device.delete_sd_card_file("log_a.bin")
+    assert _names(device.sd_card_files) == ["log_b.bin"]
