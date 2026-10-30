@@ -48,8 +48,8 @@ SHORT = DaqifiOutMessage(msg_time_stamp=4, analog_in_data=[5])  # 05 08 04 12 01
 # ---- 1: echo ahead of a short frame -------------------------------------
 
 
-@pytest.mark.parametrize("noise", [b"SYSTem:SYSInfoPB?\r\n", b"DAQIFI> ", b"SYSTem:SYSInfoPB?\r\nDAQIFI> "])
-def test_text_ahead_of_a_short_frame_is_skipped(noise) -> None:
+@pytest.mark.parametrize("noise", [b"SYSTem:SYSInfoPB?\r\n", b"*IDN?\r\n"])
+def test_an_echo_line_ahead_of_a_short_frame_is_skipped(noise) -> None:
     data = noise + _frame(SHORT)
     parser = ProtobufMessageParser(DaqifiOutMessage.FromString)
     messages, consumed = parser.parse_messages(data)
@@ -70,6 +70,63 @@ def test_a_real_frame_arriving_in_chunks_still_waits() -> None:
         assert messages == [] and consumed == 0, cut
     messages, consumed = parser.parse_messages(frame)
     assert len(messages) == 1 and consumed == len(frame)
+
+
+# ---- audit r1: never discard bytes that could start a frame still arriving -
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        # First 5 bytes of 0a 2a 02 08 01 40 01 48 01 50 01 (digital_data,
+        # device/pwr/batt status): length 0x0a and tag 0x2a are printable.
+        bytes.fromhex("0a2a020801"),
+        # First 10 bytes of a 0x24-length frame (msg_time_stamp=40, 16
+        # analog values).
+        _frame(DaqifiOutMessage(
+            msg_time_stamp=40, analog_in_data=[1, 4] * 3 + [8192] * 8 + [1, 4]
+        ))[:10],
+        # Not a complete echo line: no frame parses right after its CRLF.
+        b"SYSTem:SYSInfoPB?\r\n" + _frame(SHORT)[:3],
+    ],
+    ids=["printable-length-and-tag", "0x24-frame", "echo-then-partial"],
+)
+def test_an_incomplete_frame_is_never_skipped_into(data) -> None:
+    parser = ProtobufMessageParser(DaqifiOutMessage.FromString)
+    assert parser.parse_messages(data) == ([], 0)
+
+
+def test_the_protobuf_parser_says_when_it_is_waiting_on_a_frame() -> None:
+    parser = ProtobufMessageParser(DaqifiOutMessage.FromString)
+    frame = _frame(SHORT)
+    parser.parse_messages(frame[:3])
+    assert parser.last_incomplete
+    parser.parse_messages(frame)
+    assert not parser.last_incomplete
+
+
+def test_a_float_payload_with_printable_bytes_and_crlf_is_one_protobuf_frame() -> None:
+    # A complete 69-byte frame: timestamp 64, eight 2.5006... and eight
+    # 3.0195... floats, whose bytes are "\r\n @" and "\x00AA@".
+    data = bytes.fromhex("4408401a40") + b"\r\n @" * 8 + b"\x00AA@" * 8
+    messages, consumed = _composite().parse_messages(data)
+    assert len(messages) == 1 and isinstance(messages[0].data, DaqifiOutMessage)
+    assert messages[0].data.msg_time_stamp == 64
+    assert consumed == 69
+
+
+@pytest.mark.parametrize(
+    "data, waiting_after",
+    [
+        # A CRLF separator, then the first 20 of a 69-byte frame's bytes.
+        (b"\r\n" + bytes.fromhex("44082a1a40") + b"\r\n @" + b"\x00" * 11, 2),
+        # One noise byte, then 0a0801120600000d0ac801 less its final byte.
+        (bytes.fromhex("000a0801120600000d0ac8"), 1),
+    ],
+    ids=["separator-then-partial", "noise-then-partial"],
+)
+def test_the_line_parser_never_gets_a_frame_protobuf_is_waiting_on(data, waiting_after) -> None:
+    assert _composite().parse_messages(data) == ([], waiting_after)
 
 
 # ---- 2: binary frames ending in a line ending ---------------------------

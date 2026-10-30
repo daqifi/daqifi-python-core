@@ -232,12 +232,18 @@ class ProtobufMessageParser:
 
     def __init__(self, message_factory: Callable[[bytes], object]) -> None:
         self._message_factory = message_factory
+        # Whether the last parse_messages call stopped at an incomplete
+        # frame (or length prefix) it is waiting to complete, as opposed
+        # to running out of bytes that could start one. Callers must not
+        # hand those bytes to another parser.
+        self.last_incomplete = False
 
     def parse_messages(
         self, data: bytes
     ) -> Tuple[List[ObjectInboundMessage], int]:
         messages: List[ObjectInboundMessage] = []
         consumed_bytes = 0
+        self.last_incomplete = False
         if len(data) == 0:
             return messages, consumed_bytes
 
@@ -267,6 +273,7 @@ class ProtobufMessageParser:
                     current_index += 1
                     consumed_bytes = current_index
                     continue
+                self.last_incomplete = True
                 break  # need more data for length prefix
 
             if message_length <= 0 or message_length > _MAX_MESSAGE_SIZE_BYTES:
@@ -337,24 +344,23 @@ class ProtobufMessageParser:
                     consumed_bytes = current_index
                     continue
 
-                # Leading noise reaches here too: echoed command text
+                # Echo noise reaches here too: an echoed command
                 # ("SYSTem:SYSInfoPB?\r\n") whose 'S' decodes as length 83
-                # with a plausible 'Y' after it, ahead of a short real
-                # frame. If only text lies between here and a complete,
-                # parseable frame, skip to that frame (upstream ed605b8,
-                # narrowed: upstream skips any bytes, but a real frame
-                # arriving in chunks holds nested fields that parse as
-                # frames on their own, and skipping into them would destroy
-                # it). Only before the first frame of this call: after one,
-                # a short tail is the normal split frame, and the scan stays
-                # off the streaming path.
+                # with a plausible 'Y' after it, ahead of a short real frame
+                # (upstream ed605b8). A printable byte is also a valid length
+                # or field tag, so no character class tells echo from a frame
+                # still arriving. Only a complete echo line is skipped: text
+                # starting like a command and ending in CRLF, with a complete
+                # frame parsing right after it. Anything else waits. Only
+                # before the first frame of this call.
                 if not messages:
-                    next_frame = self._find_next_parseable_frame(data, current_index + 1)
-                    if next_frame >= 0:
-                        current_index = next_frame
+                    after_echo = self._end_of_echo_line(data, current_index)
+                    if after_echo >= 0:
+                        current_index = after_echo
                         consumed_bytes = current_index
                         continue
 
+                self.last_incomplete = True
                 break  # legitimate partial frame — wait for more data
 
             try:
@@ -371,34 +377,30 @@ class ProtobufMessageParser:
 
         return messages, consumed_bytes
 
-    def _find_next_parseable_frame(self, data: bytes, start: int) -> int:
-        """The first index from ``start`` where a complete, fully buffered
-        frame that the factory parses begins, with only text (printable
-        ASCII, CR, LF, TAB) from ``start - 1`` up to it; else -1. Echo and
-        prompt noise is text; a real frame's bytes aren't, so the scan stops
-        at the first binary byte and never skips into a frame still
-        arriving. Emits nothing."""
-        for i in range(start, len(data)):
-            if not _is_text_byte(data[i - 1]):
-                return -1
-            remaining = data[i:]
-            length, prefix_bytes, _ = _try_read_length_prefix(remaining)
-            if length is None or length <= 0 or length > _MAX_MESSAGE_SIZE_BYTES:
-                continue
-            if len(remaining) < prefix_bytes + length:
-                continue
-            if not _is_plausible_field_tag_byte(remaining[prefix_bytes]):
-                continue
-            try:
-                self._message_factory(bytes(remaining[prefix_bytes : prefix_bytes + length]))
-            except Exception:
-                continue
-            return i
-        return -1
-
-
-def _is_text_byte(b: int) -> bool:
-    return 32 <= b <= 126 or b in (0x09, 0x0A, 0x0D)
+    def _end_of_echo_line(self, data: bytes, start: int) -> int:
+        """If ``data[start:]`` begins with a complete echoed command line (a
+        letter or ``*``, then printable text, then CRLF) and a complete frame
+        that the factory parses starts right after it, the index after the
+        CRLF; else -1."""
+        if start >= len(data) or not (chr(data[start]).isalpha() or data[start] == 0x2A):
+            return -1
+        crlf = data.find(b"\r\n", start)
+        if crlf < 0 or not all(32 <= b <= 126 for b in data[start:crlf]):
+            return -1
+        frame_start = crlf + 2
+        remaining = data[frame_start:]
+        length, prefix_bytes, _ = _try_read_length_prefix(remaining)
+        if length is None or length <= 0 or length > _MAX_MESSAGE_SIZE_BYTES:
+            return -1
+        if len(remaining) < prefix_bytes + length:
+            return -1
+        if not _is_plausible_field_tag_byte(remaining[prefix_bytes]):
+            return -1
+        try:
+            self._message_factory(bytes(remaining[prefix_bytes : prefix_bytes + length]))
+        except Exception:
+            return -1
+        return frame_start
 
 
 class _MessageTypeHint:
@@ -423,21 +425,17 @@ def _detect_message_type(data: bytes) -> int:
     sample = data[:512]
     sample_len = len(sample)
 
-    # CR, LF and TAB are framing, not content: a binary frame the firmware
-    # ends with CRLF mustn't look more like text for it (upstream e8c4998).
-    content = [b for b in sample if b not in (0x0D, 0x0A, 0x09)]
-    printable_ratio = (
-        sum(1 for b in content if 32 <= b <= 126) / len(content) if content else 0.0
-    )
-    if printable_ratio > 0.8:
-        return _MessageTypeHint.LIKELY_TEXT
-
-    # Null density before any text-shaped edge: the binary SYSInfoPB? reply
-    # ends in CRLF and, with echo on, starts with the echoed "SYST..." text,
-    # yet is ~40% null bytes.
+    # Binary evidence first, and it wins: the SYSInfoPB? reply ends in CRLF
+    # and, with echo on, starts with the echoed "SYST..." text, yet is ~40%
+    # null bytes; a float payload can be mostly printable bytes and CR/LF
+    # (upstream e8c4998, with null density moved ahead of the ratio).
     null_ratio = sum(1 for b in sample if b == 0) / sample_len
     if null_ratio > 0.1:
         return _MessageTypeHint.LIKELY_PROTOBUF
+
+    printable_ratio = sum(1 for b in sample if 32 <= b <= 126) / sample_len
+    if printable_ratio > 0.8:
+        return _MessageTypeHint.LIKELY_TEXT
 
     if sample_len > 3 and printable_ratio > 0.5 and _is_likely_text_command(sample):
         return _MessageTypeHint.LIKELY_TEXT
@@ -510,22 +508,27 @@ class CompositeMessageParser:
         # protobuf first: it failed the printable test, so it isn't
         # plausibly text, and a small streaming frame can leave every
         # ratio abstaining (upstream e8c4998).
+        #
+        # The other parser runs only when the first neither produced a
+        # message nor made progress, and (protobuf) isn't waiting on an
+        # incomplete frame: ([], n) from protobuf means it skipped noise
+        # and is waiting, and the bytes it's waiting on mustn't go to the
+        # line parser. Progress through ignorable bytes is returned as is,
+        # or the consumer's buffer grows without bound (Qodo PR 17 pass 6
+        # #1).
         if hint == _MessageTypeHint.LIKELY_TEXT:
-            order = (self._try_text, self._try_protobuf)
-        else:
-            order = (self._try_protobuf, self._try_text)
-        first_wrapped, first_consumed = order[0](data)
-        if first_wrapped:
-            return first_wrapped, first_consumed
-        wrapped, consumed = order[1](data)
-        if wrapped:
+            wrapped, consumed = self._try_text(data)
+            if wrapped or consumed:
+                return wrapped, consumed
+            return self._try_protobuf(data)
+        wrapped, consumed = self._try_protobuf(data)
+        if wrapped or consumed or self._protobuf_parser_incomplete():
             return wrapped, consumed
-        # Neither produced a message: still report progress through
-        # ignorable bytes (blank lines, malformed prefixes), or the
-        # consumer's buffer grows without bound (Qodo PR 17 pass 6 #1).
-        if first_consumed:
-            return [], first_consumed
-        return [], consumed
+        return self._try_text(data)
+
+    def _protobuf_parser_incomplete(self) -> bool:
+        # A caller-supplied parser without the flag is treated as complete.
+        return bool(getattr(self._protobuf_parser, "last_incomplete", False))
 
     def _try_text(self, data: bytes) -> Tuple[List[ObjectInboundMessage], int]:
         text_messages, consumed = self._text_parser.parse_messages(data)
