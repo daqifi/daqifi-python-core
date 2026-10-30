@@ -2129,18 +2129,33 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 response_timeout_s=3.0,
             )
 
+        from .exceptions import (
+            SdCardDeleteOutcomeUnknownException,
+            SdCardListIncompleteException,
+        )
+
         try:
             # No retry: it would send the DELete again.
             # Empty the error queue first, so the listing's terminator
             # reply is the listing's own.
             self._empty_error_queue_for_listing()
-            files = self._read_sd_listing(
-                _capture,
-                sent=self._sd_listing_commands(
-                    scpi_commands.delete_sd_file(file_name)
-                ),
-                leading_reply=True,
-            )
+            try:
+                files = self._read_sd_listing(
+                    _capture,
+                    sent=self._sd_listing_commands(
+                        scpi_commands.delete_sd_file(file_name)
+                    ),
+                    leading_reply=True,
+                )
+            except (SdCardListIncompleteException, TimeoutError) as e:
+                # The DELete was sent, but its confirmation (or the
+                # listing after it) never came back complete: the file may
+                # be gone or not. Say so, rather than report a failure.
+                raise SdCardDeleteOutcomeUnknownException(
+                    file_name,
+                    getattr(e, "raw_device_response", ()),
+                    str(getattr(e, "reason", e)),
+                ) from e
         finally:
             if self.is_connected:
                 try:
@@ -2544,7 +2559,10 @@ class DaqifiStreamingDevice(DaqifiDevice):
                         f"{self._SD_TEXT_CAPTURE_MAX_BYTES} bytes; "
                         f"aborting capture (likely a stuck stream)."
                     )
-                in_waiting = getattr(raw_stream, "in_waiting", 0) or 0
+                # Both transport streams have in_waiting (serial: pyserial;
+                # TCP: _SocketStream). One without it fails here rather than
+                # reading as a line that never has anything waiting.
+                in_waiting = raw_stream.in_waiting
                 if in_waiting:
                     chunk = raw_stream.read(in_waiting)
                     if chunk:
@@ -2705,7 +2723,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     f"{self._SD_DOWNLOAD_TIMEOUT_S:.0f}s "
                     f"({bytes_written} bytes written, no EOF marker)."
                 )
-            in_waiting = getattr(raw_stream, "in_waiting", 0) or 0
+            in_waiting = raw_stream.in_waiting  # serial and TCP streams both have it
             chunk = (
                 raw_stream.read(min(in_waiting, self._SD_DOWNLOAD_BUFFER_BYTES))
                 if in_waiting else b""

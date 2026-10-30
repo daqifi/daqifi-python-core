@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import logging
+import select
 import selectors
 import socket
 import threading
@@ -119,6 +120,36 @@ class _SocketStream(io.RawIOBase):
 
     def fileno(self) -> int:
         return self._sock.fileno()
+
+    @property
+    def in_waiting(self) -> int:
+        """Bytes ready to read now, without blocking (pyserial's name, so
+        raw readers poll a socket and a serial port the same way).
+
+        A zero-timeout ``select`` and, if the socket is readable, a
+        ``MSG_PEEK`` receive that leaves the bytes for the next read. A
+        readable socket with nothing to peek is end of stream, reported as
+        :meth:`readinto` reports it; a socket error too."""
+        if self.peer_closed or self._sock is None:
+            return 0
+        try:
+            readable, _, _ = select.select([self._sock], [], [], 0)
+        except (OSError, ValueError):
+            self._mark_peer_closed()
+            return 0
+        if not readable:
+            return 0
+        try:
+            peeked = self._sock.recv(65536, socket.MSG_PEEK)
+        except (BlockingIOError, InterruptedError):
+            return 0
+        except OSError:
+            self._mark_peer_closed()
+            return 0
+        if not peeked:
+            self._mark_peer_closed()
+            return 0
+        return len(peeked)
 
     def readinto(self, buffer) -> int:  # type: ignore[override]
         if self.peer_closed:
