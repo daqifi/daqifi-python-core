@@ -303,6 +303,21 @@ def _split_at_list_terminator(
     return content[:-1], reply
 
 
+class _SessionHealthSink:
+    """Forwards a consumer's read outcomes to the transport, tagged with
+    the connection the consumer reads (#191)."""
+
+    def __init__(self, transport: Any, session: Optional[int]) -> None:
+        self._transport = transport
+        self._session = session
+
+    def report_io_fault(self, error: BaseException) -> None:
+        self._transport.report_io_fault(error, session=self._session)
+
+    def report_io_success(self) -> None:
+        self._transport.report_io_success(session=self._session)
+
+
 def _exclusive_sd_operation(method):
     """Run an SD-card operation entirely inside the text-exchange lock.
 
@@ -599,7 +614,7 @@ class DaqifiDevice:
             consumer = StreamMessageConsumer[Any](
                 stream,
                 ProtobufMessageParser(message_factory=self._message_factory),
-                health_sink=self._transport_health_sink(),
+                health_sink=self._transport_health_sink(session),
             )
             with self._state_lock:
                 superseded = (
@@ -998,7 +1013,9 @@ class DaqifiDevice:
         try:
             text_parser = LineBasedMessageParser(line_ending="\r\n")
             text_consumer = StreamMessageConsumer[str](
-                stream, text_parser, health_sink=self._transport_health_sink()
+                stream,
+                text_parser,
+                health_sink=self._transport_health_sink(self._transport_session),
             )
 
             def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
@@ -1594,15 +1611,17 @@ class DaqifiDevice:
             except Exception:
                 pass
 
-    def _transport_health_sink(self) -> Optional[Any]:
-        """The transport, when it can be told how reads on its stream go
-        (``report_io_fault`` / ``report_io_success``): the serial transport
-        uses that to notice an unplugged device (#191)."""
+    def _transport_health_sink(self, session: Optional[int]) -> Optional[Any]:
+        """A sink reporting reads on this connection's stream to the
+        transport, when it can be told (``report_io_fault`` /
+        ``report_io_success``): the serial transport uses that to notice an
+        unplugged device (#191). Bound to ``session``, so a reader of an
+        earlier connection can't count against a newer one."""
         transport = self._transport
         if callable(getattr(transport, "report_io_fault", None)) and callable(
             getattr(transport, "report_io_success", None)
         ):
-            return transport
+            return _SessionHealthSink(transport, session)
         return None
 
     def _on_transport_status_changed(self, args: TransportStatusEventArgs) -> None:
@@ -1678,6 +1697,16 @@ class DaqifiDevice:
                 return False
             if if_stream_alive is not None and getattr(
                 if_stream_alive, "peer_closed", False
+            ):
+                return False
+            # A loss reported while connecting (a serial transport counting
+            # read faults, its reader stopped) wins over "Connected" too.
+            if if_consumer is not None and (
+                not getattr(if_consumer, "is_running", True)
+                or (
+                    self._transport is not None
+                    and not getattr(self._transport, "is_connected", True)
+                )
             ):
                 return False
             evt = self._change_status(value)

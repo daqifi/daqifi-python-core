@@ -552,6 +552,10 @@ class SerialStreamTransport:
         self._io_faults = 0
         self._loss_armed = False
         self._lost = False
+        # Counts connections, so a report or loss event from an earlier one
+        # (a reader still running down, a slow status handler) is told apart
+        # from the current connection's (as TcpStreamTransport.session).
+        self._session = 0
 
     @property
     def stream(self) -> Optional[IO[bytes]]:
@@ -567,13 +571,24 @@ class SerialStreamTransport:
     def is_connected(self) -> bool:
         return self._serial is not None and self._serial.is_open and not self._lost
 
-    def report_io_fault(self, error: BaseException) -> None:
+    @property
+    def session(self) -> int:
+        """Identifies the current connection; changes on every connect()."""
+        return self._session
+
+    def report_io_fault(
+        self, error: BaseException, session: Optional[int] = None
+    ) -> None:
         """A read or write on :attr:`stream` failed for a reason other than
         a timeout. ``IO_FAULT_LIMIT`` failures in a row, with no success in
         between, are taken as the device gone: the transport reports itself
-        disconnected, once per connection (#191, upstream daqifi-core
-        ITransportHealthSink). Safe from any thread."""
+        disconnected, once per connection, with that connection's
+        ``session`` (#191, upstream daqifi-core ITransportHealthSink). A
+        report from an earlier connection (``session`` not current) is
+        ignored. Safe from any thread."""
         with self._io_lock:
+            if session is not None and session != self._session:
+                return
             if not self._loss_armed:
                 return
             self._io_faults += 1
@@ -581,12 +596,15 @@ class SerialStreamTransport:
                 return
             self._loss_armed = False
             self._lost = True
-        self._notify_status(False, error)
+            lost_session = self._session
+        self._notify_status(False, error, session=lost_session)
 
-    def report_io_success(self) -> None:
+    def report_io_success(self, session: Optional[int] = None) -> None:
         """A read or write on :attr:`stream` succeeded; any run of
-        failures is forgotten."""
+        failures on that connection is forgotten."""
         with self._io_lock:
+            if session is not None and session != self._session:
+                return
             self._io_faults = 0
 
     @property
@@ -626,6 +644,15 @@ class SerialStreamTransport:
                     if delay > 0:
                         time.sleep(delay)
 
+                # A handle left open by a lost connection (the port object
+                # stays open after an unplug) is closed first: Windows opens
+                # a COM port exclusively, so a second open is refused.
+                if self._serial is not None:
+                    try:
+                        self._serial.close()
+                    except Exception:
+                        pass
+                    self._serial = None
                 self._serial = serial.Serial(
                     port=self._port_name,
                     baudrate=self._baud_rate,
@@ -678,10 +705,11 @@ class SerialStreamTransport:
                 self._serial.timeout = 0.5
 
                 with self._io_lock:
+                    self._session += 1
                     self._io_faults = 0
                     self._lost = False
                     self._loss_armed = True
-                self._notify_status(True, None)
+                self._notify_status(True, None, session=self._session)
                 return
             except Exception as exc:
                 last_exc = exc
@@ -754,13 +782,19 @@ class SerialStreamTransport:
 
         return [p.device for p in list_ports.comports()]
 
-    def _notify_status(self, is_connected: bool, error: Optional[BaseException]) -> None:
+    def _notify_status(
+        self,
+        is_connected: bool,
+        error: Optional[BaseException],
+        session: Optional[int] = None,
+    ) -> None:
         _notify(
             self._status_handlers,
             TransportStatusEventArgs(
                 is_connected=is_connected,
                 connection_info=self.connection_info,
                 error=error,
+                session=session,
             ),
         )
 

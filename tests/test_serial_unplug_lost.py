@@ -61,6 +61,10 @@ def connected(monkeypatch):
     ports = []
 
     def _serial(**kw):
+        # Windows opens a COM port exclusively: a second open while a
+        # handle is still open is refused.
+        if any(p.is_open for p in ports):
+            raise serial.SerialException("Access is denied (port already open)")
         port = _FakePort(**kw)
         ports.append(port)
         return port
@@ -118,9 +122,71 @@ def test_a_reconnect_rearms_loss_detection(connected) -> None:
     device, transport, port, statuses = connected
     port.unplugged = True
     assert _wait(lambda: device.status == ConnectionStatus.Lost)
-    device.disconnect()
+    # Straight back to connect(), no disconnect() first (audit r1 (3)): the
+    # lost handle must be closed before the port is opened again.
     device.connect()
     assert device.status == ConnectionStatus.Connected and transport.is_connected
     new_port = transport._serial
     new_port.unplugged = True
     assert _wait(lambda: device.status == ConnectionStatus.Lost)
+
+
+# Audit r1 on #214.
+
+def test_a_loss_event_from_an_earlier_connection_is_ignored(connected) -> None:
+    device, transport, port, statuses = connected
+    old_session = transport.session
+    device.disconnect()
+    device.connect()
+    assert transport.session != old_session
+    transport._notify_status(False, serial.SerialException("late"), session=old_session)
+    time.sleep(0.2)
+    assert device.status == ConnectionStatus.Connected
+    assert device._consumer is not None and device._consumer.is_running
+
+
+def test_read_faults_from_an_earlier_connection_do_not_count(connected) -> None:
+    device, transport, port, statuses = connected
+    old_session = transport.session
+    device.disconnect()
+    device.connect()
+    for _ in range(transport.IO_FAULT_LIMIT + 2):
+        transport.report_io_fault(serial.SerialException("stale"), session=old_session)
+    time.sleep(0.2)
+    assert device.status == ConnectionStatus.Connected and transport.is_connected
+
+
+def test_a_loss_while_connecting_is_not_overwritten_by_connected(monkeypatch) -> None:
+    from daqifi import communication
+
+    class _Lossy(tmod.SerialStreamTransport):
+        IO_FAULT_LIMIT = 1
+
+    ports = []
+
+    def _serial(**kw):
+        port = _FakePort(**kw)
+        port.unplugged = True  # opens, but every read fails
+        ports.append(port)
+        return port
+
+    monkeypatch.setattr(tmod.serial, "Serial", _serial)
+    real_start = communication.StreamMessageConsumer.start
+    transport = _Lossy("FAKE")
+
+    def _start(self):
+        real_start(self)
+        # Hold connect() until the reader's first fault has been reported,
+        # so the loss lands while the device is still connecting.
+        _wait(lambda: transport._lost, timeout=2.0)
+
+    monkeypatch.setattr(communication.StreamMessageConsumer, "start", _start)
+    device = DaqifiDevice("fake", transport=transport, message_factory=lambda b: bytes(b))
+    try:
+        device.connect()
+        assert device.status == ConnectionStatus.Lost
+    finally:
+        try:
+            device.disconnect()
+        except Exception:
+            pass
