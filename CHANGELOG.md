@@ -7,6 +7,9 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `execute_text_command(..., max_total_ms=...)` caps the whole capture;
+  without it a device that keeps sending lines keeps the capture going
+  (#190).
 - `CONTRIBUTING.md`, `SECURITY.md` and this changelog.
 - `pyproject.toml` declaring the PEP 517 build backend and the pytest
   configuration (#155).
@@ -43,6 +46,29 @@ aims to follow [Semantic Versioning](https://semver.org/).
   subclass. Echoes of the listing's own commands are dropped. The legacy
   `NyquistDevice.sd_list_files()` skips the marker and refuses a listing
   marked incomplete too (#188).
+- The WiFi module update didn't follow the firmware's sequence.
+  `LAN:FWUpdate` only requests the update; the following `LAN:APPLY` enters
+  the USB-transparent bridge, and `LAN:APPLY` from the bridge leaves it. The
+  update never sent that APPLY, and after a successful flash it restored LAN
+  with the bridge still on, so the commands went raw to the WiFi chip and
+  the console stayed dead until a power cycle. The update now sends
+  `POWer:STATe 1`, `FWUpdate`, `APPLY`, waits until the bridge is up
+  (on a board in WiFi retry backoff that takes up to 30 s; the update is
+  refused up front on a board left in standby, or connected over TCP
+  rather than USB serial, and stops any stream first), runs the tool,
+  then sends `SYSTem:USB:SetTransparentMode 0` before the LAN restore. After a failed
+  or cancelled update it sends the bridge exit and `APPLY` until the error
+  queue shows the APPLY was accepted, then watches the console for longer
+  than the firmware's longest WiFi restart delay, exiting again if the
+  bridge comes up late. It saves nothing, and the failure says when the
+  device could not be confirmed back to normal. Success now needs the flash
+  tool's own success line, not just exit code 0, and the update waits for
+  the OS to release the serial port before starting the tool. New options:
+  `power_on_wifi_module_before_lan_update_mode`,
+  `power_on_wifi_module_settle_delay`,
+  `post_lan_disconnect_port_release_delay`,
+  `post_usb_transparent_mode_exit_delay`, `wifi_recovery_timeout` (at least
+  one 40 s bridge watch), `wifi_flash_success_marker` (#190).
 - Every NQ3 DAC write was rejected by the firmware. The voltage setter sent
   `SOUR:VOLT:LEV <ch> <volts>`, which the firmware answers with -101
   Invalid character; it now sends `<ch>,<volts>`. The DAC enable commands
