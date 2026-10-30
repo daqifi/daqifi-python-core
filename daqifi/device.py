@@ -57,6 +57,19 @@ def _frame_has_metadata_fields(data: Any) -> bool:
     return False
 
 
+def _transfer_error_first(response, end_marker: bytes) -> bool:
+    """Whether the device's ``__TRANSFER_ERROR__`` comes before any
+    end-of-file marker in ``response`` (the first marker ends a legacy
+    download)."""
+    from .sdcard import TRANSFER_ERROR_MARKER
+
+    error_at = bytes(response).find(TRANSFER_ERROR_MARKER)
+    if error_at < 0:
+        return False
+    eof_at = bytes(response).find(end_marker)
+    return eof_at < 0 or error_at < eof_at
+
+
 class NyquistDevice:
     """
     Main controller for DAQiFi Nyquist devices.
@@ -755,7 +768,12 @@ class NyquistDevice:
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
 
-        # Read until we see __END_OF_FILE__ marker (simplified, no CRLF)
+        # Read until we see __END_OF_FILE__ marker (simplified, no CRLF),
+        # or the device's __TRANSFER_ERROR__ (a read failure part-way
+        # through the file, #154).
+        from .exceptions import SdCardTransferErrorException
+        from .sdcard import TRANSFER_ERROR_MARKER
+
         response = b""
         start_time = time.time()
         end_marker = b"__END_OF_FILE__"
@@ -766,7 +784,7 @@ class NyquistDevice:
                 response += chunk
 
                 # Check if we've received the end marker
-                if end_marker in response:
+                if end_marker in response or TRANSFER_ERROR_MARKER in response:
                     break
 
                 # Reset start time when receiving data (prevents timeout during large transfers)
@@ -774,6 +792,11 @@ class NyquistDevice:
             else:
                 # No data available, wait a bit
                 time.sleep(0.01)
+
+        if _transfer_error_first(response, end_marker):
+            raise SdCardTransferErrorException(
+                filename, len(response[: response.find(TRANSFER_ERROR_MARKER)])
+            )
 
         # Decode response
         response_str = response.decode('ascii', errors='ignore')
@@ -826,8 +849,12 @@ class NyquistDevice:
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
 
-        # Read until we see __END_OF_FILE__ marker
+        # Read until we see __END_OF_FILE__ marker, or the device's
+        # __TRANSFER_ERROR__ (a read failure part-way through, #154).
         # Use bytearray for O(n) accumulation instead of O(n^2) bytes concat
+        from .exceptions import SdCardTransferErrorException
+        from .sdcard import TRANSFER_ERROR_MARKER
+
         response = bytearray()
         end_marker = b"__END_OF_FILE__"
         deadline = time.monotonic() + timeout
@@ -837,7 +864,7 @@ class NyquistDevice:
                 chunk = self._comm._serial.read(self._comm._serial.in_waiting)
                 response.extend(chunk)
 
-                if end_marker in response:
+                if end_marker in response or TRANSFER_ERROR_MARKER in response:
                     break
             else:
                 time.sleep(0.01)
@@ -856,6 +883,13 @@ class NyquistDevice:
             if echo_end >= 0:
                 response = response[echo_end + len(marker):]
                 break
+
+        if _transfer_error_first(response, end_marker):
+            # The bytes before it are genuine content; the file is not
+            # complete.
+            raise SdCardTransferErrorException(
+                filename, response.find(TRANSFER_ERROR_MARKER)
+            )
 
         # Strip EOF marker
         eof_idx = response.find(end_marker)

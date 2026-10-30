@@ -53,6 +53,7 @@ from .firmware.version import FirmwareVersion
 from .sdcard import _write_all
 from .sdcard import (
     END_OF_FILE_MARKER,
+    TRANSFER_ERROR_MARKER,
     SdCardDownloadResult,
     SdCardFileInfo,
     SdCardTransferProgress,
@@ -225,10 +226,9 @@ def _is_eof_trailer(trailer: bytes) -> bool:
     return False
 
 
-def _eof_marker_start(buffer: bytes) -> int:
-    """Index of an end-of-file marker that ends ``buffer`` apart from a
-    trailer of line endings and prompt, or -1."""
-    marker = END_OF_FILE_MARKER
+def _eof_marker_start(buffer: bytes, marker: bytes = END_OF_FILE_MARKER) -> int:
+    """Index of ``marker`` (by default the end-of-file marker) ending
+    ``buffer`` apart from a trailer of line endings and prompt, or -1."""
     position = bytes(buffer).rfind(marker)
     while position >= 0:
         if _is_eof_trailer(bytes(buffer[position + len(marker):])):
@@ -2625,8 +2625,16 @@ class DaqifiStreamingDevice(DaqifiDevice):
         leading SCPI echo + ``DAQIFI>`` prompt from the head of the
         response so the destination only sees the file payload.
         """
+        from .exceptions import SdCardTransferErrorException
+
         marker = END_OF_FILE_MARKER
         marker_len = len(marker)
+        error_marker = TRANSFER_ERROR_MARKER
+        error_len = len(error_marker)
+        # Known size: body bytes held back in case they are the device's
+        # __TRANSFER_ERROR__ (a read failure part-way through the file),
+        # which must not be written as content.
+        held = bytearray()
         # Two deadlines: a hard total cap (so a trickling stream can't
         # run forever) AND an idle cap (so a stuck stream gives up
         # quickly without waiting the full total).
@@ -2675,11 +2683,23 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 if in_waiting else b""
             )
             if not chunk:
+                quiet = now - last_data >= settle_s or now >= idle_deadline
+                # The device's read-error marker at the end of what came,
+                # then quiet: the bytes before it are real content, but the
+                # file is incomplete (firmware #725, upstream receiver).
+                pending = held if expected_size is not None else trailing
+                error_at = _eof_marker_start(pending, error_marker) if head_done else -1
+                if quiet and error_at >= 0:
+                    payload = bytes(pending[:error_at])
+                    if payload:
+                        _write_all(destination_stream, payload, total_deadline)
+                        bytes_written += len(payload)
+                    raise SdCardTransferErrorException(file_name, bytes_written)
                 if (
                     expected_size is None
                     and head_done
                     and _ends_with_eof_marker(trailing)
-                    and (now - last_data >= settle_s or now >= idle_deadline)
+                    and quiet
                 ):
                     # The line went quiet with the marker at the end.
                     payload = bytes(trailing[: _eof_marker_start(trailing)])
@@ -2693,15 +2713,16 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     expected_size is not None
                     and bytes_written == expected_size
                     and len(trailing) >= marker_len
-                    and (now - last_data >= settle_s or now >= idle_deadline)
+                    and quiet
                 ):
                     # The listed size, the marker, and then only a line
                     # ending or prompt before the line went quiet.
                     return bytes_written
                 if now >= idle_deadline:
+                    received = bytes_written + len(held)
                     short = (
-                        f" (short read: {bytes_written} of {expected_size} bytes)"
-                        if expected_size is not None and bytes_written < expected_size
+                        f" (short read: {received} of {expected_size} bytes)"
+                        if expected_size is not None and received < expected_size
                         else ""
                     )
                     raise TimeoutError(
@@ -2720,7 +2741,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             # echo + prompt prefix; only ~200 bytes are needed in practice.
             if not head_done:
                 head_buf.extend(chunk)
-                if len(head_buf) >= 256 or marker in head_buf:
+                if len(head_buf) >= 256 or marker in head_buf or error_marker in head_buf:
                     chunk = _strip_echo_prefix(head_buf)
                     head_buf = bytearray()
                     head_done = True
@@ -2731,9 +2752,21 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 # that many bytes, whatever they contain (the end-of-file
                 # token may occur inside it), and the marker must follow
                 # directly. Anything else is an error, not a success (#163).
-                data = bytes(chunk)
+                data = bytes(held) + bytes(chunk)
+                held = bytearray()
                 remaining = expected_size - bytes_written
-                if remaining > 0:
+                if len(data) <= remaining:
+                    # All body so far: hold back the tail, which is the
+                    # error marker (and its trailer) if the read failed here.
+                    keep = min(len(data), error_len + _EOF_TRAILER_MAX)
+                    if len(data) > keep:
+                        _write_all(destination_stream, data[: len(data) - keep], total_deadline)
+                        bytes_written += len(data) - keep
+                        if progress is not None:
+                            progress(SdCardTransferProgress(bytes_written, file_name))
+                    held = bytearray(data[len(data) - keep:])
+                    data = b""
+                elif remaining > 0:
                     body = data[:remaining]
                     _write_all(destination_stream, body, total_deadline)
                     bytes_written += len(body)
@@ -2742,6 +2775,12 @@ class DaqifiStreamingDevice(DaqifiDevice):
                         progress(SdCardTransferProgress(bytes_written, file_name))
                 if bytes_written == expected_size:
                     trailing.extend(data)
+                    if bytes(trailing[:error_len]) == error_marker:
+                        raise SdCardTransferErrorException(file_name, bytes_written)
+                    if len(trailing) < error_len and error_marker.startswith(bytes(trailing)):
+                        last_data = time.monotonic()
+                        idle_deadline = last_data + self._SD_DOWNLOAD_IDLE_TIMEOUT_S
+                        continue  # could still become the error marker
                     # The marker must follow directly, then nothing but a
                     # line ending or prompt: more data means the file is
                     # longer than listed, even if the marker text happens
@@ -2766,7 +2805,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             # trailer at the end; everything before that is file content,
             # even if it contains the marker.
             trailing.extend(chunk)
-            keep = marker_len + _EOF_TRAILER_MAX
+            keep = max(marker_len, error_len) + _EOF_TRAILER_MAX
             if len(trailing) > keep:
                 writable = bytes(trailing[: len(trailing) - keep])
                 _write_all(destination_stream, writable, total_deadline)

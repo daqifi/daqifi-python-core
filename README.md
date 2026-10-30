@@ -468,6 +468,7 @@ SD card operations (port of upstream PR #182):
 - **`SdCardBusyException`**: SD logging is in progress; stop it before the operation
 - **`SdCardNotPresentException`**: No card inserted
 - **`SdCardFilesystemException`**: Filesystem-level failure (corrupt, unreadable, etc.)
+- **`SdCardTransferErrorException`**: the device hit a read error part-way through a download (`__TRANSFER_ERROR__`); the `bytes_received` bytes written are real content, but the file is incomplete
 
 ## Device Variants
 
