@@ -7,8 +7,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `CsvExportOptions.relative_time_decimals` (0–7, default 3) sets the
-  relative-time resolution (#195).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -30,11 +28,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- CSV export progress fired only when the running count landed exactly on
-  a multiple of 5000 (with 7 channels, twice in 70,000 samples); it now
-  fires as each multiple is passed. Formula neutralisation skips any
-  Unicode whitespace before `=`, `+`, `-` or `@`, and fields with
-  whitespace at their edges are quoted (#195).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
