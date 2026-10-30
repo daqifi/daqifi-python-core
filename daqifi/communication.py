@@ -337,6 +337,24 @@ class ProtobufMessageParser:
                     consumed_bytes = current_index
                     continue
 
+                # Leading noise reaches here too: echoed command text
+                # ("SYSTem:SYSInfoPB?\r\n") whose 'S' decodes as length 83
+                # with a plausible 'Y' after it, ahead of a short real
+                # frame. If only text lies between here and a complete,
+                # parseable frame, skip to that frame (upstream ed605b8,
+                # narrowed: upstream skips any bytes, but a real frame
+                # arriving in chunks holds nested fields that parse as
+                # frames on their own, and skipping into them would destroy
+                # it). Only before the first frame of this call: after one,
+                # a short tail is the normal split frame, and the scan stays
+                # off the streaming path.
+                if not messages:
+                    next_frame = self._find_next_parseable_frame(data, current_index + 1)
+                    if next_frame >= 0:
+                        current_index = next_frame
+                        consumed_bytes = current_index
+                        continue
+
                 break  # legitimate partial frame — wait for more data
 
             try:
@@ -352,6 +370,35 @@ class ProtobufMessageParser:
                 consumed_bytes = current_index
 
         return messages, consumed_bytes
+
+    def _find_next_parseable_frame(self, data: bytes, start: int) -> int:
+        """The first index from ``start`` where a complete, fully buffered
+        frame that the factory parses begins, with only text (printable
+        ASCII, CR, LF, TAB) from ``start - 1`` up to it; else -1. Echo and
+        prompt noise is text; a real frame's bytes aren't, so the scan stops
+        at the first binary byte and never skips into a frame still
+        arriving. Emits nothing."""
+        for i in range(start, len(data)):
+            if not _is_text_byte(data[i - 1]):
+                return -1
+            remaining = data[i:]
+            length, prefix_bytes, _ = _try_read_length_prefix(remaining)
+            if length is None or length <= 0 or length > _MAX_MESSAGE_SIZE_BYTES:
+                continue
+            if len(remaining) < prefix_bytes + length:
+                continue
+            if not _is_plausible_field_tag_byte(remaining[prefix_bytes]):
+                continue
+            try:
+                self._message_factory(bytes(remaining[prefix_bytes : prefix_bytes + length]))
+            except Exception:
+                continue
+            return i
+        return -1
+
+
+def _is_text_byte(b: int) -> bool:
+    return 32 <= b <= 126 or b in (0x09, 0x0A, 0x0D)
 
 
 class _MessageTypeHint:
@@ -376,19 +423,24 @@ def _detect_message_type(data: bytes) -> int:
     sample = data[:512]
     sample_len = len(sample)
 
-    printable = sum(1 for b in sample if 32 <= b <= 126)
-    if printable / sample_len > 0.8:
+    # CR, LF and TAB are framing, not content: a binary frame the firmware
+    # ends with CRLF mustn't look more like text for it (upstream e8c4998).
+    content = [b for b in sample if b not in (0x0D, 0x0A, 0x09)]
+    printable_ratio = (
+        sum(1 for b in content if 32 <= b <= 126) / len(content) if content else 0.0
+    )
+    if printable_ratio > 0.8:
         return _MessageTypeHint.LIKELY_TEXT
 
-    if sample_len > 3 and _is_likely_text_command(sample):
-        return _MessageTypeHint.LIKELY_TEXT
-
+    # Null density before any text-shaped edge: the binary SYSInfoPB? reply
+    # ends in CRLF and, with echo on, starts with the echoed "SYST..." text,
+    # yet is ~40% null bytes.
     null_ratio = sum(1 for b in sample if b == 0) / sample_len
     if null_ratio > 0.1:
         return _MessageTypeHint.LIKELY_PROTOBUF
 
-    if null_ratio > 0.05 and _is_likely_protobuf_data(sample):
-        return _MessageTypeHint.LIKELY_PROTOBUF
+    if sample_len > 3 and printable_ratio > 0.5 and _is_likely_text_command(sample):
+        return _MessageTypeHint.LIKELY_TEXT
 
     return _MessageTypeHint.UNCERTAIN
 
@@ -403,26 +455,15 @@ def _is_likely_text_command(data: bytes) -> bool:
     # SCPI commands are case-insensitive — match on head_upper for
     # SYST/CONF/READ. `*` is literal (only standard form), so test
     # against `head` directly (Qodo PR 17 pass 30 #2).
+    # A leading SCPI marker only: a trailing line ending is no evidence
+    # of text, since binary frames end in CRLF or 0x0A too (upstream
+    # e8c4998; the dead protobuf-pattern heuristic went in 41dbf3d).
     return (
         head.startswith("*")
         or head_upper.startswith("SYST")
         or head_upper.startswith("CONF")
         or head_upper.startswith("READ")
-        or data.endswith(b"\r\n")
-        or data.endswith(b"\n")
     )
-
-
-def _is_likely_protobuf_data(data: bytes) -> bool:
-    if len(data) < 2:
-        return False
-    # Look for a plausible varint field tag in the first few bytes:
-    # wire type (low 3 bits) <= 5 and field number (high bits) > 0.
-    for i in range(min(len(data) - 1, 5)):
-        b = data[i]
-        if (b & 0x07) <= 5 and (b >> 3) > 0:
-            return True
-    return False
 
 
 class CompositeMessageParser:
@@ -463,33 +504,28 @@ class CompositeMessageParser:
 
         hint = _detect_message_type(data)
 
-        # Critical: return whenever EITHER messages OR consumed > 0.
-        # A parser may legitimately advance through ignorable bytes
-        # (blank lines, malformed prefixes) without producing a
-        # message; dropping that progress causes the consumer's
-        # buffer to grow without bound (Qodo PR 17 pass 6 #1).
-        if hint == _MessageTypeHint.LIKELY_PROTOBUF:
-            wrapped, consumed = self._try_protobuf(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
+        # The favoured parser runs first, the other only if it finds no
+        # message. Routing the wrong way isn't just slow: the line parser
+        # swallows a whole binary frame as one "line". Uncertain tries
+        # protobuf first: it failed the printable test, so it isn't
+        # plausibly text, and a small streaming frame can leave every
+        # ratio abstaining (upstream e8c4998).
         if hint == _MessageTypeHint.LIKELY_TEXT:
-            wrapped, consumed = self._try_text(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        # Heuristics uncertain or first attempt failed -- try the other.
-        if hint != _MessageTypeHint.LIKELY_TEXT:
-            wrapped, consumed = self._try_text(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        if hint != _MessageTypeHint.LIKELY_PROTOBUF:
-            wrapped, consumed = self._try_protobuf(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        return [], 0
+            order = (self._try_text, self._try_protobuf)
+        else:
+            order = (self._try_protobuf, self._try_text)
+        first_wrapped, first_consumed = order[0](data)
+        if first_wrapped:
+            return first_wrapped, first_consumed
+        wrapped, consumed = order[1](data)
+        if wrapped:
+            return wrapped, consumed
+        # Neither produced a message: still report progress through
+        # ignorable bytes (blank lines, malformed prefixes), or the
+        # consumer's buffer grows without bound (Qodo PR 17 pass 6 #1).
+        if first_consumed:
+            return [], first_consumed
+        return [], consumed
 
     def _try_text(self, data: bytes) -> Tuple[List[ObjectInboundMessage], int]:
         text_messages, consumed = self._text_parser.parse_messages(data)

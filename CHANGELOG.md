@@ -7,6 +7,9 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `TimestampProcessor.set_timestamp_frequency(device_id, hz)` and
+  `get_tick_period(device_id)`: a device's reported `timestamp_freq` sets
+  its tick period instead of the fixed 20 ns (#204).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -28,6 +31,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- `ProtobufMessageParser` stalled on echo or prompt text ahead of a short
+  frame (the text decoded as a long length); it now skips text that a
+  complete frame follows. `CompositeMessageParser` read a binary frame
+  ending in CRLF (the status reply) as text; null density now decides
+  before any text marker, a line ending is no longer one, and uncertain
+  data tries protobuf first (#204).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than

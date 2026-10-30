@@ -25,6 +25,7 @@ __all__ = ["TimestampResult", "TimestampProcessor"]
 
 
 _UINT32_MAX = 0xFFFFFFFF
+_DEFAULT_TIMESTAMP_FREQUENCY = 50_000_000
 _DEFAULT_TICK_PERIOD = 20e-9
 _MAX_ROLLOVER_TIME_BETWEEN_MESSAGES = 10.0
 
@@ -60,22 +61,54 @@ class TimestampProcessor:
 
     State is keyed by `device_id`, so a single processor instance
     can multiplex any number of devices.
+
+    The tick period defaults to 20 ns (50 MHz), but should be set per
+    device from its reported ``timestamp_freq`` (the protobuf status
+    field, :attr:`DaqifiDevice.timestamp_frequency`) with
+    :meth:`set_timestamp_frequency`: boards don't all run at 50 MHz.
+    A device without one uses the processor-wide :attr:`tick_period`
+    (upstream 6f9677d).
     """
 
     DEFAULT_TICK_PERIOD: float = _DEFAULT_TICK_PERIOD
+    DEFAULT_TIMESTAMP_FREQUENCY: int = _DEFAULT_TIMESTAMP_FREQUENCY
 
     def __init__(self, tick_period: float = _DEFAULT_TICK_PERIOD) -> None:
         if tick_period <= 0:
             raise ValueError("Tick period must be greater than zero.")
         self._tick_period = tick_period
         self._device_states: Dict[str, _DeviceTimestampState] = {}
+        self._device_tick_periods: Dict[str, float] = {}
         # Guards _device_states dict insertion/deletion. Per-device
         # processing locks live on each state object.
         self._states_lock = threading.Lock()
 
     @property
     def tick_period(self) -> float:
+        """The fallback tick period, for devices with no frequency set."""
         return self._tick_period
+
+    def set_timestamp_frequency(self, device_id: str, frequency_hz: int) -> None:
+        """Use ``1 / frequency_hz`` as ``device_id``'s tick period from now
+        on (the device-reported ``timestamp_freq``). 0 clears it, back to
+        the fallback (an older firmware that doesn't report one)."""
+        if device_id is None:
+            raise TypeError("device_id must not be None")
+        if isinstance(frequency_hz, bool) or not isinstance(frequency_hz, int):
+            raise TypeError(f"frequency_hz must be an int (got {frequency_hz!r})")
+        if frequency_hz < 0:
+            raise ValueError(f"frequency_hz must not be negative (got {frequency_hz})")
+        with self._states_lock:
+            if frequency_hz == 0:
+                self._device_tick_periods.pop(device_id, None)
+            else:
+                self._device_tick_periods[device_id] = 1.0 / frequency_hz
+
+    def get_tick_period(self, device_id: str) -> float:
+        """The tick period ``device_id``'s timestamps are converted with."""
+        if device_id is None:
+            raise TypeError("device_id must not be None")
+        return self._device_tick_periods.get(device_id, self._tick_period)
 
     def process_timestamp(self, device_id: str, device_timestamp: int) -> TimestampResult:
         """Process one device timestamp and compute its system-clock equivalent.
@@ -95,6 +128,7 @@ class TimestampProcessor:
             raise TypeError("device_id must not be None")
 
         state = self._get_or_add_state(device_id)
+        tick_period = self.get_tick_period(device_id)
 
         with state.lock:
             if not state.has_previous_timestamp:
@@ -123,7 +157,7 @@ class TimestampProcessor:
             else:
                 clock_cycles_between_messages = device_timestamp - previous_device_timestamp
 
-            seconds_between_messages = clock_cycles_between_messages * self._tick_period
+            seconds_between_messages = clock_cycles_between_messages * tick_period
 
             # Sanity check: a "rollover" that implies > 10 s gap is more
             # likely an out-of-order message — treat it as moving backwards
@@ -132,7 +166,7 @@ class TimestampProcessor:
             if rollover and seconds_between_messages > _MAX_ROLLOVER_TIME_BETWEEN_MESSAGES:
                 rollover = False
                 clock_cycles_between_messages = previous_device_timestamp - device_timestamp
-                seconds_between_messages = clock_cycles_between_messages * self._tick_period * -1
+                seconds_between_messages = clock_cycles_between_messages * tick_period * -1
 
             message_timestamp = state.previous_system_timestamp + timedelta(
                 seconds=seconds_between_messages
@@ -150,16 +184,19 @@ class TimestampProcessor:
             )
 
     def reset(self, device_id: str) -> None:
-        """Drop the state for a single device. No-op if unknown."""
+        """Drop the state for a single device. No-op if unknown. Its
+        frequency is kept: that's static device configuration, not
+        per-session state."""
         if device_id is None:
             raise TypeError("device_id must not be None")
         with self._states_lock:
             self._device_states.pop(device_id, None)
 
     def reset_all(self) -> None:
-        """Drop state for every tracked device."""
+        """Drop state for every tracked device, frequencies included."""
         with self._states_lock:
             self._device_states.clear()
+            self._device_tick_periods.clear()
 
     def _get_or_add_state(self, device_id: str) -> _DeviceTimestampState:
         # Fast path: state already exists. Dict reads are atomic in CPython
