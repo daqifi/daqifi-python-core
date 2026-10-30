@@ -261,6 +261,9 @@ def _strip_prompt_prefixes(lines: Sequence[str]) -> List[str]:
     return out
 
 
+# drain_errors' sentinel code for "queue not confirmed clean".
+_DRAIN_INCONCLUSIVE_CODE = 99999
+
 # Firmware that ends every SD listing with __END_OF_LIST__ (#794).
 _SD_LIST_MARKER_SINCE = FirmwareVersion(3, 8, 0)
 
@@ -1876,7 +1879,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         try:
             # Empty the error queue first, so the listing's terminator
             # reply is the listing's own.
-            self.drain_errors(max_iterations=16, empty_budget=1)
+            self._empty_error_queue_for_listing()
             files = self._read_sd_listing(
                 lambda: self.execute_text_command(
                     _setup_list,
@@ -2077,7 +2080,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
             # No retry: it would send the DELete again.
             # Empty the error queue first, so the listing's terminator
             # reply is the listing's own.
-            self.drain_errors(max_iterations=16, empty_budget=1)
+            self._empty_error_queue_for_listing()
             files = self._read_sd_listing(
                 _capture,
                 sent=self._sd_listing_commands(
@@ -2169,7 +2172,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         try:
             # Empty the error queue first, so the listing's terminator
             # reply is the listing's own.
-            self.drain_errors(max_iterations=16, empty_budget=1)
+            self._empty_error_queue_for_listing()
             files = self._read_sd_listing(
                 _capture,
                 sent=self._sd_listing_commands(),
@@ -2324,6 +2327,23 @@ class DaqifiStreamingDevice(DaqifiDevice):
             scpi_commands.get_last_error(),
         ]
 
+    def _empty_error_queue_for_listing(self) -> None:
+        """Drain the error queue before a listing, so the listing's
+        terminator code can be attributed to it. A drain that can't confirm
+        the queue empty (``drain_errors``' inconclusive sentinel) raises
+        rather than letting an old error be blamed on the listing."""
+        from ._internal import scpi as _scpi
+        from .exceptions import SdCardOperationException
+
+        popped = self.drain_errors(empty_budget=1)
+        if popped and _scpi.parse_system_error(popped[-1])[0] == _DRAIN_INCONCLUSIVE_CODE:
+            raise SdCardOperationException(
+                "The device's error queue could not be emptied before the SD "
+                "listing, so its result could not be attributed.",
+                popped,
+                popped[-1],
+            )
+
     def _sd_listing_marker_expected(self) -> bool:
         """Whether the firmware ends every listing with ``__END_OF_LIST__``:
         since v3.8.0 (firmware #794). Unknown or older firmware is not
@@ -2355,9 +2375,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
           be the DELete's own.
         - Then no card, filesystem errors, a missing directory and an
           ``INCOMPLETE`` / ``FAILED`` marker raise. So does a missing
-          marker, on firmware that always sends one (an aborted listing has
-          none), or on any firmware when the listing is empty: an empty card
-          is only believed when the device says the listing was complete.
+          marker on firmware that always sends one (an aborted listing has
+          none). On older firmware an empty unmarked listing is an empty
+          directory only with a clean (0) terminator.
         """
         from ._internal import scpi as _scpi
         from .exceptions import SdCardListIncompleteException
@@ -2374,20 +2394,26 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 lines, "the reply ended before the device answered SYSTem:ERRor?"
             )
         terminator = _scpi.find_system_error_reply([lines[len(listing)]])
+        code, _ = _scpi.parse_system_error(terminator)
         check_sd_card_listing(listing)
-        if error_code_is_the_listings and terminator is not None:
-            code, _ = _scpi.parse_system_error(terminator)
-            if code != 0:
-                raise SdCardListIncompleteException(
-                    lines, f"the device reported {terminator}"
-                )
-        files = parse_sd_card_file_list(listing)
-        if sd_card_listing_status(listing) == "unterminated" and (
-            not files or self._sd_listing_marker_expected()
-        ):
+        if error_code_is_the_listings and code != 0:
             raise SdCardListIncompleteException(
-                lines, "no end-of-listing marker"
+                lines, f"the device reported {terminator}"
             )
+        files = parse_sd_card_file_list(listing)
+        if sd_card_listing_status(listing) == "unterminated":
+            # 3.8.0+ always marks a listing, so no marker means an abort.
+            # Older firmware never does; there a clean terminator is the
+            # evidence an empty listing is an empty directory, and without
+            # it (the delete path, whose code can be DELete's) it isn't.
+            if self._sd_listing_marker_expected():
+                raise SdCardListIncompleteException(
+                    lines, "no end-of-listing marker"
+                )
+            if not files and code != 0:
+                raise SdCardListIncompleteException(
+                    lines, "an empty listing without a clean terminator"
+                )
         return files
 
     def _execute_raw_text_capture(

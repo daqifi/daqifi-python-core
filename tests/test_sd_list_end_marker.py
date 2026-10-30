@@ -100,7 +100,9 @@ def test_another_open_failure_stays_a_filesystem_error() -> None:
 
 @pytest.mark.parametrize("method", ["get_sd_card_files", "request_sd_card_file_list"])
 def test_a_silent_device_is_not_an_empty_card(method) -> None:
-    device = _fakes._make_device_with_serial_facade({b"SYSTem:ERRor?": b""})
+    device = _fakes._make_device_with_serial_facade()
+    # The drain before the listing is answered; the listing's terminator isn't.
+    _with_error_queue(device, [b'0,"No error"\r\n', b""], then=b"")
     with pytest.raises(SdCardListIncompleteException):
         getattr(device, method)()
     sent = b"".join(device._transport.stream.written)
@@ -113,7 +115,8 @@ def test_an_empty_card_with_a_terminator_is_empty() -> None:
 
 
 def test_a_delete_whose_relisting_never_finishes_is_not_retried() -> None:
-    device = _fakes._make_device_with_serial_facade({b"SYSTem:ERRor?": b""})
+    device = _fakes._make_device_with_serial_facade()
+    _with_error_queue(device, [b'0,"No error"\r\n', b""], then=b"")
     with pytest.raises(SdCardListIncompleteException):
         device.delete_sd_card_file("log_a.bin")
     sent = b"".join(device._transport.stream.written)
@@ -178,8 +181,9 @@ def test_a_missing_terminator_is_not_retried() -> None:
     # end it, and no quiet interval proves the first attempt finished, so
     # there is no automatic retry; the caller decides.
     device = _fakes._make_device_with_serial_facade(
-        {b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n__END_OF_LIST__ OK\r\n", b"SYSTem:ERRor?": b""}
+        {b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n__END_OF_LIST__ OK\r\n"}
     )
+    _with_error_queue(device, [b'0,"No error"\r\n', b""], then=b"")
     device._sd_card_files = ["sentinel"]
     with pytest.raises(SdCardListIncompleteException):
         device.get_sd_card_files()
@@ -187,8 +191,8 @@ def test_a_missing_terminator_is_not_retried() -> None:
     assert device._sd_card_files == ["sentinel"]  # nothing cached
 
 
-def _with_error_queue(device, replies):
-    """Answer successive SYSTem:ERRor? queries from ``replies``, then 0."""
+def _with_error_queue(device, replies, then=b'0,"No error"\r\n'):
+    """Answer successive SYSTem:ERRor? queries from ``replies``, then ``then``."""
     stream = device._transport.stream
     stream.response_map.pop(b"SYSTem:ERRor?", None)
     real_write = stream.write
@@ -197,7 +201,7 @@ def _with_error_queue(device, replies):
     def _write(data):
         n = real_write(data)
         if b"SYSTem:ERRor?" in bytes(data):
-            stream.feed(queue.pop(0) if queue else b'0,"No error"\r\n')
+            stream.feed(queue.pop(0) if queue else then)
         return n
 
     stream.write = _write
@@ -240,7 +244,44 @@ def test_terminator_spellings_drain_errors_accepts_are_accepted(terminator) -> N
     assert _names(device.get_sd_card_files()) == ["log_a.bin"]
 
 
-def test_no_files_and_no_marker_is_not_an_empty_card() -> None:
+def test_no_files_and_no_marker_is_not_an_empty_card_on_marking_firmware() -> None:
     device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b""})
+    device._metadata.firmware_version = "3.8.0"
     with pytest.raises(SdCardListIncompleteException):
         device.get_sd_card_files()
+
+
+# Audit r3 on #212.
+
+def test_an_empty_directory_on_older_firmware_is_empty() -> None:
+    # Before 3.8.0 no listing is marked; a clean terminator is the evidence.
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b""})
+    device._metadata.firmware_version = "3.7.3"
+    assert device.get_sd_card_files() == ()
+
+
+def test_deleting_the_last_file_on_older_firmware_lists_an_empty_card() -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b""})
+    device._metadata.firmware_version = "3.7.3"
+    device.delete_sd_card_file("log_a.bin")
+    assert device.sd_card_files == ()
+
+
+def test_seventeen_stale_errors_are_all_drained() -> None:
+    # drain_errors stopped at 16 and its "inconclusive" result was ignored,
+    # so the 17th stale error was blamed on a healthy listing.
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OK})
+    _with_error_queue(device, [b'-200,"Execution error"\r\n'] * 17)
+    assert _names(device.get_sd_card_files()) == ["log_a.bin"]
+
+
+def test_an_error_queue_that_cannot_be_emptied_is_not_blamed_on_the_listing() -> None:
+    from daqifi.exceptions import SdCardOperationException
+
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OK})
+    _with_error_queue(device, [], then=b"")  # the drain never gets an answer
+    with pytest.raises(SdCardOperationException) as excinfo:
+        device.get_sd_card_files()
+    assert "could not be emptied" in str(excinfo.value)
+    assert not isinstance(excinfo.value, SdCardListIncompleteException)
+    assert b"SD:LIST?" not in b"".join(device._transport.stream.written)

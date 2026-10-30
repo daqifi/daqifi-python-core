@@ -34,8 +34,10 @@ aims to follow [Semantic Versioning](https://semver.org/).
   reply, and raises `SdCardListIncompleteException` when that answer never
   comes, when it is an error (the firmware's answer to an aborted listing),
   when the marker says INCOMPLETE or FAILED, or when the marker is missing
-  on firmware 3.8.0 and later (which always sends one) or from an empty
-  listing. It isn't retried automatically. A missing directory
+  on firmware 3.8.0 and later (which always sends one). On older firmware
+  an empty listing is an empty directory only with a clean terminator. An
+  error queue that can't be emptied first raises rather than being blamed
+  on the listing. It isn't retried automatically. A missing directory
   (`[Error:4]` / `[Error:5] Failed to open directory`) raises
   `SdCardDirectoryNotFoundException`, a `SdCardFilesystemException`
   subclass. Echoes of the listing's own commands are dropped. The legacy
