@@ -28,10 +28,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- After a WiFi module update, restoring LAN sent `LAN:APPLY` then
-  `LAN:SAVE`; when the firmware's apply gate refused the apply (a REINIT
-  in flight), the separate SAVE still persisted the unapplied settings. It
-  now sends `LAN:APPLY 1`, which saves only an accepted apply (#220).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
