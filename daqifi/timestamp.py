@@ -18,7 +18,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, Optional
 
 
 __all__ = ["TimestampResult", "TimestampProcessor"]
@@ -47,6 +47,7 @@ class _DeviceTimestampState:
         "previous_system_timestamp",
         "previous_device_timestamp",
         "has_previous_timestamp",
+        "tick_period",
     )
 
     def __init__(self) -> None:
@@ -54,6 +55,16 @@ class _DeviceTimestampState:
         self.previous_system_timestamp: datetime = datetime.min
         self.previous_device_timestamp: int = 0
         self.has_previous_timestamp: bool = False
+        # The device's own tick period (from its timestamp_freq), or None
+        # for the processor's fallback. On the state, under its lock, so it
+        # can't fall out of step with the previous timestamp it's applied
+        # to, and goes when the state does.
+        self.tick_period: Optional[float] = None
+
+    def clear_timestamps(self) -> None:
+        self.previous_system_timestamp = datetime.min
+        self.previous_device_timestamp = 0
+        self.has_previous_timestamp = False
 
 
 class TimestampProcessor:
@@ -78,7 +89,6 @@ class TimestampProcessor:
             raise ValueError("Tick period must be greater than zero.")
         self._tick_period = tick_period
         self._device_states: Dict[str, _DeviceTimestampState] = {}
-        self._device_tick_periods: Dict[str, float] = {}
         # Guards _device_states dict insertion/deletion. Per-device
         # processing locks live on each state object.
         self._states_lock = threading.Lock()
@@ -98,21 +108,22 @@ class TimestampProcessor:
             raise TypeError(f"frequency_hz must be an int (got {frequency_hz!r})")
         if frequency_hz < 0:
             raise ValueError(f"frequency_hz must not be negative (got {frequency_hz})")
-        # Under the device's processing lock, so a frequency change can't
+        # On the device's state, under its lock: a frequency change can't
         # land between a process_timestamp's reading of the period and its
         # use of the previous timestamp.
         state = self._get_or_add_state(device_id)
         with state.lock:
-            if frequency_hz == 0:
-                self._device_tick_periods.pop(device_id, None)
-            else:
-                self._device_tick_periods[device_id] = 1.0 / frequency_hz
+            state.tick_period = None if frequency_hz == 0 else 1.0 / frequency_hz
 
     def get_tick_period(self, device_id: str) -> float:
         """The tick period ``device_id``'s timestamps are converted with."""
         if device_id is None:
             raise TypeError("device_id must not be None")
-        return self._device_tick_periods.get(device_id, self._tick_period)
+        state = self._device_states.get(device_id)
+        return self._tick_period_of(state) if state is not None else self._tick_period
+
+    def _tick_period_of(self, state: _DeviceTimestampState) -> float:
+        return state.tick_period if state.tick_period is not None else self._tick_period
 
     def process_timestamp(self, device_id: str, device_timestamp: int) -> TimestampResult:
         """Process one device timestamp and compute its system-clock equivalent.
@@ -134,9 +145,9 @@ class TimestampProcessor:
         state = self._get_or_add_state(device_id)
 
         with state.lock:
-            # Read in the same critical section as the previous timestamp
-            # (set_timestamp_frequency takes this lock too).
-            tick_period = self.get_tick_period(device_id)
+            # From the state this lock guards, with the previous timestamp
+            # (set_timestamp_frequency writes it under this lock too).
+            tick_period = self._tick_period_of(state)
             if not state.has_previous_timestamp:
                 now = datetime.now()
                 state.previous_system_timestamp = now
@@ -190,19 +201,22 @@ class TimestampProcessor:
             )
 
     def reset(self, device_id: str) -> None:
-        """Drop the state for a single device. No-op if unknown. Its
-        frequency is kept: that's static device configuration, not
-        per-session state."""
+        """Forget a device's timestamps, so its next one is a first message.
+        No-op if unknown. Its frequency is kept: that's static device
+        configuration, not per-session state."""
         if device_id is None:
             raise TypeError("device_id must not be None")
-        with self._states_lock:
-            self._device_states.pop(device_id, None)
+        state = self._device_states.get(device_id)
+        if state is not None:
+            with state.lock:
+                state.clear_timestamps()
 
     def reset_all(self) -> None:
-        """Drop state for every tracked device, frequencies included."""
+        """Drop the state of every tracked device, frequencies included. A
+        call already holding a device's lock finishes on its old state, its
+        frequency included; the next starts fresh."""
         with self._states_lock:
             self._device_states.clear()
-            self._device_tick_periods.clear()
 
     def _get_or_add_state(self, device_id: str) -> _DeviceTimestampState:
         # Fast path: state already exists. Dict reads are atomic in CPython

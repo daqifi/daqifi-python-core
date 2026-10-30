@@ -162,6 +162,35 @@ def test_an_invalid_frequency_is_refused(bad, error) -> None:
         TimestampProcessor().set_timestamp_frequency("nq1", bad)
 
 
+def _pause_thread_at_period_read(processor, before_read=False):
+    """Pause the thread that calls ``arm()`` where process_timestamp reads
+    the tick period (``_tick_period_of``; on older code
+    ``get_tick_period``), just after the read or, with ``before_read``,
+    just before it. Returns (arm, paused, resume)."""
+    import threading
+
+    paused, resume = threading.Event(), threading.Event()
+    armed = {}
+    name = "_tick_period_of" if hasattr(processor, "_tick_period_of") else "get_tick_period"
+    real = getattr(processor, name)
+
+    def _pause():
+        if threading.get_ident() == armed.get("ident") and not paused.is_set():
+            paused.set()
+            resume.wait(5)
+
+    def _pausing(*args):
+        if before_read:
+            _pause()
+        period = real(*args)
+        if not before_read:
+            _pause()
+        return period
+
+    setattr(processor, name, _pausing)
+    return (lambda: armed.__setitem__("ident", threading.get_ident())), paused, resume
+
+
 def test_a_frequency_change_cant_land_between_reading_the_period_and_using_it() -> None:
     # Audit r3: A reads the 20 ns period and pauses; B sets 80 MHz and
     # processes a later timestamp; A resumes. A must not apply its stale
@@ -171,22 +200,11 @@ def test_a_frequency_change_cant_land_between_reading_the_period_and_using_it() 
 
     processor = TimestampProcessor()
     first = processor.process_timestamp("d", 0)
-    a_read, a_resume = threading.Event(), threading.Event()
-    real_get = processor.get_tick_period
-    a_thread = {}
-
-    def _pausing_get(device_id):
-        period = real_get(device_id)
-        if threading.get_ident() == a_thread.get("ident") and not a_read.is_set():
-            a_read.set()
-            a_resume.wait(5)
-        return period
-
-    processor.get_tick_period = _pausing_get
+    arm, a_paused, a_resume = _pause_thread_at_period_read(processor)
     results = {}
 
     def _a():
-        a_thread["ident"] = threading.get_ident()
+        arm()
         results["a"] = processor.process_timestamp("d", 100_000_000)
 
     def _b():
@@ -196,7 +214,7 @@ def test_a_frequency_change_cant_land_between_reading_the_period_and_using_it() 
     a = threading.Thread(target=_a)
     b = threading.Thread(target=_b)
     a.start()
-    assert a_read.wait(5)
+    assert a_paused.wait(5)
     b.start()
     b.join(0.5)  # B gets in now, if it can
     a_resume.set()
@@ -205,3 +223,36 @@ def test_a_frequency_change_cant_land_between_reading_the_period_and_using_it() 
     # A: 100e6 cycles at 20 ns = 2.0 s. B: 60e6 more at 12.5 ns = 0.75 s.
     assert (results["a"].timestamp - first.timestamp) / timedelta(seconds=1) == pytest.approx(2.0)
     assert (results["b"].timestamp - first.timestamp) / timedelta(seconds=1) == pytest.approx(2.75)
+
+
+def test_reset_all_cant_pair_an_old_timestamp_with_the_fallback_period() -> None:
+    # Audit r4: A holds the device's lock and pauses before reading the
+    # period; B runs reset_all. A must finish consistently with the state it
+    # holds (80 MHz: 1.0 s), not apply the 20 ns fallback to it (1.6 s);
+    # the next timestamp after the reset is a first message.
+    import threading
+
+    processor = TimestampProcessor()
+    processor.set_timestamp_frequency("d", 80_000_000)
+    first = processor.process_timestamp("d", 0)
+    arm, a_paused, a_resume = _pause_thread_at_period_read(processor, before_read=True)
+    results = {}
+
+    def _a():
+        arm()
+        results["a"] = processor.process_timestamp("d", 80_000_000)
+
+    a = threading.Thread(target=_a)
+    a.start()
+    assert a_paused.wait(5)
+    b = threading.Thread(target=processor.reset_all)
+    b.start()
+    b.join(0.5)
+    a_resume.set()
+    a.join(5)
+    b.join(5)
+    assert not results["a"].is_first_message
+    assert results["a"].seconds_between_messages == pytest.approx(1.0)
+    after = processor.process_timestamp("d", 90_000_000)
+    assert after.is_first_message
+    assert processor.get_tick_period("d") == TimestampProcessor.DEFAULT_TICK_PERIOD
