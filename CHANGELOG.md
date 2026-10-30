@@ -37,12 +37,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   and the first sample of a session keeps its raw time. Limit: a gap in the
   device's own samples longer than half a period (42.9 s at 50 MHz) reads as
   a step back; a running stream doesn't produce one (#193).
-- `StreamManager` fell behind a board streaming at its configured rate:
-  the callback thread slept a whole sample period after every sample, and
-  `read()` slept 1 ms after every sample, so the backlog of undelivered
-  samples grew for the whole session (about 70 a second at 1 kHz) until
-  buffers overflowed. Readers now wait only when a poll finds nothing
-  (#192).
 - SD listings on current firmware returned a file named `__END_OF_LIST__`:
   the firmware ends every listing with `__END_OF_LIST__ OK`, `INCOMPLETE`
   or `FAILED`, and a listing marked INCOMPLETE or FAILED came back as if
