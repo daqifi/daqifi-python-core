@@ -151,9 +151,14 @@ class CsvExportOptions:
     delimiter: str = ","
 
     #: When ``True``, the time column contains seconds elapsed since
-    #: the first sample (formatted to 3 decimal places). When
+    #: the first sample, to :attr:`relative_time_decimals` places. When
     #: ``False``, it contains an ISO 8601 round-trip timestamp.
     use_relative_time: bool = False
+    #: Decimal places of the relative time column, 0 to 7 (7 is the tick
+    #: resolution, 100 ns). The default 3 (1 ms, as upstream) gives
+    #: samples above 1 kHz repeated labels (2 kHz: 0.000, 0.001, 0.001,
+    #: ...); use 6 or 7 for fast streams (#195).
+    relative_time_decimals: int = 3
 
     #: When ``None``, every sample is written as its own row (grouped
     #: by timestamp tick). When set to a positive integer ``N``,
@@ -207,6 +212,15 @@ class CsvExporter:
             raise ValueError(
                 f"options.average_window must be greater than zero "
                 f"(got {options.average_window})"
+            )
+        if (
+            isinstance(options.relative_time_decimals, bool)
+            or not isinstance(options.relative_time_decimals, int)
+            or not 0 <= options.relative_time_decimals <= 7
+        ):
+            raise ValueError(
+                f"options.relative_time_decimals must be an int from 0 to 7 "
+                f"(got {options.relative_time_decimals!r})"
             )
         if (
             len(options.delimiter) != 1
@@ -286,6 +300,7 @@ class CsvExporter:
         current_tick: Optional[int] = None
         bucket: List[SampleRow] = []
         processed = 0
+        reported = 0
 
         for sample in source.stream_samples(cancel_event):
             _check_cancel(cancel_event)
@@ -297,7 +312,7 @@ class CsvExporter:
                     writer, bucket, channel_keys, first_ticks, options
                 )
                 processed += len(bucket)
-                self._report_progress(progress, processed, total_samples)
+                reported = self._report_progress(progress, processed, total_samples, reported)
                 bucket = []
 
             current_tick = sample.timestamp_ticks
@@ -321,7 +336,9 @@ class CsvExporter:
         options: CsvExportOptions,
     ) -> None:
         ticks = bucket[0].timestamp_ticks
-        timestamp = _format_timestamp(ticks, first_ticks, options.use_relative_time)
+        timestamp = _format_timestamp(
+            ticks, first_ticks, options.use_relative_time, options.relative_time_decimals
+        )
         parts: List[str] = [
             _escape_csv_field(timestamp, options.delimiter, formula_safe=False)
         ]
@@ -361,6 +378,7 @@ class CsvExporter:
         last_tick = 0
         window_count = 0
         processed = 0
+        reported = 0
 
         for sample in source.stream_samples(cancel_event):
             _check_cancel(cancel_event)
@@ -390,7 +408,7 @@ class CsvExporter:
                     counts[key] = 0
                 window_count = 0
 
-                self._report_progress(progress, processed, total_samples)
+                reported = self._report_progress(progress, processed, total_samples, reported)
 
         # Flush any trailing samples that didn't fill a complete window.
         if window_count > 0 and first_ticks is not None:
@@ -417,7 +435,9 @@ class CsvExporter:
         first_ticks: int,
         options: CsvExportOptions,
     ) -> None:
-        timestamp = _format_timestamp(last_tick, first_ticks, options.use_relative_time)
+        timestamp = _format_timestamp(
+            last_tick, first_ticks, options.use_relative_time, options.relative_time_decimals
+        )
         parts: List[str] = [
             _escape_csv_field(timestamp, options.delimiter, formula_safe=False)
         ]
@@ -439,12 +459,20 @@ class CsvExporter:
         progress: Optional[Callable[[int], None]],
         processed: int,
         total: int,
-    ) -> None:
+        reported: int,
+    ) -> int:
+        """Report (capped at 99) each time ``processed`` passes another
+        multiple of 5000, and return how many multiples have been passed.
+
+        Upstream reports only when the count lands exactly on a multiple,
+        but it grows by a whole timestamp's samples at a time, so with 7
+        channels 70,000 samples reported only twice (#195)."""
+        crossed = processed // cls._PROGRESS_REPORT_EVERY
         if progress is None or total <= 0:
-            return
-        # Mirrors upstream's "every 5000 samples, report capped at 99".
-        if processed % cls._PROGRESS_REPORT_EVERY == 0:
+            return crossed
+        if crossed > reported:
             progress(min(99, int((processed / total) * 100)))
+        return crossed
 
 
 def _check_cancel(cancel_event: Optional[threading.Event]) -> None:
@@ -462,7 +490,7 @@ def _check_cancel(cancel_event: Optional[threading.Event]) -> None:
 
 
 def _format_timestamp(
-    ticks: int, first_ticks: int, use_relative_time: bool
+    ticks: int, first_ticks: int, use_relative_time: bool, relative_decimals: int = 3
 ) -> str:
     """Format a tick value as an ISO 8601 absolute string or as
     seconds elapsed since ``first_ticks``.
@@ -481,7 +509,7 @@ def _format_timestamp(
 
     if use_relative_time:
         seconds = (ticks - first_ticks) / _TICKS_PER_SECOND
-        return f"{seconds:.3f}"
+        return f"{seconds:.{relative_decimals}f}"
 
     # ISO 8601 round-trip (matches C# DateTime.ToString("O") shape:
     # `YYYY-MM-DDTHH:MM:SS.fffffffZ` for UTC, with 7-digit fractional
@@ -530,10 +558,17 @@ def _escape_csv_field(value: str, delimiter: str, *, formula_safe: bool = True) 
         # for quoting if needed. Strip leading whitespace before the
         # formula-char check — spreadsheets ignore leading whitespace
         # when detecting a formula (e.g. " =SUM(A1)" still evaluates).
-        leading = value.lstrip(" \t")
+        # Any Unicode whitespace, not just space and tab: injection
+        # payloads put NBSP, thin spaces or U+2028 before "=" and
+        # spreadsheets still evaluate the cell (upstream 4f3766f).
+        leading = value.lstrip()
         if leading and leading[0] in ("=", "+", "-", "@"):
             value = "'" + value
-    must_quote = any(ch in value for ch in (delimiter, '"', "\r", "\n"))
+    # Leading or trailing whitespace is quoted too: many readers (Excel,
+    # Google Sheets, pandas) trim unquoted whitespace and lose it.
+    must_quote = (bool(value) and (value[0].isspace() or value[-1].isspace())) or any(
+        ch in value for ch in (delimiter, '"', "\r", "\n")
+    )
     if must_quote:
         value = value.replace('"', '""')
         return f'"{value}"'
@@ -554,10 +589,131 @@ def _format_value(value: float) -> str:
     return f"{value:.15g}"
 
 
+def datetime_to_ticks(value: _dt.datetime) -> int:
+    """.NET ``DateTime.Ticks`` (100 ns since 0001-01-01 UTC) for ``value``.
+
+    An aware datetime is converted to UTC first. A naive one is taken as
+    UTC: the SD-card parser's timestamps are naive UTC, and the exporter
+    writes "Z" (#195).
+    """
+    if value.tzinfo is not None:
+        value = value.astimezone(_dt.timezone.utc)
+    else:
+        value = value.replace(tzinfo=_dt.timezone.utc)
+    delta = value - _DOTNET_EPOCH
+    return (delta.days * 86_400 + delta.seconds) * _TICKS_PER_SECOND + delta.microseconds * 10
+
+
+class SdCardLogSampleSource:
+    """A :class:`SampleSource` over a parsed SD-card log's entries, so a log
+    can go straight to :class:`CsvExporter` (port of upstream a12f0aa).
+
+    Channels are ``AI0`` .. ``AI<n-1>`` and ``DIO``, keyed by device name and
+    serial number. Each entry yields one row per analog value (by position,
+    up to ``analog_channel_count``) and one for its digital data, at the
+    entry's timestamp in ticks (:func:`datetime_to_ticks`). The entries are
+    read once: stream the samples once.
+
+    After streaming: ``sample_count`` entries read, ``row_count`` distinct
+    timestamps (the exported lines), ``dropped_analog_columns`` the most
+    analog values an entry had past ``analog_channel_count``, and
+    ``non_monotonic_entry_count`` entries earlier than the one before.
+    """
+
+    DEFAULT_DEVICE_NAME = "Daqifi"
+    DIGITAL_CHANNEL_NAME = "DIO"
+
+    def __init__(
+        self,
+        samples,
+        device_serial_number: Optional[str],
+        analog_channel_count: int,
+        device_name: Optional[str] = None,
+    ) -> None:
+        if samples is None:
+            raise TypeError("samples must not be None")
+        if analog_channel_count < 0:
+            raise ValueError(
+                f"analog_channel_count must not be negative (got {analog_channel_count})"
+            )
+        self._samples = samples
+        name = device_name if device_name and device_name.strip() else self.DEFAULT_DEVICE_NAME
+        serial = (
+            device_serial_number
+            if device_serial_number and device_serial_number.strip()
+            else "unknown"
+        )
+        self.analog_channel_count = analog_channel_count
+        self._channels = [
+            ChannelDescriptor(name, serial, f"AI{i}", ChannelType.Analog)
+            for i in range(analog_channel_count)
+        ]
+        self._analog_keys = [c.key for c in self._channels]
+        digital = ChannelDescriptor(name, serial, self.DIGITAL_CHANNEL_NAME, ChannelType.Digital)
+        self._channels.append(digital)
+        self._digital_key = digital.key
+        self.sample_count = 0
+        self.row_count = 0
+        self.dropped_analog_columns = 0
+        self.non_monotonic_entry_count = 0
+
+    @classmethod
+    def from_session(
+        cls,
+        session,
+        fallback_configuration=None,
+        device_name: Optional[str] = None,
+    ) -> "SdCardLogSampleSource":
+        """From an ``SdCardLogSession``: its serial number and analog channel
+        count, else ``fallback_configuration``'s (a blank serial in the log
+        is a gap, not an answer)."""
+        config = session.device_config
+
+        def _stated(value):
+            return value if value and value.strip() else None
+
+        serial = _stated(getattr(config, "device_serial_number", None)) or _stated(
+            getattr(fallback_configuration, "device_serial_number", None)
+        )
+        count = getattr(config, "analog_port_count", None)
+        if count is None:
+            count = getattr(fallback_configuration, "analog_port_count", None)
+        return cls(session.samples, serial, max(0, count or 0), device_name)
+
+    def get_channels(self) -> List[ChannelDescriptor]:
+        return list(self._channels)
+
+    def get_sample_count(self) -> int:
+        return 0  # unknown until the entries are read
+
+    def stream_samples(
+        self, cancel_event: Optional[threading.Event] = None
+    ) -> Iterator[SampleRow]:
+        previous: Optional[int] = None
+        for entry in self._samples:
+            _check_cancel(cancel_event)
+            self.sample_count += 1
+            ticks = datetime_to_ticks(entry.timestamp)
+            if previous != ticks:
+                self.row_count += 1
+            if previous is not None and ticks < previous:
+                self.non_monotonic_entry_count += 1
+            previous = ticks
+            values = entry.analog_values
+            overflow = len(values) - len(self._analog_keys)
+            if overflow > self.dropped_analog_columns:
+                self.dropped_analog_columns = overflow
+            for key, value in zip(self._analog_keys, values):
+                yield SampleRow(ticks, key, value)
+            yield SampleRow(ticks, self._digital_key, float(entry.digital_data))
+
+
 __all__ = [
     "ChannelDescriptor",
     "SampleRow",
     "SampleSource",
     "CsvExportOptions",
     "CsvExporter",
+    "SdCardLogSampleSource",
+    "datetime_to_ticks",
 ]

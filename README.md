@@ -252,6 +252,20 @@ with open("export.csv", "w") as f:
     )
 ```
 
+A parsed SD-card log exports through `SdCardLogSampleSource` (channels
+`AI0`… and `DIO`; the log's naive-UTC timestamps become ticks via
+`datetime_to_ticks`). Relative time defaults to 3 decimals (1 ms); set
+`relative_time_decimals` up to 7 for streams faster than 1 kHz.
+
+```python
+from daqifi.export import SdCardLogSampleSource
+from daqifi.sdcard import SdCardCsvFileParser
+
+session = SdCardCsvFileParser().parse_file("log_a.csv")
+with open("log_a_export.csv", "w") as f:
+    CsvExporter().export(SdCardLogSampleSource.from_session(session), f)
+```
+
 ### SD Card Operations
 
 ```python
