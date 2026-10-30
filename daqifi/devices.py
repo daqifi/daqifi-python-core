@@ -291,6 +291,21 @@ def _split_at_list_terminator(
     return content[:-1], reply
 
 
+class _SessionHealthSink:
+    """Forwards a consumer's read outcomes to the transport, tagged with
+    the connection the consumer reads (#191)."""
+
+    def __init__(self, transport: Any, session: Optional[int]) -> None:
+        self._transport = transport
+        self._session = session
+
+    def report_io_fault(self, error: BaseException) -> None:
+        self._transport.report_io_fault(error, session=self._session)
+
+    def report_io_success(self) -> None:
+        self._transport.report_io_success(session=self._session)
+
+
 def _exclusive_sd_operation(method):
     """Run an SD-card operation entirely inside the text-exchange lock.
 
@@ -587,6 +602,7 @@ class DaqifiDevice:
             consumer = StreamMessageConsumer[Any](
                 stream,
                 ProtobufMessageParser(message_factory=self._message_factory),
+                health_sink=self._transport_health_sink(session),
             )
             with self._state_lock:
                 superseded = (
@@ -961,10 +977,24 @@ class DaqifiDevice:
             raise RuntimeError(
                 "execute_text_command requires an active transport."
             )
-        stream = self._transport.stream
+        # The stream and the connection it belongs to are read together:
+        # a reconnect while this exchange is paused below opens a newer
+        # session, and the text reader's faults must count against the
+        # stream it actually reads, never the newer one (#191).
+        with self._state_lock:
+            stream = self._transport.stream
+            stream_session = self._transport_session
         if stream is None:
             raise RuntimeError(
                 "Transport reports no stream; cannot pause consumer."
+            )
+        # On a transport that numbers its connections, no current session
+        # means disconnect() is under way: the stream may be about to close,
+        # and a reader on it could only be blamed on whatever connects next.
+        if stream_session is None and hasattr(self._transport, "session"):
+            raise RuntimeError(
+                "execute_text_command cannot run while the device is "
+                "disconnecting."
             )
 
         was_running = self._consumer.is_running
@@ -984,7 +1014,11 @@ class DaqifiDevice:
 
         try:
             text_parser = LineBasedMessageParser(line_ending="\r\n")
-            text_consumer = StreamMessageConsumer[str](stream, text_parser)
+            text_consumer = StreamMessageConsumer[str](
+                stream,
+                text_parser,
+                health_sink=self._transport_health_sink(stream_session),
+            )
 
             def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
                 # Background-thread callback. Only push to the queue;
@@ -1579,6 +1613,19 @@ class DaqifiDevice:
             except Exception:
                 pass
 
+    def _transport_health_sink(self, session: Optional[int]) -> Optional[Any]:
+        """A sink reporting reads on this connection's stream to the
+        transport, when it can be told (``report_io_fault`` /
+        ``report_io_success``): the serial transport uses that to notice an
+        unplugged device (#191). Bound to ``session``, so a reader of an
+        earlier connection can't count against a newer one."""
+        transport = self._transport
+        if callable(getattr(transport, "report_io_fault", None)) and callable(
+            getattr(transport, "report_io_success", None)
+        ):
+            return _SessionHealthSink(transport, session)
+        return None
+
     def _on_transport_status_changed(self, args: TransportStatusEventArgs) -> None:
         if args.is_connected:
             return
@@ -1652,6 +1699,15 @@ class DaqifiDevice:
                 return False
             if if_stream_alive is not None and getattr(
                 if_stream_alive, "peer_closed", False
+            ):
+                return False
+            # A loss reported while connecting (a serial transport counting
+            # read faults) wins over "Connected" too. The transport says so,
+            # not the reader: a reader paused by a text exchange isn't lost.
+            if (
+                if_consumer is not None
+                and self._transport is not None
+                and not getattr(self._transport, "is_connected", True)
             ):
                 return False
             evt = self._change_status(value)

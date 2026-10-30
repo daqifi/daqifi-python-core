@@ -45,6 +45,15 @@ aims to follow [Semantic Versioning](https://semver.org/).
   and the first sample of a session keeps its raw time. Limit: a gap in the
   device's own samples longer than half a period (42.9 s at 50 MHz) reads as
   a step back; a running stream doesn't produce one (#193).
+- An unplugged serial (USB) device was never reported lost: pyserial's
+  port stays open after an unplug, so the device stayed `Connected` while
+  its reader logged a read error ten times a second forever. The reader
+  now tells the serial transport how each read went, and five failed reads
+  in a row with no success between are taken as the device gone: the
+  transport reports itself disconnected, the device moves to
+  `ConnectionStatus.Lost` and its reader stops, as for TCP. A single
+  failed read that recovers changes nothing, and `disconnect()` is never
+  reported as a loss (#191).
 - SD listings on current firmware returned a file named `__END_OF_LIST__`:
   the firmware ends every listing with `__END_OF_LIST__ OK`, `INCOMPLETE`
   or `FAILED`, and a listing marked INCOMPLETE or FAILED came back as if
