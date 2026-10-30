@@ -7,9 +7,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `SdCardLogEntry.analog_channels` names the channel of each analog value;
-  `SdCardParseOptions.analog_channels` gives a protobuf log's channels,
-  which the log doesn't record (#194).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -31,15 +28,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- SD CSV rows with an empty `,,` pair (a channel with no conversion that
-  period, or every analog pair of a DIO-only row) were dropped whole; the
-  missing channel is now left out of that row. A stray `ch` line before the
-  column header no longer hides it. Protobuf logs' raw ADC codes are marked
-  `analog_units="raw"` and warn when nothing supplies the scaling, float
-  values are marked `"volts"`, and calibration follows the channels given
-  in `analog_channels` rather than the packed position. The calibration
-  offset is added after the internal scale factor, as the firmware does
-  (#194).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
