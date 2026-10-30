@@ -198,6 +198,62 @@ def _list_end_status(line: str) -> Optional[str]:
     return None if parts is None else parts[0]
 
 
+# A SYSTem:ERRor? reply glued to the end of the line before it. The firmware
+# strips the final CR/LF of a listing's last chunk (ListFilesInDirectoryChunked,
+# v3.7.3 and main), so on firmware without the end-of-listing marker the
+# reply lands on the last file line: 'Daqifi/log_a.bin 30,"No error"'. A
+# file's size digits can't be told from a code's, so only forms that are
+# unambiguous at the end of the line are split: a negative code, or 0 (or
+# +0) with "No error".
+_GLUED_ERROR_REPLY_RE = re.compile(r'(-\d+\s*,\s*"[^"]*"|\+?0\s*,\s*"No error")\s*$')
+
+
+def split_glued_error_reply(lines: Sequence[str]) -> List[str]:
+    """Split a ``SYSTem:ERRor?`` reply glued onto the end of the last line
+    onto a line of its own."""
+    out = list(lines)
+    while out and not (out[-1] or "").strip():
+        out.pop()
+    if not out:
+        return out
+    last = out[-1]
+    match = _GLUED_ERROR_REPLY_RE.search(last)
+    if match and match.start() > 0 and last[:match.start()].strip():
+        out[-1:] = [last[:match.start()], match.group(1)]
+    return out
+
+
+def throw_if_sd_card_reported_error(lines: Sequence[str]) -> None:
+    """Raise for an explicit device report in a listing reply ("No SD Card
+    Detected", "Failed to open directory"), before any judgement about how
+    the reply ended: those replies carry no end-of-listing marker."""
+    from .exceptions import (
+        SdCardDirectoryNotFoundException,
+        SdCardFilesystemException,
+        SdCardNotPresentException,
+    )
+
+    lines_list = [ln for ln in lines if ln is not None]
+    last_scpi_error = None
+    for line in reversed(lines_list):
+        if _is_scpi_error_line(line):
+            last_scpi_error = line.strip()
+            break
+    for line in lines_list:
+        if "no sd card detected" in line.lower():
+            raise SdCardNotPresentException(lines_list, last_scpi_error)
+    for line in lines_list:
+        if "failed to open directory" in line.lower():
+            match = _DIRECTORY_NOT_FOUND_RE.search(line)
+            if match and match.group(1) in _DIRECTORY_NOT_FOUND_CODES:
+                raise SdCardDirectoryNotFoundException(
+                    lines_list, last_scpi_error, line.strip()
+                )
+            raise SdCardFilesystemException(
+                lines_list, last_scpi_error, line.strip()
+            )
+
+
 def split_glued_list_end(lines: Iterable[str]) -> List[str]:
     """Split a reply glued onto the end-of-listing marker onto its own line,
     as it would be if the firmware ended the marker with CR/LF."""

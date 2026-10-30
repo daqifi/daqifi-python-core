@@ -2403,15 +2403,26 @@ class DaqifiStreamingDevice(DaqifiDevice):
         """
         from ._internal import scpi as _scpi
         from .exceptions import SdCardListIncompleteException
-        from .sdcard import sd_card_listing_status, split_glued_list_end
+        from .sdcard import (
+            sd_card_listing_status,
+            split_glued_error_reply,
+            split_glued_list_end,
+            throw_if_sd_card_reported_error,
+        )
 
         echoes = {m.data.strip() for m in sent}
         lines = [
             line for line in _strip_prompt_prefixes(
-                split_glued_list_end(_strip_prompt_prefixes(capture()))
+                split_glued_list_end(
+                    split_glued_error_reply(_strip_prompt_prefixes(capture()))
+                )
             )
             if line.strip() and line.strip() not in echoes
         ]
+        # An explicit report (no card, a directory that can't be opened)
+        # comes without a marker, so it is classified before the reply's
+        # ending is judged.
+        throw_if_sd_card_reported_error(lines)
         if leading_reply:
             if not lines or _scpi.find_system_error_reply([lines[0]]) is None:
                 raise SdCardListIncompleteException(

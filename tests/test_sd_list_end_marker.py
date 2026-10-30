@@ -43,6 +43,13 @@ SD_LIST_END_INCOMPLETE = b"\r\n__END_OF_LIST__ INCOMPLETE"
 SD_LIST_END_FAILED = b"\r\n__END_OF_LIST__ FAILED"
 ENTRY = b"Daqifi/log_a.bin 3\r\n"
 OK = ENTRY + SD_LIST_END_OK
+# Before 3.8.0 there is no marker, and ListFilesInDirectoryChunked strips the
+# final chunk's trailing CR/LF (firmware tag v3.7.3, sd_card_manager.c,
+# "Remove trailing CRLF from final chunk"), so the last entry has no line
+# ending and the SYSTem:ERRor? reply is glued to it.
+OLD_LISTING = b"Daqifi/log_a.bin 3"
+# SCPIStorageSD.c SD_CARD_NOT_PRESENT_ERROR_MSG (main 2f8a5d5c9).
+NO_CARD = b"\r\nError !! No SD Card Detected\r\n"
 
 
 def _names(files):
@@ -234,7 +241,7 @@ def test_a_missing_marker_is_refused_on_firmware_that_always_sends_one() -> None
 
 
 def test_a_listing_without_a_marker_from_older_firmware_is_accepted() -> None:
-    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": b"Daqifi/log_a.bin 3\r\n"})
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OLD_LISTING})
     device._metadata.firmware_version = "3.7.3"
     assert _names(device.get_sd_card_files()) == ["log_a.bin"]
 
@@ -319,7 +326,7 @@ def test_a_filename_shaped_like_a_reply_does_not_end_a_marked_listing() -> None:
 def test_a_filename_shaped_like_a_reply_is_not_a_terminator_on_older_firmware() -> None:
     # Old firmware has no marker; only the quoted form the firmware sends
     # counts, so an unanswered SYSTem:ERRor? isn't faked by a filename.
-    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": ENTRY + b"0,logs/b.bin 4\r\n"})
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": ENTRY + b"0,logs/b.bin 4"})
     device._metadata.firmware_version = "3.7.3"
     _with_error_queue(device, [b'0,"No error"\r\n', b""], then=b"")
     with pytest.raises(SdCardListIncompleteException):
@@ -329,7 +336,7 @@ def test_a_filename_shaped_like_a_reply_is_not_a_terminator_on_older_firmware() 
 def test_a_failed_delete_does_not_hide_an_aborted_relisting() -> None:
     # The DELete's own error is read by its own SYSTem:ERRor?, so the
     # listing's -200 is the listing's again (it was ignored on this path).
-    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": ENTRY})
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OLD_LISTING})
     device._metadata.firmware_version = "3.7.3"
     _with_error_queue(
         device,
@@ -344,3 +351,36 @@ def test_a_successful_delete_relists_the_rest() -> None:
     device._metadata.firmware_version = "3.8.0"
     device.delete_sd_card_file("log_a.bin")
     assert _names(device.sd_card_files) == ["log_b.bin"]
+
+
+# Audit r5 on #212.
+
+@pytest.mark.parametrize("method", ["get_sd_card_files", "request_sd_card_file_list"])
+def test_an_old_firmware_listing_with_the_reply_glued_to_its_last_entry(method) -> None:
+    # 'Daqifi/log_a.bin 30,"No error"': the entry's size is 3, the reply's
+    # code 0. Every successful old-firmware listing used to raise.
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OLD_LISTING})
+    device._metadata.firmware_version = "3.7.3"
+    getattr(device, method)()
+    assert [(f.file_name, f.size) for f in device.sd_card_files] == [("log_a.bin", 3)]
+
+
+def test_an_old_firmware_abort_glued_to_its_last_entry_is_refused() -> None:
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OLD_LISTING})
+    device._metadata.firmware_version = "3.7.3"
+    _with_error_queue(device, [b'0,"No error"\r\n', b'-200,"Execution error"\r\n'])
+    with pytest.raises(SdCardListIncompleteException):
+        device.get_sd_card_files()
+
+
+@pytest.mark.parametrize("version", ["3.8.0", "3.7.3"])
+def test_a_missing_card_raises_not_present_whatever_the_firmware(version) -> None:
+    # No card: the firmware prints its message, queues -200 and sends no
+    # marker. The missing-marker rule used to win over the explicit report.
+    from daqifi.exceptions import SdCardNotPresentException
+
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": NO_CARD})
+    device._metadata.firmware_version = version
+    _with_error_queue(device, [b'0,"No error"\r\n', b'-200,"Execution error"\r\n'])
+    with pytest.raises(SdCardNotPresentException):
+        device.get_sd_card_files()
