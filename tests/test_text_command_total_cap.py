@@ -40,6 +40,30 @@ def test_a_capture_against_a_device_that_never_goes_quiet_stops_at_the_cap() -> 
     assert lines
 
 
+def test_the_cap_also_bounds_the_wait_for_the_first_line() -> None:
+    # Audit r8: the cap only applied after the first line, so a silent
+    # device still took the full response_timeout_ms.
+    device = _fakes._make_device_with_serial_facade()
+    start = time.monotonic()
+    lines = device.execute_text_command(
+        lambda: None, response_timeout_ms=1200, completion_timeout_ms=200, max_total_ms=50
+    )
+    assert lines == []
+    assert time.monotonic() - start < 0.6
+
+
+def test_a_first_line_later_than_the_cap_is_not_captured() -> None:
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    import threading
+
+    threading.Timer(0.3, lambda: stream.feed(b"late\r\n")).start()
+    lines = device.execute_text_command(
+        lambda: None, response_timeout_ms=1200, completion_timeout_ms=200, max_total_ms=50
+    )
+    assert lines == []
+
+
 def test_without_a_cap_the_inactivity_rules_are_unchanged() -> None:
     device = _fakes._make_device_with_serial_facade({b"*IDN?": b"DAQiFi,Nyquist1\r\n"})
     from daqifi._internal.comm import ScpiMessage

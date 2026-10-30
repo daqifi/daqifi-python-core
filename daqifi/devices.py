@@ -965,16 +965,29 @@ class DaqifiDevice:
             text_consumer.start()
 
             try:
-                exchange_start = time.monotonic()
+                # Optional absolute cap, measured from setup_action and
+                # applied to every wait: a device that keeps sending lines
+                # (a stream left running) would otherwise keep phase 2 going.
+                total_deadline = (
+                    None if max_total_ms is None
+                    else time.monotonic() + max_total_ms / 1000.0
+                )
+
+                def _wait(budget: float) -> float:
+                    if total_deadline is None:
+                        return budget
+                    return min(budget, total_deadline - time.monotonic())
+
                 setup_action()
 
                 # Phase 1: block up to response_timeout_ms for the first
                 # line. Returns immediately as soon as a line arrives,
                 # so we don't waste cycles polling.
+                first_wait = _wait(response_timeout_ms / 1000.0)
+                if first_wait <= 0:
+                    return []
                 try:
-                    captured.append(
-                        line_queue.get(timeout=response_timeout_ms / 1000.0)
-                    )
+                    captured.append(line_queue.get(timeout=first_wait))
                 except queue.Empty:
                     # No data within phase-1 budget — skip phase-2
                     # entirely (nothing to wait inactivity ON).
@@ -985,19 +998,10 @@ class DaqifiDevice:
                 # until the next line OR the timeout — when get raises
                 # queue.Empty, we've hit the inactivity gap.
                 inactivity_threshold = completion_timeout_ms / 1000.0
-                # Optional absolute cap: a device that keeps sending lines
-                # (a stream left running) would otherwise keep phase 2
-                # going indefinitely.
-                total_deadline = (
-                    None if max_total_ms is None
-                    else exchange_start + max_total_ms / 1000.0
-                )
                 while True:
-                    wait = inactivity_threshold
-                    if total_deadline is not None:
-                        wait = min(wait, total_deadline - time.monotonic())
-                        if wait <= 0:
-                            break
+                    wait = _wait(inactivity_threshold)
+                    if wait <= 0:
+                        break
                     try:
                         captured.append(line_queue.get(timeout=wait))
                     except queue.Empty:
