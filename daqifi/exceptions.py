@@ -116,6 +116,31 @@ class SdCardOperationException(DAQiFiError):
             self.last_scpi_error = s or None
 
 
+class SdCardTransferErrorException(SdCardOperationException):
+    """The device reported a read error part-way through sending an SD card
+    file, ending the transfer with ``__TRANSFER_ERROR__`` instead of
+    ``__END_OF_FILE__`` (firmware #725). The ``bytes_received`` bytes already
+    written to the destination are genuine file content, but the file is
+    incomplete. Port of upstream ``SdCardTransferErrorException`` (#154).
+    """
+
+    def __init__(self, file_name: str, bytes_received: int):
+        super().__init__(
+            f"The device reported a read error while sending SD card file "
+            f"{file_name!r} and ended the transfer after {bytes_received} bytes. "
+            "Those bytes are genuine file content, but the file is incomplete; "
+            "retry the download, and if it keeps failing the card or that file "
+            "may be damaged.",
+            (),
+        )
+        self.file_name = file_name
+        self.bytes_received = bytes_received
+
+    def __reduce__(self):
+        # Pickle (multiprocessing) rebuilds from these, not the message.
+        return (type(self), (self.file_name, self.bytes_received), self.__dict__)
+
+
 class SdCardBusyException(SdCardOperationException):
     """Raised when an SD card operation cannot proceed because the SD
     card is busy (for example, the device is actively logging to it).

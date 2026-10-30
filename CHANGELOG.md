@@ -28,6 +28,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- An SD download the device ended with `__TRANSFER_ERROR__` (a card read
+  error part-way through the file) waited out its whole timeout (30 s, or
+  30 min for `SdCardFileReceiver`) and could leave the marker in the file.
+  `SdCardFileReceiver` and `download_sd_card_file` now raise
+  `SdCardTransferErrorException` (`file_name`, `bytes_received`), keeping
+  the real content received before it. With a known size, marker text in
+  the file is still content; a real mid-file error there surfaces at the
+  idle timeout (#154).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
