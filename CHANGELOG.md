@@ -7,13 +7,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- PIC32 updates verify the flash: `VERIFYING` reads each programmed region's
-  CRC back from the bootloader (`READ_CRC`) and compares it with the image's.
-  `Pic32BootloaderProtocol.compute_crc_regions`, `create_read_crc_message`
-  and `decode_read_crc_response`, and `FlashCrcRegion` (#198).
-- A PIC32 update that fails (or is canceled) while erasing, programming or
-  verifying re-erases the flash: new states `FirmwareUpdateState.CLEANING_UP`
-  and `RECOVERED` (#198).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -35,10 +28,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- A PIC32 HEX image with data outside the lower program-flash panel (the
-  upper panel, boot flash), which the bootloader neither erases nor programs
-  since firmware #909, is refused before any device I/O instead of being
-  flashed partly or over unerased flash (#198).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
