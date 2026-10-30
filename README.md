@@ -260,6 +260,10 @@ with open("export.csv", "w") as f:
     )
 ```
 
+Relative time defaults to 3 decimals (1 ms); set
+`CsvExportOptions(relative_time_decimals=...)` up to 7 for streams faster
+than 1 kHz.
+
 ### SD Card Operations
 
 These operations are on `DaqifiStreamingDevice`, which
