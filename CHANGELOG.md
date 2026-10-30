@@ -21,6 +21,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   enumerated device; `SerialStreamTransport.port_name` (#161).
 
 ### Changed
+- python-core opens serial ports exclusively (`exclusive=True`: an advisory
+  `flock` on POSIX; Windows COM ports already were), in `SerialInterface`,
+  `SerialStreamTransport` and serial discovery. A second python-core open of
+  a port in use now fails instead of sharing it. Clients that don't take the
+  lock (a terminal program, a raw file descriptor) can still share a port on
+  POSIX (#196).
 - A PIC32 update now refuses to start while more than one DAQiFi board is
   connected over USB (application serial ports with 04D8:F794, plus boards
   already in bootloader mode), and says to disconnect the others; it also

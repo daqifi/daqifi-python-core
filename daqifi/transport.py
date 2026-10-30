@@ -617,6 +617,11 @@ class SerialStreamTransport:
                     timeout=options.connection_timeout,
                     write_timeout=options.connection_timeout,
                     dsrdtr=False,
+                    # Never share the port with another python-core session
+                    # (an advisory flock on POSIX; Windows is exclusive
+                    # anyway): a second open fails instead of taking a share
+                    # of this session's data.
+                    exclusive=True,
                 )
                 # pyserial 3.5 supports setting these after open().
                 self._serial.dtr = self._enable_dtr

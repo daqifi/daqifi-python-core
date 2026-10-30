@@ -1198,16 +1198,19 @@ class CancellablePort:
     """A serial port that refuses every operation but ``close`` once
     ``cancel_event`` is set.
 
-    A discovery probe abandoned after its hard timeout must not touch a port
-    a newer session may share (opens aren't exclusive): a write would reach
-    the board, and a read, ``in_waiting`` or buffer reset would take or
-    discard that session's bytes. Checking before each blocking call isn't
-    enough, since the call can return after the probe was abandoned; this
-    checks on every attribute access instead, so the first operation after
-    cancellation raises :class:`PortCancelled` (a SerialException, which the
-    probes already handle by stopping). Reads in the probes are of bytes
-    already waiting, never a blocking wait, so no read is in progress across
-    the cancellation.
+    A discovery probe abandoned after its hard timeout stops at its next
+    operation: attribute reads and writes are checked, and a method is
+    checked again when it is called, not only when it is looked up (in
+    ``port.read(port.in_waiting)`` the ``read`` is resolved before
+    ``in_waiting`` runs). The first refused operation raises
+    :class:`PortCancelled`, a SerialException, which the probes already
+    handle by stopping.
+
+    This keeps an abandoned probe from acting on the board. It can't reach
+    into the port's constructor or into a call already running; what stops
+    such a call from touching a newer session's data is that python-core
+    opens ports exclusively (see :class:`SerialInterface`), so no newer
+    python-core session can open the port while the probe holds it.
     """
 
     _ALWAYS_ALLOWED = frozenset({"close", "is_open"})
@@ -1222,7 +1225,15 @@ class CancellablePort:
 
     def __getattr__(self, name: str) -> Any:
         self._check(name)
-        return getattr(self._port, name)
+        value = getattr(self._port, name)
+        if not callable(value):
+            return value
+
+        def _checked(*args: Any, **kwargs: Any) -> Any:
+            self._check(name)
+            return value(*args, **kwargs)
+
+        return _checked
 
     def __setattr__(self, name: str, value: Any) -> None:
         self._check(name)
@@ -1270,6 +1281,11 @@ class SerialInterface:
         for transports where the echo-disable command itself is lost
         (a flaky pre-stable USB CDC enumeration, for example).
 
+        The port is opened exclusively (``exclusive=True``: an advisory
+        ``flock`` on POSIX; Windows COM ports are exclusive anyway), so a
+        second python-core session can't open it meanwhile, and one that
+        tries gets an error rather than a share of this one's data.
+
         Returns:
             True if connection successful, False otherwise.
         """
@@ -1290,7 +1306,8 @@ class SerialInterface:
                 write_timeout=write_timeout,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE
+                stopbits=serial.STOPBITS_ONE,
+                exclusive=True,
             )
             if self.cancel_event is not None:
                 self._serial = CancellablePort(self._serial, self.cancel_event)

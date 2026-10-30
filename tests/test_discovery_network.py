@@ -175,9 +175,9 @@ def test_each_hard_timeout_exceeds_its_probes_worst_healthy_run() -> None:
     assert discovery._IDENTIFY_HARD_TIMEOUT_S > discovery._IDENTIFY_WORST_HEALTHY_S
     # The SerialDeviceFinder probe can legitimately take: wake-up 1 s; four
     # init writes (each up to the 1 s write timeout) and 0.1 s waits; the 4 s
-    # response loop and its up-to-3 GetDeviceInfo writes (1 s each); a
-    # straddling 1 s read; a 0.1 s poll.
-    assert device_finders._SERIAL_PROBE_WORST_HEALTHY_S >= 1 + 4 * 1.1 + 4 + 3 + 1 + 0.1
+    # response loop and its up-to-3 GetDeviceInfo writes (1 s each); a 0.1 s
+    # poll. Its reads don't block (timeout=0).
+    assert device_finders._SERIAL_PROBE_WORST_HEALTHY_S >= 1 + 4 * 1.1 + 4 + 3 + 0.1
 
 
 def test_a_board_that_answers_on_its_retry_is_still_found(monkeypatch) -> None:
@@ -443,16 +443,33 @@ def test_an_abandoned_idn_probe_sends_nothing_once_its_open_completes(monkeypatc
 _NEW_SESSION_FRAME = b"\x0a\x05FRAME-FOR-THE-NEW-SESSION"
 
 
+_HELD = set()  # ports held by an exclusive fake open
+
+
+def _exclusive_open(port, kwargs):
+    import serial
+
+    if kwargs.get("exclusive"):
+        if port in _HELD:
+            raise serial.SerialException(f"Could not exclusively lock port {port}")
+        _HELD.add(port)
+        return True
+    return False
+
+
 class _StallingSerial:
     """An open port whose first blocking output call (``stall_on``: flush or
     write) stalls until released, as a Linux tty flush can. Input is a real
-    buffer, so a read or reset that shouldn't happen is visible."""
+    buffer, so a read or reset that shouldn't happen is visible. Models
+    pyserial's exclusive open."""
 
     stall_on = "flush"
     release = None
     instances = []
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, port=None, *args, **kwargs):
+        self.port = port
+        self.exclusive = _exclusive_open(port, kwargs)
         _StallingSerial.instances.append(self)
         self.input = bytearray()
         self.writes = []
@@ -512,6 +529,8 @@ class _StallingSerial:
         self.input.extend(data)
 
     def close(self):
+        if self.exclusive and not self.closed:
+            _HELD.discard(self.port)
         self.closed = True
         self.is_open = False
 
@@ -522,9 +541,11 @@ def stalling(monkeypatch):
 
     _StallingSerial.release = threading.Event()
     _StallingSerial.instances = []
+    _HELD.clear()
     monkeypatch.setattr(serial, "Serial", _StallingSerial)
     yield _StallingSerial
     _StallingSerial.release.set()
+    _HELD.clear()
 
 
 def test_an_abandoned_idn_probe_leaves_a_newer_sessions_input_alone(monkeypatch, stalling) -> None:
@@ -538,9 +559,18 @@ def test_an_abandoned_idn_probe_leaves_a_newer_sessions_input_alone(monkeypatch,
     monkeypatch.setattr(list_ports, "comports", lambda: [_port("COM56", 0x04D8, 0xF794)])
     assert DeviceFinder.discover() == []
     (port,) = stalling.instances
+    # While the abandoned probe holds the port, a newer python-core session
+    # can't open it: the open fails instead of sharing the port.
+    from daqifi._internal.comm import SerialInterface
+
+    assert SerialInterface("COM56", timeout=0.1).open() is False
     port.inject(_NEW_SESSION_FRAME)
     stalling.release.set()
     _wait_for_probe_threads("COM56")
+    # Once the probe lets go, the port opens again.
+    newer = SerialInterface("COM56", timeout=0.1)
+    assert newer.open() is True
+    newer.close()
     assert bytes(port.input) == _NEW_SESSION_FRAME
     assert port.resets_after_injection == 0
     assert port.closed
@@ -556,6 +586,9 @@ def test_an_abandoned_serial_probe_leaves_a_newer_sessions_input_alone(monkeypat
     monkeypatch.setattr(list_ports, "comports", lambda: [_port("COM57", 0x04D8, 0xF794)])
     assert SerialDeviceFinder().discover() == []
     (port,) = stalling.instances
+    from daqifi._internal.comm import SerialInterface
+
+    assert SerialInterface("COM57", timeout=0.1).open() is False
     port.inject(_NEW_SESSION_FRAME)
     stalling.release.set()
     _wait_for_probe_threads("COM57")
@@ -563,3 +596,74 @@ def test_an_abandoned_serial_probe_leaves_a_newer_sessions_input_alone(monkeypat
     assert port.resets_after_injection == 0
     assert len(port.writes) == 1  # the stalled one; nothing after it
     assert port.closed
+
+
+# ---- round 5 ------------------------------------------------------------
+
+
+def test_every_python_core_serial_open_is_exclusive(monkeypatch) -> None:
+    import serial
+
+    from daqifi._internal.comm import SerialInterface
+    from daqifi.transport import SerialStreamTransport
+
+    seen = []
+
+    class _Recorder:
+        def __init__(self, *args, **kwargs):
+            seen.append(kwargs.get("exclusive"))
+            raise serial.SerialException("recorded")
+
+    monkeypatch.setattr(serial, "Serial", _Recorder)
+    SerialInterface("COM59").open()
+    SerialDeviceFinder()._try_get_device_info("COM59")
+    from daqifi._internal.comm import ConnectionRetryOptions
+
+    transport = SerialStreamTransport("COM59")
+    with pytest.raises(Exception):
+        transport.connect(ConnectionRetryOptions(max_attempts=1, connection_timeout=0.1))
+    assert seen == [True, True, True]
+
+
+def test_a_second_open_of_a_held_port_fails_on_a_real_tty() -> None:
+    # End to end on a pseudo-terminal: while SerialInterface holds the port,
+    # neither a raw exclusive open nor a SerialStreamTransport can open it.
+    import os
+    import serial
+
+    from daqifi._internal.comm import SerialInterface
+
+    try:
+        master, slave = os.openpty()
+    except (AttributeError, OSError):
+        pytest.skip("no pseudo-terminals here")
+    path = os.ttyname(slave)
+    holder = SerialInterface(path, timeout=0.1)
+    try:
+        assert holder.open() is True
+        with pytest.raises(serial.SerialException):
+            serial.Serial(path, exclusive=True)
+        second = SerialInterface(path, timeout=0.1)
+        assert second.open() is False
+        holder.close()
+        # Released on close.
+        again = serial.Serial(path, exclusive=True)
+        again.close()
+    finally:
+        holder.close()
+        os.close(master)
+        os.close(slave)
+
+
+def test_the_guard_checks_a_method_when_it_is_called_not_only_looked_up() -> None:
+    # In port.read(port.in_waiting) the read is resolved first; if the
+    # cancellation lands before it is called, the call must still be refused.
+    from daqifi._internal.comm import CancellablePort, PortCancelled
+
+    raw = SimpleNamespace(read=lambda n: b"taken", close=lambda: None, is_open=True)
+    cancelled = threading.Event()
+    port = CancellablePort(raw, cancelled)
+    read = port.read
+    cancelled.set()
+    with pytest.raises(PortCancelled):
+        read(5)

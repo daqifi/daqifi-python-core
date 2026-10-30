@@ -222,15 +222,14 @@ _SERIAL_INIT_COMMANDS = 4  # DisableEcho, StopStreaming, TurnOn, PB format
 _SERIAL_INIT_COMMAND_DELAY_S = 0.1
 # The probe's longest healthy run: wake-up; each init command's write (up to
 # the write timeout, _SERIAL_PROBE_TIMEOUT_S) and wait; the response loop,
-# whose GetDeviceInfo writes can each block up to the write timeout too; one
-# read that starts just before the loop's deadline and runs its full read
-# timeout; then a poll interval.
+# whose GetDeviceInfo writes can each block up to the write timeout too (its
+# reads don't block: the port is opened with timeout=0); then a poll
+# interval.
 _SERIAL_PROBE_WORST_HEALTHY_S = (
     _SERIAL_DEVICE_WAKEUP_DELAY_S
     + _SERIAL_INIT_COMMANDS * (_SERIAL_PROBE_TIMEOUT_S + _SERIAL_INIT_COMMAND_DELAY_S)
     + _SERIAL_RESPONSE_TIMEOUT_S
     + _SERIAL_MAX_RETRIES * _SERIAL_PROBE_TIMEOUT_S
-    + _SERIAL_PROBE_TIMEOUT_S
     + _SERIAL_POLL_INTERVAL_S
 )
 # The hard timeout adds room for the port open itself (a fresh
@@ -339,14 +338,18 @@ class SerialDeviceFinder:
             with serial.Serial(
                 port=port_name,
                 baudrate=self._baud_rate,
-                timeout=_SERIAL_PROBE_TIMEOUT_S,
+                # Reads return at once (the loop polls): one can't block
+                # across the probe being abandoned.
+                timeout=0,
                 write_timeout=_SERIAL_PROBE_TIMEOUT_S,
+                # Held exclusively, so no other python-core session shares
+                # the port while the probe runs (or hangs) on it.
+                exclusive=True,
             ) as raw_port:
                 # Once discover() gives up on this probe (run_port_probe sets
                 # the event), every operation on the port raises
                 # PortCancelled, a SerialException: the probe stops without
-                # touching the board or the input a newer session may share,
-                # and leaving the block closes the port.
+                # touching the board, and leaving the block closes the port.
                 port = (
                     CancellablePort(raw_port, cancelled) if cancelled is not None else raw_port
                 )
@@ -390,10 +393,8 @@ class SerialDeviceFinder:
                         port.write(scpi_commands.get_device_info().get_bytes())
                         last_send = now
                         retry_count += 1
-                    # Only bytes already waiting: a read never blocks, so none
-                    # is in progress when the probe is abandoned.
-                    waiting = port.in_waiting
-                    chunk = port.read(waiting) if waiting else b""
+                    # Non-blocking (timeout=0): only bytes already waiting.
+                    chunk = port.read(256)
                     if chunk:
                         received.extend(chunk)
                         # A protobuf-shaped response contains null bytes.
