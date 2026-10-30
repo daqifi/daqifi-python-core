@@ -190,3 +190,28 @@ def test_a_loss_while_connecting_is_not_overwritten_by_connected(monkeypatch) ->
             device.disconnect()
         except Exception:
             pass
+
+
+def test_a_text_exchange_reading_an_old_stream_cannot_fail_the_new_connection(connected) -> None:
+    # Audit r2: the exchange captured the old stream, paused, a reconnect
+    # opened session 2 meanwhile, and the text reader's sink was then bound
+    # to session 2, so the closed old port's faults failed the new one.
+    device, transport, port, statuses = connected
+    old_port = port
+    consumer = device._consumer
+    real_stop = consumer.stop_safely
+
+    def _stop_and_reconnect():
+        result = real_stop()
+        # Another thread's reconnect, reduced to what this exchange can see:
+        # the transport and the device have moved on to a newer session.
+        with transport._io_lock:
+            transport._session += 1
+        device._transport_session = transport.session
+        old_port.unplugged = True  # the stream this exchange holds has gone
+        return result
+
+    consumer.stop_safely = _stop_and_reconnect
+    device.execute_text_command(lambda: None, response_timeout_ms=1000, completion_timeout_ms=200)
+    time.sleep(0.2)
+    assert transport.is_connected

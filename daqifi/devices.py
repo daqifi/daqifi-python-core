@@ -989,7 +989,13 @@ class DaqifiDevice:
             raise RuntimeError(
                 "execute_text_command requires an active transport."
             )
-        stream = self._transport.stream
+        # The stream and the connection it belongs to are read together:
+        # a reconnect while this exchange is paused below opens a newer
+        # session, and the text reader's faults must count against the
+        # stream it actually reads, never the newer one (#191).
+        with self._state_lock:
+            stream = self._transport.stream
+            stream_session = self._transport_session
         if stream is None:
             raise RuntimeError(
                 "Transport reports no stream; cannot pause consumer."
@@ -1015,7 +1021,7 @@ class DaqifiDevice:
             text_consumer = StreamMessageConsumer[str](
                 stream,
                 text_parser,
-                health_sink=self._transport_health_sink(self._transport_session),
+                health_sink=self._transport_health_sink(stream_session),
             )
 
             def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
