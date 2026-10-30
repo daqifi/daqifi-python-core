@@ -7,9 +7,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `TimestampProcessor.set_timestamp_frequency(device_id, hz)` and
-  `get_tick_period(device_id)`: a device's reported `timestamp_freq` sets
-  its tick period instead of the fixed 20 ns (#204).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
