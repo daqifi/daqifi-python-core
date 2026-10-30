@@ -46,6 +46,8 @@ class _DeviceTimestampState:
         "previous_system_timestamp",
         "previous_device_timestamp",
         "has_previous_timestamp",
+        "first_system_timestamp",
+        "elapsed_seconds",
     )
 
     def __init__(self) -> None:
@@ -53,6 +55,11 @@ class _DeviceTimestampState:
         self.previous_system_timestamp: datetime = datetime.min
         self.previous_device_timestamp: int = 0
         self.has_previous_timestamp: bool = False
+        # Each timestamp is the first one plus the exact elapsed time, so
+        # timedelta's whole-microsecond rounding doesn't accumulate step by
+        # step (#163 item 11).
+        self.first_system_timestamp: datetime = datetime.min
+        self.elapsed_seconds: float = 0.0
 
 
 class TimestampProcessor:
@@ -102,6 +109,8 @@ class TimestampProcessor:
                 state.previous_system_timestamp = now
                 state.previous_device_timestamp = device_timestamp
                 state.has_previous_timestamp = True
+                state.first_system_timestamp = now
+                state.elapsed_seconds = 0.0
                 return TimestampResult(
                     timestamp=now,
                     was_rollover=False,
@@ -134,8 +143,11 @@ class TimestampProcessor:
                 clock_cycles_between_messages = previous_device_timestamp - device_timestamp
                 seconds_between_messages = clock_cycles_between_messages * self._tick_period * -1
 
-            message_timestamp = state.previous_system_timestamp + timedelta(
-                seconds=seconds_between_messages
+            # From the first timestamp and the exact running total, not the
+            # previous (already rounded) timestamp plus this step.
+            state.elapsed_seconds += seconds_between_messages
+            message_timestamp = state.first_system_timestamp + timedelta(
+                seconds=state.elapsed_seconds
             )
 
             state.previous_system_timestamp = message_timestamp

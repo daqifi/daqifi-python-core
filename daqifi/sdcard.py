@@ -2001,8 +2001,15 @@ def _parse_csv_header(
                 space_idx = rate_str.find(" ")
                 if space_idx > 0:
                     rate_str = rate_str[:space_idx]
-                if rate_str.isdigit():
-                    timestamp_freq = int(rate_str)
+                # ASCII digits only (str.isdigit also takes "²", which
+                # int() rejects), within the firmware's uint32 field (a
+                # huge value overflowed later). Anything else reads as an
+                # absent header: the override or fallback applies, and the
+                # rest of the file still parses.
+                if rate_str.isascii() and rate_str.isdigit():
+                    rate = int(rate_str)
+                    if 0 < rate <= _CSV_TICK_RATE_MAX:
+                        timestamp_freq = rate
             continue
         # First non-comment line — treat it as the column header iff
         # it contains the firmware's per-channel naming convention.
@@ -2056,6 +2063,9 @@ def _find_csv_data_start_index(lines: List[str]) -> int:
         return i
     return len(lines)
 
+
+# The firmware writes the tick rate from a uint32.
+_CSV_TICK_RATE_MAX = 2 ** 32 - 1
 
 # An integer CSV value: optional sign, ASCII digits only.
 _CSV_INTEGER_VALUE = re.compile(r"[+-]?[0-9]+\Z")
@@ -2125,6 +2135,9 @@ def _try_parse_csv_data_row(
         if not per_channel_ts and dio_timestamp == 0 and not layout.has_digital_pair:
             return None
         return row_timestamp, analog_values, digital_data, per_channel_ts
+    except MemoryError:
+        # Not a malformed row: the process is out of memory.
+        raise
     except Exception:
         return None
 

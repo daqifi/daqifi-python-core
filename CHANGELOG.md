@@ -28,6 +28,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- Items carried forward from #163 (#206): `start_streaming` accepts up to
+  the firmware's 22000 Hz ceiling instead of 1000 (the device refuses a
+  rate its channel configuration can't sustain); `TimestampProcessor` no
+  longer accumulates whole-microsecond rounding step by step; an unusable
+  CSV `# Timestamp Tick Rate:` header reads as absent instead of aborting
+  the parse; the CSV row parser lets `MemoryError` through;
+  `NyquistDevice.sd_get_file_binary` strips only a leading echo and prompt,
+  not file data before a `DAQIFI>` in its first 200 bytes.
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
