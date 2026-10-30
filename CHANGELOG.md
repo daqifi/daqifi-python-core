@@ -17,6 +17,11 @@ aims to follow [Semantic Versioning](https://semver.org/).
   enumerated device; `SerialStreamTransport.port_name` (#161).
 
 ### Changed
+- The hardware-free test run (`pytest tests --ignore=tests/integration/hardware`)
+  no longer probes serial ports: the device smoke test moved under
+  `tests/integration/hardware`, and a layout test keeps any test that needs a
+  board out of the hardware-free path. The download-service tests now drive
+  `GitHubFirmwareDownloadService` itself (#205).
 - A PIC32 update now refuses to start while more than one DAQiFi board is
   connected over USB (application serial ports with 04D8:F794, plus boards
   already in bootloader mode), and says to disconnect the others; it also
