@@ -11,6 +11,7 @@ value by 1000 (2.5 V read as 0.0025 V), and the live CSV parser int()'d it
 
 import importlib.util
 import os
+import time
 import warnings
 
 import pytest
@@ -93,3 +94,43 @@ def test_the_async_manager_passes_integer_units_through() -> None:
 
     stream = AsyncStreamManager(_f._FakeSerial(), channels=[0], integer_units="millivolts")
     assert stream._stream._integer_units == "millivolts"
+
+
+# ---- audit r1 --------------------------------------------------------------
+
+_CODEX_JSON = (b'{"meta":{"tick_hz":1000}}\n'
+               b'{"ts":1000,"ai":[{"ch":0,"val":2048}]}\n'
+               b'{"ts":1100,"ai":[{"ch":0,"val":2049}]}\n')
+_CODEX_CSV = CSV_HEAD + b"1000,2048\n1100,2049\n"
+
+
+@pytest.mark.parametrize("data, fmt", [(_CODEX_JSON, 1), (_CODEX_CSV, 2)], ids=["json", "csv"])
+def test_a_warning_promoted_to_an_error_reaches_the_caller_and_loses_no_sample(data, fmt) -> None:
+    # Audit r1: under simplefilter('error') the warning was swallowed as a
+    # malformed record, losing the first sample; read(2) timed out.
+    sm = _f._manager(_f._FakeSerial(on_start=data), channels=[0], sample_rate=10, format=fmt)
+    sm.start()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(UserWarning, match="integer_units"):
+                sm.read(num_samples=2, timeout=1.0)
+            samples = sm.read(num_samples=2, timeout=1.0)
+    finally:
+        sm.stop()
+    assert [s.channels for s in samples] == [{0: 2048.0}, {0: 2049.0}]
+
+
+def test_a_promoted_warning_doesnt_end_a_callback_stream() -> None:
+    received = []
+    sm = _f._manager(_f._FakeSerial(on_start=_CODEX_JSON), channels=[0], sample_rate=10, format=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sm.start(callback=received.append)
+        try:
+            deadline = time.monotonic() + 3
+            while len(received) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            sm.stop()
+    assert [s.channels for s in received] == [{0: 2048.0}, {0: 2049.0}]

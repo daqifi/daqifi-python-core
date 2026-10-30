@@ -872,7 +872,7 @@ class StreamManager:
             units = None
             if 'ai' in data:
                 ch_ids = [ch_data['ch'] for ch_data in data['ai']]
-                read = self._value_reader.read([ch_data['val'] for ch_data in data['ai']])
+                read = self._read_values([ch_data['val'] for ch_data in data['ai']], json_str)
                 if read is None:
                     return None  # mixes decimals and integers: not firmware output
                 values, units = read
@@ -898,10 +898,22 @@ class StreamManager:
             # Invalid JSON, clear buffer and try again
             self._read_buffer = ""
             return None
+        except Warning:
+            raise  # a promoted warning isn't a malformed record
         except Exception as e:
             # Other error, log and return None
             print(f"Error reading sample: {e}")
             return None
+
+    def _read_values(self, raw, record: str):
+        """The value reader's result for ``raw``. Its once-per-session
+        warning, promoted to an error (``simplefilter('error')``), reaches
+        the caller with ``record`` put back, so the next read returns it."""
+        try:
+            return self._value_reader.read(raw)
+        except Warning:
+            self._read_buffer = record + self._read_buffer
+            raise
 
     def _read_sample_csv(self) -> Optional[Sample]:
         """
@@ -1006,7 +1018,7 @@ class StreamManager:
             channels_data = {}
             units = None
             if raw_values:
-                read = self._value_reader.read(raw_values)
+                read = self._read_values(raw_values, line + '\n')
                 if read is None:
                     return None  # mixes decimals and integers: not firmware output
                 values_v, units = read
@@ -1032,6 +1044,8 @@ class StreamManager:
             else:
                 return None
 
+        except Warning:
+            raise  # a promoted warning isn't a malformed record
         except Exception as e:
             print(f"Error parsing CSV sample: {e}")
             return None
@@ -1246,6 +1260,11 @@ class StreamManager:
 
                 time.sleep(1.0 / self._sample_rate)
 
+            except Warning:
+                # Promoted to an error, with no caller on this thread to
+                # raise it to; the record was kept for the next read.
+                import logging
+                logging.getLogger(__name__).warning("Streaming warning", exc_info=True)
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception("Streaming error")
