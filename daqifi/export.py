@@ -32,6 +32,7 @@ Design adaptations vs upstream:
 from __future__ import annotations
 
 import datetime as _dt
+import itertools
 import threading
 from dataclasses import dataclass
 from typing import IO, Callable, Iterator, List, Optional, Protocol, runtime_checkable
@@ -154,11 +155,6 @@ class CsvExportOptions:
     #: the first sample, to :attr:`relative_time_decimals` places. When
     #: ``False``, it contains an ISO 8601 round-trip timestamp.
     use_relative_time: bool = False
-    #: Decimal places of the relative time column, 0 to 7 (7 is the tick
-    #: resolution, 100 ns). The default 3 (1 ms, as upstream) gives
-    #: samples above 1 kHz repeated labels (2 kHz: 0.000, 0.001, 0.001,
-    #: ...); use 6 or 7 for fast streams (#195).
-    relative_time_decimals: int = 3
 
     #: When ``None``, every sample is written as its own row (grouped
     #: by timestamp tick). When set to a positive integer ``N``,
@@ -166,6 +162,12 @@ class CsvExportOptions:
     #: samples (across all channels) and one averaged row is written
     #: per window.
     average_window: Optional[int] = None
+    #: Decimal places of the relative time column, 0 to 7 (7 is the tick
+    #: resolution, 100 ns). The default 3 (1 ms, as upstream) gives
+    #: samples above 1 kHz repeated labels (2 kHz: 0.000, 0.001, 0.001,
+    #: ...); use 6 or 7 for fast streams (#195). Last, so existing
+    #: positional calls keep their meaning.
+    relative_time_decimals: int = 3
 
 
 class CsvExporter:
@@ -608,15 +610,25 @@ class SdCardLogSampleSource:
     """A :class:`SampleSource` over a parsed SD-card log's entries, so a log
     can go straight to :class:`CsvExporter` (port of upstream a12f0aa).
 
-    Channels are ``AI0`` .. ``AI<n-1>`` and ``DIO``, keyed by device name and
-    serial number. Each entry yields one row per analog value (by position,
-    up to ``analog_channel_count``) and one for its digital data, at the
-    entry's timestamp in ticks (:func:`datetime_to_ticks`). The entries are
-    read once: stream the samples once.
+    Analog columns are named by the physical channel when it is known, and
+    never guessed from position: a log of only enabled channels keeps them
+    in order without their numbers, so ``ain7`` alone is the first value of
+    every entry, and calling it ``AI0`` would attribute it to the wrong
+    input. The channel numbers are known when given as ``analog_channels``,
+    or when the entries carry them (``entry.analog_channels``). Then the
+    columns are ``AI<n>`` and each value goes to its own channel's column.
+    Otherwise ``channel_numbers_known`` is False and the columns are named
+    by position only, ``analog[0]``, ``analog[1]``, ... Either way there is a
+    ``DIO`` column.
+
+    Each entry yields one row per analog value with a column and one for
+    its digital data, at the entry's timestamp in ticks
+    (:func:`datetime_to_ticks`). The entries are read once: stream the
+    samples once.
 
     After streaming: ``sample_count`` entries read, ``row_count`` distinct
     timestamps (the exported lines), ``dropped_analog_columns`` the most
-    analog values an entry had past ``analog_channel_count``, and
+    analog values an entry had with no column, and
     ``non_monotonic_entry_count`` entries earlier than the one before.
     """
 
@@ -629,6 +641,7 @@ class SdCardLogSampleSource:
         device_serial_number: Optional[str],
         analog_channel_count: int,
         device_name: Optional[str] = None,
+        analog_channels: Optional[List[int]] = None,
     ) -> None:
         if samples is None:
             raise TypeError("samples must not be None")
@@ -643,12 +656,21 @@ class SdCardLogSampleSource:
             if device_serial_number and device_serial_number.strip()
             else "unknown"
         )
-        self.analog_channel_count = analog_channel_count
+        self.channel_numbers_known = analog_channels is not None
+        if analog_channels is not None:
+            numbers = [int(n) for n in analog_channels]
+            if len(set(numbers)) != len(numbers) or any(n < 0 for n in numbers):
+                raise ValueError(f"analog_channels must be distinct and >= 0 (got {numbers})")
+            names = [f"AI{n}" for n in numbers]
+        else:
+            numbers = []
+            names = [f"analog[{i}]" for i in range(analog_channel_count)]
+        self.analog_channel_count = len(names)
         self._channels = [
-            ChannelDescriptor(name, serial, f"AI{i}", ChannelType.Analog)
-            for i in range(analog_channel_count)
+            ChannelDescriptor(name, serial, n, ChannelType.Analog) for n in names
         ]
         self._analog_keys = [c.key for c in self._channels]
+        self._key_by_number = dict(zip(numbers, self._analog_keys))
         digital = ChannelDescriptor(name, serial, self.DIGITAL_CHANNEL_NAME, ChannelType.Digital)
         self._channels.append(digital)
         self._digital_key = digital.key
@@ -663,10 +685,17 @@ class SdCardLogSampleSource:
         session,
         fallback_configuration=None,
         device_name: Optional[str] = None,
+        analog_channels: Optional[List[int]] = None,
     ) -> "SdCardLogSampleSource":
-        """From an ``SdCardLogSession``: its serial number and analog channel
-        count, else ``fallback_configuration``'s (a blank serial in the log
-        is a gap, not an answer)."""
+        """From an ``SdCardLogSession``.
+
+        The serial number and analog channel count come from the log, else
+        from ``fallback_configuration``: a blank serial or a zero count is a
+        gap, not an answer (the parser's own configuration merge treats
+        them so). The channel numbers come from ``analog_channels``, else
+        from the first entry if it carries them; otherwise they're unknown
+        and the columns are named by position.
+        """
         config = session.device_config
 
         def _stated(value):
@@ -675,16 +704,39 @@ class SdCardLogSampleSource:
         serial = _stated(getattr(config, "device_serial_number", None)) or _stated(
             getattr(fallback_configuration, "device_serial_number", None)
         )
-        count = getattr(config, "analog_port_count", None)
-        if count is None:
-            count = getattr(fallback_configuration, "analog_port_count", None)
-        return cls(session.samples, serial, max(0, count or 0), device_name)
+        count = getattr(config, "analog_port_count", 0) or getattr(
+            fallback_configuration, "analog_port_count", 0
+        ) or 0
+        samples = iter(session.samples)
+        if analog_channels is None:
+            first = next(samples, None)
+            if first is not None:
+                carried = getattr(first, "analog_channels", None)
+                if carried is not None:
+                    analog_channels = list(carried)
+                samples = itertools.chain([first], samples)
+        return cls(samples, serial, max(0, count), device_name, analog_channels)
 
     def get_channels(self) -> List[ChannelDescriptor]:
         return list(self._channels)
 
     def get_sample_count(self) -> int:
         return 0  # unknown until the entries are read
+
+    def _analog_rows(self, entry, ticks: int):
+        values = entry.analog_values
+        carried = getattr(entry, "analog_channels", None)
+        if self.channel_numbers_known and carried is not None:
+            # Each value to its own channel's column.
+            keyed = [(self._key_by_number.get(n), v) for n, v in zip(carried, values)]
+        else:
+            # By position: the given channel list, or the positional labels.
+            keyed = list(zip(self._analog_keys, values))
+            keyed += [(None, v) for v in values[len(self._analog_keys):]]
+        dropped = sum(1 for key, _ in keyed if key is None)
+        if dropped > self.dropped_analog_columns:
+            self.dropped_analog_columns = dropped
+        return [SampleRow(ticks, key, value) for key, value in keyed if key is not None]
 
     def stream_samples(
         self, cancel_event: Optional[threading.Event] = None
@@ -699,12 +751,7 @@ class SdCardLogSampleSource:
             if previous is not None and ticks < previous:
                 self.non_monotonic_entry_count += 1
             previous = ticks
-            values = entry.analog_values
-            overflow = len(values) - len(self._analog_keys)
-            if overflow > self.dropped_analog_columns:
-                self.dropped_analog_columns = overflow
-            for key, value in zip(self._analog_keys, values):
-                yield SampleRow(ticks, key, value)
+            yield from self._analog_rows(entry, ticks)
             yield SampleRow(ticks, self._digital_key, float(entry.digital_data))
 
 
