@@ -34,6 +34,11 @@ class StreamState(Enum):
 # samples are waiting (#192).
 _IDLE_POLL_SECONDS = 0.001
 
+# The device's timestamp tick counter is an unsigned 32-bit value.
+_TICK_RANGE = 1 << 32
+_TICK_HALF_RANGE = 1 << 31
+_TICK_MASK = _TICK_RANGE - 1
+
 @dataclass
 class Sample:
     """Single sample across all enabled channels.
@@ -276,6 +281,11 @@ class StreamManager:
         self._device_streaming = False
         self._read_buffer = ""  # Buffer for partial data (JSON/CSV)
         self._tick_rate_hz = None  # Tick rate from metadata header (for timestamp conversion)
+        # The device's tick counter is 32 bits and rolls over (about every
+        # 102 s at 42 MHz). Ticks are unwrapped per session; see
+        # _unwrap_tick.
+        self._last_raw_tick: Optional[int] = None
+        self._unwrapped_tick = 0
         # Protobuf decode state. Lazily initialised on the first
         # _read_sample_protobuf call so callers using JSON/CSV pay
         # nothing for the import.
@@ -353,6 +363,7 @@ class StreamManager:
         self._stop_event = threading.Event()
         self._buffer.clear()
         self._read_buffer = ""  # Clear read buffer (JSON/CSV)
+        self._last_raw_tick = None  # a new session unwraps from its own start
         # Clear protobuf decode state for the same reason — leftover
         # bytes from a previous stop()'d session would otherwise be
         # decoded as the start of the new stream, and queued samples
@@ -817,7 +828,7 @@ class StreamManager:
             # Get timestamp from firmware (new field: 'ts' not 'timestamp')
             if 'ts' in data and self._tick_rate_hz:
                 # Convert device ticks to seconds using tick rate from metadata
-                timestamp = data['ts'] / self._tick_rate_hz
+                timestamp = self._unwrap_tick(data['ts']) / self._tick_rate_hz
             else:
                 # Fallback to current time if no tick rate available yet
                 timestamp = time.time()
@@ -939,10 +950,10 @@ class StreamManager:
 
             # Use device timestamp (convert using tick rate from metadata)
             if first_timestamp is not None and self._tick_rate_hz:
-                timestamp = first_timestamp / self._tick_rate_hz
+                timestamp = self._unwrap_tick(first_timestamp) / self._tick_rate_hz
             elif first_timestamp is not None:
                 # Fallback to 1MHz if tick rate not available
-                timestamp = first_timestamp / 1_000_000.0
+                timestamp = self._unwrap_tick(first_timestamp) / 1_000_000.0
             else:
                 timestamp = time.time()  # Fallback to PC time if no valid channels
 
@@ -1057,6 +1068,33 @@ class StreamManager:
             return self._pending_pb_samples.popleft()
         return None
 
+    def _unwrap_tick(self, raw_tick: int) -> int:
+        """Place a raw 32-bit device tick on this session's unbroken scale.
+
+        Each tick is placed by its signed 32-bit distance from the previous
+        one, so a rollover continues upwards instead of jumping back to
+        zero, and a slightly older tick (a sample queued earlier) steps back
+        a little. The session's first tick keeps its raw value (#193).
+
+        Limit: the counter only gives the step modulo 2^32, so a gap in the
+        device's own samples longer than half a period (2^31 ticks: 42.9 s
+        at 50 MHz, 51.1 s at 42 MHz) reads as a step back. A running stream
+        doesn't produce one at any configured rate, and a new session starts
+        afresh. Host time was tried as a second source, but pyserial gives
+        no arrival time, and every way of estimating it misjudged ordinary
+        pauses as whole periods.
+        """
+        raw = int(raw_tick) & _TICK_MASK
+        if self._last_raw_tick is None:
+            self._unwrapped_tick = raw
+        else:
+            delta = (raw - self._last_raw_tick) & _TICK_MASK
+            if delta >= _TICK_HALF_RANGE:
+                delta -= _TICK_RANGE
+            self._unwrapped_tick += delta
+        self._last_raw_tick = raw
+        return self._unwrapped_tick
+
     def _samples_from_pb_message(self, message: Any) -> List["Sample"]:
         """Convert a parsed ``DaqifiOutMessage`` into one or more
         :class:`Sample` objects.
@@ -1110,7 +1148,7 @@ class StreamManager:
 
         def _convert_ts(raw_ts: int) -> float:
             if self._tick_rate_hz and self._tick_rate_hz > 0:
-                return raw_ts / float(self._tick_rate_hz)
+                return self._unwrap_tick(raw_ts) / float(self._tick_rate_hz)
             return time.time()
 
         samples: List[Sample] = []
