@@ -194,6 +194,43 @@ def contains_scpi_error(lines) -> bool:
     return False
 
 
+def find_system_error_reply(lines) -> Optional[str]:
+    """The first ``SYST:ERR?`` reply in ``lines``, or ``None`` if there is none.
+
+    A reply is ``<int>,<description>``, with the description quoted or not.
+    A leading ``DAQIFI>`` prompt, in any case, is stripped first, whether it
+    prefixes the reply or sits on its own line. ``0,No error`` is normalised
+    to ``0,"No error"``. Shared by ``DaqifiDevice.drain_errors`` and the
+    WiFi update's bridge handling, so both read replies the same way.
+    """
+    for raw in lines:
+        candidate = raw.strip()
+        if not candidate:
+            continue
+        # Case-insensitive prompt strip — firmware variants may emit
+        # `Daqifi>` / `daqifi>` instead of the canonical `DAQIFI>`.
+        if candidate.upper().startswith("DAQIFI>"):
+            candidate = candidate[len("DAQIFI>"):].strip()
+            if not candidate:
+                continue
+        code_str, sep, rest = candidate.partition(",")
+        if not sep:
+            continue
+        try:
+            code = int(code_str.strip())
+        except ValueError:
+            continue
+        rest = rest.strip()
+        # Non-empty content after the comma, quoted or not: firmware
+        # variants omit the quotes (``-200,Execution error``).
+        if not rest:
+            continue
+        if code == 0 and rest.replace('"', "").strip().lower() == "no error":
+            return f'{code},"No error"'
+        return candidate
+    return None
+
+
 def parse_system_error(response: str) -> tuple[int, str]:
     """Parse a ``SYST:ERR?`` response into (code, description).
 

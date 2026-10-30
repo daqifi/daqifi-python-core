@@ -29,6 +29,14 @@ ReadinessProbe = Callable[[Any, Any], bool]
 _DEFAULT_STATE_TIMEOUT_SECONDS: float = 5 * 60.0
 
 
+#: How long the WiFi bridge can take to come up after an accepted
+#: ``LAN:APPLY``, and so how long a watch must last to rule it out. A
+#: firmware bound, not a preference: the WiFi manager's REINIT first waits
+#: out STA retry backoff (``retryAfterTick``, up to 30 s, wifi_manager.c),
+#: then the bridge entry waits up to 3 s twice for the WINC driver.
+WIFI_BRIDGE_SETTLE_SECONDS = 30.0 + 2 * 3.0 + 4.0
+
+
 @dataclass
 class FirmwareUpdateServiceOptions:
     """Configuration knobs for the firmware update service.
@@ -99,6 +107,22 @@ class FirmwareUpdateServiceOptions:
     # construction of the fields above keeps its meaning.
     application_vendor_id: int = 0x04D8
     application_product_id: int = 0xF794
+
+    # WiFi update mode and the USB-transparent bridge (#190). LAN:FWUpdate
+    # requests the update and the following LAN:APPLY enters the bridge,
+    # which forwards the USB CDC port raw to the WINC until
+    # ``SYSTem:USB:SetTransparentMode 0``. The WINC is off in standby and
+    # right after a PIC32 reflash, so it is powered on first; the flash
+    # tool's success line, not its exit code, decides success.
+    # After a failed or cancelled update, recovery gives up after
+    # ``wifi_recovery_timeout``, which can't be shorter than one
+    # WIFI_BRIDGE_SETTLE_SECONDS watch. Delays may be zero.
+    power_on_wifi_module_before_lan_update_mode: bool = True
+    power_on_wifi_module_settle_delay: float = 1.0
+    post_lan_disconnect_port_release_delay: float = 1.5
+    post_usb_transparent_mode_exit_delay: float = 0.1
+    wifi_flash_success_marker: str = "Operation completed successfully"
+    wifi_recovery_timeout: float = 150.0
 
     # ------------------------------------------------------------------
     # Lookup helpers
@@ -184,6 +208,28 @@ class FirmwareUpdateServiceOptions:
         if not name or not name.strip():
             raise ValueError("wifi_flash_tool_file_name cannot be empty.")
 
+        for field_name in (
+            "power_on_wifi_module_settle_delay",
+            "post_lan_disconnect_port_release_delay",
+            "post_usb_transparent_mode_exit_delay",
+        ):
+            value = getattr(self, field_name)
+            if value < 0:
+                raise ValueError(
+                    f"{field_name} cannot be negative (got {value})."
+                )
+
+        if self.wifi_recovery_timeout < WIFI_BRIDGE_SETTLE_SECONDS:
+            raise ValueError(
+                "wifi_recovery_timeout must be at least "
+                f"{WIFI_BRIDGE_SETTLE_SECONDS:.0f} s, one full bridge watch "
+                f"(got {self.wifi_recovery_timeout})."
+            )
+
+        marker = self.wifi_flash_success_marker
+        if not marker or not marker.strip():
+            raise ValueError("wifi_flash_success_marker cannot be empty.")
+
         # Readiness-probe options are only meaningful when a probe is
         # configured. Gate validation on the probe being set so callers
         # who don't use the feature don't have to set timeout/retry fields
@@ -228,4 +274,4 @@ def _validate_positive(value: float, parameter_name: str) -> None:
         )
 
 
-__all__ = ["FirmwareUpdateServiceOptions", "ReadinessProbe"]
+__all__ = ["FirmwareUpdateServiceOptions", "ReadinessProbe", "WIFI_BRIDGE_SETTLE_SECONDS"]

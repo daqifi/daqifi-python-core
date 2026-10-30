@@ -193,7 +193,7 @@ class _FakeExternalProcessRunner:
                 exit_code=0,
                 timed_out=False,
                 duration_seconds=0.01,
-                standard_output_lines=tuple(),
+                standard_output_lines=("Operation completed successfully",),
                 standard_error_lines=tuple(),
             )
         )
@@ -269,6 +269,21 @@ class _FakeStreamingDevice:
     def stop_streaming(self) -> None:
         self.is_streaming = False
 
+    def execute_text_command(
+        self, setup_action, response_timeout_ms=5000, completion_timeout_ms=1000,
+        max_total_ms=None,
+    ):
+        # Silent until the bridge exit has been sent: to the WiFi update the
+        # bridge is up as soon as LAN:APPLY goes out, and the console
+        # answers *IDN? again once SetTransparentMode 0 has.
+        before = len(self.sent_commands)
+        setup_action()
+        sent = self.sent_commands[before:]
+        exited = "SYSTem:USB:SetTransparentMode 0" in self.sent_commands
+        if exited and "*IDN?" in sent:
+            return ["DAQiFi,Nyquist1,0,3.8.0"]
+        return []
+
 
 class _FakeLanChipInfoStreamingDevice(_FakeStreamingDevice):
     def __init__(self, name: str, chip_info: LanChipInfo) -> None:
@@ -280,6 +295,18 @@ class _FakeLanChipInfoStreamingDevice(_FakeStreamingDevice):
 
 
 # ---- Test scaffolding ----------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _short_wifi_bridge_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The WiFi bridge watch is a firmware bound (40 s) and the recovery
+    # timeout can't be set below it. These fakes have no bridge to wait
+    # for, so shrink the bound, letting _fast_options keep recovery short.
+    import daqifi.firmware.update_options as _update_options
+    import daqifi.firmware.update_service as _update_service
+
+    monkeypatch.setattr(_update_options, "WIFI_BRIDGE_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr(_update_service, "WIFI_BRIDGE_SETTLE_SECONDS", 0.05)
 
 
 def _fast_options() -> FirmwareUpdateServiceOptions:
@@ -299,6 +326,10 @@ def _fast_options() -> FirmwareUpdateServiceOptions:
         hid_connect_retry_delay=0.005,
         flash_write_retry_delay=0.005,
         wifi_process_timeout=2.0,
+        power_on_wifi_module_settle_delay=0.005,
+        post_lan_disconnect_port_release_delay=0.005,
+        post_usb_transparent_mode_exit_delay=0.005,
+        wifi_recovery_timeout=0.2,
     )
 
 
@@ -2074,6 +2105,7 @@ class TestUpdateWifiModule:
                     "begin write operation",
                     "67%",
                     "begin verify operation",
+                    "Operation completed successfully",
                 ),
                 standard_error_lines=tuple(),
             )
@@ -2101,8 +2133,17 @@ class TestUpdateWifiModule:
             shutil.rmtree(firmware_dir, ignore_errors=True)
 
         assert service.current_state == FirmwareUpdateState.COMPLETE
-        assert device.sent_commands == [
+        # The bridge handling's queries aside.
+        assert [
+            c for c in device.sent_commands
+            if c not in (
+                "SYSTem:ERRor?", "*IDN?", "SYSTem:POWer:STATe?", "SYSTem:STReam:STOP"
+            )
+        ] == [
+            "SYSTem:POWer:STATe 1",
             "SYSTem:COMMUnicate:LAN:FWUpdate",
+            "SYSTem:COMMunicate:LAN:APPLY",
+            "SYSTem:USB:SetTransparentMode 0",
             "SYSTem:COMMunicate:LAN:ENAbled 1",
             "SYSTem:COMMunicate:LAN:APPLY",
             "SYSTem:COMMunicate:LAN:SAVE",
