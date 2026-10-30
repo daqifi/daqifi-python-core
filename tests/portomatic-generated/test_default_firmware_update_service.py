@@ -2145,8 +2145,7 @@ class TestUpdateWifiModule:
             "SYSTem:COMMunicate:LAN:APPLY",
             "SYSTem:USB:SetTransparentMode 0",
             "SYSTem:COMMunicate:LAN:ENAbled 1",
-            "SYSTem:COMMunicate:LAN:APPLY",
-            "SYSTem:COMMunicate:LAN:SAVE",
+            "SYSTem:COMMunicate:LAN:APPLY 1",
         ]
         assert device.disconnect_calls == 1
         assert device.connect_attempts >= 1

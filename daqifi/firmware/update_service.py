@@ -1038,8 +1038,12 @@ class DefaultFirmwareUpdateService:
                     self._options.post_usb_transparent_mode_exit_delay, deadline
                 )
                 device.send(scpi_commands.enable_network_lan())
-                device.send(scpi_commands.apply_network_lan())
-                device.send(scpi_commands.save_network_lan())
+                # APPLY 1, not APPLY then SAVE: the firmware's apply gate
+                # can refuse the apply (-200, a REINIT in flight), and a
+                # separate SAVE would persist the unapplied settings anyway
+                # (SCPI_LANSettingsSave copies them unconditionally). APPLY 1
+                # saves only an accepted apply (SCPI_LANSettingsApply).
+                device.send(scpi_commands.apply_and_save_network_lan())
                 # Success ends with the same positive check recovery uses:
                 # the console answers. The firmware only recognises the
                 # exit when it arrives in one receive buffer, so a split

@@ -350,6 +350,13 @@ def save_network_lan() -> ScpiMessage:
     return ScpiMessage("SYSTem:COMMunicate:LAN:SAVE")
 
 
+def apply_and_save_network_lan() -> ScpiMessage:
+    """``LAN:APPLY 1``: apply the staged settings and, only if the apply is
+    accepted, save them to NVM, in one firmware handler
+    (``SCPI_LANSettingsApply``)."""
+    return ScpiMessage("SYSTem:COMMunicate:LAN:APPLY 1")
+
+
 def set_lan_firmware_update_mode() -> ScpiMessage:
     return ScpiMessage("SYSTem:COMMUnicate:LAN:FWUpdate")
 
