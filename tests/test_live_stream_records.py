@@ -250,3 +250,72 @@ def test_to_json_writes_a_missing_value_as_null_and_stays_strict_json(tmp_path) 
     data = json.loads(path.read_text(), parse_constant=_reject)
     assert data["channel_1"] == [2.0, None]
     assert math.isnan(buf.to_dict()["channel_1"][1])  # numeric access keeps NaN
+
+
+# ---- round 3 ------------------------------------------------------------
+
+
+def _mixed_backlog(n):
+    # Alternating analog and digital-only records, all already queued.
+    return META + b"".join(_ai(1000 + 2 * i, 1000) + _di(1001 + 2 * i) for i in range(n))
+
+
+def test_skipped_digital_records_dont_count_as_idle_for_read() -> None:
+    # 1500 analog + 1500 digital-only records at 10 kHz: the default deadline
+    # (2 x 1500 / 10 kHz + 1 s = 1.3 s) must cover them, so a skipped record
+    # mustn't cost the empty-poll wait.
+    sm = _f._manager(_f._FakeSerial(on_start=_mixed_backlog(1500)), channels=[0],
+                     sample_rate=10000, format=1)
+    sm.start()
+    try:
+        samples = sm.read(num_samples=1500)
+    finally:
+        sm.stop()
+    assert len(samples) == 1500
+
+
+def test_skipped_digital_records_dont_count_as_idle_for_read_all() -> None:
+    sm = _f._manager(_f._FakeSerial(on_start=_mixed_backlog(1500)), channels=[0],
+                     sample_rate=10000, format=1)
+    sm.start()
+    try:
+        buffer = sm.read_all(duration=0.3)
+    finally:
+        sm.stop()
+    assert len(buffer) == 1500
+
+
+def _filled_buffer():
+    buf = SampleBuffer(channels=[0], sample_rate=10.0, max_samples=50)
+    for i in range(3):
+        buf.add_sample(Sample(timestamp=float(i), channels={0: float(i)}))
+    return buf
+
+
+def test_asdict_works_on_a_sample_buffer() -> None:
+    import dataclasses
+
+    data = dataclasses.asdict(_filled_buffer())
+    assert data["channels"] == [0] and len(data["samples"]) == 3
+    assert "_lock" not in data
+
+
+def test_deepcopy_gives_the_copy_its_own_lock() -> None:
+    import copy
+
+    buf = _filled_buffer()
+    clone = copy.deepcopy(buf)
+    assert clone._lock is not buf._lock
+    assert [s.timestamp for s in clone] == [0.0, 1.0, 2.0]
+    clone.add_sample(Sample(timestamp=3.0, channels={0: 3.0}))
+    assert len(clone) == 4 and len(buf) == 3
+
+
+def test_a_sample_buffer_pickles() -> None:
+    import pickle
+
+    buf = _filled_buffer()
+    back = pickle.loads(pickle.dumps(buf))
+    assert [s.channels for s in back] == [{0: 0.0}, {0: 1.0}, {0: 2.0}]
+    assert back.max_samples == 50 and back._lock is not buf._lock
+    back.add_sample(Sample(timestamp=3.0, channels={0: 3.0}))

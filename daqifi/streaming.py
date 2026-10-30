@@ -22,6 +22,10 @@ from .exceptions import CommandError, ConfigurationError
 
 _LOGGER = logging.getLogger(__name__)
 
+# A poll that took a complete record which gave no sample (see
+# StreamManager._poll_sample): not idle, so no wait before the next poll.
+_SKIPPED = object()
+
 # Samples a StreamManager keeps in its buffer by default (about 100 s at
 # 1 kHz): enough to export a recent window, bounded so a long-running stream
 # can't exhaust memory. Pass buffer_size=None for an unbounded buffer.
@@ -88,9 +92,20 @@ class SampleBuffer:
     sample_rate: float = 0.0
     start_time: Optional[float] = None
     max_samples: Optional[int] = None
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, init=False, repr=False, compare=False
-    )
+
+    def __post_init__(self) -> None:
+        # Not a dataclass field: asdict(), deepcopy and pickle must not
+        # reach it (a lock can't be copied); each copy gets its own.
+        self._lock = threading.Lock()
+
+    def __getstate__(self) -> Dict[str, Any]:
+        state = dict(self.__dict__)
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
 
     def add_sample(self, sample: Sample):
         """Add sample to buffer"""
@@ -356,6 +371,10 @@ class StreamManager:
         self._device_channels: Optional[List[int]] = None
         self._pb_parser: Optional[ProtobufMessageParser] = None
         self._pending_pb_samples: Deque[Sample] = deque()
+        # Set by a parser when it takes a complete record off its buffer;
+        # tells a record that gave no sample (metadata, digital-only,
+        # malformed) from a poll that found nothing. See _poll_sample.
+        self._consumed_record = False
 
     @property
     def state(self) -> StreamState:
@@ -758,7 +777,9 @@ class StreamManager:
                 )
 
             # Try to read sample
-            sample = self._read_sample()
+            sample = self._poll_sample()
+            if sample is _SKIPPED:
+                continue
             if sample is not None:
                 samples.append(sample)
                 self._buffer.add_sample(sample)
@@ -797,7 +818,9 @@ class StreamManager:
         collected = SampleBuffer(sample_rate=self._sample_rate)
         deadline = time.monotonic() + duration
         while time.monotonic() < deadline:
-            sample = self._read_sample()
+            sample = self._poll_sample()
+            if sample is _SKIPPED:
+                continue
             if sample is not None:
                 collected.add_sample(sample)
                 self._buffer.add_sample(sample)
@@ -811,6 +834,20 @@ class StreamManager:
         )
         return collected
 
+    def _poll_sample(self) -> Any:
+        """One poll of the stream: a :class:`Sample`; ``_SKIPPED`` when a
+        complete record was taken but gave no sample (metadata, a
+        digital-only or malformed record); or None when nothing was there.
+
+        Callers wait only on None: a skipped record means more may be
+        queued right behind it.
+        """
+        self._consumed_record = False
+        sample = self._read_sample()
+        if sample is None and self._consumed_record:
+            return _SKIPPED
+        return sample
+
     def _read_sample(self) -> Optional[Sample]:
         """
         Read a single sample from device.
@@ -818,7 +855,8 @@ class StreamManager:
         Dispatches to format-specific parser based on self._format.
 
         Returns:
-            Sample or None if no data available
+            Sample, or None if none came of this read (a parser that took a
+            record without producing a sample sets ``_consumed_record``)
         """
         if self._format == 0:
             return self._read_sample_protobuf()
@@ -879,6 +917,7 @@ class StreamManager:
             # Extract and parse JSON
             json_str = self._read_buffer[start_idx:end_idx]
             self._read_buffer = self._read_buffer[end_idx:]  # Remove parsed data
+            self._consumed_record = True
 
             _LOGGER.debug("JSON data received: %s", json_str)
 
@@ -962,6 +1001,7 @@ class StreamManager:
             # Extract line
             line = self._read_buffer[:newline_idx].strip()
             self._read_buffer = self._read_buffer[newline_idx + 1:]  # Remove parsed data
+            self._consumed_record = True
 
             if not line:
                 return None  # Empty line
@@ -1118,6 +1158,7 @@ class StreamManager:
             )
             if consumed:
                 del self._pb_buffer[:consumed]
+                self._consumed_record = True
             elif len(self._pb_buffer) > self._PB_BUFFER_HARD_CAP:
                 # Parser made no forward progress and the buffer keeps
                 # growing — the wire is desynced (firmware reboot mid-
@@ -1254,14 +1295,17 @@ class StreamManager:
         stop_event = stop_event if stop_event is not None else self._stop_event
         while not stop_event.is_set():
             try:
-                sample = self._read_sample()
+                sample = self._poll_sample()
+                if sample is _SKIPPED:
+                    continue
                 if sample is not None:
                     self._buffer.add_sample(sample)
                     self._dispatch_per_channel(sample)
                     if self._callback is not None:
                         self._callback(sample)
-
-                time.sleep(1.0 / self._sample_rate)
+                else:
+                    # Wait only on an empty poll, as read() does.
+                    time.sleep(0.001)
 
             except Exception:
                 _LOGGER.exception("Streaming error")
