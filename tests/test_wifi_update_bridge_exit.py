@@ -150,6 +150,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
         self._prompt = prompt
         self.powered = powered
         self.power_reply = True
+        self.split_next_exit = False
         if entry_delay is not None:
             self.ENTRY_DELAY = entry_delay
         self._late_errors = late_errors
@@ -181,7 +182,12 @@ class _FirmwareModel(_f._FakeStreamingDevice):
             raise OSError("write failed before delivery")
         self.sent_commands.append(text)
         self._tick()
-        if self.transparent and text != BRIDGE_EXIT:
+        if self.transparent and text == BRIDGE_EXIT and self.split_next_exit:
+            # Delivered across two receive buffers: UsbCdc_FinalizeRead only
+            # matches the escape within one, so it goes to the WINC.
+            self.split_next_exit = False
+            self.raw_to_winc.append(text)
+        elif self.transparent and text != BRIDGE_EXIT:
             self.raw_to_winc.append(text)
         elif text == BRIDGE_EXIT:
             self.transparent = False
@@ -659,6 +665,34 @@ def test_a_bridge_that_comes_up_during_recoverys_first_exit_is_still_left(clock)
         _update(device, _f._FakeExternalProcessRunner(_result()), cancel_event=cancel)
     assert device.final_state() == ("normal", False)
     assert "power-cycle it" not in str(excinfo.value)
+
+
+class _SplitExitAfterFlash(_f._FakeExternalProcessRunner):
+    def __init__(self, device):
+        super().__init__(_result())
+        self.device = device
+
+    def run(self, request):
+        self.device.split_next_exit = True  # the success path's exit is lost
+        return super().run(request)
+
+
+def test_a_success_whose_bridge_exit_is_lost_is_not_complete(clock) -> None:
+    # Audit r10 (1): success never confirmed the exit, so a lost escape left
+    # the board transparent and the update reported COMPLETE.
+    from daqifi.enums import FirmwareUpdateState
+
+    device = _FirmwareModel(clock)
+    service = _service(_SplitExitAfterFlash(device))
+    firmware_dir = _f._make_temp_wifi_dir()
+    try:
+        with pytest.raises(FirmwareUpdateException) as excinfo:
+            service.update_wifi_module(device, firmware_dir)
+    finally:
+        shutil.rmtree(firmware_dir, ignore_errors=True)
+    assert "did not answer" in str(excinfo.value.__cause__)
+    assert service.current_state == FirmwareUpdateState.FAILED
+    assert device.final_state() == ("normal", False)  # recovery left it
 
 
 def test_a_failure_before_update_mode_sends_no_bridge_exit(clock, monkeypatch) -> None:

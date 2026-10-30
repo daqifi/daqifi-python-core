@@ -273,9 +273,15 @@ class _FakeStreamingDevice:
         self, setup_action, response_timeout_ms=5000, completion_timeout_ms=1000,
         max_total_ms=None,
     ):
-        # A console that never answers: to the WiFi update, the bridge is up
-        # as soon as LAN:APPLY is sent.
+        # Silent until the bridge exit has been sent: to the WiFi update the
+        # bridge is up as soon as LAN:APPLY goes out, and the console
+        # answers *IDN? again once SetTransparentMode 0 has.
+        before = len(self.sent_commands)
         setup_action()
+        sent = self.sent_commands[before:]
+        exited = "SYSTem:USB:SetTransparentMode 0" in self.sent_commands
+        if exited and "*IDN?" in sent:
+            return ["DAQiFi,Nyquist1,0,3.8.0"]
         return []
 
 

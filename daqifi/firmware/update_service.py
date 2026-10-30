@@ -271,6 +271,7 @@ class _CancelledError(Exception):
 _BRIDGE_POLL_SECONDS = 1.0
 _APPLY_REPLY_WINDOW_MS = 1500
 _BRIDGE_EXCHANGE_MAX_MS = 3000
+_SUCCESS_CONSOLE_CHECKS = 5
 _ERROR_QUEUE_DRAIN_LIMIT = 16
 _NOT_RECOVERED = (
     " The device could not be confirmed out of WiFi update mode: it may be "
@@ -1039,6 +1040,20 @@ class DefaultFirmwareUpdateService:
                 device.send(scpi_commands.enable_network_lan())
                 device.send(scpi_commands.apply_network_lan())
                 device.send(scpi_commands.save_network_lan())
+                # Success ends with the same positive check recovery uses:
+                # the console answers. The firmware only recognises the
+                # exit when it arrives in one receive buffer, so a split
+                # delivery would leave the bridge up and the LAN commands
+                # forwarded to the WINC. No answer is a failure, so recovery
+                # runs and the update isn't reported COMPLETE.
+                for attempt in range(_SUCCESS_CONSOLE_CHECKS):
+                    self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)
+                    if self._console_answers(device):
+                        return
+                raise IOError(
+                    "The device's console did not answer after leaving the "
+                    "WiFi bridge, so it may still be in USB-transparent mode."
+                )
 
             self._execute_with_state_timeout(
                 FirmwareUpdateState.VERIFYING,

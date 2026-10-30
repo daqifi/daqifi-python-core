@@ -17,9 +17,29 @@ _spec = importlib.util.spec_from_file_location(
 _fakes = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_fakes)
 
+_made = []
+
+
+@pytest.fixture(autouse=True)
+def _disconnect_devices():
+    # A connected fake leaves a consumer thread polling its stream; the
+    # flooding one would spin for the rest of the suite.
+    yield
+    while _made:
+        try:
+            _made.pop().disconnect()
+        except Exception:
+            pass
+
+
+def _device(response_map=None):
+    device = _fakes._make_device_with_serial_facade(response_map)
+    _made.append(device)
+    return device
+
 
 def _flooding_device():
-    device = _fakes._make_device_with_serial_facade()
+    device = _device()
     stream = device._transport.stream
     stream.feed(b"1000,0.5\r\n" * 200)
     real_read = stream.read
@@ -45,7 +65,7 @@ def test_a_capture_against_a_device_that_never_goes_quiet_stops_at_the_cap() -> 
 def test_the_cap_also_bounds_the_wait_for_the_first_line() -> None:
     # Audit r8: the cap only applied after the first line, so a silent
     # device still took the full response_timeout_ms.
-    device = _fakes._make_device_with_serial_facade()
+    device = _device()
     start = time.monotonic()
     lines = device.execute_text_command(
         lambda: None, response_timeout_ms=1200, completion_timeout_ms=200, max_total_ms=50
@@ -55,7 +75,7 @@ def test_the_cap_also_bounds_the_wait_for_the_first_line() -> None:
 
 
 def test_a_first_line_later_than_the_cap_is_not_captured() -> None:
-    device = _fakes._make_device_with_serial_facade()
+    device = _device()
     stream = device._transport.stream
     import threading
 
@@ -70,7 +90,7 @@ def test_a_first_line_later_than_the_cap_is_not_captured() -> None:
 def test_a_zero_timeout_still_drains_lines_already_queued(cap) -> None:
     # Audit r9 (2): get(timeout=0) used to drain what had arrived; the
     # clamp's "wait <= 0" stop dropped it, even with no cap set.
-    device = _fakes._make_device_with_serial_facade(
+    device = _device(
         {b"*IDN?": b"first\r\nsecond\r\nthird\r\n"}
     )
     from daqifi._internal.comm import ScpiMessage
@@ -89,7 +109,7 @@ def test_a_zero_timeout_still_drains_lines_already_queued(cap) -> None:
 
 
 def test_lines_already_queued_when_the_cap_runs_out_are_kept() -> None:
-    device = _fakes._make_device_with_serial_facade(
+    device = _device(
         {b"*IDN?": b"first\r\nsecond\r\nthird\r\n"}
     )
     from daqifi._internal.comm import ScpiMessage
@@ -105,7 +125,7 @@ def test_lines_already_queued_when_the_cap_runs_out_are_kept() -> None:
 
 
 def test_without_a_cap_the_inactivity_rules_are_unchanged() -> None:
-    device = _fakes._make_device_with_serial_facade({b"*IDN?": b"DAQiFi,Nyquist1\r\n"})
+    device = _device({b"*IDN?": b"DAQiFi,Nyquist1\r\n"})
     from daqifi._internal.comm import ScpiMessage
 
     lines = device.execute_text_command(
