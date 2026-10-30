@@ -280,6 +280,16 @@ class Pic32BootloaderProtocol:
     APP_FLASH_START: int = 0x1D000000
     APP_FLASH_END: int = 0x1D100000  # exclusive
     _KSEG0: int = 0x80000000
+    # The word the bootloader checks to decide whether to start an
+    # application: it stays in bootloader mode only while it reads
+    # 0xFFFFFFFF (app.c, APP_RESET_ADDRESS = APP_FLASH_BASE_ADDRESS).
+    APP_RESET_ADDRESS: int = 0x9D000000
+    # Image regions closer than this merge into one CRC window, the bytes
+    # between them expected erased (0xFF): ERASE blanks the panel, and the
+    # bootloader pads a partial word with 0xFF (APP_ProgramHexRecord). It
+    # bounds the CRC exchanges for a sparse image: windows are at least this
+    # far apart, so at most ~1,000 in the 1 MiB panel.
+    CRC_MERGE_GAP: int = 1024
 
     def __init__(
         self,
@@ -333,8 +343,10 @@ class Pic32BootloaderProtocol:
         """The image's programmed bytes as contiguous regions, each with the
         CRC the bootloader should report for it after programming.
 
-        Data records are ordered by address and merged where they touch; a
-        gap or overlap starts a new region. Protected-range records are
+        Data records are ordered by address and merged where they touch or
+        are less than `CRC_MERGE_GAP` apart; the bytes of such a gap count
+        as 0xFF, so verification also checks they stayed erased. A larger
+        gap (or an overlap) starts a new region. Protected-range records are
         left out, as they are left out of programming.
         """
         data_records = sorted(
@@ -348,6 +360,9 @@ class Pic32BootloaderProtocol:
         buffer = bytearray()
         start = next_address = 0
         for record in data_records:
+            if buffer and next_address < record.address < next_address + self.CRC_MERGE_GAP:
+                buffer += b"\xff" * (record.address - next_address)
+                next_address = record.address
             if buffer and record.address != next_address:
                 regions.append(self._region(start, buffer))
                 buffer = bytearray()
@@ -359,6 +374,15 @@ class Pic32BootloaderProtocol:
         if buffer:
             regions.append(self._region(start, buffer))
         return regions
+
+    def reset_vector_region(self) -> FlashCrcRegion:
+        """The bootloader's start-or-stay word, with the CRC it gives when
+        erased: an erase isn't confirmed until this reads back blank."""
+        return FlashCrcRegion(
+            address=self.APP_RESET_ADDRESS,
+            length=4,
+            expected_crc=Crc16(b"\xff" * 4).crc,
+        )
 
     def _region(self, start: int, data: bytes) -> FlashCrcRegion:
         return FlashCrcRegion(

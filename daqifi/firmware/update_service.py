@@ -2179,19 +2179,25 @@ class DefaultFirmwareUpdateService:
         return actual
 
     def _confirm_flash_erased(self, deadline: _Cancellation) -> None:
-        """Read every programmed region back after the cleanup erase and
-        require the CRC of erased (0xFF) flash. The ERASE ack proves nothing:
-        APP_NVMOperation (nvm.c) checks no NVM error flag, and
-        BOOTLOADER_WAIT_FOR_NVM acks once the write cycle completes."""
+        """Read back, after the cleanup erase, the reset vector and every
+        programmed region, and require the CRC of erased (0xFF) flash. The
+        ERASE ack proves nothing: APP_NVMOperation (nvm.c) checks no NVM
+        error flag, and BOOTLOADER_WAIT_FOR_NVM acks once the write cycle
+        completes. The reset vector decides whether a stale application
+        starts (app.c), and a sparse image's regions needn't cover it."""
+        reset_vector = getattr(self._bootloader_protocol, "reset_vector_region", None)
         regions = self._crc_regions
-        if not regions:
+        if not regions or not callable(reset_vector):
             raise _FlashVerificationError(
                 "The re-erase can't be confirmed: this bootloader protocol "
-                "can't read a CRC back."
+                "can't read the flash back."
             )
-        for index, region in enumerate(regions):
+        checks = [("the reset vector", reset_vector())] + [
+            (f"region {index + 1} at 0x{region.address:08X}", region)
+            for index, region in enumerate(regions)
+        ]
+        for where, region in checks:
             deadline.check()
-            where = f"region {index + 1} at 0x{region.address:08X}"
             blank = Crc16(b"\xff" * region.length).crc
             actual = self._read_region_crc(region, where)
             if actual != blank:
@@ -2202,13 +2208,16 @@ class DefaultFirmwareUpdateService:
 
     def _drain_hid_reports(self, limit: int = 16) -> None:
         """Discard reports already waiting from the bootloader (a late reply
-        to an earlier request). A read that times out (``b""``, or
-        TimeoutError from some transports) means nothing is waiting."""
+        to an earlier request). A 1 ms poll: it only clears what has already
+        arrived, so it stays cheap before each of many CRC requests; a reply
+        later still is caught by the strict decode. A read that times out
+        (``b""``, or TimeoutError from some transports) means nothing is
+        waiting."""
         from datetime import timedelta
 
         for _ in range(limit):
             try:
-                if not self._hid_transport.read(timedelta(milliseconds=20)):
+                if not self._hid_transport.read(timedelta(milliseconds=1)):
                     return
             except TimeoutError:
                 return
