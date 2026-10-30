@@ -5,6 +5,7 @@ Provides real-time data acquisition with support for multiple channels,
 configurable sample rates, and data export.
 """
 
+import logging
 import math
 import time
 import threading
@@ -18,6 +19,13 @@ from ._internal.comm import SerialInterface
 from ._internal import scpi
 from .communication import ProtobufMessageParser
 from .exceptions import CommandError, ConfigurationError
+
+_LOGGER = logging.getLogger(__name__)
+
+# Samples a StreamManager keeps in its buffer by default (about 100 s at
+# 1 kHz): enough to export a recent window, bounded so a long-running stream
+# can't exhaust memory. Pass buffer_size=None for an unbounded buffer.
+DEFAULT_BUFFER_SIZE = 100_000
 
 
 class StreamState(Enum):
@@ -53,8 +61,9 @@ class Sample:
     channels: Dict[int, float]  # Channel ID -> voltage
 
     def __getitem__(self, channel: int) -> float:
-        """Get channel value by index"""
-        return self.channels.get(channel, 0.0)
+        """Get channel value by index; NaN when this sample has no value for
+        the channel (it wasn't in the record), never a fake 0 V."""
+        return self.channels.get(channel, math.nan)
 
     def __repr__(self) -> str:
         ch_str = ", ".join(f"{ch}:{val:.3f}" for ch, val in sorted(self.channels.items()))
@@ -63,17 +72,27 @@ class Sample:
 
 @dataclass
 class SampleBuffer:
-    """Buffer of samples"""
+    """Buffer of samples.
+
+    ``max_samples`` bounds it: once it holds more than ``max_samples`` plus a
+    tenth again, the oldest samples are dropped down to ``max_samples`` (in
+    chunks, so adding stays cheap). None keeps every sample.
+    """
     samples: List[Sample] = field(default_factory=list)
     channels: List[int] = field(default_factory=list)
     sample_rate: float = 0.0
     start_time: Optional[float] = None
+    max_samples: Optional[int] = None
 
     def add_sample(self, sample: Sample):
         """Add sample to buffer"""
         if self.start_time is None:
             self.start_time = sample.timestamp
         self.samples.append(sample)
+        if self.max_samples is not None:
+            excess = len(self.samples) - self.max_samples
+            if excess > max(1, self.max_samples // 10):
+                del self.samples[:excess]
 
     def clear(self):
         """Clear buffer"""
@@ -153,10 +172,10 @@ class SampleBuffer:
 
             # Write data
             timestamps = self.get_timestamps()
-            for i, ts in enumerate(timestamps):
+            for ts, sample in zip(timestamps, self.samples):
                 row = [ts]
                 for ch in sorted(self.channels):
-                    row.append(self.samples[i][ch])
+                    row.append(sample[ch])
                 writer.writerow(row)
 
     def to_json(self, filename: str):
@@ -225,6 +244,7 @@ class StreamManager:
         sample_rate: int = 1000,
         format: int = 1,
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+        buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE,
     ):
         """
         Initialize stream manager.
@@ -244,13 +264,21 @@ class StreamManager:
                 fans the sample out to per-channel ``SampleReceived``
                 handlers without callers having to wire dispatch
                 themselves. Closes daqifi-python-core#107.
+            buffer_size: Most samples :attr:`buffer` keeps (the newest);
+                older ones are dropped so a long-running stream can't
+                exhaust memory. Default :data:`DEFAULT_BUFFER_SIZE`; None
+                keeps all.
         """
+        if buffer_size is not None and buffer_size <= 0:
+            raise ValueError("buffer_size must be positive (or None for unbounded).")
         self._comm = comm
         self._channels = channels
         self._sample_rate = sample_rate
         self._format = format
         self._state = StreamState.STOPPED
-        self._buffer = SampleBuffer(channels=channels, sample_rate=sample_rate)
+        self._buffer = SampleBuffer(
+            channels=channels, sample_rate=sample_rate, max_samples=buffer_size
+        )
         self._callback: Optional[Callable[[Sample], None]] = None
         self._per_channel_dispatch = per_channel_dispatch
         # Anchor for relative-device-time → wall-clock conversion in
@@ -315,7 +343,8 @@ class StreamManager:
 
     @property
     def buffer(self) -> SampleBuffer:
-        """Get sample buffer (for reading collected samples)"""
+        """The newest samples collected this session, at most ``buffer_size``
+        (see :class:`SampleBuffer`); cleared by :meth:`start`."""
         return self._buffer
 
     def start(self, callback: Optional[Callable[[Sample], None]] = None):
@@ -659,20 +688,22 @@ class StreamManager:
                 raise
             raise CommandError(f"Failed to stop streaming: {e}") from e
 
-    def read(self, num_samples: int = 1, timeout: float = 1.0) -> List[Sample]:
+    def read(self, num_samples: int = 1, timeout: Optional[float] = None) -> List[Sample]:
         """
         Read samples from stream (blocking).
 
         Args:
             num_samples: Number of samples to read
-            timeout: Timeout in seconds per sample
+            timeout: Total seconds to wait for all ``num_samples``. None
+                (the default) allows twice their duration at the configured
+                sample rate, plus one second.
 
         Returns:
             List of samples
 
         Raises:
             RuntimeError: If not streaming
-            TimeoutError: If timeout exceeded
+            TimeoutError: If ``num_samples`` didn't arrive within ``timeout``
 
         Example:
             stream.start()
@@ -683,13 +714,17 @@ class StreamManager:
         if self._state != StreamState.RUNNING:
             raise RuntimeError("Not streaming")
 
+        if timeout is None:
+            timeout = 2.0 * num_samples / max(self._sample_rate, 1) + 1.0
         samples = []
-        start_time = time.time()
+        deadline = time.monotonic() + timeout
 
         while len(samples) < num_samples:
-            # Check timeout
-            if time.time() - start_time > timeout * num_samples:
-                raise TimeoutError(f"Timeout reading {num_samples} samples")
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Timeout reading {num_samples} samples: {len(samples)} "
+                    f"arrived in {timeout:.3g} s"
+                )
 
             # Try to read sample
             sample = self._read_sample()
@@ -707,24 +742,35 @@ class StreamManager:
 
     def read_all(self, duration: float) -> SampleBuffer:
         """
-        Read all samples for specified duration.
+        Read every sample that arrives during ``duration`` seconds.
+
+        Returns after ``duration`` seconds whether or not the device sent
+        anything (a stalled stream gives an empty buffer, never a hang).
 
         Args:
             duration: Duration in seconds
 
         Returns:
-            SampleBuffer with all samples
+            SampleBuffer with the samples read in that time (only those)
 
         Example:
             stream.start()
             buffer = stream.read_all(duration=10.0)
             buffer.to_csv("data.csv")
         """
-        expected_samples = int(duration * self._sample_rate)
-        samples = self.read(num_samples=expected_samples)
-
-        # Return buffer with all samples
-        return self._buffer
+        if self._state != StreamState.RUNNING:
+            raise RuntimeError("Not streaming")
+        collected = SampleBuffer(channels=list(self._channels), sample_rate=self._sample_rate)
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            sample = self._read_sample()
+            if sample is not None:
+                collected.add_sample(sample)
+                self._buffer.add_sample(sample)
+                self._dispatch_per_channel(sample)
+            else:
+                time.sleep(0.001)
+        return collected
 
     def _read_sample(self) -> Optional[Sample]:
         """
@@ -795,8 +841,7 @@ class StreamManager:
             json_str = self._read_buffer[start_idx:end_idx]
             self._read_buffer = self._read_buffer[end_idx:]  # Remove parsed data
 
-            # Show raw JSON data received (for debugging/verification)
-            print(f"JSON data received: {json_str}")
+            _LOGGER.debug("JSON data received: %s", json_str)
 
             data = json.loads(json_str)
 
@@ -805,7 +850,7 @@ class StreamManager:
                 # Extract and store tick rate for future timestamp conversion
                 if 'tick_hz' in data['meta']:
                     self._tick_rate_hz = data['meta']['tick_hz']
-                    print(f"Metadata received: {data['meta']}")
+                    _LOGGER.debug("Metadata received: %s", data['meta'])
                 return None  # Not a sample, skip
 
             # Parse ADC data (new field name: 'ai' not 'adc')
@@ -816,6 +861,13 @@ class StreamManager:
                     # Firmware sends data in millivolts, convert to volts (new field: 'val' not 'data')
                     voltage = ch_data['val'] / 1000.0
                     channels_data[ch_id] = voltage
+
+            if not channels_data:
+                # A digital-only record ({"ts":..,"di":[..]}: the firmware
+                # sends one per DIO read when DIO streaming is on) has no
+                # analog value; it isn't an analog sample, and must not
+                # become a fake 0 V one.
+                return None
 
             # Get timestamp from firmware (new field: 'ts' not 'timestamp')
             if 'ts' in data and self._tick_rate_hz:
@@ -833,12 +885,12 @@ class StreamManager:
             return sample
 
         except json.JSONDecodeError:
-            # Invalid JSON, clear buffer and try again
-            self._read_buffer = ""
+            # The malformed object was already cut from the buffer; the
+            # complete objects behind it are still good.
+            _LOGGER.warning("Skipping a malformed JSON record")
             return None
         except Exception as e:
-            # Other error, log and return None
-            print(f"Error reading sample: {e}")
+            _LOGGER.warning("Error reading sample: %s", e)
             return None
 
     def _read_sample_csv(self) -> Optional[Sample]:
@@ -885,7 +937,7 @@ class StreamManager:
                         if len(parts) > 1:
                             tick_str = parts[1].strip().replace(' Hz', '')
                             self._tick_rate_hz = int(tick_str)
-                            print(f"CSV Metadata: Tick rate = {self._tick_rate_hz} Hz")
+                            _LOGGER.debug("CSV metadata: tick rate %s Hz", self._tick_rate_hz)
                     except ValueError:
                         pass
                 return None  # Skip header lines
@@ -901,11 +953,10 @@ class StreamManager:
                     # Keep the buffer's channel list in step: exports
                     # (to_dict/to_csv/to_dataframe) read it.
                     self._buffer.channels = list(self._channels)
-                    print(f"CSV Column Headers detected: Enabled channels = {self._channels}")
+                    _LOGGER.debug("CSV column headers: enabled channels %s", self._channels)
                 return None
 
-            # Show raw CSV data received (for debugging/verification)
-            print(f"CSV data received: {line}")
+            _LOGGER.debug("CSV data received: %s", line)
 
             # Parse CSV values
             values = line.split(',')
@@ -960,7 +1011,7 @@ class StreamManager:
                 return None
 
         except Exception as e:
-            print(f"Error parsing CSV sample: {e}")
+            _LOGGER.warning("Error parsing CSV sample: %s", e)
             return None
 
     def _read_sample_protobuf(self) -> Optional[Sample]:
@@ -1174,8 +1225,7 @@ class StreamManager:
                 time.sleep(1.0 / self._sample_rate)
 
             except Exception:
-                import logging
-                logging.getLogger(__name__).exception("Streaming error")
+                _LOGGER.exception("Streaming error")
                 self._state = StreamState.ERROR
                 break
 
@@ -1265,6 +1315,7 @@ class AsyncStreamManager:
         sample_rate: int = 1000,
         format: int = 1,
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+        buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE,
     ):
         """
         Initialize async stream manager.
@@ -1276,6 +1327,7 @@ class AsyncStreamManager:
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
             per_channel_dispatch: See :class:`StreamManager`. Forwarded
                 to the wrapped synchronous manager.
+            buffer_size: See :class:`StreamManager`.
         """
         self._stream = StreamManager(
             comm,
@@ -1283,6 +1335,7 @@ class AsyncStreamManager:
             sample_rate,
             format,
             per_channel_dispatch=per_channel_dispatch,
+            buffer_size=buffer_size,
         )
 
     async def start(self):
