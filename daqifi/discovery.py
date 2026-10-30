@@ -5,6 +5,7 @@ Provides automatic detection of devices connected via USB/Serial.
 """
 
 import glob
+import threading
 import platform
 from typing import List, Optional
 from dataclasses import dataclass
@@ -37,17 +38,18 @@ class DeviceInfo:
 
 
 # *IDN? probe timing (``_identify_device``) and its longest healthy run, from
-# SerialInterface's own waits: open sleeps 0.1 s, writes the echo-off with a
-# write timeout of the port timeout, waits 0.1 s and drains up to 0.5 s; the
+# SerialInterface's own waits (writes time out at the port timeout): open
+# sleeps 0.1 s, writes the echo-off, waits 0.1 s and drains up to 0.5 s; the
 # query waits its delay, writes, and reads until the port timeout with one
-# read that can start just before it; close may write once more.
+# read that can start just before it; close writes the echo-on and waits
+# 0.05 s.
 _IDENTIFY_PORT_TIMEOUT_S = 0.5
 _IDENTIFY_QUERY_DELAY_S = 0.2
 _IDENTIFY_WORST_HEALTHY_S = (
-    0.1 + _IDENTIFY_PORT_TIMEOUT_S + 0.1 + 0.5         # open
-    + _IDENTIFY_QUERY_DELAY_S + _IDENTIFY_PORT_TIMEOUT_S
-    + 2 * _IDENTIFY_PORT_TIMEOUT_S                      # query
-    + _IDENTIFY_PORT_TIMEOUT_S                          # close
+    0.1 + _IDENTIFY_PORT_TIMEOUT_S + 0.1 + 0.5                      # open
+    + _IDENTIFY_QUERY_DELAY_S + _IDENTIFY_PORT_TIMEOUT_S            # query write
+    + 2 * _IDENTIFY_PORT_TIMEOUT_S                                   # query reads
+    + _IDENTIFY_PORT_TIMEOUT_S + 0.05                                # close
 )
 # Plus room for the port open itself; a probe past it is abandoned.
 _IDENTIFY_HARD_TIMEOUT_S = _IDENTIFY_WORST_HEALTHY_S + 3.0
@@ -84,7 +86,9 @@ class DeviceFinder:
         return daqifi_serial_ports()
 
     @staticmethod
-    def _identify_device(port: str) -> Optional[DeviceInfo]:
+    def _identify_device(
+        port: str, cancelled: Optional[threading.Event] = None
+    ) -> Optional[DeviceInfo]:
         """
         Try to identify device on given port.
 
@@ -99,6 +103,8 @@ class DeviceFinder:
 
             # Try to open and query device
             comm = SerialInterface(port, timeout=_IDENTIFY_PORT_TIMEOUT_S)
+            # Once discover() gives up on this probe, nothing more is sent.
+            comm.cancel_event = cancelled
 
             if not comm.open():
                 return None

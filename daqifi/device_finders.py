@@ -220,13 +220,16 @@ _SERIAL_RETRY_INTERVAL_S = 1.0
 _SERIAL_POLL_INTERVAL_S = 0.1
 _SERIAL_INIT_COMMANDS = 4  # DisableEcho, StopStreaming, TurnOn, PB format
 _SERIAL_INIT_COMMAND_DELAY_S = 0.1
-# The probe's longest healthy run: wake-up, the init commands' waits, the
-# response loop, and one read that starts just before the loop's deadline
-# and runs its full read timeout, then a poll interval.
+# The probe's longest healthy run: wake-up; each init command's write (up to
+# the write timeout, _SERIAL_PROBE_TIMEOUT_S) and wait; the response loop,
+# whose GetDeviceInfo writes can each block up to the write timeout too; one
+# read that starts just before the loop's deadline and runs its full read
+# timeout; then a poll interval.
 _SERIAL_PROBE_WORST_HEALTHY_S = (
     _SERIAL_DEVICE_WAKEUP_DELAY_S
-    + _SERIAL_INIT_COMMANDS * _SERIAL_INIT_COMMAND_DELAY_S
+    + _SERIAL_INIT_COMMANDS * (_SERIAL_PROBE_TIMEOUT_S + _SERIAL_INIT_COMMAND_DELAY_S)
     + _SERIAL_RESPONSE_TIMEOUT_S
+    + _SERIAL_MAX_RETRIES * _SERIAL_PROBE_TIMEOUT_S
     + _SERIAL_PROBE_TIMEOUT_S
     + _SERIAL_POLL_INTERVAL_S
 )
@@ -320,7 +323,9 @@ class SerialDeviceFinder:
         self._fire_completed()
         return discovered
 
-    def _try_get_device_info(self, port_name: str) -> Optional[DeviceInfo]:
+    def _try_get_device_info(
+        self, port_name: str, cancelled: Optional[threading.Event] = None
+    ) -> Optional[DeviceInfo]:
         """Probe one port and return DeviceInfo if it looks like DAQiFi.
 
         Simplified vs upstream's full TaskCompletionSource flow: open
@@ -337,6 +342,13 @@ class SerialDeviceFinder:
                 timeout=_SERIAL_PROBE_TIMEOUT_S,
                 write_timeout=_SERIAL_PROBE_TIMEOUT_S,
             ) as port:
+                def _abandoned() -> bool:
+                    # Given up on by discover() (run_port_probe): touch
+                    # nothing on the device; leaving the block closes it.
+                    return cancelled is not None and cancelled.is_set()
+
+                if _abandoned():
+                    return None
                 # DTR-up wakes the device.
                 port.dtr = True
                 time.sleep(_SERIAL_DEVICE_WAKEUP_DELAY_S)
@@ -361,6 +373,8 @@ class SerialDeviceFinder:
                     scpi_commands.turn_device_on(),
                     scpi_commands.set_protobuf_stream_format(),
                 ):
+                    if _abandoned():
+                        return None
                     port.write(command.get_bytes())
                     time.sleep(_SERIAL_INIT_COMMAND_DELAY_S)
 
@@ -374,6 +388,8 @@ class SerialDeviceFinder:
                 while time.monotonic() < deadline:
                     now = time.monotonic()
                     if now - last_send >= _SERIAL_RETRY_INTERVAL_S and retry_count < _SERIAL_MAX_RETRIES:
+                        if _abandoned():
+                            return None
                         port.write(scpi_commands.get_device_info().get_bytes())
                         last_send = now
                         retry_count += 1

@@ -6,6 +6,7 @@ Not intended for direct use - use the public API instead.
 """
 
 import serial
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1204,6 +1205,13 @@ class SerialInterface:
         self.baudrate = baudrate
         self.timeout = timeout
         self._serial: Optional[serial.Serial] = None
+        # Set by a caller that has given up on this interface (a discovery
+        # probe past its hard timeout): from then on nothing is written to
+        # the device, so a late open can't disturb a newer session on it.
+        self.cancel_event: Optional[threading.Event] = None
+
+    def _cancelled(self) -> bool:
+        return self.cancel_event is not None and self.cancel_event.is_set()
 
     def open(self) -> bool:
         """
@@ -1243,6 +1251,11 @@ class SerialInterface:
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE
             )
+            if self._cancelled():
+                # Opened only after the caller gave up: close, send nothing.
+                self._serial.close()
+                self._serial = None
+                return False
             # Wait for device to stabilize
             time.sleep(0.1)
             # Clear any pending data
@@ -1279,7 +1292,7 @@ class SerialInterface:
         as belt-and-suspenders so a discovery flow's *IDN? right
         after open() can't pick up stale echo bytes.
         """
-        if self._serial is None or not self._serial.is_open:
+        if self._serial is None or not self._serial.is_open or self._cancelled():
             return
         # Use \r\n to match ScpiMessage.get_bytes() — the canonical
         # wire format. send_command() uses bare \r for legacy
@@ -1326,9 +1339,10 @@ class SerialInterface:
         port in a serial terminal afterward sees the prompt."""
         if self._serial and self._serial.is_open:
             try:
-                self._serial.write(b"SYSTem:ECHO 1\r\n")
-                self._serial.flush()
-                time.sleep(0.05)
+                if not self._cancelled():  # a given-up caller sends nothing
+                    self._serial.write(b"SYSTem:ECHO 1\r\n")
+                    self._serial.flush()
+                    time.sleep(0.05)
             except (serial.SerialException, OSError):
                 # Best-effort; the underlying port may already be gone.
                 pass
@@ -1358,6 +1372,8 @@ class SerialInterface:
         try:
             # Send command with CR terminator
             cmd_bytes = (command + "\r").encode('ascii')
+            if self._cancelled():
+                return ""
             self._serial.write(cmd_bytes)
             self._serial.flush()
 

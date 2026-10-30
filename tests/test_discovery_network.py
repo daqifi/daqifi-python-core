@@ -82,21 +82,21 @@ def test_only_daqifi_application_ports_are_listed(listing) -> None:
 
 def test_device_finder_probes_only_daqifi_ports(listing, monkeypatch) -> None:
     probed = []
-    monkeypatch.setattr(DeviceFinder, "_identify_device", staticmethod(lambda p: probed.append(p)))
+    monkeypatch.setattr(DeviceFinder, "_identify_device", staticmethod(lambda p, cancelled=None: probed.append(p)))
     DeviceFinder.discover()
     assert sorted(probed) == ["/dev/ttyACM5", "COM41"]
 
 
 def test_serial_device_finder_probes_only_daqifi_ports(listing, monkeypatch) -> None:
     probed = []
-    monkeypatch.setattr(SerialDeviceFinder, "_try_get_device_info", lambda self, p: probed.append(p))
+    monkeypatch.setattr(SerialDeviceFinder, "_try_get_device_info", lambda self, p, cancelled=None: probed.append(p))
     SerialDeviceFinder().discover()
     assert sorted(probed) == ["/dev/ttyACM5", "COM41"]
 
 
 def test_an_explicit_port_filter_is_probed_as_given(listing, monkeypatch) -> None:
     probed = []
-    monkeypatch.setattr(SerialDeviceFinder, "_try_get_device_info", lambda self, p: probed.append(p))
+    monkeypatch.setattr(SerialDeviceFinder, "_try_get_device_info", lambda self, p, cancelled=None: probed.append(p))
     SerialDeviceFinder().discover(port_filter=["COM42"])
     assert probed == ["COM42"]
 
@@ -127,7 +127,7 @@ def test_a_hung_port_doesnt_block_discovery_and_isnt_probed_again(monkeypatch) -
     release = threading.Event()
     calls = []
 
-    def probe(self, port):
+    def probe(self, port, cancelled=None):
         calls.append(port)
         if port == "COM50":
             release.wait(10)  # a driver that never returns
@@ -151,7 +151,7 @@ def test_a_port_is_probed_again_once_its_stuck_probe_ends() -> None:
     release = threading.Event()
     calls = []
 
-    def probe(port):
+    def probe(port, cancelled):
         calls.append(port)
         if len(calls) == 1:
             release.wait(10)
@@ -173,9 +173,11 @@ def test_each_hard_timeout_exceeds_its_probes_worst_healthy_run() -> None:
 
     assert device_finders._SERIAL_PROBE_HARD_TIMEOUT_S > device_finders._SERIAL_PROBE_WORST_HEALTHY_S
     assert discovery._IDENTIFY_HARD_TIMEOUT_S > discovery._IDENTIFY_WORST_HEALTHY_S
-    # The SerialDeviceFinder probe can legitimately take: wake-up 1 s, init
-    # 0.4 s, the 4 s response loop, a straddling 1 s read, a 0.1 s poll.
-    assert device_finders._SERIAL_PROBE_WORST_HEALTHY_S >= 6.5
+    # The SerialDeviceFinder probe can legitimately take: wake-up 1 s; four
+    # init writes (each up to the 1 s write timeout) and 0.1 s waits; the 4 s
+    # response loop and its up-to-3 GetDeviceInfo writes (1 s each); a
+    # straddling 1 s read; a 0.1 s poll.
+    assert device_finders._SERIAL_PROBE_WORST_HEALTHY_S >= 1 + 4 * 1.1 + 4 + 3 + 1 + 0.1
 
 
 def test_a_board_that_answers_on_its_retry_is_still_found(monkeypatch) -> None:
@@ -183,7 +185,7 @@ def test_a_board_that_answers_on_its_retry_is_still_found(monkeypatch) -> None:
     # GetDeviceInfo) must not be abandoned.
     monkeypatch.setattr(list_ports, "comports", lambda: [_port("COM52", 0x04D8, 0xF794)])
 
-    def slow_probe(self, port):
+    def slow_probe(self, port, cancelled=None):
         time.sleep(3.5)
         return _info(port)
 
@@ -199,7 +201,7 @@ def test_concurrent_probes_of_one_port_never_run_twice() -> None:
     started = threading.Event()
     calls = []
 
-    def probe(port):
+    def probe(port, cancelled):
         calls.append(port)
         started.set()
         release.wait(10)
@@ -333,3 +335,104 @@ def test_the_configuration_is_applied_and_saved_in_one_command_sent_last() -> No
         assert "SYSTem:COMMunicate:LAN:SAVE" not in commands
     finally:
         sd.close()
+
+
+# ---- round 3 ------------------------------------------------------------
+
+
+class _BlockedOpenSerial:
+    """A serial port whose open blocks until released: the open completes
+    only after discovery has given up on the probe. Records every action."""
+
+    release = None
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        _BlockedOpenSerial.instances.append(self)
+        self.writes = []
+        self.dtr_set = False
+        self.closed = False
+        self.is_open = True
+        self.in_waiting = 0
+        _BlockedOpenSerial.release.wait(10)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    @property
+    def dtr(self):
+        return self.dtr_set
+
+    @dtr.setter
+    def dtr(self, value):
+        self.dtr_set = True
+
+    def write(self, data):
+        self.writes.append(bytes(data))
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def read(self, n=1):
+        return b""
+
+    def reset_input_buffer(self):
+        pass
+
+    def reset_output_buffer(self):
+        pass
+
+    def close(self):
+        self.closed = True
+        self.is_open = False
+
+
+@pytest.fixture
+def blocked_open(monkeypatch):
+    import serial
+
+    _BlockedOpenSerial.release = threading.Event()
+    _BlockedOpenSerial.instances = []
+    monkeypatch.setattr(serial, "Serial", _BlockedOpenSerial)
+    yield _BlockedOpenSerial
+    _BlockedOpenSerial.release.set()
+
+
+def _wait_for_probe_threads(port, timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while usb_ports._live.get(port) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not usb_ports._live.get(port), "probe thread didn't end"
+
+
+def test_an_abandoned_serial_probe_sends_nothing_once_its_open_completes(monkeypatch, blocked_open) -> None:
+    # The open blocks past the hard timeout, then completes: the abandoned
+    # probe must not wake the board or send STOP / a format change, which
+    # would break a newer session on it.
+    import daqifi.device_finders as device_finders
+
+    monkeypatch.setattr(device_finders, "_SERIAL_PROBE_HARD_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(list_ports, "comports", lambda: [_port("COM54", 0x04D8, 0xF794)])
+    assert SerialDeviceFinder().discover() == []
+    blocked_open.release.set()
+    _wait_for_probe_threads("COM54")
+    (port,) = blocked_open.instances
+    assert port.writes == [] and not port.dtr_set
+    assert port.closed
+
+
+def test_an_abandoned_idn_probe_sends_nothing_once_its_open_completes(monkeypatch, blocked_open) -> None:
+    import daqifi.discovery as discovery
+
+    monkeypatch.setattr(discovery, "_IDENTIFY_HARD_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(list_ports, "comports", lambda: [_port("COM55", 0x04D8, 0xF794)])
+    assert DeviceFinder.discover() == []
+    blocked_open.release.set()
+    _wait_for_probe_threads("COM55")
+    (port,) = blocked_open.instances
+    assert port.writes == []
+    assert port.closed

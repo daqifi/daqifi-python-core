@@ -80,7 +80,7 @@ _live_lock = threading.Lock()
 
 def run_port_probe(
     port: str,
-    probe: Callable[[str], Optional[T]],
+    probe: Callable[[str, threading.Event], Optional[T]],
     timeout_s: float,
 ) -> Optional[T]:
     """``probe(port)``, or None if it takes longer than ``timeout_s`` or
@@ -94,12 +94,18 @@ def run_port_probe(
     it ends, so a wedged port costs one stuck thread and isn't probed again
     meanwhile, by this caller or a concurrent one. An exception in the
     probe gives None.
+
+    The probe gets an event that is set when it is abandoned, and must not
+    act on the device once it is (check it after the open and before every
+    write): a late open must not send STOP or a format change that would
+    break a newer session on the same board.
     """
     result: List[Optional[T]] = [None]
+    cancelled = threading.Event()
 
     def _run() -> None:
         try:
-            result[0] = probe(port)
+            result[0] = probe(port, cancelled)
         except Exception:
             result[0] = None
         finally:
@@ -119,5 +125,6 @@ def run_port_probe(
     thread.start()
     thread.join(timeout_s)
     if thread.is_alive():
+        cancelled.set()
         return None
     return result[0]
