@@ -511,6 +511,10 @@ class SerialStreamTransport:
     DEFAULT_OS_RX_BUFFER_BYTES = 64 * 1024
     DEFAULT_OS_TX_BUFFER_BYTES = 64 * 1024
 
+    #: Consecutive I/O failures, with no success in between, taken as the
+    #: device having gone away (as upstream).
+    IO_FAULT_LIMIT = 5
+
     def __init__(
         self,
         port_name: str,
@@ -541,6 +545,13 @@ class SerialStreamTransport:
         self._serial: Optional[serial.Serial] = None
         self._disposed = False
         self._status_handlers: List[Callable[[TransportStatusEventArgs], None]] = []
+        # Loss detection from the reader's I/O outcomes (report_io_fault /
+        # report_io_success): pyserial's port stays "open" after a USB
+        # unplug, so the reader is the first to know (#191).
+        self._io_lock = threading.Lock()
+        self._io_faults = 0
+        self._loss_armed = False
+        self._lost = False
 
     @property
     def stream(self) -> Optional[IO[bytes]]:
@@ -554,7 +565,29 @@ class SerialStreamTransport:
 
     @property
     def is_connected(self) -> bool:
-        return self._serial is not None and self._serial.is_open
+        return self._serial is not None and self._serial.is_open and not self._lost
+
+    def report_io_fault(self, error: BaseException) -> None:
+        """A read or write on :attr:`stream` failed for a reason other than
+        a timeout. ``IO_FAULT_LIMIT`` failures in a row, with no success in
+        between, are taken as the device gone: the transport reports itself
+        disconnected, once per connection (#191, upstream daqifi-core
+        ITransportHealthSink). Safe from any thread."""
+        with self._io_lock:
+            if not self._loss_armed:
+                return
+            self._io_faults += 1
+            if self._io_faults < self.IO_FAULT_LIMIT:
+                return
+            self._loss_armed = False
+            self._lost = True
+        self._notify_status(False, error)
+
+    def report_io_success(self) -> None:
+        """A read or write on :attr:`stream` succeeded; any run of
+        failures is forgotten."""
+        with self._io_lock:
+            self._io_faults = 0
 
     @property
     def connection_info(self) -> str:
@@ -644,6 +677,10 @@ class SerialStreamTransport:
                 # so consumer threads can be stopped promptly.
                 self._serial.timeout = 0.5
 
+                with self._io_lock:
+                    self._io_faults = 0
+                    self._lost = False
+                    self._loss_armed = True
                 self._notify_status(True, None)
                 return
             except Exception as exc:
@@ -683,6 +720,10 @@ class SerialStreamTransport:
         # the actual failure instead of a clean (False, None) that
         # immediately overwrites the (False, exc) from the except path.
         disconnect_error: Optional[BaseException] = None
+        # Disarmed first: our own close makes the reader fail, and that is
+        # a disconnect, not a loss.
+        with self._io_lock:
+            self._loss_armed = False
         try:
             if self._serial is not None:
                 self._serial.close()

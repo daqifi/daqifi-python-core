@@ -599,6 +599,7 @@ class DaqifiDevice:
             consumer = StreamMessageConsumer[Any](
                 stream,
                 ProtobufMessageParser(message_factory=self._message_factory),
+                health_sink=self._transport_health_sink(),
             )
             with self._state_lock:
                 superseded = (
@@ -996,7 +997,9 @@ class DaqifiDevice:
 
         try:
             text_parser = LineBasedMessageParser(line_ending="\r\n")
-            text_consumer = StreamMessageConsumer[str](stream, text_parser)
+            text_consumer = StreamMessageConsumer[str](
+                stream, text_parser, health_sink=self._transport_health_sink()
+            )
 
             def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
                 # Background-thread callback. Only push to the queue;
@@ -1590,6 +1593,17 @@ class DaqifiDevice:
                 h(args)
             except Exception:
                 pass
+
+    def _transport_health_sink(self) -> Optional[Any]:
+        """The transport, when it can be told how reads on its stream go
+        (``report_io_fault`` / ``report_io_success``): the serial transport
+        uses that to notice an unplugged device (#191)."""
+        transport = self._transport
+        if callable(getattr(transport, "report_io_fault", None)) and callable(
+            getattr(transport, "report_io_success", None)
+        ):
+            return transport
+        return None
 
     def _on_transport_status_changed(self, args: TransportStatusEventArgs) -> None:
         if args.is_connected:
