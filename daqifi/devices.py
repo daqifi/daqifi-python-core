@@ -811,6 +811,7 @@ class DaqifiDevice:
         setup_action: Callable[[], None],
         response_timeout_ms: int = 5000,
         completion_timeout_ms: int = 1000,
+        max_total_ms: Optional[int] = None,
     ) -> List[str]:
         """Run a SCPI command that expects a TEXT-mode reply, capturing
         the lines the device returns.
@@ -844,6 +845,10 @@ class DaqifiDevice:
             response_timeout_ms: phase-1 budget for the first byte.
             completion_timeout_ms: phase-2 inactivity budget after the
                 first line.
+            max_total_ms: optional cap on the whole capture, measured from
+                ``setup_action()``. Without it a device that keeps sending
+                lines keeps phase 2 going; ``None`` (the default) keeps
+                that behaviour.
 
         Returns:
             List of text lines captured between ``setup_action()`` and the
@@ -860,7 +865,8 @@ class DaqifiDevice:
             self._sd_text_exchange_active = True
             try:
                 return self._execute_text_command_locked(
-                    setup_action, response_timeout_ms, completion_timeout_ms
+                    setup_action, response_timeout_ms, completion_timeout_ms,
+                    max_total_ms,
                 )
             finally:
                 self._sd_text_exchange_active = False
@@ -886,7 +892,8 @@ class DaqifiDevice:
             self._text_exchange_lock_owner = tid
             try:
                 return self._execute_text_command_locked(
-                    setup_action, response_timeout_ms, completion_timeout_ms
+                    setup_action, response_timeout_ms, completion_timeout_ms,
+                    max_total_ms,
                 )
             finally:
                 self._text_exchange_lock_owner = None
@@ -898,6 +905,7 @@ class DaqifiDevice:
         setup_action: Callable[[], None],
         response_timeout_ms: int,
         completion_timeout_ms: int,
+        max_total_ms: Optional[int] = None,
     ) -> List[str]:
         # Catch teardown that's in flight but hasn't yet cleared
         # self._consumer / self._transport — same TOCTOU class as
@@ -957,6 +965,7 @@ class DaqifiDevice:
             text_consumer.start()
 
             try:
+                exchange_start = time.monotonic()
                 setup_action()
 
                 # Phase 1: block up to response_timeout_ms for the first
@@ -976,11 +985,21 @@ class DaqifiDevice:
                 # until the next line OR the timeout — when get raises
                 # queue.Empty, we've hit the inactivity gap.
                 inactivity_threshold = completion_timeout_ms / 1000.0
+                # Optional absolute cap: a device that keeps sending lines
+                # (a stream left running) would otherwise keep phase 2
+                # going indefinitely.
+                total_deadline = (
+                    None if max_total_ms is None
+                    else exchange_start + max_total_ms / 1000.0
+                )
                 while True:
+                    wait = inactivity_threshold
+                    if total_deadline is not None:
+                        wait = min(wait, total_deadline - time.monotonic())
+                        if wait <= 0:
+                            break
                     try:
-                        captured.append(
-                            line_queue.get(timeout=inactivity_threshold)
-                        )
+                        captured.append(line_queue.get(timeout=wait))
                     except queue.Empty:
                         break
             finally:

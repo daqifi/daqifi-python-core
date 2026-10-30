@@ -7,6 +7,9 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `execute_text_command(..., max_total_ms=...)` caps the whole capture;
+  without it a device that keeps sending lines keeps the capture going
+  (#190).
 - `CONTRIBUTING.md`, `SECURITY.md` and this changelog.
 - `pyproject.toml` declaring the PEP 517 build backend and the pytest
   configuration (#155).
@@ -33,7 +36,8 @@ aims to follow [Semantic Versioning](https://semver.org/).
   the console stayed dead until a power cycle. The update now sends
   `POWer:STATe 1`, `FWUpdate`, `APPLY`, waits until the bridge is up
   (on a board in WiFi retry backoff that takes up to 30 s; the update is
-  refused up front on a board left in standby), runs the tool,
+  refused up front on a board left in standby, or connected over TCP
+  rather than USB serial, and stops any stream first), runs the tool,
   then sends `SYSTem:USB:SetTransparentMode 0` before the LAN restore. After a failed
   or cancelled update it sends the bridge exit and `APPLY` until the error
   queue shows the APPLY was accepted, then watches the console for longer

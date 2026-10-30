@@ -107,6 +107,7 @@ def clock(monkeypatch):
 IDN = "*IDN?"
 ERR_QUERY = "SYSTem:ERRor?"
 POWER_QUERY = "SYSTem:POWer:STATe?"
+STREAM_STOP = "SYSTem:STReam:STOP"
 
 
 class _FirmwareModel(_f._FakeStreamingDevice):
@@ -214,7 +215,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
             raise OSError("flush failed after delivery")
 
     def execute_text_command(self, setup_action, response_timeout_ms=5000,
-                             completion_timeout_ms=1000):
+                             completion_timeout_ms=1000, max_total_ms=None):
         self._refused_in_this_exchange = False
         self._replies = []
         try:
@@ -232,7 +233,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
 def test_a_successful_flash_enters_the_bridge_and_leaves_it_before_restoring_lan(clock) -> None:
     device = _FirmwareModel(clock)
     _update(device, _f._FakeExternalProcessRunner(_result()))
-    commands = [c for c in device.sent_commands if c not in (IDN, ERR_QUERY, POWER_QUERY)]
+    commands = [c for c in device.sent_commands if c not in (IDN, ERR_QUERY, POWER_QUERY, STREAM_STOP)]
     assert commands == [
         POWER_ON, FW_UPDATE, LAN_APPLY, BRIDGE_EXIT, LAN_ENABLE, LAN_APPLY, LAN_SAVE,
     ]
@@ -341,7 +342,7 @@ def test_an_apply_refused_by_the_gate_is_retried_and_recovery_ends_normal(clock)
 
 class _DeadConsole(_FirmwareModel):
     def execute_text_command(self, setup_action, response_timeout_ms=5000,
-                             completion_timeout_ms=1000):
+                             completion_timeout_ms=1000, max_total_ms=None):
         setup_action()
         return []
 
@@ -623,6 +624,27 @@ def test_an_unreadable_power_state_makes_recovery_unconfirmed(clock) -> None:
     assert "power-cycle it" in str(excinfo.value)
 
 
+def test_the_stream_is_stopped_before_fwupdate_even_if_untracked(clock) -> None:
+    # Audit r7 (1): a stream started by a raw send leaves is_streaming
+    # False, and its output kept the bridge's text exchanges alive.
+    device = _FirmwareModel(clock)
+    device.is_streaming = False
+    _update(device, _f._FakeExternalProcessRunner(_result()))
+    sent = device.sent_commands
+    assert STREAM_STOP in sent and sent.index(STREAM_STOP) < sent.index(FW_UPDATE)
+
+
+def test_a_device_on_tcp_is_refused_before_anything_is_sent(clock) -> None:
+    # Audit r7 (2): with wifi_port_override the bridge came up on USB while
+    # reconnect and recovery used the TCP transport, which can't reach it.
+    device = _FirmwareModel(clock)
+    device.is_usb_connection = False
+    with pytest.raises(FirmwareUpdateException) as excinfo:
+        _update(device, _f._FakeExternalProcessRunner(_result()))
+    assert "USB serial" in str(excinfo.value.__cause__)
+    assert device.sent_commands == []
+
+
 def test_a_failure_before_update_mode_sends_no_bridge_exit(clock, monkeypatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda *a, **k: None)
     device = _FirmwareModel(clock)
@@ -657,7 +679,7 @@ def test_power_on_can_be_turned_off(clock) -> None:
         service.update_wifi_module(device, firmware_dir)
     finally:
         shutil.rmtree(firmware_dir, ignore_errors=True)
-    assert [c for c in device.sent_commands if c not in (IDN, ERR_QUERY, POWER_QUERY)][:2] == [FW_UPDATE, LAN_APPLY]
+    assert [c for c in device.sent_commands if c not in (IDN, ERR_QUERY, POWER_QUERY, STREAM_STOP)][:2] == [FW_UPDATE, LAN_APPLY]
 
 
 @pytest.mark.parametrize(

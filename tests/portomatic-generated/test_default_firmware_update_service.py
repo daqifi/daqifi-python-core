@@ -270,7 +270,8 @@ class _FakeStreamingDevice:
         self.is_streaming = False
 
     def execute_text_command(
-        self, setup_action, response_timeout_ms=5000, completion_timeout_ms=1000
+        self, setup_action, response_timeout_ms=5000, completion_timeout_ms=1000,
+        max_total_ms=None,
     ):
         # A console that never answers: to the WiFi update, the bridge is up
         # as soon as LAN:APPLY is sent.
@@ -2129,7 +2130,9 @@ class TestUpdateWifiModule:
         # The bridge handling's queries aside.
         assert [
             c for c in device.sent_commands
-            if c not in ("SYSTem:ERRor?", "*IDN?", "SYSTem:POWer:STATe?")
+            if c not in (
+                "SYSTem:ERRor?", "*IDN?", "SYSTem:POWer:STATe?", "SYSTem:STReam:STOP"
+            )
         ] == [
             "SYSTem:POWer:STATe 1",
             "SYSTem:COMMUnicate:LAN:FWUpdate",

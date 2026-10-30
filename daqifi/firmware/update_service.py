@@ -270,6 +270,7 @@ class _CancelledError(Exception):
 
 _BRIDGE_POLL_SECONDS = 1.0
 _APPLY_REPLY_WINDOW_MS = 1500
+_BRIDGE_EXCHANGE_MAX_MS = 3000
 _ERROR_QUEUE_DRAIN_LIMIT = 16
 _NOT_RECOVERED = (
     " The device could not be confirmed out of WiFi update mode: it may be "
@@ -836,6 +837,15 @@ class DefaultFirmwareUpdateService:
             # is still untouched. A disconnected device is reported as such
             # first, whatever the host can or can't run.
             _ensure_device_connected(device)
+            # The bridge is on the USB CDC port, and while it's up the board
+            # can only be reached there: a device on TCP couldn't be brought
+            # back out of it. Refused before anything is sent.
+            if getattr(device, "is_usb_connection", True) is not True:
+                raise RuntimeError(
+                    "The WiFi module update needs the device connected over "
+                    "USB serial: while the WiFi bridge is up, the board can "
+                    "only be reached on its USB port."
+                )
             request = self._build_wifi_process_request(
                 device, firmware_path, progress
             )
@@ -848,6 +858,11 @@ class DefaultFirmwareUpdateService:
                 if device.is_streaming:
                     device.stop_streaming()
                 from daqifi._internal import scpi_commands
+
+                # Stop the stream whatever is_streaming says: one started by
+                # a raw send isn't tracked, and its output would fill every
+                # text exchange below.
+                device.send(scpi_commands.stop_streaming())
 
                 # The WINC is off in standby and right after a PIC32
                 # reflash, and LAN commands are refused then, so FWUpdate
@@ -1118,10 +1133,13 @@ class DefaultFirmwareUpdateService:
     # refused APPLY leaves -200 in the error queue.
 
     def _bridge_ask(self, device, *messages, completion_timeout_ms=200) -> List[str]:
+        # Capped as a whole: a device still streaming text would otherwise
+        # keep the exchange's inactivity timer from ever running out.
         return device.execute_text_command(
             lambda: [device.send(m) for m in messages],
             response_timeout_ms=1000,
             completion_timeout_ms=completion_timeout_ms,
+            max_total_ms=_BRIDGE_EXCHANGE_MAX_MS,
         )
 
     def _read_error_code(self, device) -> Optional[int]:
