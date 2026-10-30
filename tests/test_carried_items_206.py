@@ -1,7 +1,7 @@
 """#206: items carried forward from #163.
 
-5. NyquistDevice.sd_get_file_binary cut everything before a "DAQIFI>" found
-   anywhere in the first 200 bytes, file data included.
+5. (Not fixed here: without the device's echo state, bytes alone can't
+   tell an echo from file data. These pins keep main's behaviour.)
 10. start_streaming capped the rate at 1000 Hz; the firmware's ceiling is
     STREAMING_ISR_MAX_HZ (22000), with a lower per-configuration cap it
     enforces itself.
@@ -55,20 +55,16 @@ def _download(reply: bytes) -> bytes:
     return device.sd_get_file_binary("log_a.bin", timeout=2.0)
 
 
-def test_a_prompt_inside_the_file_is_kept() -> None:
-    data = b"run 3 log\nDAQIFI> appears in this file\n\x00\x01binary"
-    assert _download(data + b"__END_OF_FILE__\r\n") == data
-
-
-def test_a_leading_echo_and_prompt_are_stripped() -> None:
-    data = b"\x00\x01payload DAQIFI> kept"
-    echo = scpi_commands.get_sd_file("log_a.bin").data.encode("ascii")
-    assert _download(echo + b"\r\nDAQIFI> " + data + b"__END_OF_FILE__") == data
-
-
-def test_data_with_no_echo_is_returned_whole() -> None:
-    data = b"\x00\x01payload"
+def test_a_command_shaped_payload_is_kept_with_echo_off() -> None:
+    # Audit r1: echo is off after open(), so a file that happens to begin
+    # with the GET command's text is file data, not an echo.
+    data = b'SYSTem:STORage:SD:GET "log_a.bin" is how this file was fetched\n'
     assert _download(data + b"__END_OF_FILE__") == data
+
+
+def test_a_prompt_after_cr_lf_is_stripped() -> None:
+    # Real firmware framing ahead of the payload.
+    assert _download(b"\r\nDAQIFI> payload__END_OF_FILE__") == b"payload"
 
 
 # ---- 10 --------------------------------------------------------------------
@@ -111,7 +107,9 @@ _ROWS = "ain0_ts,ain0_val\n100,1234\n200,1235\n"
 
 
 @pytest.mark.parametrize(
-    "rate", ["1\u00b2", "9" * 400, "4294967296"], ids=["superscript", "400-digits", "past-uint32"]
+    "rate",
+    ["1\u00b2", "9" * 400, "9" * 4301, "4294967296"],
+    ids=["superscript", "400-digits", "4301-digits", "past-uint32"],
 )
 def test_an_unusable_tick_rate_header_reads_as_absent(rate) -> None:
     text = f"# Device: Nq1\n# Timestamp Tick Rate: {rate} Hz\n" + _ROWS

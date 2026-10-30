@@ -846,23 +846,15 @@ class NyquistDevice:
                 f"SD file download timed out after {timeout}s "
                 f"({len(response)} bytes received, no EOF marker)")
 
-        # Strip a leading echo and prompt from raw bytes
+        # Strip leading echo and prompt from raw bytes
         # Echo format: <cmd>\r\nDAQIFI> <file data>__END_OF_FILE__...
-        # Only at the very start, and only the echo of the command just
-        # sent: a "DAQIFI>" further in is file data (a log can contain
-        # anything), and cutting at one lost everything before it (#163
-        # item 5). Echo is normally off (open() sends SYSTem:ECHO -1).
-        echo = cmd.encode("ascii")
-        if response.startswith(echo):
-            rest = response[len(echo):]
-            for line_end in (b"\r\n", b"\n", b"\r"):
-                if rest.startswith(line_end):
-                    rest = rest[len(line_end):]
-                    break
-            response = rest
+        # Only search the first 200 bytes to avoid truncating binary data
+        # that might coincidentally contain the prompt string
+        header = bytes(response[:200])
         for marker in (b"DAQIFI> ", b"DAQIFI>"):
-            if response.startswith(marker):
-                response = response[len(marker):]
+            echo_end = header.find(marker)
+            if echo_end >= 0:
+                response = response[echo_end + len(marker):]
                 break
 
         # Strip EOF marker

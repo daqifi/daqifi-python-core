@@ -2006,8 +2006,14 @@ def _parse_csv_header(
                 # huge value overflowed later). Anything else reads as an
                 # absent header: the override or fallback applies, and the
                 # rest of the file still parses.
-                if rate_str.isascii() and rate_str.isdigit():
-                    rate = int(rate_str)
+                # Length first: a uint32 has at most 10 digits, and int() of
+                # a long enough string raises (Python's digit limit) before
+                # any range check could run.
+                if rate_str.isascii() and rate_str.isdigit() and len(rate_str) <= 10:
+                    try:
+                        rate = int(rate_str)
+                    except ValueError:
+                        rate = 0
                     if 0 < rate <= _CSV_TICK_RATE_MAX:
                         timestamp_freq = rate
             continue
