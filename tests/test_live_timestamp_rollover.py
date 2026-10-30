@@ -23,14 +23,10 @@ WRAP = 2 ** 32
 TICKS = [WRAP - 75_000_000, WRAP - 25_000_000, 25_000_000, 75_000_000]
 
 
-def _run(fmt, on_start, n, tick_hz=None, host_times=None):
+def _run(fmt, on_start, n, tick_hz=None):
     sm = _f._manager(_f._FakeSerial(on_start=on_start), channels=[0], sample_rate=10, format=fmt)
     if tick_hz is not None:
         sm._tick_rate_hz = tick_hz
-    if host_times is not None:
-        # When each sample was received on the host (one value per sample).
-        times = iter(host_times)
-        sm._host_clock = lambda: next(times)
     sm.start()
     try:
         return sm, sm.read(num_samples=n, timeout=1.0)
@@ -101,49 +97,135 @@ def test_a_new_session_unwraps_from_its_own_first_tick() -> None:
     assert samples[0].timestamp == pytest.approx(10.0)
 
 
-# Audit r1 on #213: a gap longer than half the counter period.
+# Audits r1/r2 on #213: a gap longer than half the counter period, and the
+# host time that may judge it.
 
-def _json(ticks):
+class _Clock:
+    """Host time that moves on by ``step`` at every port poll, as it does
+    while a reader drains the port continuously."""
+
+    def __init__(self, step=0.25):
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self):
+        self.now += self.step
+        return self.now
+
+
+class _ScheduledSerial(_f._FakeSerial):
+    """Releases each (host_time, bytes) once the host clock reaches it."""
+
+    def __init__(self, clock, header, schedule):
+        super().__init__(on_start=header)
+        self.clock = clock
+        self.schedule = list(schedule)
+        self.started_at = None  # host time of START; arrivals count from it
+
+    def write(self, data):
+        n = super().write(data)
+        if "STREAM:START" in data.decode().strip().upper():
+            self.started_at = self.clock.now
+        return n
+
+    @property
+    def in_waiting(self):
+        with self.lock:
+            while (
+                self.started_at is not None
+                and self.schedule
+                and self.started_at + self.schedule[0][0] <= self.clock.now
+            ):
+                self.rx += self.schedule.pop(0)[1]
+            return len(self.rx)
+
+
+def _json_parts(ticks):
     meta = b'{"meta":{"dev":"Nyquist 1","sn":"0","tick_hz":%d}}\n' % TICK_HZ
-    return meta + b"".join(b'{"ts":%d,"ai":[{"ch":0,"val":1000}]}\n' % t for t in ticks)
+    return meta, [b'{"ts":%d,"ai":[{"ch":0,"val":1000}]}\n' % t for t in ticks]
 
 
-def _csv(ticks):
+def _csv_parts(ticks):
     header = b"# Timestamp Tick Rate: %d Hz\nain0_ts,ain0_val\n" % TICK_HZ
-    return header + b"".join(b"%d,1000\n" % t for t in ticks)
+    return header, [b"%d,1000\n" % t for t in ticks]
 
 
-def _pb(ticks):
-    return b"".join(_f._frame(msg_time_stamp=t, analog_in_data_float=[1.0]) for t in ticks)
+def _pb_parts(ticks):
+    return b"", [_f._frame(msg_time_stamp=t, analog_in_data_float=[1.0]) for t in ticks]
 
 
 _FORMATS = {
-    "json": (1, _json, None),
-    "csv": (2, _csv, None),
-    "protobuf": (0, _pb, TICK_HZ),
+    "json": (1, _json_parts, None),
+    "csv": (2, _csv_parts, None),
+    "protobuf": (0, _pb_parts, TICK_HZ),
 }
+
+
+def _scheduled(name, ticks, arrivals, clock):
+    fmt, parts, tick_hz = _FORMATS[name]
+    header, records = parts(ticks)
+    fake = _ScheduledSerial(clock, header, zip(arrivals, records))
+    sm = _f._manager(fake, channels=[0], sample_rate=10, format=fmt)
+    if tick_hz is not None:
+        sm._tick_rate_hz = tick_hz
+    sm._host_clock = clock
+    return sm
 
 
 @pytest.mark.parametrize("name", list(_FORMATS))
 def test_a_50_second_gap_is_a_50_second_step(name) -> None:
     # The signed-distance rule read a forward gap over half a period
-    # (42.9 s at 50 MHz) as a step back: [1.0, -34.9, -33.9].
-    fmt, build, tick_hz = _FORMATS[name]
+    # (42.9 s at 50 MHz) as a step back: [1.0, -34.9, -33.9]. The port is
+    # polled throughout, so the host saw the gap.
+    clock = _Clock()
     ticks = [50_000_000, 100_000_000, 2_600_000_000, 2_650_000_000]
-    _, samples = _run(fmt, build(ticks), 4, tick_hz=tick_hz, host_times=[0.0, 1.0, 51.0, 52.0])
+    sm = _scheduled(name, ticks, [0.0, 1.0, 51.0, 52.0], clock)
+    sm.start()
+    try:
+        samples = sm.read(num_samples=4, timeout=10.0)
+    finally:
+        sm.stop()
     assert _steps(samples) == [1.0, 50.0, 1.0]
 
 
 @pytest.mark.parametrize("name", list(_FORMATS))
 def test_a_gap_of_several_periods_is_counted(name) -> None:
-    fmt, build, tick_hz = _FORMATS[name]
+    clock = _Clock()
     gap_ticks = 200 * TICK_HZ  # 200 s: more than two whole periods
     ticks = [50_000_000, (50_000_000 + gap_ticks) % WRAP]
-    _, samples = _run(fmt, build(ticks), 2, tick_hz=tick_hz, host_times=[0.0, 200.2])
+    sm = _scheduled(name, ticks, [0.0, 200.0], clock)
+    sm.start()
+    try:
+        samples = sm.read(num_samples=2, timeout=10.0)
+    finally:
+        sm.stop()
     assert _steps(samples) == [200.0]
 
 
+@pytest.mark.parametrize("name", list(_FORMATS))
+def test_a_paused_consumer_does_not_turn_buffered_records_into_a_gap(name) -> None:
+    # Audit r2: host time measured at parse turned a 50 s pause between
+    # read() calls into a whole extra period (+85.9 s). Records already
+    # waiting are 1 s apart, and the poll after the pause isn't trusted.
+    clock = _Clock(step=0.001)
+    ticks = [WRAP - 75_000_000, WRAP - 25_000_000, 25_000_000, 75_000_000]
+    sm = _scheduled(name, ticks, [0.0, 0.0, 0.0, 0.0], clock)
+    sm.start()
+    try:
+        first = sm.read(num_samples=2, timeout=5.0)
+        clock.now += 50.0  # the consumer is away; nothing polls the port
+        second = sm.read(num_samples=2, timeout=5.0)
+    finally:
+        sm.stop()
+    assert _steps(first + second) == [1.0, 1.0, 1.0]
+
+
 def test_an_older_tick_received_later_still_steps_back() -> None:
-    ticks = [100_000_000, 150_000_000, 125_000_000]
-    _, samples = _run(1, _json(ticks), 3, host_times=[0.0, 1.0, 1.01])
+    clock = _Clock(step=0.005)
+    sm = _scheduled("json", [100_000_000, 150_000_000, 125_000_000], [0.0, 1.0, 1.01], clock)
+    sm.start()
+    try:
+        samples = sm.read(num_samples=3, timeout=10.0)
+    finally:
+        sm.stop()
     assert _steps(samples) == [1.0, -0.5]

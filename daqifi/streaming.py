@@ -33,6 +33,9 @@ class StreamState(Enum):
 _TICK_RANGE = 1 << 32
 _TICK_HALF_RANGE = 1 << 31
 _TICK_MASK = _TICK_RANGE - 1
+# Polls closer together than this count as draining the port continuously,
+# so host time stands in for when bytes arrived.
+_FRESH_POLL_SECONDS = 0.5
 
 @dataclass
 class Sample:
@@ -280,9 +283,11 @@ class StreamManager:
         # 102 s at 42 MHz). Ticks are unwrapped per session; see
         # _unwrap_tick.
         self._last_raw_tick: Optional[int] = None
-        self._last_host_time = 0.0
+        self._last_host_time: Optional[float] = None
         self._unwrapped_tick = 0
         self._host_clock: Callable[[], float] = time.monotonic
+        self._last_poll_time: Optional[float] = None
+        self._poll_fresh = False
         # Protobuf decode state. Lazily initialised on the first
         # _read_sample_protobuf call so callers using JSON/CSV pay
         # nothing for the import.
@@ -361,6 +366,9 @@ class StreamManager:
         self._buffer.clear()
         self._read_buffer = ""  # Clear read buffer (JSON/CSV)
         self._last_raw_tick = None  # a new session unwraps from its own start
+        self._last_host_time = None
+        self._last_poll_time = None
+        self._poll_fresh = False
         # Clear protobuf decode state for the same reason — leftover
         # bytes from a previous stop()'d session would otherwise be
         # decoded as the start of the new stream, and queued samples
@@ -768,6 +776,7 @@ class StreamManager:
 
         try:
             # Read available data from serial port
+            self._note_port_poll()
             if self._comm._serial.in_waiting > 0:
                 chunk = self._comm._serial.read(self._comm._serial.in_waiting).decode('utf-8', errors='ignore')
                 self._read_buffer += chunk
@@ -864,6 +873,7 @@ class StreamManager:
         """
         try:
             # Read available data from serial port
+            self._note_port_poll()
             if self._comm._serial.in_waiting > 0:
                 chunk = self._comm._serial.read(self._comm._serial.in_waiting).decode('utf-8', errors='ignore')
                 self._read_buffer += chunk
@@ -1003,6 +1013,7 @@ class StreamManager:
         # would mask the actual fault site (Qodo PR #149
         # /agentic_review #3).
         try:
+            self._note_port_poll()
             in_waiting = self._comm._serial.in_waiting
 
             if in_waiting > 0:
@@ -1068,33 +1079,53 @@ class StreamManager:
             return self._pending_pb_samples.popleft()
         return None
 
+    def _note_port_poll(self) -> None:
+        """Called each time the port is polled for new bytes. Host time is
+        a fair measure of when bytes arrived only while the port is being
+        drained continuously; after a pause between polls (a consumer that
+        stopped calling read()), the OS buffered what arrived meanwhile and
+        the time it is read says nothing about when it came (#193)."""
+        now = self._host_clock()
+        self._poll_fresh = (
+            self._last_poll_time is not None
+            and now - self._last_poll_time <= _FRESH_POLL_SECONDS
+        )
+        self._last_poll_time = now
+
     def _unwrap_tick(self, raw_tick: int, tick_hz: float) -> int:
         """Place a raw 32-bit device tick on this session's unbroken scale.
 
         The counter is only 32 bits, so the step from the previous tick is
         known only up to whole periods (2^32 ticks): its unsigned distance
-        ``d`` could mean ``d + k * 2^32`` for any whole ``k``. The host's
-        clock is the second source. The host time between receiving the two
-        ticks, times ``tick_hz``, gives the step to expect, and the ``k``
-        that comes closest to it is taken. So:
+        ``d`` could mean ``d + k * 2^32`` for any whole ``k``. The ``k`` that
+        brings the step closest to what the host saw is taken:
 
-        - a rollover continues upwards;
-        - a gap longer than half a period, or several, is counted;
-        - a slightly older tick (a sample queued earlier) steps back a
-          little.
+        - while the port is drained continuously, the expected step is the
+          host time since the previous sample times ``tick_hz``. A rollover
+          continues upwards, and a gap longer than half a period, or
+          several, is counted;
+        - otherwise (samples read in a burst, or after a pause between
+          polls) nothing is expected, and the nearest step is taken, within
+          half a period either way.
 
-        Samples read in a burst have almost no host time between them, and
-        then this is the nearest-step rule: within half a period either way.
+        Either way a slightly older tick (a sample queued earlier) steps
+        back a little.
 
         The session's first tick keeps its raw value (#193).
         """
         raw = int(raw_tick) & _TICK_MASK
-        now = self._host_clock()
+        now = self._last_poll_time
         if self._last_raw_tick is None:
             self._unwrapped_tick = raw
         else:
             distance = (raw - self._last_raw_tick) & _TICK_MASK
-            expected = max(0.0, now - self._last_host_time) * tick_hz
+            expected = 0.0
+            if (
+                self._poll_fresh
+                and now is not None
+                and self._last_host_time is not None
+            ):
+                expected = max(0.0, now - self._last_host_time) * tick_hz
             k = round((expected - distance) / _TICK_RANGE)
             self._unwrapped_tick += distance + k * _TICK_RANGE
         self._last_raw_tick = raw
