@@ -222,6 +222,41 @@ def test_download_sd_card_file_still_completes_a_clean_transfer() -> None:
     assert error is None and result.file_size == 9 and written == b"whole log"
 
 
+# ---- audit r2 --------------------------------------------------------------
+
+_OVERLAP_BODY = b"abc__TRANSFER_ERROR"  # its tail + the EOF's "__" spell the marker
+
+
+@pytest.mark.parametrize("buffer_size", range(19, 35))
+def test_the_receiver_decides_the_boundary_the_same_at_every_chunking(buffer_size) -> None:
+    result, written, error = _receive(
+        io.BytesIO(_OVERLAP_BODY + EOF), expected_size=19, buffer_size=buffer_size
+    )
+    assert error is None, repr(error)
+    assert (result, written) == (19, _OVERLAP_BODY)
+
+
+@pytest.mark.parametrize("read_size", range(19, 35))
+def test_download_decides_the_boundary_the_same_at_every_chunking(read_size) -> None:
+    device = _fakes._make_device_with_serial_facade(
+        {b"SD:GET": _OVERLAP_BODY + EOF}, max_read_bytes=read_size
+    )
+    device._SD_DOWNLOAD_IDLE_TIMEOUT_S = 1.5
+    result, written, error = _download(device, 19)
+    assert error is None, repr(error)
+    assert result.file_size == 19 and result.size_verified
+    assert written == _OVERLAP_BODY
+
+
+@pytest.mark.parametrize("total_s, idle_s", [(0.05, 0.2), (0.1, 0.5)])
+def test_download_the_total_cap_also_classifies_an_open_candidate(total_s, idle_s) -> None:
+    device = _device(b"partial log" + TE, idle_s=idle_s)
+    device._SD_DOWNLOAD_TIMEOUT_S = total_s
+    _, written, error = _download(device, 1000)
+    assert type(error).__name__ == "SdCardTransferErrorException", repr(error)
+    assert error.bytes_received == 11 and written == b"partial log"
+
+
 # ---- legacy NyquistDevice: unchanged -------------------------------------
 
 

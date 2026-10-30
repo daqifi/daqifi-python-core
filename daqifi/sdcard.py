@@ -132,14 +132,23 @@ class _SizedTransfer:
     """The body of a download whose size is known, telling the device's
     ``__TRANSFER_ERROR__`` from file content that happens to contain it.
 
-    No byte is written from the first OPEN candidate on: a place the marker
-    could start that nothing but a line ending or prompt follows (or a
-    proper prefix of the marker at the end of what has come). A candidate
-    followed by real content was content. At the size boundary only an
-    exact ``__END_OF_FILE__`` is success; a complete transfer-error marker
-    there, or one crossing it, is the error. A candidate still open when
-    the line goes idle or closes (:meth:`finish`) is the error, with the
-    bytes before it. No quiet window decides anything: content may pause.
+    The boundary is decided by what starts AT it: the size bytes followed
+    by an exact ``__END_OF_FILE__`` are success, whatever the content's tail
+    looks like (its last bytes and the marker's leading ``__`` can spell
+    ``__TRANSFER_ERROR__`` together). While the bytes past the boundary are
+    still a prefix of that marker, nothing is decided.
+
+    Before that, no byte is written from the first OPEN candidate on: a
+    place the marker could start that nothing but a line ending or prompt
+    follows (or a proper prefix of the marker at the end of what has
+    come). A candidate followed by real content was content. Past the
+    boundary, anything but the end-of-file marker: a complete transfer-error
+    marker there or across the boundary is the error, else a mismatch. A
+    candidate still open when the line goes idle, closes or the deadline
+    passes (:meth:`finish`) is the error, with the bytes before it, unless
+    the bytes past the boundary could be the start of the end-of-file
+    marker (then it can't be told; the caller's timeout stands). No quiet
+    window decides anything: content may pause.
     """
 
     def __init__(self, expected_size: int) -> None:
@@ -167,41 +176,49 @@ class _SizedTransfer:
         ("transfer_error", bytes before it) or ("mismatch", None)."""
         self.pending.extend(data)
         boundary = self.expected - self.committed
+        undecided = True
+        if len(self.pending) >= boundary:
+            after = bytes(self.pending[boundary:])
+            if after.startswith(END_OF_FILE_MARKER):
+                # The whole body, then the exact marker: success.
+                out = bytes(self.pending[:boundary])
+                self.committed += boundary
+                self.pending = bytearray()
+                return out, ("eof", after[len(END_OF_FILE_MARKER):])
+            # Empty, or a prefix of the end-of-file marker: not yet known.
+            undecided = END_OF_FILE_MARKER.startswith(after)
         limit = min(boundary, len(self.pending))
         candidate = self._open_candidate(limit)
         safe = limit if candidate is None else candidate
         out = bytes(self.pending[:safe])
         del self.pending[:safe]
         self.committed += safe
-        return out, self._outcome()
+        return out, (None if undecided else self._outcome())
 
     def _outcome(self) -> Optional[Tuple[str, Any]]:
+        # Called once the bytes past the boundary are known not to be (the
+        # start of) the end-of-file marker.
         tail = bytes(self.pending)
         marker = TRANSFER_ERROR_MARKER
-        error_complete = tail.startswith(marker) and _is_marker_trailer(tail[len(marker):])
-        if self.committed == self.expected:
-            if tail.startswith(END_OF_FILE_MARKER):
-                return ("eof", tail[len(END_OF_FILE_MARKER):])
-            if error_complete:
-                return ("transfer_error", self.committed)
-            if END_OF_FILE_MARKER.startswith(tail) or marker.startswith(tail):
-                return None
-            return ("mismatch", None)
-        # Short of the boundary, with an open candidate at the start: one
-        # that reaches past the boundary can't be content (an end-of-file
-        # marker would have to start inside it).
-        if error_complete and len(tail) > self.expected - self.committed:
+        if tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
             return ("transfer_error", self.committed)
-        return None
+        if marker.startswith(tail):
+            return None  # could still complete
+        return ("mismatch", None)
 
     def finish(self) -> Optional[Tuple[str, Any]]:
         """At idle, close or the deadline: an open complete candidate is the
         device's marker."""
         tail = bytes(self.pending)
         marker = TRANSFER_ERROR_MARKER
-        if tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
-            return ("transfer_error", self.committed)
-        return None
+        if not (tail.startswith(marker) and _is_marker_trailer(tail[len(marker):])):
+            return None
+        boundary = self.expected - self.committed
+        if len(tail) >= boundary and END_OF_FILE_MARKER.startswith(tail[boundary:]):
+            # Its bytes past the boundary could be the end-of-file marker
+            # starting: content followed by a cut-off marker, or the error.
+            return None
+        return ("transfer_error", self.committed)
 
 
 _LOG_FILENAME_RE = re.compile(r"^log_(\d{8}_\d{6})", re.IGNORECASE)

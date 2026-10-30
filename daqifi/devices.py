@@ -2660,6 +2660,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
         while True:
             now = time.monotonic()
             if now >= total_deadline:
+                # As at the idle timeout: an open transfer-error candidate
+                # was the device's marker.
+                outcome = sized.finish() if sized is not None else None
+                if outcome is not None:
+                    raise SdCardTransferErrorException(file_name, outcome[1])
                 raise TimeoutError(
                     f"SD card file download exceeded total cap of "
                     f"{self._SD_DOWNLOAD_TIMEOUT_S:.0f}s "
