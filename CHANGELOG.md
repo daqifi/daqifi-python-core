@@ -28,13 +28,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- `DaqifiStreamingDevice` reported every DIO pin as an input and every
-  analog channel as disabled: it now reads the status message's direction
-  mask (field 37, bit set = input) and enable mask (field 22). A pin or
-  channel the device doesn't report keeps the old default (#202).
-- Two legacy `DigitalIOChannel` direction or state setters run at once on
-  one device could lose one update (an unlocked read-modify-write of the
-  port mask); they now share a per-device lock (#202).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
