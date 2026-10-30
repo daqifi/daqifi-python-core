@@ -2183,10 +2183,15 @@ class DaqifiStreamingDevice(DaqifiDevice):
             raise RuntimeError("Cannot format SD card while logging.")
 
         was_streaming = self._pause_streaming_for_sd()
+        format_done = False
 
         try:
             self.prepare_sd_interface()
             self.send(scpi_commands.format_sd_card())
+            # The format runs on asynchronously; while it does the SD
+            # module refuses SD:ENAble 0 and a START that would arm
+            # logging. Wait for it before restoring anything.
+            format_done = self._wait_for_sd_format()
         finally:
             # Restore LAN — same finally pattern as get/delete/download.
             # The format command continues asynchronously on the device,
@@ -2197,7 +2202,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     self.prepare_lan_interface()
                 except Exception:
                     pass
-            self._restore_streaming(was_streaming)
+            if format_done:
+                self._restore_streaming(was_streaming)
+            elif was_streaming:
+                _log.warning(
+                    "Not resuming streaming after the SD format: the format's "
+                    "completion couldn't be confirmed."
+                )
 
     @_exclusive_sd_operation
     def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
@@ -2435,18 +2446,99 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
     def _restore_streaming(self, was_streaming: bool) -> None:
         """Resume a stream an SD operation paused (port of daqifi-core
-        874c5fb / 9717b32). Best-effort, from a finally: a failure must not
-        replace the operation's own outcome, and leaves the device marked
-        not streaming."""
+        874c5fb / 9717b32), and mark it streaming only once the device has
+        accepted it.
+
+        ``send()`` doesn't check acceptance, and the firmware can refuse the
+        restore (``SD:ENAble 0`` or a START that arms SD logging, while the
+        SD module is busy). So the error queue is emptied first (an error
+        there, or a queue that can't be emptied, means the restore isn't
+        confirmed), then START is sent with ``SYSTem:ERRor?`` right after
+        it, and only a ``0`` reply marks the device streaming. Anything else
+        sends STOP and leaves it Ready, with a warning: a restore that
+        couldn't be confirmed never lands in the streaming state.
+        Best-effort, from a finally: a failure must not replace the
+        operation's own outcome.
+        """
         if not was_streaming or not self.is_connected:
             return
-        try:
-            self.start_streaming()
-        except Exception:
-            _log.exception("Failed to resume streaming after an SD operation")
+        from ._internal import scpi as _scpi
+
+        def _not_resumed(why: str) -> None:
+            _log.warning("Not resuming streaming after an SD operation: %s", why)
+            try:
+                self.send(scpi_commands.stop_streaming())
+            except Exception:
+                pass
             self._is_streaming = False
             if self._state == DeviceState.Streaming:
                 self._set_state(DeviceState.Ready)
+
+        try:
+            popped = self.drain_errors(max_iterations=16, empty_budget=2)
+            codes = [_scpi.parse_system_error(entry)[0] for entry in popped]
+            if _DRAIN_INCONCLUSIVE_CODE in codes:
+                _not_resumed("the error queue couldn't be confirmed empty")
+                return
+            if codes:
+                _not_resumed(f"the device reported {popped!r}")
+                return
+            lines = self.execute_text_command(
+                lambda: (
+                    self.send(scpi_commands.start_streaming(self._streaming_frequency)),
+                    self.send(scpi_commands.get_last_error()),
+                ),
+                response_timeout_ms=1000,
+                completion_timeout_ms=300,
+            )
+            reply = _scpi.find_system_error_reply(lines)
+            if reply is None:
+                _not_resumed("the START wasn't confirmed (no reply)")
+                return
+            code, _description = _scpi.parse_system_error(reply)
+            if code != 0:
+                _not_resumed(f"the device refused START: {reply}")
+                return
+        except Exception as exc:
+            _not_resumed(f"{exc}")
+            return
+        self._is_streaming = True
+        self._set_state(DeviceState.Streaming)
+
+    def _wait_for_sd_format(self, timeout_s: float = 120.0) -> bool:
+        """Poll ``FORmat?`` until the format leaves "formatting": True when
+        it completed (or none is running), False when that can't be
+        confirmed (no readable reply, or still formatting at ``timeout_s``).
+        Raises when the device reports the format failed."""
+        import re
+
+        from .exceptions import SdCardOperationException
+
+        deadline = time.monotonic() + timeout_s
+        status_line = re.compile(r"^\s*(?:DAQIFI>\s*)?(-?\d+)\s*,\s*(\d+)\s*$", re.IGNORECASE)
+        while time.monotonic() < deadline:
+            try:
+                lines = self.execute_text_command(
+                    lambda: self.send(scpi_commands.get_sd_format_status()),
+                    response_timeout_ms=1000,
+                    completion_timeout_ms=200,
+                )
+            except Exception:
+                return False
+            match = next((status_line.match(l) for l in lines if status_line.match(l)), None)
+            if match is None:
+                return False
+            status = int(match.group(1))
+            if status == -1:
+                raise SdCardOperationException(
+                    "The SD card format failed (the device reported status -1).",
+                    tuple(lines),
+                    None,
+                )
+            if status != 1:
+                return True
+            time.sleep(0.5)
+        return False
 
     def _sd_listing_marker_expected(self) -> bool:
         """Whether the firmware ends every listing with ``__END_OF_LIST__``:

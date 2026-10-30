@@ -33,7 +33,11 @@ LISTING = b"Daqifi/log_a.bin 3\r\n"
 
 
 def _device(**kwargs):
-    return _fakes._make_device_with_serial_facade({b"SD:LIST?": LISTING}, **kwargs)
+    # FORmat? answers "done": format_sd_card waits for the format to finish
+    # before it resumes anything.
+    return _fakes._make_device_with_serial_facade(
+        {b"SD:LIST?": LISTING, b"SD:FORmat?": b"2,100\r\n"}, **kwargs
+    )
 
 
 def _written(device):
@@ -61,7 +65,9 @@ def test_an_sd_operation_resumes_the_stream_it_paused(op) -> None:
         }[op]()
         commands = _written(device)
         assert commands[0].startswith("SYSTem:STReam:STOP")
-        assert commands[-1].startswith("SYSTem:STReam:START")
+        # Resumed, and confirmed: START, then the error query that checks it.
+        assert commands[-2:][0].startswith("SYSTem:STReam:START")
+        assert commands[-1].startswith("SYSTem:ERRor?")
         assert device.is_streaming and device.state == DeviceState.Streaming
     finally:
         device.disconnect()
@@ -72,7 +78,7 @@ def test_a_download_resumes_the_stream_it_paused() -> None:
         {b"SD:GET": b"abc__END_OF_FILE__\r\n"}))
     try:
         device.download_sd_card_file("log_a.bin", io.BytesIO(), expected_size=3)
-        assert _written(device)[-1].startswith("SYSTem:STReam:START")
+        assert any(c.startswith("SYSTem:STReam:START") for c in _written(device))
         assert device.is_streaming
     finally:
         device.disconnect()
@@ -91,10 +97,17 @@ def test_no_stream_is_started_when_none_was_running() -> None:
 def test_a_failed_resume_leaves_the_device_marked_not_streaming(monkeypatch) -> None:
     device = _streaming(_device())
     try:
-        def _fail():
-            raise OSError("link dropped")
+        real_drain = device.drain_errors
+        calls = []
 
-        monkeypatch.setattr(device, "start_streaming", _fail)
+        def _fail_on_restore(*args, **kwargs):
+            # The listing's own drain works; the restore's raises.
+            calls.append(1)
+            if len(calls) > 1:
+                raise OSError("link dropped")
+            return real_drain(*args, **kwargs)
+
+        monkeypatch.setattr(device, "drain_errors", _fail_on_restore)
         files = device.get_sd_card_files()  # the listing's own outcome stands
         assert [f.file_name for f in files] == ["log_a.bin"]
         assert not device.is_streaming and device.state != DeviceState.Streaming
@@ -175,3 +188,120 @@ def test_the_benchmark_size_is_1_to_1024_kb(size, ok) -> None:
     else:
         with pytest.raises(ValueError, match="1 to 1024 KB"):
             scpi_commands.run_sd_benchmark(size)
+
+
+# ---- audit r2: a restore during the format's busy window ---------------------
+
+import time
+
+
+class _BusyAfterFormat:
+    """Models the firmware around an asynchronous format: for ``busy_s``
+    after SD:FORmat the SD module is busy, so SD:ENAble 0 and a START (which
+    would arm SD logging) are refused with -200; FORmat? says 1 while busy,
+    2 after. SYSTem:ERRor? pops the queued errors."""
+
+    def __init__(self, device, busy_s=0.3, refuse_start_always=False, format_status=2):
+        self.stream = device._transport.stream
+        self.busy_until = 0.0
+        self.busy_s = busy_s
+        self.refuse_start_always = refuse_start_always
+        self.format_status = format_status
+        self.errors = []
+        self.refused = []
+        self._write = self.stream.write
+        self.stream.write = self.write
+
+    def busy(self):
+        return time.monotonic() < self.busy_until
+
+    def write(self, data):
+        b = bytes(data)
+        self.stream.written.append(b)
+        command = b.decode(errors="replace").strip()
+        if command.startswith("SYSTem:STORage:SD:FORmat?"):
+            self.stream.feed(b"1,50\r\n" if self.busy() else b"%d,100\r\n" % self.format_status)
+        elif command.startswith("SYSTem:STORage:SD:FORmat"):
+            self.busy_until = time.monotonic() + self.busy_s
+        elif command.startswith("SYSTem:STORage:SD:ENAble 0") and self.busy():
+            self.errors.append(b'-200,"Execution error"')
+            self.refused.append(command)
+        elif command.startswith("SYSTem:STReam:START") and (self.busy() or self.refuse_start_always):
+            self.errors.append(b'-200,"Execution error"')
+            self.refused.append(command)
+        elif command.startswith("SYSTem:ERRor?"):
+            self.stream.feed((self.errors.pop(0) if self.errors else b'0,"No error"') + b"\r\n")
+        return len(b)
+
+
+def test_a_format_resumes_only_after_it_completes_and_is_accepted() -> None:
+    device = _streaming(_device())
+    fake = _BusyAfterFormat(device, busy_s=0.3)
+    try:
+        device.format_sd_card()
+        assert fake.refused == []  # nothing restored inside the busy window
+        assert device.is_streaming and device.state == DeviceState.Streaming
+    finally:
+        device.disconnect()
+
+
+def test_a_refused_start_leaves_the_device_ready_not_streaming() -> None:
+    device = _streaming(_device())
+    fake = _BusyAfterFormat(device, busy_s=0.0, refuse_start_always=True)
+    try:
+        device.format_sd_card()
+        assert fake.refused and fake.refused[-1].startswith("SYSTem:STReam:START")
+        assert not device.is_streaming and device.state != DeviceState.Streaming
+        assert _written(device)[-1].startswith("SYSTem:STReam:STOP")
+    finally:
+        device.disconnect()
+
+
+def test_a_failed_format_raises_and_doesnt_resume() -> None:
+    from daqifi.exceptions import SdCardOperationException
+
+    device = _streaming(_device())
+    _BusyAfterFormat(device, busy_s=0.0, format_status=-1)
+    try:
+        with pytest.raises(SdCardOperationException, match="format failed"):
+            device.format_sd_card()
+        assert not device.is_streaming
+    finally:
+        device.disconnect()
+
+
+# ---- audit r2: in_waiting on a descriptor >= 1024 ------------------------------
+
+
+def test_in_waiting_works_on_a_high_descriptor_and_doesnt_drop_a_healthy_link() -> None:
+    import socket
+
+    resource = pytest.importorskip("resource")
+    from daqifi.transport import _SocketStream
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = 1100
+    if hard != resource.RLIM_INFINITY and hard <= target:
+        pytest.skip("can't open a descriptor >= 1024 here")
+    if soft <= target:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target + 16, hard))
+    a, b = socket.socketpair()
+    os.dup2(a.fileno(), target)
+    high = socket.socket(fileno=target)
+    a.close()
+    try:
+        closed = []
+        stream = _SocketStream(high, 0.5, 1, lambda s: closed.append(s))
+        assert stream.in_waiting == 0
+        assert not stream.peer_closed and not closed
+        b.sendall(b"12345")
+        for _ in range(50):
+            if stream.in_waiting:
+                break
+            time.sleep(0.01)
+        assert stream.in_waiting == 5
+    finally:
+        high.close()
+        b.close()
+        if soft <= target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))

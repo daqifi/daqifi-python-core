@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import io
 import logging
-import select
 import selectors
 import socket
 import threading
@@ -126,19 +125,19 @@ class _SocketStream(io.RawIOBase):
         """Bytes ready to read now, without blocking (pyserial's name, so
         raw readers poll a socket and a serial port the same way).
 
-        A zero-timeout ``select`` and, if the socket is readable, a
-        ``MSG_PEEK`` receive that leaves the bytes for the next read. A
-        readable socket with nothing to peek is end of stream, reported as
-        :meth:`readinto` reports it; a socket error too."""
+        A zero-timeout selector poll (as :meth:`readinto` uses; unlike
+        ``select.select`` it takes any descriptor number) and, if the socket
+        is readable, a ``MSG_PEEK`` receive that leaves the bytes for the
+        next read. A readable socket with nothing to peek is end of stream,
+        reported as :meth:`readinto` reports it; so is a socket error from
+        the receive. A failure of the poll itself is raised, not taken for
+        a closed peer."""
         if self.peer_closed or self._sock is None:
             return 0
-        try:
-            readable, _, _ = select.select([self._sock], [], [], 0)
-        except (OSError, ValueError):
-            self._mark_peer_closed()
-            return 0
-        if not readable:
-            return 0
+        with selectors.DefaultSelector() as selector:
+            selector.register(self._sock, selectors.EVENT_READ)
+            if not selector.select(0):
+                return 0
         try:
             peeked = self._sock.recv(65536, socket.MSG_PEEK)
         except (BlockingIOError, InterruptedError):
