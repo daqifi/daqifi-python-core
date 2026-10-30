@@ -91,6 +91,52 @@ def test_a_csv_without_a_column_header_names_no_channels() -> None:
     assert sample.analog_channels is None
 
 
+def _seconds(data: bytes):
+    samples = list(_csv(data).samples)
+    return [round((s.timestamp - samples[0].timestamp).total_seconds(), 6) for s in samples]
+
+
+_HEAD = b"# Timestamp Tick Rate: 1000 Hz\nain0_ts,ain0_val,dio_ts,dio_val\n"
+
+
+def test_a_dio_only_row_stamped_before_the_analog_row_is_not_a_rollover() -> None:
+    # csv_encoder.c pairs the fronts of two queues (analog, DIO); each keeps
+    # its own stamp, so a DIO read can trail an analog sample already written.
+    data = _HEAD + (
+        b"10000,0.5,,\n"
+        b",,9990,1\n"
+        b"10100,0.5,,\n"
+        b",,10150,0\n"
+        b"10200,0.5,,\n"
+    )
+    assert _seconds(data) == [0.0, -0.01, 0.1, 0.15, 0.2]
+
+
+def test_a_delayed_adc_sample_after_a_dio_only_row_is_not_a_rollover() -> None:
+    data = _HEAD + (
+        b"10000,0.5,,\n"
+        b",,10050,1\n"
+        b"10030,0.5,,\n"
+        b"10100,0.5,,\n"
+    )
+    assert _seconds(data) == [0.0, 0.05, 0.03, 0.1]
+
+
+def test_analog_rows_still_unwrap_a_real_rollover() -> None:
+    data = _HEAD + (
+        b"4294966796,0.5,,\n"
+        b",,4294967000,1\n"
+        b"204,0.5,,\n"
+    )
+    assert _seconds(data) == [0.0, 0.204, 0.704]
+
+
+def test_a_truncated_last_row_is_not_an_all_low_dio_reading() -> None:
+    data = _HEAD + b"1000,0.5,1000,3\n,,1420000,"
+    samples = list(_csv(data).samples)
+    assert [(s.analog_values, s.digital_data) for s in samples] == [((0.5,), 3)]
+
+
 def test_a_row_with_nothing_in_it_is_still_skipped() -> None:
     data = b"ain0_ts,ain0_val,dio_ts,dio_val\n1000,0.5,1000,1\n,,,\n2000,0.6,2000,0\n"
     assert [s.analog_values for s in _csv(data).samples] == [(0.5,), (0.6,)]

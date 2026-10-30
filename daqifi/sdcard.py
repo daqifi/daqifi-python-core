@@ -2188,11 +2188,12 @@ def _try_parse_csv_data_row(
             dio_index = analog_pair_count
             dio_ts_col = cols[dio_index * 2].strip()
             dio_val_col = cols[dio_index * 2 + 1].strip()
-            if dio_ts_col.isdigit():
+            # A DIO read needs both its stamp and its value: a truncated
+            # last row (",,1420000,") is not an all-low reading.
+            if dio_ts_col.isdigit() and dio_val_col.isdigit():
                 dio_timestamp = int(dio_ts_col)
-                dio_read = True
-            if dio_val_col.isdigit():
                 digital_data = int(dio_val_col)
+                dio_read = True
 
         row_timestamp = per_channel_ts[0] if per_channel_ts else dio_timestamp
         if not per_channel_ts and not dio_read:
@@ -2214,8 +2215,12 @@ def _produce_csv_samples(
     timestamp_freq = config.timestamp_frequency if config else 0
     tick_period = 1.0 / timestamp_freq if timestamp_freq > 0 else 0.0
 
-    previous_timestamp: Optional[int] = None
-    elapsed_seconds = 0.0
+    # Analog and DIO stamps come from two queues (csv_encoder.c tryWriteRow
+    # peeks AInSampleList and DIOSampleList, writing each sample's own
+    # stamp), so a DIO-only row can sit a little before or after the
+    # analog rows around it. The JSON parser's clock places such records
+    # without letting them move the analog rollover base.
+    clock = _JsonClock(behind_window=timestamp_freq)
     lines_processed = 0
     bytes_read = 0
     progress = options.progress
@@ -2242,13 +2247,8 @@ def _produce_csv_samples(
         # protobuf parser's behavior so cross-format reconstruction
         # of the same physical log is consistent.
         if tick_period > 0 and row_ts != 0:
-            if previous_timestamp is None:
-                previous_timestamp = row_ts
-            else:
-                delta = _compute_tick_delta(previous_timestamp, row_ts)
-                elapsed_seconds += delta * tick_period
-                previous_timestamp = row_ts
-            absolute_time = base_time + timedelta(seconds=elapsed_seconds)
+            tick = clock.place(row_ts, analog=bool(per_ch_ts))
+            absolute_time = base_time + timedelta(seconds=tick * tick_period)
 
         yield SdCardLogEntry(
             timestamp=absolute_time,
@@ -2511,7 +2511,9 @@ def _split_batched_samples(obj: Any) -> Tuple[List[Any], List[Tuple[int, int]], 
 
 
 class _JsonClock:
-    """Unwrapped ticks for a JSON parse's records, from their uint32 "ts".
+    """Unwrapped ticks for a JSON parse's records, from their uint32 "ts"
+    (and for a CSV parse's rows, whose DIO-only rows are digital-only
+    records: csv_encoder.c takes analog and DIO from separate queues).
 
     Anchored at tick 0 on the first record of any kind. An analog record
     moves the base: forward with rollover (as the other formats), or, when
