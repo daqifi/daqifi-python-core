@@ -1779,11 +1779,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
     start/stop streaming, and SCPI-driven SD-card / network /
     LAN-chip-info facade methods on top of :class:`DaqifiDevice`.
 
-    SD-card list/download, network configuration apply, and similar
-    multi-step operations are intentionally simpler than upstream --
-    they send the corresponding SCPI command and rely on the consumer
-    to surface the response. Hardware-coupled retry/timeout polish
-    lives in :mod:`daqifi.device.NyquistDevice` for now.
+    Text replies (SD listings, error-queue entries, LAN queries) are read
+    through :meth:`execute_text_command`, which captures them without
+    losing them to the protobuf consumer (#16, #22).
     """
 
     _WIFI_MODULE_RESTART_DELAY_S = 2.0
@@ -2870,13 +2868,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
         ``DaqifiStreamingDevice._networkConfiguration`` field which
         is similarly process-local.
 
-        ``DaqifiStreamingDevice`` cannot currently surface text-shaped
-        SCPI query replies (the streaming-device's protobuf consumer
-        eats them — see daqifi-python-core#16), so we cannot
-        round-trip ``SYST:COMM:LAN:SSID? / NETTYPE? / SECURITY?`` to
-        rebuild the configuration from the live device state. Once
-        #16 is resolved, this property should be reworked to query
-        and reconcile.
+        It does not query ``SYST:COMM:LAN:SSID? / NETTYPE? / SECURITY?``
+        to rebuild the configuration from the live device, although
+        :meth:`execute_text_command` could now read those replies (#16).
 
         Caveats — the snapshot can drift from the device's actual
         config if:

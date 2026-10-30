@@ -90,8 +90,9 @@ class _SocketStream(io.RawIOBase):
       used for this: after one timeout it refuses all further reads.
     * End of stream (the device closed the connection: reboot, Wi-Fi
       drop) is reported to the transport, on the reading thread, and
-      every read from then on raises ``ConnectionResetError``. It used to
-      read as an endless run of empty, "idle" reads.
+      that read and every one after it return ``b""``, the standard end
+      of stream; a socket error is reported the same way and re-raised.
+      It used to read as an endless run of empty, "idle" reads.
     """
 
     def __init__(
@@ -194,8 +195,9 @@ class TcpStreamTransport:
     """TCP implementation of :class:`StreamTransport` Protocol.
 
     Ports the C# ``TcpStreamTransport``. Wraps a :class:`socket.socket`
-    in a ``rwb`` file-like view (via :meth:`socket.makefile`) so it
-    matches the ``IO[bytes]`` shape consumers expect.
+    in a buffered read/write view (:class:`_SocketStream`, not
+    :meth:`socket.makefile`) so it matches the ``IO[bytes]`` shape
+    consumers expect.
 
     Like upstream, accepts either an explicit IP address string or a
     hostname; hostname resolution happens at :meth:`connect` time.
@@ -1003,8 +1005,9 @@ class HidLibraryTransport:
 
     Ports the C# ``HidLibraryTransport``. Uses two
     :class:`threading.Lock` instances (mirrors the upstream
-    ``SemaphoreSlim(1, 1)`` connection + io locks) so disconnects can
-    happen while a long read is still draining without re-entering.
+    ``SemaphoreSlim(1, 1)`` connection + io locks). :meth:`disconnect`
+    takes the io lock, so it waits for an in-flight read to finish, up
+    to :attr:`read_timeout` (10 s by default); upstream waits the same.
 
     Default :class:`HidPlatform` is :class:`HidApiPlatform` (lazy-loads
     the ``hid`` package on first use); pass a fake to avoid the
