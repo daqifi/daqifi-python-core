@@ -786,15 +786,22 @@ class DaqifiDevice:
             raise DeviceNotConnectedError()
         if isinstance(message, ScpiMessage):
             data = message.get_bytes()
-            # Read once: disconnect() on another thread closes the stream
-            # under no lock this path takes (upstream baabf0c). The
-            # connection generation and the stream itself tell this
-            # connection from a newer one on the same transport object.
-            generation = self._connect_generation
-            transport = self._transport
-            stream = transport.stream if transport is not None else None
+            # Read once, under the lock connect() bumps the generation
+            # with: disconnect() on another thread closes the stream under
+            # no lock this path takes (upstream baabf0c), and the
+            # generation tells this connection from a newer one on the
+            # same transport object. connect() bumps it before installing
+            # the new stream, so the pair read here is consistent.
+            with self._state_lock:
+                generation = self._connect_generation
+                transport = self._transport
+                try:
+                    stream = transport.stream if transport is not None else None
+                except Exception:
+                    # A closed transport's getter raises.
+                    stream = None
             if stream is None:
-                if self._shutting_down_since(transport, generation, None):
+                if self._shutting_down_since(transport, generation):
                     raise DeviceNotConnectedError(
                         "The message could not be sent: a disconnect completed "
                         "while it was in flight.",
@@ -838,7 +845,7 @@ class DaqifiDevice:
                 except AttributeError:
                     pass
             except Exception as exc:
-                if self._shutting_down_since(transport, generation, stream):
+                if self._shutting_down_since(transport, generation):
                     # A disconnect on another thread closed the stream under
                     # this write, or a reconnect has replaced it since: an
                     # expected race, not a loss of the current link. The
@@ -857,21 +864,18 @@ class DaqifiDevice:
                 "not yet implemented."
             )
 
-    def _shutting_down_since(
-        self, transport: Any, generation: int, stream: Any
-    ) -> bool:
+    def _shutting_down_since(self, transport: Any, generation: int) -> bool:
         """Whether a disconnect, or a new connection (even on the same
         transport object), has replaced the connection a send started on.
         A link that dropped by itself (status Lost) isn't one: that send
-        failure is the loss."""
-        current_stream = getattr(transport, "stream", None) if transport is not None else None
+        failure is the loss. Reads only device fields: a closed
+        transport's ``stream`` getter raises."""
         return (
-            self._is_disconnecting
-            or self._disposed
+            self._disposed
+            or self._is_disconnecting
             or self._status == ConnectionStatus.Disconnected
             or self._transport is not transport
             or self._connect_generation != generation
-            or (stream is not None and current_stream is not stream)
         )
 
     def _acquire_text_exchange_lock(self, operation: str) -> None:
@@ -1027,6 +1031,18 @@ class DaqifiDevice:
                 "Transport reports no stream; cannot pause consumer."
             )
 
+        # A stream the text reader can't poll (no in_waiting) is read in
+        # blocking chunks that return only at its read timeout: no wait
+        # below may be shorter than that, or a reply on its way is cut off.
+        if not hasattr(stream, "in_waiting"):
+            read_timeout = getattr(stream, "timeout", None)
+            if isinstance(read_timeout, (int, float)) and read_timeout > 0:
+                floor_ms = int(read_timeout * 1000) + 250
+                response_timeout_ms = max(response_timeout_ms, floor_ms)
+                completion_timeout_ms = max(completion_timeout_ms, floor_ms)
+                if max_total_ms is not None:
+                    max_total_ms = max(max_total_ms, floor_ms)
+
         was_running = self._consumer.is_running
         if was_running:
             try:
@@ -1046,7 +1062,11 @@ class DaqifiDevice:
             # LF-terminated replies too; blank lines count as an answer
             # (upstream a57a86a / 5a9f917) and are dropped on return.
             text_parser = LineBasedMessageParser(line_ending="\n", emit_empty_lines=True)
-            text_consumer = StreamMessageConsumer[str](stream, text_parser)
+            # Read what's waiting: a short reply then arrives at once, not
+            # after the serial port's whole read timeout.
+            text_consumer = StreamMessageConsumer[str](
+                stream, text_parser, read_available=True
+            )
 
             def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
                 # Background-thread callback. Only push to the queue;
@@ -1422,6 +1442,8 @@ class DaqifiDevice:
     _INIT_SCPI_RETRY_DELAY_S = 0.15
     _INIT_SCPI_SETTLE_S = 0.1
     _DEVICE_INFO_RESEND_S = 1.0
+    # How long after the last SYSInfoPB? its reply is still waited for.
+    _DEVICE_INFO_OWED_WAIT_S = 2.0
 
     def _run_init_sequence(self) -> None:
         """Send upstream's init commands (echo off, stream stop, power on,
@@ -1521,30 +1543,57 @@ class DaqifiDevice:
 
     def _wait_for_channels(self, timeout_s: float) -> bool:
         """Send ``SYSInfoPB?``, re-sending it every second, until a status
-        reply reports at least one channel; False at ``timeout_s``."""
+        reply reports at least one channel; False at ``timeout_s``.
+
+        Every query sent is owed a reply. Before returning, the replies
+        still owed (a re-send that crossed a slow first reply) are waited
+        for, up to ``_DEVICE_INFO_OWED_WAIT_S`` after the last send: one
+        arriving later would land in the next text exchange and corrupt
+        its first line."""
         populated = threading.Event()
+        lock = threading.Lock()
+        counts = {"sent": 0, "replies": 0}
+        all_answered = threading.Event()
 
         def _on_populated(args: ChannelsPopulatedEventArgs) -> None:
+            with lock:
+                counts["replies"] += 1
+                if counts["replies"] >= counts["sent"]:
+                    all_answered.set()
             # A status with no channels would satisfy the wait with an
             # empty device, the outcome this exists to prevent.
             if args.analog_channel_count + args.digital_channel_count > 0:
                 populated.set()
 
+        def _request() -> None:
+            with lock:
+                counts["sent"] += 1
+                all_answered.clear()
+            self.send(scpi_commands.get_device_info())
+
         # Subscribed before the send, so a fast reply can't be missed.
         self.add_channels_populated(_on_populated)
         try:
             deadline = time.monotonic() + timeout_s
-            self.send(scpi_commands.get_device_info())
+            _request()
+            last_send = time.monotonic()
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return populated.is_set()
+                    break
                 if populated.wait(min(self._DEVICE_INFO_RESEND_S, remaining)):
-                    return True
+                    break
                 if deadline - time.monotonic() > 0:
                     # Serial/CDC devices can miss the first request while
                     # the port settles.
-                    self.send(scpi_commands.get_device_info())
+                    _request()
+                    last_send = time.monotonic()
+            if not populated.is_set():
+                return False
+            all_answered.wait(
+                max(0.0, last_send + self._DEVICE_INFO_OWED_WAIT_S - time.monotonic())
+            )
+            return True
         finally:
             self.remove_channels_populated(_on_populated)
 

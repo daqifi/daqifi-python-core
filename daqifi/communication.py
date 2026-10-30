@@ -623,7 +623,14 @@ class StreamMessageConsumer(Generic[T]):
         message_parser: Any,  # Duck-typed: anything with parse_messages(bytes)
         buffer_size: int = DEFAULT_BUFFER_SIZE,
         is_wifi_device: bool = False,
+        read_available: bool = False,
     ) -> None:
+        """``read_available``: read only what the stream reports waiting
+        (``in_waiting``), or one byte when nothing is, instead of
+        ``buffer_size`` bytes. A serial port's ``read(n)`` returns early only
+        once ``n`` bytes arrive, so a short reply otherwise lands only after
+        the port's whole read timeout. For the text exchange; a stream
+        without ``in_waiting`` is read as before."""
         if stream is None:  # type: ignore[unreachable]
             raise TypeError("stream must not be None.")
         if message_parser is None:  # type: ignore[unreachable]
@@ -633,6 +640,7 @@ class StreamMessageConsumer(Generic[T]):
         self._stream = stream
         self._parser = message_parser
         self._buffer_size = buffer_size
+        self._read_available = read_available
         self._message_buffer = bytearray()
         # Hard cap to prevent unbounded growth if the parser
         # consistently fails to consume bytes (e.g. fed garbage
@@ -787,6 +795,18 @@ class StreamMessageConsumer(Generic[T]):
 
     # ---- internals ---------------------------------------------------------
 
+    def _read_size(self) -> int:
+        if not self._read_available:
+            return self._buffer_size
+        try:
+            waiting = self._stream.in_waiting
+        except AttributeError:
+            return self._buffer_size
+        except Exception:
+            # Let the read itself report a broken stream.
+            return 1
+        return max(1, min(int(waiting or 0), self._buffer_size))
+
     def _process_messages(self) -> None:
         # `socket.timeout` is the canonical "no data within window"
         # signal when the underlying transport is a TCP socket with a
@@ -802,7 +822,7 @@ class StreamMessageConsumer(Generic[T]):
                 bytes_read = b""
                 _read_start = time.monotonic()
                 try:
-                    bytes_read = self._stream.read(self._buffer_size)
+                    bytes_read = self._stream.read(self._read_size())
                     # Some stream-like objects return None on timeout (pyserial
                     # with non-blocking reads); coerce to empty bytes.
                     if bytes_read is None:

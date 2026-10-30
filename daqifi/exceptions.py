@@ -75,6 +75,11 @@ class DeviceNotConnectedError(DAQiFiError, RuntimeError):
         super().__init__(message)
         self.is_shutting_down = is_shutting_down
 
+    def __reduce__(self):
+        # Pickle (multiprocessing) rebuilds from args, which hold only the
+        # message; the keyword travels in the state.
+        return (type(self), self.args, self.__dict__)
+
 
 class ScpiInitializationError(CommandError):
     """The device reported a SCPI error during :meth:`DaqifiDevice.initialize`
@@ -89,6 +94,9 @@ class ScpiInitializationError(CommandError):
         super().__init__(message)
         self.lines = tuple(lines)
         self.error_line = error_line
+
+    def __reduce__(self):
+        return (type(self), (str(self), self.lines, self.error_line), self.__dict__)
 
 
 class InitializationUnconfirmedError(DeviceUnresponsiveError):
@@ -105,6 +113,9 @@ class InitializationUnconfirmedError(DeviceUnresponsiveError):
     def __init__(self, message: str, lines: Sequence[str] = ()):
         super().__init__(message)
         self.lines = tuple(lines)
+
+    def __reduce__(self):
+        return (type(self), (str(self), self.lines), self.__dict__)
 
 
 class SerialPortConnectFailure(enum.Enum):
@@ -142,6 +153,10 @@ class SerialPortConnectError(ConnectionError, _SerialException):
         super().__init__(message)
         self.port = port
         self.reason = reason
+        self.detail = detail
+
+    def __reduce__(self):
+        return (type(self), (self.port, self.reason, self.detail), self.__dict__)
 
 
 class SdCardOperationException(DAQiFiError):

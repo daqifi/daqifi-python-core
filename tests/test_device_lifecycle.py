@@ -47,7 +47,7 @@ class _Stream:
     SYSTem:ERRor? reply (a stream still running)."""
 
     def __init__(self, stale_errors=0, refuse=None, status_after=0, on_write=None,
-                 frame_before_replies=b""):
+                 frame_before_replies=b"", status_delay=0.0):
         self.written = []
         self.queue = [b'-200,"Execution error"'] * stale_errors
         self.refuse = dict(refuse or {})
@@ -55,6 +55,7 @@ class _Stream:
         self.info_requests = 0
         self.on_write = dict(on_write or {})
         self.frame_before_replies = frame_before_replies
+        self.status_delay = status_delay
         self._rx = bytearray()
         self._lock = threading.Lock()
 
@@ -76,10 +77,20 @@ class _Stream:
         elif b.startswith(b"SYSTem:SYSInfoPB?"):
             self.info_requests += 1
             if self.status_after is not None and self.info_requests > self.status_after:
-                self.feed(_status_frame())
+                if self.status_delay:
+                    timer = threading.Timer(self.status_delay, self.feed, (_status_frame(),))
+                    timer.daemon = True
+                    timer.start()
+                else:
+                    self.feed(_status_frame())
         for prefix, reply in self.on_write.items():
             if b.startswith(prefix):
-                self.feed(reply)
+                if isinstance(reply, tuple):  # (bytes, delay_s)
+                    timer = threading.Timer(reply[1], self.feed, (reply[0],))
+                    timer.daemon = True
+                    timer.start()
+                else:
+                    self.feed(reply)
         return len(b)
 
     def flush(self) -> None:
@@ -236,6 +247,65 @@ def test_a_reply_merged_with_stream_bytes_isnt_taken_for_success() -> None:
         device.disconnect()
 
 
+class _BlockingReadStream(_Stream):
+    """pyserial's read semantics: ``read(n)`` returns early only once n
+    bytes are in; otherwise at the read timeout (0.5 s, as the transport
+    sets after open), here plus a 30 ms scheduling delay."""
+
+    timeout = 0.5
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._arrived = threading.Condition(self._lock)
+
+    def feed(self, data: bytes) -> None:
+        with self._arrived:
+            self._rx.extend(data)
+            self._arrived.notify_all()
+
+    def read(self, n: int) -> bytes:
+        deadline = time.monotonic() + self.timeout + 0.03
+        with self._arrived:
+            while len(self._rx) < n:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._arrived.wait(remaining)
+            out = bytes(self._rx[:n])
+            del self._rx[:n]
+            return out
+
+
+def test_init_reads_short_replies_on_a_port_that_blocks_for_its_read_timeout() -> None:
+    # A healthy device answering at once; the text reader must not wait out
+    # the port's read timeout for each short reply.
+    device = _device(_BlockingReadStream())
+    try:
+        device.initialize(response_timeout_s=4.0)
+        assert device.state == DeviceState.Ready
+    finally:
+        device.disconnect()
+
+
+def test_no_status_reply_is_left_owed_to_corrupt_the_next_text_reply() -> None:
+    # Each SYSInfoPB? is answered 1.1 s later, so the 1 s re-send crosses
+    # the first reply and its own reply is still owed when the channels
+    # arrive. A text query straight after initialize(), answered 1.2 s
+    # later, must read clean: the owed frame mustn't land in front of it.
+    from daqifi._internal.scpi_commands import ScpiMessage
+
+    device = _device(_Stream(status_delay=1.1, on_write={b"X?": (b"VALUE\r\n", 1.2)}))
+    try:
+        device.initialize(response_timeout_s=4.0)
+        lines = device.execute_text_command(
+            lambda: device.send(ScpiMessage("X?")),
+            response_timeout_ms=2500, completion_timeout_ms=1500,
+        )
+        assert lines == ["VALUE"]
+    finally:
+        device.disconnect()
+
+
 # ---- 2: send() racing disconnect() --------------------------------------------
 
 
@@ -363,6 +433,101 @@ def test_a_stale_send_failure_doesnt_mark_a_reconnected_device_lost(monkeypatch)
     finally:
         first.release.set()
         device.disconnect()
+
+
+def test_a_send_cut_off_by_close_is_typed_on_serial(monkeypatch) -> None:
+    # close() disposes the transport, whose stream getter then raises; the
+    # failed send must still report the typed error, not that.
+    import daqifi.transport as transport_mod
+    from daqifi._internal import scpi_commands
+
+    port = _FakeSerial(block_writes=True)
+    monkeypatch.setattr(transport_mod.serial, "Serial", lambda *a, **k: port)
+    device = DaqifiStreamingDevice(
+        name="d", transport=transport_mod.SerialStreamTransport("COM58")
+    )
+    device.connect()
+    _assert_close_mid_send_is_typed(device, port.entered, port.release)
+
+
+def test_a_send_cut_off_by_close_is_typed_on_tcp(monkeypatch) -> None:
+    import socket
+
+    import daqifi.transport as transport_mod
+    from daqifi._internal import scpi_commands
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    entered, release = threading.Event(), threading.Event()
+
+    def _blocking_write(self, data):
+        entered.set()
+        release.wait(5)
+        raise OSError("write on a closed socket")
+
+    monkeypatch.setattr(transport_mod._SocketStream, "write", _blocking_write)
+    transport = transport_mod.TcpStreamTransport("127.0.0.1", server.getsockname()[1])
+    device = DaqifiStreamingDevice(name="d", transport=transport)
+    try:
+        device.connect()
+        peer, _ = server.accept()
+        try:
+            _assert_close_mid_send_is_typed(device, entered, release)
+        finally:
+            peer.close()
+    finally:
+        release.set()
+        server.close()
+
+
+def _assert_close_mid_send_is_typed(device, entered, release) -> None:
+    from daqifi._internal import scpi_commands
+
+    outcome = {}
+
+    def _send():
+        try:
+            device.send(scpi_commands.get_last_error())
+        except BaseException as e:
+            outcome["error"] = e
+
+    sender = threading.Thread(target=_send, daemon=True)
+    try:
+        sender.start()
+        assert entered.wait(5)
+        device.close()
+        release.set()
+        sender.join(5)
+        error = outcome.get("error")
+        assert type(error).__name__ == "DeviceNotConnectedError", repr(error)
+        assert error.is_shutting_down
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: exc_mod.DeviceNotConnectedError("gone", is_shutting_down=True),
+        lambda: exc_mod.ScpiInitializationError("refused", ["a", "b"], "-200,x"),
+        lambda: exc_mod.InitializationUnconfirmedError("unknown", ["l"]),
+        lambda: exc_mod.SerialPortConnectError(
+            "COM41", exc_mod.SerialPortConnectFailure.IN_USE, "detail"
+        ),
+    ],
+    ids=["not_connected", "scpi_init", "unconfirmed", "serial_connect"],
+)
+def test_the_new_exceptions_survive_pickling(build) -> None:
+    # A multiprocessing worker that raises one sends it back pickled; one
+    # that can't be rebuilt crashes the parent's result handler.
+    import pickle
+
+    original = build()
+    copy = pickle.loads(pickle.dumps(original))
+    assert type(copy) is type(original)
+    assert str(copy) == str(original)
+    assert copy.__dict__ == original.__dict__
 
 
 # ---- 3: execute_text_command --------------------------------------------------
