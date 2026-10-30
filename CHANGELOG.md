@@ -30,8 +30,8 @@ aims to follow [Semantic Versioning](https://semver.org/).
   `SYSTem:ERRor?` after them, retried once. A refusal that persists raises
   `ScpiInitializationError`; an outcome it can't read (no reply, a reply
   garbled by stream bytes, a queue that won't empty) raises
-  `InitializationUnconfirmedError` and leaves the device out of Error. It then re-sends
-  `SYSInfoPB?` every second until a status reports the channels, and
+  `InitializationUnconfirmedError` and leaves the device out of Error. It then sends
+  `SYSInfoPB?` once and waits for a status that reports the channels, and
   raises `DeviceUnresponsiveError` (now also a `TimeoutError`) on any
   transport if none does: on serial it reported Ready with empty metadata
   before. The serial default timeout is 8 s (#201).

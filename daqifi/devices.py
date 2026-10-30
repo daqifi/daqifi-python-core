@@ -845,7 +845,16 @@ class DaqifiDevice:
                 except AttributeError:
                     pass
             except Exception as exc:
-                if self._shutting_down_since(transport, generation):
+                # Decided and applied under the lock connect() bumps the
+                # generation with, so no disconnect/reconnect can land
+                # between the check and the Lost transition.
+                with self._state_lock:
+                    stale = self._shutting_down_since(transport, generation)
+                    evt = None
+                    if not stale:
+                        evt = self._change_status(ConnectionStatus.Lost)
+                        self._state = DeviceState.Error
+                if stale:
                     # A disconnect on another thread closed the stream under
                     # this write, or a reconnect has replaced it since: an
                     # expected race, not a loss of the current link. The
@@ -855,8 +864,8 @@ class DaqifiDevice:
                         "progress and closed the connection.",
                         is_shutting_down=True,
                     ) from exc
-                self._set_status(ConnectionStatus.Lost)
-                self._set_state(DeviceState.Error)
+                if evt is not None:
+                    self._deliver_status_event(evt)
                 raise
         else:
             raise NotImplementedError(
@@ -1040,8 +1049,8 @@ class DaqifiDevice:
                 floor_ms = int(read_timeout * 1000) + 250
                 response_timeout_ms = max(response_timeout_ms, floor_ms)
                 completion_timeout_ms = max(completion_timeout_ms, floor_ms)
-                if max_total_ms is not None:
-                    max_total_ms = max(max_total_ms, floor_ms)
+                # An explicit max_total_ms is the caller's hard window and
+                # is kept exactly: nothing back within it is the answer.
 
         was_running = self._consumer.is_running
         if was_running:
@@ -1303,10 +1312,11 @@ class DaqifiDevice:
         after connect is often transient); an error that persists raises
         :class:`ScpiInitializationError` (upstream 1ce13b2 / 1142893).
 
-        Then it queries device info, re-sending ``SYSInfoPB?`` every
-        second, until a status reply reports the device's channels: the
-        protobuf consumer's status callback fills :attr:`metadata` and
-        :attr:`channels` (upstream 8c97c47). Only then is the device Ready.
+        Then it sends ``SYSInfoPB?`` once and waits for a status reply that
+        reports the device's channels: the protobuf consumer's status
+        callback fills :attr:`metadata` and :attr:`channels` (upstream
+        8c97c47, without its re-sends, which can leave a reply owed). Only
+        then is the device Ready.
 
         :param response_timeout_s: how long to wait for that status reply.
             Defaults to 8.0 s on serial transports (upstream's default)
@@ -1392,8 +1402,8 @@ class DaqifiDevice:
                 raise DeviceUnresponsiveError(
                     f"Device {self.name!r} did not report its channel "
                     f"configuration within {response_timeout_s:.1f} s "
-                    f"(SYSInfoPB? re-sent every second). The device may be "
-                    f"unresponsive or still starting up."
+                    f"of SYSInfoPB?. The device may be unresponsive or still "
+                    f"starting up."
                 )
 
             self._is_initialized = True
@@ -1436,14 +1446,10 @@ class DaqifiDevice:
                     self._metadata.serial_number = prev_serial_number
 
     # Upstream InitScpiErrorMaxRetries / InitScpiErrorRetryDelayMs /
-    # InitScpiSettleDelayMs, and the re-request interval of
-    # WaitForChannelsPopulatedAsync.
+    # InitScpiSettleDelayMs.
     _INIT_SCPI_RETRIES = 1
     _INIT_SCPI_RETRY_DELAY_S = 0.15
     _INIT_SCPI_SETTLE_S = 0.1
-    _DEVICE_INFO_RESEND_S = 1.0
-    # How long after the last SYSInfoPB? its reply is still waited for.
-    _DEVICE_INFO_OWED_WAIT_S = 2.0
 
     def _run_init_sequence(self) -> None:
         """Send upstream's init commands (echo off, stream stop, power on,
@@ -1542,58 +1548,26 @@ class DaqifiDevice:
         )
 
     def _wait_for_channels(self, timeout_s: float) -> bool:
-        """Send ``SYSInfoPB?``, re-sending it every second, until a status
-        reply reports at least one channel; False at ``timeout_s``.
+        """Send ``SYSInfoPB?`` once and wait up to ``timeout_s`` for a status
+        reply reporting at least one channel.
 
-        Every query sent is owed a reply. Before returning, the replies
-        still owed (a re-send that crossed a slow first reply) are waited
-        for, up to ``_DEVICE_INFO_OWED_WAIT_S`` after the last send: one
-        arriving later would land in the next text exchange and corrupt
-        its first line."""
+        Once, not re-sent (upstream re-sends every second): a second query
+        crossing a slow first reply would leave a reply owed when this
+        returns, and that late binary frame would fuse into the next text
+        reply. With one query in flight no reply can be owed."""
         populated = threading.Event()
-        lock = threading.Lock()
-        counts = {"sent": 0, "replies": 0}
-        all_answered = threading.Event()
 
         def _on_populated(args: ChannelsPopulatedEventArgs) -> None:
-            with lock:
-                counts["replies"] += 1
-                if counts["replies"] >= counts["sent"]:
-                    all_answered.set()
             # A status with no channels would satisfy the wait with an
             # empty device, the outcome this exists to prevent.
             if args.analog_channel_count + args.digital_channel_count > 0:
                 populated.set()
 
-        def _request() -> None:
-            with lock:
-                counts["sent"] += 1
-                all_answered.clear()
-            self.send(scpi_commands.get_device_info())
-
         # Subscribed before the send, so a fast reply can't be missed.
         self.add_channels_populated(_on_populated)
         try:
-            deadline = time.monotonic() + timeout_s
-            _request()
-            last_send = time.monotonic()
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                if populated.wait(min(self._DEVICE_INFO_RESEND_S, remaining)):
-                    break
-                if deadline - time.monotonic() > 0:
-                    # Serial/CDC devices can miss the first request while
-                    # the port settles.
-                    _request()
-                    last_send = time.monotonic()
-            if not populated.is_set():
-                return False
-            all_answered.wait(
-                max(0.0, last_send + self._DEVICE_INFO_OWED_WAIT_S - time.monotonic())
-            )
-            return True
+            self.send(scpi_commands.get_device_info())
+            return populated.wait(timeout_s)
         finally:
             self.remove_channels_populated(_on_populated)
 

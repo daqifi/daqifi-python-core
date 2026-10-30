@@ -162,15 +162,24 @@ def test_serial_initialize_without_a_status_raises_instead_of_reporting_ready() 
         device.disconnect()
 
 
-def test_initialize_re_requests_device_info_until_the_channels_arrive() -> None:
-    # The first SYSInfoPB? is missed (a serial port still settling).
-    stream = _Stream(status_after=1)
+def test_a_slow_status_reply_is_waited_for_with_one_query_and_none_left_owed() -> None:
+    # SYSInfoPB? answered 2.5 s late. One query, waited for: Ready with the
+    # channels, and nothing still owed to land in the next text reply (a
+    # re-send every second left replies due at 3.5 and 4.5 s).
+    from daqifi._internal.scpi_commands import ScpiMessage
+
+    stream = _Stream(status_delay=2.5, on_write={b"X?": (b"VALUE\r\n", 1.2)})
     device = _device(stream)
     try:
-        device.initialize(response_timeout_s=4.0)
+        device.initialize(response_timeout_s=6.0)
         assert device.state == DeviceState.Ready
         assert len(device.channels) == 2
-        assert stream.info_requests >= 2
+        assert stream.info_requests == 1
+        lines = device.execute_text_command(
+            lambda: device.send(ScpiMessage("X?")),
+            response_timeout_ms=2500, completion_timeout_ms=1500,
+        )
+        assert lines == ["VALUE"]
     finally:
         device.disconnect()
 
@@ -288,10 +297,9 @@ def test_init_reads_short_replies_on_a_port_that_blocks_for_its_read_timeout() -
 
 
 def test_no_status_reply_is_left_owed_to_corrupt_the_next_text_reply() -> None:
-    # Each SYSInfoPB? is answered 1.1 s later, so the 1 s re-send crosses
-    # the first reply and its own reply is still owed when the channels
-    # arrive. A text query straight after initialize(), answered 1.2 s
-    # later, must read clean: the owed frame mustn't land in front of it.
+    # Each SYSInfoPB? is answered 1.1 s later (a re-send at 1 s would cross
+    # it). A text query straight after initialize(), answered 1.2 s later,
+    # must read clean: no owed frame may land in front of it.
     from daqifi._internal.scpi_commands import ScpiMessage
 
     device = _device(_Stream(status_delay=1.1, on_write={b"X?": (b"VALUE\r\n", 1.2)}))
@@ -432,6 +440,104 @@ def test_a_stale_send_failure_doesnt_mark_a_reconnected_device_lost(monkeypatch)
         assert second.written
     finally:
         first.release.set()
+        device.disconnect()
+
+
+def test_a_reconnect_after_the_shutdown_check_isnt_marked_lost(monkeypatch) -> None:
+    # A's write fails on the live connection and its check finds no
+    # shutdown; B then disconnects and reconnects. A must not mark the new
+    # connection Lost: B can't get in between A's check and its transition.
+    import daqifi.transport as transport_mod
+    from daqifi._internal import scpi_commands
+
+    first, second = _FakeSerial(block_writes=True), _FakeSerial()
+    ports = iter([first, second])
+    monkeypatch.setattr(transport_mod.serial, "Serial", lambda *a, **k: next(ports))
+    device = DaqifiStreamingDevice(
+        name="d", transport=transport_mod.SerialStreamTransport("COM58")
+    )
+    device.connect()
+
+    checked, resume = threading.Event(), threading.Event()
+    real_check = device._shutting_down_since
+
+    def _check_then_pause(*args):
+        result = real_check(*args)
+        if not checked.is_set():
+            checked.set()
+            resume.wait(5)
+        return result
+
+    monkeypatch.setattr(device, "_shutting_down_since", _check_then_pause)
+    outcome = {}
+
+    def _send():
+        try:
+            device.send(scpi_commands.get_last_error())
+        except BaseException as e:
+            outcome["error"] = e
+
+    def _reconnect():
+        device.disconnect()
+        device.connect()
+
+    sender = threading.Thread(target=_send, daemon=True)
+    other = threading.Thread(target=_reconnect, daemon=True)
+    try:
+        sender.start()
+        assert first.entered.wait(5)
+        first.release.set()  # A's write fails on the live connection
+        assert checked.wait(5)
+        other.start()
+        other.join(1.0)  # B reconnects, if it can get in before A finishes
+        resume.set()
+        sender.join(5)
+        other.join(5)
+        assert not other.is_alive()
+        assert device.status == ConnectionStatus.Connected
+        assert device.state != DeviceState.Error
+        device.send(scpi_commands.get_last_error())
+        assert second.written
+    finally:
+        resume.set()
+        first.release.set()
+        device.disconnect()
+
+
+class _UnpolledStream(_Stream):
+    """A stream with no ``in_waiting`` whose ``read(n)`` returns early only
+    once n bytes are in, else at its 0.5 s timeout."""
+
+    timeout = 0.5
+
+    def read(self, n: int) -> bytes:
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if len(self._rx) >= n:
+                    break
+            time.sleep(0.01)
+        with self._lock:
+            out = bytes(self._rx[:n])
+            del self._rx[:n]
+            return out
+
+    in_waiting = property(lambda self: (_ for _ in ()).throw(AttributeError("in_waiting")))
+
+
+def test_an_explicit_total_cap_is_kept_even_below_the_read_timeout() -> None:
+    from daqifi._internal.scpi_commands import ScpiMessage
+
+    stream = _UnpolledStream(on_write={b"X?": b"VALUE\r\n"})
+    assert not hasattr(stream, "in_waiting")
+    device = _device(stream)
+    try:
+        lines = device.execute_text_command(
+            lambda: device.send(ScpiMessage("X?")),
+            response_timeout_ms=1000, completion_timeout_ms=200, max_total_ms=50,
+        )
+        assert lines == []
+    finally:
         device.disconnect()
 
 

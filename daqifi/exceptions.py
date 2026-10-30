@@ -52,8 +52,8 @@ class DeviceUnresponsiveError(DAQiFiError, TimeoutError):
     """Transport connected but the device never reported itself.
 
     Raised by :meth:`DaqifiDevice.initialize` when no status reply
-    reporting the device's channels arrives within the timeout, although
-    ``SYSInfoPB?`` is re-sent every second. Over TCP this is typically
+    reporting the device's channels arrives within the timeout of its
+    ``SYSInfoPB?``. Over TCP this is typically
     the device's WiFi-SCPI parser wedged after cumulative
     connect/disconnect cycles (recovery: reboot it via USB,
     ``SYSTem:REboot``). A :class:`TimeoutError`, as upstream's
