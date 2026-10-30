@@ -403,6 +403,123 @@ def test_a_start_that_streams_nothing_isnt_a_resume() -> None:
         device.disconnect()
 
 
+# ---- audit r4: no resume after a failed operation, nor after a stop ---------
+
+
+class _FullDisk(io.RawIOBase):
+    def writable(self):
+        return True
+
+    def write(self, data):
+        raise OSError(28, "No space left on device")
+
+
+class _EndlessGet:
+    """After SD:GET, sends 512-byte CR LF-terminated file lines every 10 ms
+    until closed: a long file the device keeps sending."""
+
+    def __init__(self, device):
+        self.stream = device._transport.stream
+        self.sending = threading.Event()
+        self.done = threading.Event()
+        self._write = self.stream.write
+        self.stream.write = self.write
+        self.thread = threading.Thread(target=self._pump, daemon=True)
+        self.thread.start()
+
+    def write(self, data):
+        if b"SD:GET" in bytes(data):
+            self.sending.set()
+        return self._write(data)
+
+    def _pump(self):
+        line = b"x" * 510 + b"\r\n"
+        while not self.done.is_set():
+            if self.sending.is_set():
+                self.stream.feed(line)
+            time.sleep(0.01)
+
+    def close(self):
+        self.done.set()
+        self.thread.join(2)
+
+
+def test_a_failed_download_raises_promptly_and_doesnt_resume() -> None:
+    # The destination fails mid-GET while the device goes on sending the
+    # file: the error must come back at once, with no resume attempted
+    # (a text exchange then would read the rest of the file).
+    device = _streaming(_device())
+    feed = _EndlessGet(device)
+    outcome = {}
+
+    def _run():
+        try:
+            device.download_sd_card_file("log_a.bin", _FullDisk(), expected_size=10**9)
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_run, daemon=True)
+    try:
+        worker.start()
+        worker.join(8)  # bounds the test
+        assert not worker.is_alive(), "the failed download never returned"
+        assert isinstance(outcome.get("error"), OSError), outcome
+        assert not any(c.startswith("SYSTem:STReam:START") for c in _written(device))
+        assert not device.is_streaming and device.state != DeviceState.Streaming
+    finally:
+        feed.close()
+        worker.join(5)
+        device.disconnect()
+
+
+def test_a_stop_from_the_download_progress_callback_isnt_undone() -> None:
+    device = _streaming(_device({b"SD:GET": b"abc__END_OF_FILE__\r\n"}))
+    try:
+        device.download_sd_card_file(
+            "log_a.bin", io.BytesIO(), expected_size=3,
+            progress=lambda _p: device.stop_streaming(),
+        )
+        commands = _written(device)
+        stops = [i for i, c in enumerate(commands) if c.startswith("SYSTem:STReam:STOP")]
+        assert not any(c.startswith("SYSTem:STReam:START") for c in commands[stops[-1]:])
+        assert not device.is_streaming and device.state != DeviceState.Streaming
+    finally:
+        device.disconnect()
+
+
+def test_a_stop_from_a_handler_of_the_confirming_sample_isnt_undone() -> None:
+    device = _streaming(_device())
+    try:
+        stopped = []
+
+        def _on_sample(_args):
+            if not stopped:
+                stopped.append(1)
+                device.stop_streaming()
+
+        # Widen the window between the confirmation and the Streaming state
+        # being set, so the handler's stop always lands inside it.
+        real_set_state = device._set_state
+
+        def _slow_set_state(value):
+            if value == DeviceState.Streaming:
+                time.sleep(0.2)
+            real_set_state(value)
+
+        device._set_state = _slow_set_state
+        device.add_message_received(_on_sample)
+        assert [f.file_name for f in device.get_sd_card_files()] == ["log_a.bin"]
+        deadline = time.monotonic() + 2
+        while not stopped and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.3)
+        assert stopped
+        assert not device.is_streaming and device.state != DeviceState.Streaming
+        assert _written(device)[-1].startswith("SYSTem:STReam:STOP")
+    finally:
+        device.disconnect()
+
+
 # ---- audit r2: in_waiting on a descriptor >= 1024 ------------------------------
 
 
