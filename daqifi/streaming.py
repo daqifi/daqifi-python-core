@@ -33,9 +33,6 @@ class StreamState(Enum):
 _TICK_RANGE = 1 << 32
 _TICK_HALF_RANGE = 1 << 31
 _TICK_MASK = _TICK_RANGE - 1
-# Polls closer together than this count as draining the port continuously,
-# so host time stands in for when bytes arrived.
-_FRESH_POLL_SECONDS = 0.5
 
 @dataclass
 class Sample:
@@ -283,11 +280,7 @@ class StreamManager:
         # 102 s at 42 MHz). Ticks are unwrapped per session; see
         # _unwrap_tick.
         self._last_raw_tick: Optional[int] = None
-        self._last_host_time: Optional[float] = None
         self._unwrapped_tick = 0
-        self._host_clock: Callable[[], float] = time.monotonic
-        self._last_poll_time: Optional[float] = None
-        self._poll_fresh = False
         # Protobuf decode state. Lazily initialised on the first
         # _read_sample_protobuf call so callers using JSON/CSV pay
         # nothing for the import.
@@ -366,9 +359,6 @@ class StreamManager:
         self._buffer.clear()
         self._read_buffer = ""  # Clear read buffer (JSON/CSV)
         self._last_raw_tick = None  # a new session unwraps from its own start
-        self._last_host_time = None
-        self._last_poll_time = None
-        self._poll_fresh = False
         # Clear protobuf decode state for the same reason — leftover
         # bytes from a previous stop()'d session would otherwise be
         # decoded as the start of the new stream, and queued samples
@@ -776,7 +766,6 @@ class StreamManager:
 
         try:
             # Read available data from serial port
-            self._note_port_poll()
             if self._comm._serial.in_waiting > 0:
                 chunk = self._comm._serial.read(self._comm._serial.in_waiting).decode('utf-8', errors='ignore')
                 self._read_buffer += chunk
@@ -831,10 +820,7 @@ class StreamManager:
             # Get timestamp from firmware (new field: 'ts' not 'timestamp')
             if 'ts' in data and self._tick_rate_hz:
                 # Convert device ticks to seconds using tick rate from metadata
-                timestamp = (
-                    self._unwrap_tick(data['ts'], self._tick_rate_hz)
-                    / self._tick_rate_hz
-                )
+                timestamp = self._unwrap_tick(data['ts']) / self._tick_rate_hz
             else:
                 # Fallback to current time if no tick rate available yet
                 timestamp = time.time()
@@ -873,7 +859,6 @@ class StreamManager:
         """
         try:
             # Read available data from serial port
-            self._note_port_poll()
             if self._comm._serial.in_waiting > 0:
                 chunk = self._comm._serial.read(self._comm._serial.in_waiting).decode('utf-8', errors='ignore')
                 self._read_buffer += chunk
@@ -957,13 +942,10 @@ class StreamManager:
 
             # Use device timestamp (convert using tick rate from metadata)
             if first_timestamp is not None and self._tick_rate_hz:
-                timestamp = (
-                    self._unwrap_tick(first_timestamp, self._tick_rate_hz)
-                    / self._tick_rate_hz
-                )
+                timestamp = self._unwrap_tick(first_timestamp) / self._tick_rate_hz
             elif first_timestamp is not None:
                 # Fallback to 1MHz if tick rate not available
-                timestamp = self._unwrap_tick(first_timestamp, 1_000_000) / 1_000_000.0
+                timestamp = self._unwrap_tick(first_timestamp) / 1_000_000.0
             else:
                 timestamp = time.time()  # Fallback to PC time if no valid channels
 
@@ -1013,7 +995,6 @@ class StreamManager:
         # would mask the actual fault site (Qodo PR #149
         # /agentic_review #3).
         try:
-            self._note_port_poll()
             in_waiting = self._comm._serial.in_waiting
 
             if in_waiting > 0:
@@ -1079,57 +1060,31 @@ class StreamManager:
             return self._pending_pb_samples.popleft()
         return None
 
-    def _note_port_poll(self) -> None:
-        """Called each time the port is polled for new bytes. Host time is
-        a fair measure of when bytes arrived only while the port is being
-        drained continuously; after a pause between polls (a consumer that
-        stopped calling read()), the OS buffered what arrived meanwhile and
-        the time it is read says nothing about when it came (#193)."""
-        now = self._host_clock()
-        self._poll_fresh = (
-            self._last_poll_time is not None
-            and now - self._last_poll_time <= _FRESH_POLL_SECONDS
-        )
-        self._last_poll_time = now
-
-    def _unwrap_tick(self, raw_tick: int, tick_hz: float) -> int:
+    def _unwrap_tick(self, raw_tick: int) -> int:
         """Place a raw 32-bit device tick on this session's unbroken scale.
 
-        The counter is only 32 bits, so the step from the previous tick is
-        known only up to whole periods (2^32 ticks): its unsigned distance
-        ``d`` could mean ``d + k * 2^32`` for any whole ``k``. The ``k`` that
-        brings the step closest to what the host saw is taken:
+        Each tick is placed by its signed 32-bit distance from the previous
+        one, so a rollover continues upwards instead of jumping back to
+        zero, and a slightly older tick (a sample queued earlier) steps back
+        a little. The session's first tick keeps its raw value (#193).
 
-        - while the port is drained continuously, the expected step is the
-          host time since the previous sample times ``tick_hz``. A rollover
-          continues upwards, and a gap longer than half a period, or
-          several, is counted;
-        - otherwise (samples read in a burst, or after a pause between
-          polls) nothing is expected, and the nearest step is taken, within
-          half a period either way.
-
-        Either way a slightly older tick (a sample queued earlier) steps
-        back a little.
-
-        The session's first tick keeps its raw value (#193).
+        Limit: the counter only gives the step modulo 2^32, so a gap in the
+        device's own samples longer than half a period (2^31 ticks: 42.9 s
+        at 50 MHz, 51.1 s at 42 MHz) reads as a step back. A running stream
+        doesn't produce one at any configured rate, and a new session starts
+        afresh. Host time was tried as a second source, but pyserial gives
+        no arrival time, and every way of estimating it misjudged ordinary
+        pauses as whole periods.
         """
         raw = int(raw_tick) & _TICK_MASK
-        now = self._last_poll_time
         if self._last_raw_tick is None:
             self._unwrapped_tick = raw
         else:
-            distance = (raw - self._last_raw_tick) & _TICK_MASK
-            expected = 0.0
-            if (
-                self._poll_fresh
-                and now is not None
-                and self._last_host_time is not None
-            ):
-                expected = max(0.0, now - self._last_host_time) * tick_hz
-            k = round((expected - distance) / _TICK_RANGE)
-            self._unwrapped_tick += distance + k * _TICK_RANGE
+            delta = (raw - self._last_raw_tick) & _TICK_MASK
+            if delta >= _TICK_HALF_RANGE:
+                delta -= _TICK_RANGE
+            self._unwrapped_tick += delta
         self._last_raw_tick = raw
-        self._last_host_time = now
         return self._unwrapped_tick
 
     def _samples_from_pb_message(self, message: Any) -> List["Sample"]:
@@ -1185,10 +1140,7 @@ class StreamManager:
 
         def _convert_ts(raw_ts: int) -> float:
             if self._tick_rate_hz and self._tick_rate_hz > 0:
-                return (
-                    self._unwrap_tick(raw_ts, self._tick_rate_hz)
-                    / float(self._tick_rate_hz)
-                )
+                return self._unwrap_tick(raw_ts) / float(self._tick_rate_hz)
             return time.time()
 
         samples: List[Sample] = []

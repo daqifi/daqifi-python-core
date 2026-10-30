@@ -2,7 +2,9 @@
 
 StreamManager converted each record's raw tick straight to seconds, so every
 2^32 ticks (about 86 s at 50 MHz, 102 s at 42 MHz) timestamps jumped back to
-near zero, in all three formats. Ticks are now unwrapped per session.
+near zero, in all three formats. Ticks are now unwrapped per session by the
+nearest step. Documented limit: a gap in the device's own samples over half a
+period (42.9 s at 50 MHz) reads as a step back.
 """
 
 import importlib.util
@@ -97,8 +99,9 @@ def test_a_new_session_unwraps_from_its_own_first_tick() -> None:
     assert samples[0].timestamp == pytest.approx(10.0)
 
 
-# Audits r1/r2 on #213: a gap longer than half the counter period, and the
-# host time that may judge it.
+# Audit r2 on #213: a consumer that pauses between read() calls. (The host
+# time that audit judged was dropped in r3; the nearest-step rule needs no
+# clock, and this pins that a pause can't turn into a whole period.)
 
 class _Clock:
     """Host time that moves on by ``step`` at every port poll, as it does
@@ -168,38 +171,7 @@ def _scheduled(name, ticks, arrivals, clock):
     sm = _f._manager(fake, channels=[0], sample_rate=10, format=fmt)
     if tick_hz is not None:
         sm._tick_rate_hz = tick_hz
-    sm._host_clock = clock
     return sm
-
-
-@pytest.mark.parametrize("name", list(_FORMATS))
-def test_a_50_second_gap_is_a_50_second_step(name) -> None:
-    # The signed-distance rule read a forward gap over half a period
-    # (42.9 s at 50 MHz) as a step back: [1.0, -34.9, -33.9]. The port is
-    # polled throughout, so the host saw the gap.
-    clock = _Clock()
-    ticks = [50_000_000, 100_000_000, 2_600_000_000, 2_650_000_000]
-    sm = _scheduled(name, ticks, [0.0, 1.0, 51.0, 52.0], clock)
-    sm.start()
-    try:
-        samples = sm.read(num_samples=4, timeout=10.0)
-    finally:
-        sm.stop()
-    assert _steps(samples) == [1.0, 50.0, 1.0]
-
-
-@pytest.mark.parametrize("name", list(_FORMATS))
-def test_a_gap_of_several_periods_is_counted(name) -> None:
-    clock = _Clock()
-    gap_ticks = 200 * TICK_HZ  # 200 s: more than two whole periods
-    ticks = [50_000_000, (50_000_000 + gap_ticks) % WRAP]
-    sm = _scheduled(name, ticks, [0.0, 200.0], clock)
-    sm.start()
-    try:
-        samples = sm.read(num_samples=2, timeout=10.0)
-    finally:
-        sm.stop()
-    assert _steps(samples) == [200.0]
 
 
 @pytest.mark.parametrize("name", list(_FORMATS))
@@ -218,14 +190,3 @@ def test_a_paused_consumer_does_not_turn_buffered_records_into_a_gap(name) -> No
     finally:
         sm.stop()
     assert _steps(first + second) == [1.0, 1.0, 1.0]
-
-
-def test_an_older_tick_received_later_still_steps_back() -> None:
-    clock = _Clock(step=0.005)
-    sm = _scheduled("json", [100_000_000, 150_000_000, 125_000_000], [0.0, 1.0, 1.01], clock)
-    sm.start()
-    try:
-        samples = sm.read(num_samples=3, timeout=10.0)
-    finally:
-        sm.stop()
-    assert _steps(samples) == [1.0, -0.5]

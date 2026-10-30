@@ -31,12 +31,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
-  that had wrong times. `StreamManager` now unwraps ticks per session. While
-  the port is being polled continuously the host time picks how many whole
-  periods each step spans, so a gap of any length is counted; otherwise
-  (a burst, or a consumer that paused) the nearest step is taken. Time keeps
-  rising across a rollover, a slightly older sample steps back a little, and
-  the first sample of a session keeps its raw time (#193).
+  that had wrong times. `StreamManager` now unwraps ticks per session: each
+  is placed by its signed distance from the previous one, so time keeps
+  rising across a rollover, a slightly older sample steps back a little,
+  and the first sample of a session keeps its raw time. Limit: a gap in the
+  device's own samples longer than half a period (42.9 s at 50 MHz) reads as
+  a step back; a running stream doesn't produce one (#193).
 - SD listings on current firmware returned a file named `__END_OF_LIST__`:
   the firmware ends every listing with `__END_OF_LIST__ OK`, `INCOMPLETE`
   or `FAILED`, and a listing marked INCOMPLETE or FAILED came back as if
