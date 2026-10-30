@@ -51,6 +51,13 @@ class Sample:
     """
     timestamp: float
     channels: Dict[int, float]  # Channel ID -> voltage
+    # How a JSON/CSV record's values were read (the firmware's rule, as for
+    # SD logs): "volts" (written with decimals, the firmware's default),
+    # "millivolts" or "raw" (integers, as integer_units said), or
+    # "raw-assumed" (integers read as raw ADC codes because nobody said;
+    # that case warns). Raw codes are unscaled: the live stream carries no
+    # calibration. None for protobuf samples.
+    units: Optional[str] = None
 
     def __getitem__(self, channel: int) -> float:
         """Get channel value by index"""
@@ -203,6 +210,27 @@ class SampleBuffer:
 _CONSOLE_PROMPTS = (b"DAQIFI> \r\n", b"DAQIFI>\r\n", b"DAQIFI> ", b"DAQIFI>")
 
 
+_LIVE_INTEGER_UNITS_WARNING = (
+    "Live stream analog values are integers, read as raw ADC codes "
+    "(unscaled). If the device streams at voltage precision 0 they are "
+    "millivolts: pass integer_units='millivolts' to the stream, or "
+    "integer_units='raw' to confirm and silence this "
+    "(daqifi-nyquist-firmware#1179)."
+)
+
+
+def _csv_value(text: str):
+    """A CSV value as written: int for an integer, float for a decimal."""
+    text = text.strip()
+    try:
+        return int(text)
+    except ValueError:
+        value = float(text)
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite CSV value {text!r}")
+        return value
+
+
 class StreamManager:
     """
     Manages data streaming from Nyquist device.
@@ -225,6 +253,7 @@ class StreamManager:
         sample_rate: int = 1000,
         format: int = 1,
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+        integer_units: Optional[str] = None,
     ):
         """
         Initialize stream manager.
@@ -244,7 +273,23 @@ class StreamManager:
                 fans the sample out to per-channel ``SampleReceived``
                 handlers without callers having to wire dispatch
                 themselves. Closes daqifi-python-core#107.
+            integer_units: What integer JSON/CSV values mean. The firmware
+                writes volts with decimals by default (VoltagePrecision >=
+                1), integer millivolts at precision 0, and integer raw ADC
+                codes in raw mode, and the stream doesn't say which integer
+                form it is. "millivolts" or "raw" says; None reads integers
+                as raw codes and warns once per session. Decimal values are
+                volts either way.
         """
+        from .sdcard import _INTEGER_UNITS
+
+        if integer_units not in _INTEGER_UNITS:
+            raise ValueError(
+                "integer_units must be None, 'raw' or 'millivolts' "
+                f"(got {integer_units!r})"
+            )
+        self._integer_units = integer_units
+        self._value_reader = self._new_value_reader()
         self._comm = comm
         self._channels = channels
         self._sample_rate = sample_rate
@@ -297,6 +342,16 @@ class StreamManager:
         self._device_channels: Optional[List[int]] = None
         self._pb_parser: Optional[ProtobufMessageParser] = None
         self._pending_pb_samples: Deque[Sample] = deque()
+
+    def _new_value_reader(self):
+        """The firmware value rule (shared with the SD-log parsers); a new
+        one per session, so the unspecified-integers warning repeats per
+        session."""
+        from .sdcard import _FirmwareValueReader
+
+        return _FirmwareValueReader(
+            None, self._integer_units, warning=_LIVE_INTEGER_UNITS_WARNING
+        )
 
     @property
     def state(self) -> StreamState:
@@ -357,6 +412,7 @@ class StreamManager:
         # now) keeps its own, already-set event and never reads again.
         self._stop_event = threading.Event()
         self._buffer.clear()
+        self._value_reader = self._new_value_reader()  # warn once per session
         self._read_buffer = ""  # Clear read buffer (JSON/CSV)
         self._last_raw_tick = None  # a new session unwraps from its own start
         # Clear protobuf decode state for the same reason — leftover
@@ -808,14 +864,19 @@ class StreamManager:
                     print(f"Metadata received: {data['meta']}")
                 return None  # Not a sample, skip
 
-            # Parse ADC data (new field name: 'ai' not 'adc')
+            # Parse ADC data (new field name: 'ai' not 'adc'). Values follow
+            # the firmware's rule (JSON_Encoder.c): volts written with
+            # decimals by default, integers only at precision 0 (millivolts)
+            # or in raw mode (codes); see integer_units.
             channels_data = {}
+            units = None
             if 'ai' in data:
-                for ch_data in data['ai']:
-                    ch_id = ch_data['ch']
-                    # Firmware sends data in millivolts, convert to volts (new field: 'val' not 'data')
-                    voltage = ch_data['val'] / 1000.0
-                    channels_data[ch_id] = voltage
+                ch_ids = [ch_data['ch'] for ch_data in data['ai']]
+                read = self._value_reader.read([ch_data['val'] for ch_data in data['ai']])
+                if read is None:
+                    return None  # mixes decimals and integers: not firmware output
+                values, units = read
+                channels_data = dict(zip(ch_ids, values))
 
             # Get timestamp from firmware (new field: 'ts' not 'timestamp')
             if 'ts' in data and self._tick_rate_hz:
@@ -828,7 +889,8 @@ class StreamManager:
             # Create sample
             sample = Sample(
                 timestamp=timestamp,
-                channels=channels_data
+                channels=channels_data,
+                units=units,
             )
             return sample
 
@@ -912,8 +974,12 @@ class StreamManager:
             if len(values) < 1:
                 return None
 
-            # Parse channel data (timestamp,value pairs for enabled channels only)
-            channels_data = {}
+            # Parse channel data (timestamp,value pairs for enabled channels
+            # only). A value is kept as written: an integer (millivolts at
+            # precision 0, or a raw code) or a decimal (volts, the firmware's
+            # default); the firmware rule below decides (csv_encoder.c).
+            ch_ids = []
+            raw_values = []
             i = 0  # Start from first field
             channel_idx = 0
             first_timestamp = None
@@ -922,23 +988,29 @@ class StreamManager:
                 try:
                     if values[i] and values[i+1]:  # Both timestamp and value present
                         ch_ts = int(values[i])  # Channel timestamp
-                        ch_val = int(values[i + 1])  # Channel value in millivolts
+                        ch_val = _csv_value(values[i + 1])
 
                         # Save first valid timestamp for sample
                         if first_timestamp is None:
                             first_timestamp = ch_ts
 
-                        # Convert millivolts to volts
-                        voltage = ch_val / 1000.0
-
                         # Map to actual channel ID from enabled list
-                        ch_id = self._channels[channel_idx]
-                        channels_data[ch_id] = voltage
+                        ch_ids.append(self._channels[channel_idx])
+                        raw_values.append(ch_val)
 
                     channel_idx += 1
                     i += 2  # Move to next channel pair
                 except (ValueError, IndexError):
                     break
+
+            channels_data = {}
+            units = None
+            if raw_values:
+                read = self._value_reader.read(raw_values)
+                if read is None:
+                    return None  # mixes decimals and integers: not firmware output
+                values_v, units = read
+                channels_data = dict(zip(ch_ids, values_v))
 
             # Use device timestamp (convert using tick rate from metadata)
             if first_timestamp is not None and self._tick_rate_hz:
@@ -953,7 +1025,8 @@ class StreamManager:
             if channels_data:
                 sample = Sample(
                     timestamp=timestamp,
-                    channels=channels_data
+                    channels=channels_data,
+                    units=units,
                 )
                 return sample
             else:
@@ -1265,6 +1338,7 @@ class AsyncStreamManager:
         sample_rate: int = 1000,
         format: int = 1,
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+        integer_units: Optional[str] = None,
     ):
         """
         Initialize async stream manager.
@@ -1276,6 +1350,7 @@ class AsyncStreamManager:
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
             per_channel_dispatch: See :class:`StreamManager`. Forwarded
                 to the wrapped synchronous manager.
+            integer_units: See :class:`StreamManager`.
         """
         self._stream = StreamManager(
             comm,
@@ -1283,6 +1358,7 @@ class AsyncStreamManager:
             sample_rate,
             format,
             per_channel_dispatch=per_channel_dispatch,
+            integer_units=integer_units,
         )
 
     async def start(self):

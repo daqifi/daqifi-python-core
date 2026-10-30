@@ -181,6 +181,14 @@ The API supports three streaming formats:
 - **CSV** (format=2): Efficient line-based format
 - **ProtoBuf** (format=0): Binary format for high-throughput
 
+JSON and CSV values are read as the firmware writes them: volts with
+decimals by default (voltage precision 1 or more). The firmware writes
+integers only at voltage precision 0 (millivolts) or in raw mode (ADC
+codes), and the stream doesn't say which, so tell the stream:
+`create_stream(..., integer_units="millivolts")` or `"raw"`. Unset, integers
+are read as raw codes with a one-time warning. Each sample's `units` says
+how its values were read.
+
 ```python
 # Basic streaming (JSON format)
 stream = device.create_stream(channels=[0, 1, 2], sample_rate=1000, format=1)
