@@ -105,11 +105,103 @@ TRANSFER_ERROR_MARKER: bytes = b"__TRANSFER_ERROR__"
 # A trailing window this long catches either marker split across reads.
 _TERMINAL_MARKER_WINDOW = max(len(END_OF_FILE_MARKER), len(TRANSFER_ERROR_MARKER))
 
-# How long the line stays quiet after a held-back __TRANSFER_ERROR__ before
-# it is taken as the device's marker rather than file content (with a known
-# size, content may contain the marker text; after the real marker the
-# device sends nothing).
-_TRANSFER_ERROR_SETTLE_S = 2.0
+# What may follow a terminal marker: line endings and the console prompt,
+# in any order, at most this many bytes. The firmware sends the markers
+# bare (sd_card_manager.c); the console framing is tolerated.
+_MARKER_TRAILER_MAX = 16
+
+
+def _is_marker_trailer(trailer: bytes) -> bool:
+    """True if ``trailer`` can follow a terminal marker at the end of a
+    transfer: line endings and the console prompt, at most
+    ``_MARKER_TRAILER_MAX`` bytes, possibly ending part-way through a
+    prompt still arriving."""
+    if len(trailer) > _MARKER_TRAILER_MAX:
+        return False
+    rest = trailer.replace(b"DAQIFI> ", b"").replace(b"DAQIFI>", b"")
+    if not rest.strip(b"\r\n "):
+        return True
+    # A prompt still arriving at the very end ("DAQ").
+    for cut in range(1, len(b"DAQIFI>")):
+        if rest.endswith(b"DAQIFI>"[:cut]):
+            return not rest[: len(rest) - cut].strip(b"\r\n ")
+    return False
+
+
+class _SizedTransfer:
+    """The body of a download whose size is known, telling the device's
+    ``__TRANSFER_ERROR__`` from file content that happens to contain it.
+
+    No byte is written from the first OPEN candidate on: a place the marker
+    could start that nothing but a line ending or prompt follows (or a
+    proper prefix of the marker at the end of what has come). A candidate
+    followed by real content was content. At the size boundary only an
+    exact ``__END_OF_FILE__`` is success; a complete transfer-error marker
+    there, or one crossing it, is the error. A candidate still open when
+    the line goes idle or closes (:meth:`finish`) is the error, with the
+    bytes before it. No quiet window decides anything: content may pause.
+    """
+
+    def __init__(self, expected_size: int) -> None:
+        self.expected = expected_size
+        self.committed = 0
+        self.pending = bytearray()
+
+    def _open_candidate(self, limit: int) -> Optional[int]:
+        buf = bytes(self.pending)
+        marker = TRANSFER_ERROR_MARKER
+        i = buf.find(marker[:1])
+        while 0 <= i < limit:
+            tail = buf[i:]
+            if len(tail) < len(marker):
+                if marker.startswith(tail):
+                    return i
+            elif tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
+                return i
+            i = buf.find(marker[:1], i + 1)
+        return None
+
+    def feed(self, data: bytes) -> Tuple[bytes, Optional[Tuple[str, Any]]]:
+        """Take ``data``; return the bytes now safe to write and an outcome:
+        None (keep reading), ("eof", bytes after the marker),
+        ("transfer_error", bytes before it) or ("mismatch", None)."""
+        self.pending.extend(data)
+        boundary = self.expected - self.committed
+        limit = min(boundary, len(self.pending))
+        candidate = self._open_candidate(limit)
+        safe = limit if candidate is None else candidate
+        out = bytes(self.pending[:safe])
+        del self.pending[:safe]
+        self.committed += safe
+        return out, self._outcome()
+
+    def _outcome(self) -> Optional[Tuple[str, Any]]:
+        tail = bytes(self.pending)
+        marker = TRANSFER_ERROR_MARKER
+        error_complete = tail.startswith(marker) and _is_marker_trailer(tail[len(marker):])
+        if self.committed == self.expected:
+            if tail.startswith(END_OF_FILE_MARKER):
+                return ("eof", tail[len(END_OF_FILE_MARKER):])
+            if error_complete:
+                return ("transfer_error", self.committed)
+            if END_OF_FILE_MARKER.startswith(tail) or marker.startswith(tail):
+                return None
+            return ("mismatch", None)
+        # Short of the boundary, with an open candidate at the start: one
+        # that reaches past the boundary can't be content (an end-of-file
+        # marker would have to start inside it).
+        if error_complete and len(tail) > self.expected - self.committed:
+            return ("transfer_error", self.committed)
+        return None
+
+    def finish(self) -> Optional[Tuple[str, Any]]:
+        """At idle, close or the deadline: an open complete candidate is the
+        device's marker."""
+        tail = bytes(self.pending)
+        marker = TRANSFER_ERROR_MARKER
+        if tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
+            return ("transfer_error", self.committed)
+        return None
 
 
 _LOG_FILENAME_RE = re.compile(r"^log_(\d{8}_\d{6})", re.IGNORECASE)
@@ -788,32 +880,26 @@ class SdCardFileReceiver:
         # implementation. Sized to the longer of the two markers.
         trailing = bytearray()
         total_bytes = 0
-        # Known size: body bytes not yet written, held back in case they
-        # are the device's __TRANSFER_ERROR__ rather than content.
-        held = bytearray()
-        last_data = time.monotonic()
+        # Known size: tells the device's __TRANSFER_ERROR__ from content.
+        sized = _SizedTransfer(expected_size) if expected_size is not None else None
 
-        def _held_is_transfer_error(settled: bool) -> bool:
-            return (
-                expected_size is not None
-                and bytes(held) == TRANSFER_ERROR_MARKER
-                and settled
-            )
+        def _transfer_error_if_open() -> None:
+            outcome = sized.finish() if sized is not None else None
+            if outcome is not None:
+                raise SdCardTransferErrorException(file_name, outcome[1])
 
         while True:
             if time.monotonic() >= deadline:
+                _transfer_error_if_open()
                 raise TimeoutError(
                     f"SD card file download timed out after "
                     f"{effective_timeout:.3f} seconds. Received "
                     f"{total_bytes} bytes before timeout."
                 )
 
-            quiet = time.monotonic() - last_data >= _TRANSFER_ERROR_SETTLE_S
             if has_in_waiting:
                 pending = self._source.in_waiting
                 if not pending:
-                    if _held_is_transfer_error(quiet):
-                        raise SdCardTransferErrorException(file_name, total_bytes)
                     time.sleep(self._IDLE_SLEEP_S)
                     continue
                 read_n = min(pending, self._buffer_size)
@@ -833,58 +919,34 @@ class SdCardFileReceiver:
                 except socket.timeout:
                     # A TCP stream's bounded read found nothing yet; the
                     # deadline above decides when to give up.
-                    if _held_is_transfer_error(quiet):
-                        raise SdCardTransferErrorException(file_name, total_bytes)
                     continue
                 if not chunk:
-                    # Closed: nothing can follow, so held marker bytes are
-                    # the device's marker.
-                    if _held_is_transfer_error(True):
-                        raise SdCardTransferErrorException(file_name, total_bytes)
+                    # Closed: nothing can follow, so an open transfer-error
+                    # candidate is the device's marker.
+                    _transfer_error_if_open()
                     raise TimeoutError(
                         f"Transport stream closed before receiving the EOF "
                         f"marker. Received {total_bytes} bytes."
                     )
-            last_data = time.monotonic()
-
             chunk_bytes = bytes(chunk)
-            if expected_size is not None:
-                data = bytes(held) + chunk_bytes
-                held = bytearray()
-                remaining = expected_size - total_bytes
-                if len(data) > remaining:
-                    # The body completes here; the rest must be the marker.
-                    body = data[:remaining]
-                    if body:
-                        _write_all(destination_stream, body, deadline)
-                        total_bytes += len(body)
-                        _emit_transfer_progress(progress, total_bytes, file_name)
-                    trailing.extend(data[remaining:])
-                    if bytes(trailing[:error_len]) == TRANSFER_ERROR_MARKER:
-                        raise SdCardTransferErrorException(file_name, total_bytes)
-                    if (
-                        len(trailing) < error_len
-                        and TRANSFER_ERROR_MARKER.startswith(bytes(trailing))
-                    ):
-                        continue  # could still become the error marker
-                    if len(trailing) >= marker_len:
-                        if bytes(trailing[:marker_len]) != END_OF_FILE_MARKER:
-                            raise IOError(
-                                f"SD card file {file_name!r}: {expected_size} bytes "
-                                "received but no end-of-file marker after them; the "
-                                "file is longer than listed or the transfer is corrupt."
-                            )
-                        self._leftover = bytes(trailing[marker_len:])
+            if sized is not None:
+                body, outcome = sized.feed(chunk_bytes)
+                if body:
+                    _write_all(destination_stream, body, deadline)
+                    total_bytes += len(body)
+                    _emit_transfer_progress(progress, total_bytes, file_name)
+                if outcome is not None:
+                    kind, value = outcome
+                    if kind == "eof":
+                        self._leftover = value
                         return total_bytes
-                else:
-                    # All body (perhaps exactly all of it): hold back the
-                    # tail, which is the error marker if the read failed here.
-                    keep = min(len(data), error_len)
-                    if len(data) > keep:
-                        _write_all(destination_stream, data[: len(data) - keep], deadline)
-                        total_bytes += len(data) - keep
-                        _emit_transfer_progress(progress, total_bytes, file_name)
-                    held = bytearray(data[len(data) - keep:])
+                    if kind == "transfer_error":
+                        raise SdCardTransferErrorException(file_name, value)
+                    raise IOError(
+                        f"SD card file {file_name!r}: {expected_size} bytes "
+                        "received but no end-of-file marker after them; the "
+                        "file is longer than listed or the transfer is corrupt."
+                    )
                 continue
             found, position, found_marker = _find_terminal_marker(trailing, chunk_bytes)
             if found:
