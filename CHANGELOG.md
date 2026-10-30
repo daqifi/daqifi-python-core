@@ -28,6 +28,20 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- README examples that failed as written now run: streaming reads
+  `sample.channels` and imports `time`; the SD example uses
+  `get_sd_card_files()` and `file_name`/`size`; the CSV export's source
+  accepts `cancel_event`; the firmware readiness probe uses
+  `drain_errors()`; the Quick Start, `examples/basic_adc.py` and the
+  package docstring set the DAC and input range only on NQ3.
+  `examples/streaming_callback.py` measures its duration in device time.
+  The README no longer points at a missing `testing/suites/`, names
+  classes that don't exist, lists `pyyaml` as a runtime dependency or
+  sends support requests to the firmware repo. `tests/test_readme_examples.py`
+  runs the examples against fakes (#197).
+- Docstrings that had gone stale: text replies on `DaqifiStreamingDevice`,
+  per-channel DIO commands, the SD CSV/JSON parsers, the TCP socket view's
+  end of stream and HID `disconnect()` waiting for a read (#197).
 - SD listings on current firmware returned a file named `__END_OF_LIST__`:
   the firmware ends every listing with `__END_OF_LIST__ OK`, `INCOMPLETE`
   or `FAILED`, and a listing marked INCOMPLETE or FAILED came back as if

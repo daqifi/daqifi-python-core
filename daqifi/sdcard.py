@@ -30,11 +30,9 @@ Includes the small value classes the parser surface needs:
   ``parse_stream`` / ``parse_file`` block until the whole file is
   read, and ``SdCardLogSession.samples`` is an
   ``Iterator[SdCardLogEntry]`` rather than ``IAsyncEnumerable``.
-- ``SdCardFileParserFactory`` only handles the protobuf format
-  today; CSV and JSON variants raise ``NotImplementedError`` until
-  their parsers are ported. ``detect_format`` already returns the
-  right enum for ``.csv`` / ``.json``, so callers can probe the
-  format without invoking a parser.
+- ``SdCardFileParserFactory`` picks the protobuf, CSV or JSON parser
+  (:class:`SdCardCsvFileParser`, :class:`SdCardJsonFileParser`) by
+  file extension.
 """
 from __future__ import annotations
 
@@ -1863,8 +1861,10 @@ class SdCardCsvFileParser:
        ``# Timestamp Tick Rate:``).
     2. A column header row: ``ain0_ts,ain0_val,ain1_ts,ain1_val,...,dio_ts,dio_val``
     3. Data rows with interleaved per-channel ``timestamp,value``
-       pairs. Analog values are raw ADC counts that get scaled via
-       the device calibration (see :func:`_scale_raw_analog_values`).
+       pairs. Decimal values are already calibrated volts; integers are
+       millivolts or raw ADC counts, as ``options.integer_units`` says,
+       and raw counts are scaled via the device calibration (see
+       :class:`_FirmwareValueReader`).
 
     Like the protobuf parser, ``parse_stream`` reads the entire input
     before yielding samples; the returned :class:`SdCardLogSession`
@@ -2192,14 +2192,17 @@ def _produce_csv_samples(
 
 
 class SdCardJsonFileParser:
-    """Parses SD-card ``.json`` log files (JSONL format).
+    """Parses SD-card ``.json`` log files.
 
-    Ports ``Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs``. Each
-    line is a JSON object: ``{"ts": <uint32>, "analog": [...],
-    "digital": "<hex>"}``. Sync end-to-end per project convention.
+    Ports ``Daqifi.Core/Device/SdCard/SdCardJsonFileParser.cs``. The
+    firmware writes a ``{"meta": ...}`` header object, then one object
+    per record, each spread over several lines, with analog values under
+    ``"ai"`` and DIO reads under ``"di"``. The older one-line-per-sample
+    shape (``{"ts": <uint32>, "analog": [...], "digital": "<hex>"}``)
+    still parses. Sync end-to-end per project convention.
 
-    Configuration is *inferred* from the first line (analog channel
-    count = length of the ``analog`` array); merge with
+    Configuration is *inferred* from the header and the first sample
+    with analog values; merge with
     ``options.configuration_override`` to fill in missing fields like
     calibration / resolution / port range needed for raw-to-volts
     scaling.

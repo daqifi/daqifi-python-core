@@ -127,8 +127,9 @@ class DigitalIO:
     PORT_ENABLE_QUERY = "DIO:PORt:ENAble?"
     PORT_ENABLE_SET = "DIO:PORt:ENAble"
 
-    # NOTE: Per-channel commands do not exist in firmware
-    # Use port-level commands with bit masking for individual channels
+    # One argument is a 16-bit mask for all channels; a channel and a
+    # value address one channel (``DIO:PORt:STATe <ch>,<0|1>``, the same
+    # for DIRection), and ``DIO:PORt:STATe? <ch>`` reads one.
 
 
 # Streaming commands
