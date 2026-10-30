@@ -91,6 +91,22 @@ class ScpiInitializationError(CommandError):
         self.error_line = error_line
 
 
+class InitializationUnconfirmedError(DeviceUnresponsiveError):
+    """:meth:`DaqifiDevice.initialize` couldn't tell whether the device
+    accepted its setup commands: the error queue couldn't be emptied
+    first, or the reply to the ``SYSTem:ERRor?`` after them was missing or
+    unreadable (stream bytes still arriving can garble it), on every
+    attempt. A device that answers nothing at all ends here too, hence a
+    :class:`DeviceUnresponsiveError`. Not a refusal, so the device isn't
+    put in the Error state; retrying ``initialize()`` is reasonable.
+    ``lines`` are the lines from the last attempt.
+    """
+
+    def __init__(self, message: str, lines: Sequence[str] = ()):
+        super().__init__(message)
+        self.lines = tuple(lines)
+
+
 class SerialPortConnectFailure(enum.Enum):
     """Why a serial port couldn't be opened."""
 

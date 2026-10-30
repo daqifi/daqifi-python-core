@@ -49,6 +49,7 @@ from .enums import SdCardLogFormat, WifiMode, WifiSecurityType
 from .exceptions import (
     DeviceNotConnectedError,
     DeviceUnresponsiveError,
+    InitializationUnconfirmedError,
     ScpiInitializationError,
 )
 from .network import NetworkConfiguration
@@ -786,11 +787,14 @@ class DaqifiDevice:
         if isinstance(message, ScpiMessage):
             data = message.get_bytes()
             # Read once: disconnect() on another thread closes the stream
-            # under no lock this path takes (upstream baabf0c).
+            # under no lock this path takes (upstream baabf0c). The
+            # connection generation and the stream itself tell this
+            # connection from a newer one on the same transport object.
+            generation = self._connect_generation
             transport = self._transport
             stream = transport.stream if transport is not None else None
             if stream is None:
-                if self._shutting_down_since(transport):
+                if self._shutting_down_since(transport, generation, None):
                     raise DeviceNotConnectedError(
                         "The message could not be sent: a disconnect completed "
                         "while it was in flight.",
@@ -834,10 +838,11 @@ class DaqifiDevice:
                 except AttributeError:
                     pass
             except Exception as exc:
-                if self._shutting_down_since(transport):
+                if self._shutting_down_since(transport, generation, stream):
                     # A disconnect on another thread closed the stream under
-                    # this write: an expected race, not a lost link. Its
-                    # Disconnected status stands (upstream baabf0c).
+                    # this write, or a reconnect has replaced it since: an
+                    # expected race, not a loss of the current link. The
+                    # current status stands (upstream baabf0c).
                     raise DeviceNotConnectedError(
                         "The message could not be sent: a disconnect was in "
                         "progress and closed the connection.",
@@ -852,15 +857,21 @@ class DaqifiDevice:
                 "not yet implemented."
             )
 
-    def _shutting_down_since(self, transport: Any) -> bool:
-        """Whether a disconnect (or a new connection) has replaced the
-        connection a send started on. A link that dropped by itself (status
-        Lost) isn't one: that send failure is the loss."""
+    def _shutting_down_since(
+        self, transport: Any, generation: int, stream: Any
+    ) -> bool:
+        """Whether a disconnect, or a new connection (even on the same
+        transport object), has replaced the connection a send started on.
+        A link that dropped by itself (status Lost) isn't one: that send
+        failure is the loss."""
+        current_stream = getattr(transport, "stream", None) if transport is not None else None
         return (
             self._is_disconnecting
             or self._disposed
             or self._status == ConnectionStatus.Disconnected
             or self._transport is not transport
+            or self._connect_generation != generation
+            or (stream is not None and current_stream is not stream)
         )
 
     def _acquire_text_exchange_lock(self, operation: str) -> None:
@@ -1368,6 +1379,11 @@ class DaqifiDevice:
             self._is_initialized = True
             self._set_state(DeviceState.Ready)
             init_succeeded = True
+        except InitializationUnconfirmedError:
+            # Not a refusal: no Error state on a guess. Back to where init
+            # started, so it can be retried.
+            self._set_state(prev_state)
+            raise
         except Exception:
             # Mark Error state on Exception specifically — KeyboardInterrupt
             # / SystemExit shouldn't transition to "Error" because the
@@ -1409,8 +1425,19 @@ class DaqifiDevice:
 
     def _run_init_sequence(self) -> None:
         """Send upstream's init commands (echo off, stream stop, power on,
-        protobuf format) as one text exchange ending in ``SYSTem:ERRor?``;
-        retry once on an error, then raise :class:`ScpiInitializationError`."""
+        protobuf format) as one text exchange ending in ``SYSTem:ERRor?``,
+        and judge only what that attempt produced.
+
+        Each attempt first stops any stream (so no binary frames share the
+        pipe with the replies) and empties the error queue, so errors left
+        over from earlier commands or attempts aren't taken for this
+        attempt's. Three outcomes: accepted (a ``0`` reply, nothing
+        volunteered), refused (a volunteered ``**ERROR`` or a non-zero
+        reply), or unknown (the queue couldn't be emptied, or no readable
+        reply: a merged or missing line is never success). One retry;
+        then a refusal raises :class:`ScpiInitializationError` and an
+        unknown outcome :class:`InitializationUnconfirmedError`.
+        """
         from ._internal import scpi as _scpi
 
         settle = self._INIT_SCPI_SETTLE_S
@@ -1429,31 +1456,67 @@ class DaqifiDevice:
             time.sleep(settle)
             self.send(scpi_commands.get_last_error())
 
-        def _error_line(lines: List[str]) -> Optional[str]:
-            volunteered = next((l for l in lines if _scpi.contains_scpi_error([l])), None)
-            if volunteered is not None:
-                return volunteered
+        def _volunteered(lines: List[str]) -> Optional[str]:
+            return next((l for l in lines if _scpi.contains_scpi_error([l])), None)
+
+        def _last_reply(lines: List[str]) -> Optional[str]:
             for line in reversed(lines):
                 reply = _scpi.find_system_error_reply([line])
-                if reply is not None and _scpi.parse_system_error(reply)[0] != 0:
+                if reply is not None:
                     return reply
             return None
 
         lines: List[str] = []
-        error: Optional[str] = None
+        refused: Optional[str] = None
+        unknown = ""
         for attempt in range(self._INIT_SCPI_RETRIES + 1):
             if attempt:
                 time.sleep(self._INIT_SCPI_RETRY_DELAY_S)
+            refused, unknown = None, ""
+            # Quiet first: a stream left running (or another session's)
+            # would put frames in the middle of the text replies.
+            self.send(scpi_commands.disable_device_echo())
+            time.sleep(settle)
+            self.send(scpi_commands.stop_streaming())
+            time.sleep(settle)
+            popped = self.drain_errors(max_iterations=16, empty_budget=2)
+            if any(
+                _scpi.parse_system_error(entry)[0] == _DRAIN_INCONCLUSIVE_CODE
+                for entry in popped
+            ):
+                lines = list(popped)
+                unknown = "the device's error queue couldn't be emptied first"
+                continue
             lines = self.execute_text_command(
                 _setup, response_timeout_ms=1000, completion_timeout_ms=500
             )
-            error = _error_line(lines)
-            if error is None:
+            refused = _volunteered(lines)
+            if refused is None:
+                reply = _last_reply(lines)
+                if reply is None:
+                    unknown = "no readable reply to SYSTem:ERRor?"
+                    continue
+                if _scpi.parse_system_error(reply)[0] != 0:
+                    refused = reply
+            if refused is None:
                 return
-        raise ScpiInitializationError(
-            f"Device returned a SCPI error during initialization: {error.strip()}",
+        if refused is not None:
+            raise ScpiInitializationError(
+                f"Device returned a SCPI error during initialization: {refused.strip()}",
+                lines,
+                refused.strip(),
+            )
+        hint = ""
+        if isinstance(self._transport, TcpStreamTransport):
+            hint = (
+                " The TCP socket is up, but the device's WiFi-SCPI listener "
+                "may be wedged. Recovery: reboot the device via USB "
+                "(SYSTem:REboot)."
+            )
+        raise InitializationUnconfirmedError(
+            f"Couldn't confirm the device accepted its initialization "
+            f"commands: {unknown}.{hint}",
             lines,
-            error.strip(),
         )
 
     def _wait_for_channels(self, timeout_s: float) -> bool:

@@ -463,6 +463,7 @@ Base + general:
 - **`DeviceUnresponsiveError`**: the transport is up but the device never reported its channels to `initialize()` (over TCP, typically the SCPI listener wedged after cumulative connect/disconnect cycles); also a `TimeoutError`
 - **`DeviceNotConnectedError`**: the operation needs a connected device (a `RuntimeError`); `is_shutting_down` when a disconnect on another thread cut a send off
 - **`ScpiInitializationError`**: a `CommandError`: the device refused an `initialize()` setup command, even after a retry
+- **`InitializationUnconfirmedError`**: a `DeviceUnresponsiveError`: `initialize()` couldn't read whether its setup commands were accepted (no reply, or one garbled by stream bytes)
 - **`SerialPortConnectError`**: a serial port wouldn't open; `reason` says whether it was not found, in use or access denied (also a `serial.SerialException`)
 
 SD card operations (port of upstream PR #182):

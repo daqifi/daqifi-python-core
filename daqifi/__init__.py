@@ -84,6 +84,7 @@ from .exceptions import (
     PowerStateError,
     DeviceNotConnectedError,
     ScpiInitializationError,
+    InitializationUnconfirmedError,
     SerialPortConnectError,
     SerialPortConnectFailure,
 )
@@ -128,6 +129,7 @@ __all__ = [
     'PowerStateError',
     'DeviceNotConnectedError',
     'ScpiInitializationError',
+    'InitializationUnconfirmedError',
     'SerialPortConnectError',
     'SerialPortConnectFailure',
 ]

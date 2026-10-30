@@ -9,7 +9,8 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ### Added
 - Typed errors (#201): `DeviceNotConnectedError` (a `RuntimeError`, as the
   not-connected guards raised before; `is_shutting_down` when a disconnect
-  cut a send off), `ScpiInitializationError` (a `CommandError`), and
+  cut a send off), `ScpiInitializationError` (a `CommandError`),
+  `InitializationUnconfirmedError` (a `DeviceUnresponsiveError`), and
   `SerialPortConnectError` with `reason` (`SerialPortConnectFailure`:
   not found, in use, access denied, unknown; also a
   `serial.SerialException`). `SerialInterface.last_open_error` keeps why
@@ -24,9 +25,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
   enumerated device; `SerialStreamTransport.port_name` (#161).
 
 ### Changed
-- `DaqifiDevice.initialize()` checks its setup commands (a
-  `SYSTem:ERRor?` after them, retried once) and raises
-  `ScpiInitializationError` on an error that persists. It then re-sends
+- `DaqifiDevice.initialize()` checks its setup commands: each attempt stops
+  any stream, empties the error queue, then sends them with a
+  `SYSTem:ERRor?` after them, retried once. A refusal that persists raises
+  `ScpiInitializationError`; an outcome it can't read (no reply, a reply
+  garbled by stream bytes, a queue that won't empty) raises
+  `InitializationUnconfirmedError` and leaves the device out of Error. It then re-sends
   `SYSInfoPB?` every second until a status reports the channels, and
   raises `DeviceUnresponsiveError` (now also a `TimeoutError`) on any
   transport if none does: on serial it reported Ready with empty metadata

@@ -37,17 +37,24 @@ def _status_frame() -> bytes:
 
 
 class _Stream:
-    """A scripted device. ``err_replies`` are the answers to successive
-    SYSTem:ERRor? queries (then ``0,"No error"``); ``status_after`` is how
-    many SYSInfoPB? requests go unanswered before one is answered (None:
-    never); ``on_write`` maps a command prefix to bytes to send back."""
+    """A scripted device with an error queue. ``stale_errors`` are in the
+    queue from the start; ``refuse`` maps a command prefix to how many times
+    the device refuses it (None: always), each refusal queueing -200;
+    SYSTem:ERRor? pops the queue (``0,"No error"`` when empty).
+    ``status_after`` is how many SYSInfoPB? requests go unanswered before
+    one is answered (None: never); ``on_write`` maps a command prefix to
+    bytes to send back; ``frame_before_replies`` is sent ahead of every
+    SYSTem:ERRor? reply (a stream still running)."""
 
-    def __init__(self, err_replies=(), status_after=0, on_write=None):
+    def __init__(self, stale_errors=0, refuse=None, status_after=0, on_write=None,
+                 frame_before_replies=b""):
         self.written = []
-        self.err_replies = list(err_replies)
+        self.queue = [b'-200,"Execution error"'] * stale_errors
+        self.refuse = dict(refuse or {})
         self.status_after = status_after
         self.info_requests = 0
         self.on_write = dict(on_write or {})
+        self.frame_before_replies = frame_before_replies
         self._rx = bytearray()
         self._lock = threading.Lock()
 
@@ -58,9 +65,14 @@ class _Stream:
     def write(self, data) -> int:
         b = bytes(data)
         self.written.append(b)
+        for prefix, times in self.refuse.items():
+            if b.startswith(prefix) and (times is None or times > 0):
+                self.queue.append(b'-200,"Execution error"')
+                if times is not None:
+                    self.refuse[prefix] = times - 1
         if b.startswith(b"SYSTem:ERRor?"):
-            reply = self.err_replies.pop(0) if self.err_replies else b'0,"No error"'
-            self.feed(reply + b"\r\n")
+            reply = self.queue.pop(0) if self.queue else b'0,"No error"'
+            self.feed(self.frame_before_replies + reply + b"\r\n")
         elif b.startswith(b"SYSTem:SYSInfoPB?"):
             self.info_requests += 1
             if self.status_after is not None and self.info_requests > self.status_after:
@@ -153,7 +165,7 @@ def test_initialize_re_requests_device_info_until_the_channels_arrive() -> None:
 
 
 def test_a_persistently_refused_init_command_raises_typed() -> None:
-    stream = _Stream(err_replies=[b'-200,"Execution error"', b'-200,"Execution error"'])
+    stream = _Stream(refuse={b"SYSTem:POWer:STATe 1": None})
     device = _device(stream)
     try:
         with pytest.raises(exc_mod.CommandError, match="-200") as info:
@@ -175,13 +187,51 @@ def test_a_volunteered_init_error_raises_too() -> None:
 
 
 def test_a_transient_init_error_is_retried_once() -> None:
-    stream = _Stream(err_replies=[b'-200,"Execution error"'])
+    stream = _Stream(refuse={b"SYSTem:POWer:STATe 1": 1})
     device = _device(stream)
     try:
         device.initialize(response_timeout_s=2.0)
         assert device.state == DeviceState.Ready
         power_on = [c for c in stream.commands() if c.startswith("SYSTem:POWer:STATe 1")]
         assert len(power_on) == 2
+    finally:
+        device.disconnect()
+
+
+def test_errors_left_in_the_queue_dont_fail_a_healthy_init() -> None:
+    # Two errors from earlier commands; every init command succeeds.
+    device = _device(_Stream(stale_errors=2))
+    try:
+        device.initialize(response_timeout_s=2.0)
+        assert device.state == DeviceState.Ready
+    finally:
+        device.disconnect()
+
+
+def test_two_first_attempt_errors_then_a_clean_retry_initialise() -> None:
+    stream = _Stream(refuse={b"SYSTem:POWer:STATe 1": 1, b"SYSTem:STReam:FORmat": 1})
+    device = _device(stream)
+    try:
+        device.initialize(response_timeout_s=2.0)
+        assert device.state == DeviceState.Ready
+    finally:
+        device.disconnect()
+
+
+def test_a_reply_merged_with_stream_bytes_isnt_taken_for_success() -> None:
+    # Still streaming (STOP refused): sample bytes with no LF land ahead of
+    # every reply, so "-200,..." fuses into an unreadable line.
+    stream = _Stream(
+        refuse={b"SYSTem:STReam:STOP": None},
+        frame_before_replies=bytes.fromhex("050801120102"),
+    )
+    device = _device(stream)
+    try:
+        with pytest.raises(exc_mod.DAQiFiError) as info:
+            device.initialize(response_timeout_s=1.0)
+        assert type(info.value).__name__ == "InitializationUnconfirmedError"
+        # Unknown, not refused: no Ready, and no Error on a guess.
+        assert device.state not in (DeviceState.Ready, DeviceState.Error)
     finally:
         device.disconnect()
 
@@ -233,6 +283,86 @@ def test_a_send_cut_off_by_disconnect_fails_typed_and_keeps_disconnected() -> No
     assert error.is_shutting_down
     assert device.status == ConnectionStatus.Disconnected
     assert device.state == DeviceState.Disconnected
+
+
+class _FakeSerial:
+    """A ``serial.Serial`` stand-in: ``block_writes`` makes writes wait for
+    ``release``, then fail as a port closed under them does."""
+
+    def __init__(self, block_writes=False):
+        self.is_open = True
+        self.dtr = self.rts = False
+        self.timeout = None
+        self.block_writes = block_writes
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.written = []
+
+    def write(self, data):
+        if self.block_writes:
+            self.entered.set()
+            self.release.wait(5)
+            raise serial.SerialException("write failed: port closed")
+        self.written.append(bytes(data))
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def read(self, n):
+        time.sleep(0.01)
+        return b""
+
+    @property
+    def in_waiting(self):
+        return 0
+
+    def close(self):
+        self.is_open = False
+
+
+def test_a_stale_send_failure_doesnt_mark_a_reconnected_device_lost(monkeypatch) -> None:
+    # A blocks writing on the first port; B disconnects and reconnects the
+    # same transport object (a new port); then A's write fails. That
+    # failure belongs to the old connection, not the new one.
+    import daqifi.transport as transport_mod
+    from daqifi._internal import scpi_commands
+
+    first, second = _FakeSerial(block_writes=True), _FakeSerial()
+    ports = iter([first, second])
+    monkeypatch.setattr(transport_mod.serial, "Serial", lambda *a, **k: next(ports))
+    device = DaqifiStreamingDevice(
+        name="d", transport=transport_mod.SerialStreamTransport("COM58")
+    )
+    device.connect()
+    outcome = {}
+
+    def _send():
+        try:
+            device.send(scpi_commands.get_last_error())
+        except BaseException as e:
+            outcome["error"] = e
+
+    sender = threading.Thread(target=_send, daemon=True)
+    try:
+        sender.start()
+        assert first.entered.wait(5)
+        device.disconnect()
+        device.connect()
+        assert device.status == ConnectionStatus.Connected
+        first.release.set()
+        sender.join(5)
+        error = outcome.get("error")
+        assert type(error).__name__ == "DeviceNotConnectedError", error
+        assert error.is_shutting_down
+        # The new connection is untouched and still works.
+        assert device.status == ConnectionStatus.Connected
+        assert device.state != DeviceState.Error
+        device.send(scpi_commands.get_last_error())
+        assert second.written
+    finally:
+        first.release.set()
+        device.disconnect()
 
 
 # ---- 3: execute_text_command --------------------------------------------------

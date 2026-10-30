@@ -672,9 +672,9 @@ class TestSilentInitDetection:
                 pass
 
     def test_serial_silent_init_raises_unresponsive(self):
-        """#201: a serial device that never reports its channels isn't
-        Ready with empty metadata either; it raises, as upstream's
-        InitializeAsync times out (8c97c47)."""
+        """#201: a serial device that never answers isn't Ready with empty
+        metadata either; it raises (here at the init commands' check, which
+        gets no reply)."""
         from daqifi.exceptions import DeviceUnresponsiveError
         from daqifi.transport import SerialStreamTransport
         t = _make_fake_transport(SerialStreamTransport)
@@ -682,7 +682,7 @@ class TestSilentInitDetection:
         dev = DaqifiStreamingDevice(name="d", transport=t)
         dev.connect()
         try:
-            with pytest.raises(DeviceUnresponsiveError, match="channel configuration"):
+            with pytest.raises(DeviceUnresponsiveError):
                 dev.initialize(response_timeout_s=0.1)
             assert dev.state != DeviceState.Ready
         finally:
