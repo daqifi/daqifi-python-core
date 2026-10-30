@@ -59,6 +59,7 @@ markers = [
 #     tests/integration/hardware/        15 files
 #     hardware* marker usages            6
 # So excluding by PATH catches files that carry no marker, and excluding by
-# MARKER catches hardware tests that live outside that directory. Keeping the
-# two in agreement wants its own check (every file under that path should carry
-# a hardware marker); that is filed, not built here.
+# MARKER catches hardware tests that live outside that directory. The two are
+# kept in agreement by tests/test_hardware_test_layout.py: every file under
+# that path is marked by its conftest, and no test outside it may carry a
+# hardware marker or use a fixture that probes for a board (#205).

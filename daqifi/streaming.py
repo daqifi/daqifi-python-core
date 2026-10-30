@@ -41,6 +41,11 @@ class StreamState(Enum):
 
 
 
+# How long a reader waits when a poll found nothing to deliver. Short enough
+# to keep up with the firmware's fastest rates; a reader never waits while
+# samples are waiting (#192).
+_IDLE_POLL_SECONDS = 0.001
+
 # The device's timestamp tick counter is an unsigned 32-bit value.
 _TICK_RANGE = 1 << 32
 _TICK_HALF_RANGE = 1 << 31
@@ -788,10 +793,10 @@ class StreamManager:
                 # handlers stuck on stale samples (Qodo PR #142 pass 3 #1).
                 self._dispatch_per_channel(sample)
             else:
-                # Wait only when nothing was there: samples already queued
-                # are taken at parse speed, so the deadline (sized from the
-                # sample rate) covers a backlog too.
-                time.sleep(0.001)
+                # Back off only when idle: a delay after every sample made
+                # the reader fall behind a board at its configured rate
+                # (#192).
+                time.sleep(_IDLE_POLL_SECONDS)
 
         return samples
 
@@ -1304,8 +1309,11 @@ class StreamManager:
                     if self._callback is not None:
                         self._callback(sample)
                 else:
-                    # Wait only on an empty poll, as read() does.
-                    time.sleep(0.001)
+                    # Wait only when there was nothing to deliver. Pacing
+                    # every sample by the sample period, as before, could
+                    # never keep up: reading a sample takes time too, so the
+                    # backlog grew for the whole session (#192).
+                    time.sleep(_IDLE_POLL_SECONDS)
 
             except Exception:
                 _LOGGER.exception("Streaming error")
