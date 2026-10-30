@@ -347,6 +347,27 @@ opts.validate()                                # raises ValueError on misconfig
 # for a full wiring example.
 ```
 
+### What a PIC32 update checks, and how a failed one ends
+
+- **The image.** Since firmware #909 the bootloader erases only the lower
+  program-flash panel (physical 0x1D000000-0x1D0FFFFF) and programs only
+  there. An image with data anywhere else (the upper panel, boot flash) is
+  refused before anything is sent to the board; it would be skipped or
+  written over unerased flash. Bootloader-linked release images never have
+  such data. Records in the protected calibration range are still dropped.
+- **Verifying.** After programming, the service asks the bootloader for the
+  CRC of every programmed region (`READ_CRC`) and compares it with the
+  image's. A mismatch fails the update in `VERIFYING`.
+- **A failure while erasing, programming or verifying** (or a cancel then)
+  re-erases the flash while the bootloader is still connected: the state
+  goes `CLEANING_UP`, then `RECOVERED`. The board then stays in its
+  bootloader instead of starting a half-written application. This updater
+  starts from the running application, so it can't re-flash a board
+  that's in its bootloader; program it through the bootloader with another
+  tool, or with a programmer. If the re-erase can't run or fails, the state
+  is `FAILED` and the exception's `recovery_guidance` says the board may be
+  half-written.
+
 ### Several boards on one host: which bootloader gets flashed
 
 A PIC32 update reboots the board into its HID bootloader
