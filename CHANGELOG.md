@@ -7,8 +7,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `StreamManager`/`AsyncStreamManager`/`NyquistDevice.create_stream(...,
-  integer_units=...)` and `Sample.units` for live JSON/CSV streams (#222).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -30,12 +28,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- Live JSON and CSV streaming read the firmware's values as millivolts. At
-  the firmware's default voltage precision they are volts with decimals, so
-  JSON reported 2.5 V as 0.0025 V and CSV dropped the channel. Both now use
-  the SD-log parsers' rule: decimals are volts, integers follow
-  `integer_units` (unset: raw codes, with a warning). A stream at voltage
-  precision 0 now needs `integer_units="millivolts"` (#222).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
