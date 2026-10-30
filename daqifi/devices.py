@@ -2196,6 +2196,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
         Routes through ``prepare_sd_interface`` so the LAN-disable
         precondition documented on ``enable_storage_sd`` is honored
         (LAN must be off before SD takes the SPI bus).
+
+        Stops any stream and doesn't resume it: the device can't be expected
+        to stream while it is reformatted, and the erase runs on after this
+        returns. The device is left Ready, with a warning if a stream was
+        stopped; start streaming again once the format is done.
         """
         if not self.is_connected:
             raise RuntimeError("Device is not connected.")
@@ -2203,16 +2208,15 @@ class DaqifiStreamingDevice(DaqifiDevice):
         if self._is_logging_to_sd:
             raise RuntimeError("Cannot format SD card while logging.")
 
-        paused = self._pause_streaming_for_sd()
-        format_done = False
+        if self._pause_streaming_for_sd() is not None:
+            _log.warning(
+                "format_sd_card stopped streaming; it isn't resumed. Start "
+                "streaming again once the format is done."
+            )
 
         try:
             self.prepare_sd_interface()
             self.send(scpi_commands.format_sd_card())
-            # The format runs on asynchronously; while it does the SD
-            # module refuses SD:ENAble 0 and a START that would arm
-            # logging. Wait for it before restoring anything.
-            format_done = self._wait_for_sd_format()
         finally:
             # Restore LAN — same finally pattern as get/delete/download.
             # The format command continues asynchronously on the device,
@@ -2223,7 +2227,6 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     self.prepare_lan_interface()
                 except Exception:
                     pass
-            self._restore_streaming(paused, format_done)
 
     @_exclusive_sd_operation
     def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
@@ -2562,41 +2565,6 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 return
             self._is_streaming = True
             self._set_state(DeviceState.Streaming)
-
-    def _wait_for_sd_format(self, timeout_s: float = 120.0) -> bool:
-        """Poll ``FORmat?`` until the format leaves "formatting": True when
-        it completed (or none is running), False when that can't be
-        confirmed (no readable reply, or still formatting at ``timeout_s``).
-        Raises when the device reports the format failed."""
-        import re
-
-        from .exceptions import SdCardOperationException
-
-        deadline = time.monotonic() + timeout_s
-        status_line = re.compile(r"^\s*(?:DAQIFI>\s*)?(-?\d+)\s*,\s*(\d+)\s*$", re.IGNORECASE)
-        while time.monotonic() < deadline:
-            try:
-                lines = self.execute_text_command(
-                    lambda: self.send(scpi_commands.get_sd_format_status()),
-                    response_timeout_ms=1000,
-                    completion_timeout_ms=200,
-                )
-            except Exception:
-                return False
-            match = next((status_line.match(l) for l in lines if status_line.match(l)), None)
-            if match is None:
-                return False
-            status = int(match.group(1))
-            if status == -1:
-                raise SdCardOperationException(
-                    "The SD card format failed (the device reported status -1).",
-                    tuple(lines),
-                    None,
-                )
-            if status != 1:
-                return True
-            time.sleep(0.5)
-        return False
 
     def _sd_listing_marker_expected(self) -> bool:
         """Whether the firmware ends every listing with ``__END_OF_LIST__``:

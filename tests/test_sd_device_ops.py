@@ -58,10 +58,8 @@ def _live(device):
 
 
 def _device(response_map=None, **kwargs):
-    # FORmat? answers "done": format_sd_card waits for the format to finish
-    # before it resumes anything. An accepted START streams a sample.
-    responses = {b"SD:LIST?": LISTING, b"SD:FORmat?": b"2,100\r\n",
-                 b"SYSTem:STReam:START": SAMPLE}
+    # An accepted START streams a sample.
+    responses = {b"SD:LIST?": LISTING, b"SYSTem:STReam:START": SAMPLE}
     responses.update(response_map or {})
     return _live(_fakes._make_device_with_serial_facade(responses, **kwargs))
 
@@ -84,14 +82,13 @@ def _streaming(device):
 # ---- 1: resume ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("op", ["list", "delete", "format", "request_list"])
+@pytest.mark.parametrize("op", ["list", "delete", "request_list"])
 def test_an_sd_operation_resumes_the_stream_it_paused(op) -> None:
     device = _streaming(_device())
     try:
         {
             "list": device.get_sd_card_files,
             "delete": lambda: device.delete_sd_card_file("log_a.bin"),
-            "format": device.format_sd_card,
             "request_list": device.request_sd_card_file_list,
         }[op]()
         commands = _written(device)
@@ -100,6 +97,39 @@ def test_an_sd_operation_resumes_the_stream_it_paused(op) -> None:
         # is queried as text once the stream runs.
         assert commands[-1].startswith("SYSTem:STReam:START")
         assert device.is_streaming and device.state == DeviceState.Streaming
+    finally:
+        device.disconnect()
+
+
+def test_a_format_stops_the_stream_and_doesnt_resume_it(caplog) -> None:
+    # Maintainer decision: the device can't be expected to stream while it
+    # is reformatted, and the erase runs on after the call returns.
+    import logging
+
+    device = _streaming(_device())
+    try:
+        with caplog.at_level(logging.WARNING, logger="daqifi.devices"):
+            device.format_sd_card()
+        commands = _written(device)
+        assert commands[0].startswith("SYSTem:STReam:STOP")
+        assert any(c.startswith("SYSTem:STORage:SD:FORmat") for c in commands)
+        assert not any(c.startswith("SYSTem:STReam:START") for c in commands)
+        assert not any("FORmat?" in c for c in commands)  # no status poll
+        assert not device.is_streaming and device.state == DeviceState.Ready
+        assert any("isn't resumed" in r.getMessage() for r in caplog.records)
+    finally:
+        device.disconnect()
+
+
+def test_a_format_with_no_stream_running_says_nothing(caplog) -> None:
+    import logging
+
+    device = _device()
+    try:
+        with caplog.at_level(logging.WARNING, logger="daqifi.devices"):
+            device.format_sd_card()
+        assert not any("isn't resumed" in r.getMessage() for r in caplog.records)
+        assert not device.is_streaming
     finally:
         device.disconnect()
 
@@ -220,83 +250,43 @@ def test_the_benchmark_size_is_1_to_1024_kb(size, ok) -> None:
             scpi_commands.run_sd_benchmark(size)
 
 
-# ---- audit r2: a restore during the format's busy window ---------------------
+# ---- audit r2: a refused restart ---------------------------------------------
 
 
-class _BusyAfterFormat:
-    """Models the firmware around an asynchronous format: for ``busy_s``
-    after SD:FORmat the SD module is busy, so SD:ENAble 0 and a START (which
-    would arm SD logging) are refused with -200; FORmat? says 1 while busy,
-    2 after. SYSTem:ERRor? pops the queued errors."""
+class _RefusesStart:
+    """Firmware that refuses START (-200 in the error queue) and streams
+    nothing: a restart the device didn't accept."""
 
-    def __init__(self, device, busy_s=0.3, refuse_start_always=False, format_status=2):
+    def __init__(self, device):
         self.stream = device._transport.stream
-        self.busy_until = 0.0
-        self.busy_s = busy_s
-        self.refuse_start_always = refuse_start_always
-        self.format_status = format_status
         self.errors = []
         self.refused = []
         self._write = self.stream.write
         self.stream.write = self.write
 
-    def busy(self):
-        return time.monotonic() < self.busy_until
-
     def write(self, data):
         b = bytes(data)
-        self.stream.written.append(b)
         command = b.decode(errors="replace").strip()
-        if command.startswith("SYSTem:STORage:SD:FORmat?"):
-            self.stream.feed(b"1,50\r\n" if self.busy() else b"%d,100\r\n" % self.format_status)
-        elif command.startswith("SYSTem:STORage:SD:FORmat"):
-            self.busy_until = time.monotonic() + self.busy_s
-        elif command.startswith("SYSTem:STORage:SD:ENAble 0") and self.busy():
+        if command.startswith("SYSTem:STReam:START"):
+            self.stream.written.append(b)
             self.errors.append(b'-200,"Execution error"')
             self.refused.append(command)
-        elif command.startswith("SYSTem:STReam:START"):
-            if self.busy() or self.refuse_start_always:
-                self.errors.append(b'-200,"Execution error"')
-                self.refused.append(command)
-            else:
-                self.stream.feed(SAMPLE)
-        elif command.startswith("SYSTem:ERRor?"):
-            self.stream.feed((self.errors.pop(0) if self.errors else b'0,"No error"') + b"\r\n")
-        return len(b)
-
-
-def test_a_format_resumes_only_after_it_completes_and_is_accepted() -> None:
-    device = _streaming(_device())
-    fake = _BusyAfterFormat(device, busy_s=0.3)
-    try:
-        device.format_sd_card()
-        assert fake.refused == []  # nothing restored inside the busy window
-        assert device.is_streaming and device.state == DeviceState.Streaming
-    finally:
-        device.disconnect()
+            return len(b)
+        if command.startswith("SYSTem:ERRor?") and self.errors:
+            self.stream.written.append(b)
+            self.stream.feed(self.errors.pop(0) + b"\r\n")
+            return len(b)
+        return self._write(data)
 
 
 def test_a_refused_start_leaves_the_device_ready_not_streaming() -> None:
     device = _streaming(_device())
-    fake = _BusyAfterFormat(device, busy_s=0.0, refuse_start_always=True)
+    fake = _RefusesStart(device)
     try:
-        device.format_sd_card()
+        device.get_sd_card_files()
         assert fake.refused and fake.refused[-1].startswith("SYSTem:STReam:START")
         assert not device.is_streaming and device.state != DeviceState.Streaming
         assert _written(device)[-1].startswith("SYSTem:STReam:STOP")
-    finally:
-        device.disconnect()
-
-
-def test_a_failed_format_raises_and_doesnt_resume() -> None:
-    from daqifi.exceptions import SdCardOperationException
-
-    device = _streaming(_device())
-    _BusyAfterFormat(device, busy_s=0.0, format_status=-1)
-    try:
-        with pytest.raises(SdCardOperationException, match="format failed"):
-            device.format_sd_card()
-        assert not device.is_streaming
     finally:
         device.disconnect()
 

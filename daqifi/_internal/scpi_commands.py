@@ -187,13 +187,6 @@ def run_sd_benchmark(size: int) -> ScpiMessage:
     return ScpiMessage(f"SYSTem:STORage:SD:BENCHmark {size}")
 
 
-def get_sd_format_status() -> ScpiMessage:
-    """``status,progress``: status 0 idle, 1 formatting, 2 done, -1 failed
-    (firmware ``SCPI_StorageSDFormatQuery``; a terminal status is cleared
-    once read)."""
-    return ScpiMessage("SYSTem:STORage:SD:FORmat?")
-
-
 def get_sd_benchmark_results() -> ScpiMessage:
     return ScpiMessage("SYSTem:STORage:SD:BENCHmark?")
 
