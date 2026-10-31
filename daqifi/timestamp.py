@@ -48,6 +48,9 @@ class _DeviceTimestampState:
         "previous_device_timestamp",
         "has_previous_timestamp",
         "tick_period",
+        "base_system_timestamp",
+        "base_tick_period",
+        "elapsed_ticks",
     )
 
     def __init__(self) -> None:
@@ -60,6 +63,13 @@ class _DeviceTimestampState:
         # can't fall out of step with the previous timestamp it's applied
         # to, and goes when the state does.
         self.tick_period: Optional[float] = None
+        # Each timestamp is a base plus the signed whole ticks since it,
+        # converted once: neither timedelta's microsecond rounding nor a
+        # float running sum accumulates step by step (#163 item 11). A
+        # period change moves the base, so earlier time isn't rescaled.
+        self.base_system_timestamp: datetime = datetime.min
+        self.base_tick_period: float = 0.0
+        self.elapsed_ticks: int = 0
 
     def clear_timestamps(self) -> None:
         self.previous_system_timestamp = datetime.min
@@ -162,6 +172,9 @@ class TimestampProcessor:
                 state.previous_system_timestamp = now
                 state.previous_device_timestamp = device_timestamp
                 state.has_previous_timestamp = True
+                state.base_system_timestamp = now
+                state.base_tick_period = tick_period
+                state.elapsed_ticks = 0
                 return TimestampResult(
                     timestamp=now,
                     was_rollover=False,
@@ -194,8 +207,18 @@ class TimestampProcessor:
                 clock_cycles_between_messages = previous_device_timestamp - device_timestamp
                 seconds_between_messages = clock_cycles_between_messages * tick_period * -1
 
-            message_timestamp = state.previous_system_timestamp + timedelta(
-                seconds=seconds_between_messages
+            if tick_period != state.base_tick_period:
+                state.base_system_timestamp = state.previous_system_timestamp
+                state.base_tick_period = tick_period
+                state.elapsed_ticks = 0
+            # From the base and the exact tick total, not the previous
+            # (already rounded) timestamp plus this step.
+            state.elapsed_ticks += (
+                -clock_cycles_between_messages if seconds_between_messages < 0
+                else clock_cycles_between_messages
+            )
+            message_timestamp = state.base_system_timestamp + timedelta(
+                seconds=state.elapsed_ticks * tick_period
             )
 
             state.previous_system_timestamp = message_timestamp
