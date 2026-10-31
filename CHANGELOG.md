@@ -17,6 +17,11 @@ aims to follow [Semantic Versioning](https://semver.org/).
   enumerated device; `SerialStreamTransport.port_name` (#161).
 
 ### Changed
+- The hardware-free test run (`pytest tests --ignore=tests/integration/hardware`)
+  no longer probes serial ports: the device smoke test moved under
+  `tests/integration/hardware`, and a layout test keeps any test that needs a
+  board out of the hardware-free path. The download-service tests now drive
+  `GitHubFirmwareDownloadService` itself (#205).
 - A PIC32 update now refuses to start while more than one DAQiFi board is
   connected over USB (application serial ports with 04D8:F794, plus boards
   already in bootloader mode), and says to disconnect the others; it also
@@ -28,6 +33,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
+- An SD download the device ended with `__TRANSFER_ERROR__` (a card read
+  error part-way through the file) waited out its whole timeout (30 s, or
+  30 min for `SdCardFileReceiver`) and could leave the marker in the file.
+  `SdCardFileReceiver` and `download_sd_card_file` now raise
+  `SdCardTransferErrorException` (`file_name`, `bytes_received`), keeping
+  the real content received before it. With a known size, marker text in
+  the file is still content; a real mid-file error there surfaces at the
+  idle timeout (#154).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
@@ -37,6 +50,15 @@ aims to follow [Semantic Versioning](https://semver.org/).
   and the first sample of a session keeps its raw time. Limit: a gap in the
   device's own samples longer than half a period (42.9 s at 50 MHz) reads as
   a step back; a running stream doesn't produce one (#193).
+- An unplugged serial (USB) device was never reported lost: pyserial's
+  port stays open after an unplug, so the device stayed `Connected` while
+  its reader logged a read error ten times a second forever. The reader
+  now tells the serial transport how each read went, and five failed reads
+  in a row with no success between are taken as the device gone: the
+  transport reports itself disconnected, the device moves to
+  `ConnectionStatus.Lost` and its reader stops, as for TCP. A single
+  failed read that recovers changes nothing, and `disconnect()` is never
+  reported as a loss (#191).
 - SD listings on current firmware returned a file named `__END_OF_LIST__`:
   the firmware ends every listing with `__END_OF_LIST__ OK`, `INCOMPLETE`
   or `FAILED`, and a listing marked INCOMPLETE or FAILED came back as if

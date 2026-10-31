@@ -177,6 +177,17 @@ def _hex_line(record: bytes) -> str:
     return ":" + record.hex().upper()
 
 
+def _base(high: int) -> str:
+    """An extended-linear-address line setting the upper 16 address bits."""
+    body = bytes([2, 0, 0, 4, high >> 8, high & 0xFF])
+    return _hex_line(body + bytes([(-sum(body)) & 0xFF]))
+
+
+# The lower program-flash panel, the only flash the bootloader erases; the
+# parser refuses data elsewhere (#198).
+_APP = _base(0x1D00)
+
+
 class TestSplitOversizedRecords:
     def test_record_that_fits_one_report_passes_through(self):
         record = _data_record(0, b"\x01" * 16)
@@ -241,8 +252,8 @@ class TestPic32BootloaderProtocol:
     def test_parse_hex_file(self):
         proto = Pic32BootloaderProtocol()
         data = _data_record(0, b"\xAA\xBB")
-        records = proto.parse_hex_file([_hex_line(data), ":00000001FF"])
-        assert records == [data, bytes.fromhex("00000001FF")]
+        records = proto.parse_hex_file([_APP, _hex_line(data), ":00000001FF"])
+        assert records == [bytes.fromhex(_APP[1:]), data, bytes.fromhex("00000001FF")]
 
     def test_parse_hex_file_rejects_an_image_without_data(self):
         # Audit finding: an EOF-only image passed the byte-count check and
@@ -252,24 +263,24 @@ class TestPic32BootloaderProtocol:
             proto.parse_hex_file([":00000001FF"])
 
     def test_parse_hex_file_rejects_an_image_whose_data_is_all_protected(self):
-        proto = Pic32BootloaderProtocol(0x10000, 0x1FFFF)
-        lines = [":020000040001F9", _hex_line(_data_record(0, b"\x01\x02")), ":00000001FF"]
+        proto = Pic32BootloaderProtocol(0x1D010000, 0x1D01FFFF)
+        lines = [_base(0x1D01), _hex_line(_data_record(0, b"\x01\x02")), ":00000001FF"]
         with pytest.raises(ValueError, match="no data records"):
             proto.parse_hex_file(lines)
 
     def test_parse_hex_file_splits_records_too_large_for_one_report(self):
         proto = Pic32BootloaderProtocol()
         records = proto.parse_hex_file(
-            [_hex_line(_data_record(0, b"\x01" * 32)), ":00000001FF"]
+            [_APP, _hex_line(_data_record(0, b"\x01" * 32)), ":00000001FF"]
         )
-        assert [r[0] for r in records] == [16, 16, 0]
+        assert [r[0] for r in records] == [2, 16, 16, 0]
 
     def test_custom_protected_range(self):
-        proto = Pic32BootloaderProtocol(0x10000, 0x20000)
+        proto = Pic32BootloaderProtocol(0x1D010000, 0x1D020000)
         lines = [
-            ":020000040001F9",
+            _base(0x1D01),
             _hex_line(_data_record(0, b"\x01")),
-            ":020000040003F7",
+            _base(0x1D03),
             _hex_line(_data_record(0, b"\x02")),
             ":00000001FF",
         ]

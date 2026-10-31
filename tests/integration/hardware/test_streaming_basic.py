@@ -402,13 +402,14 @@ def test_multiple_handlers_fan_out(clean_device) -> None:
 def test_start_streaming_factory_rejects_out_of_range(
     device_info,
 ) -> None:
-    """The typed factory caps rate at 1-1000 Hz before the SCPI even
-    leaves the host (per PR #17 pass 6 #5). This is the contract that
+    """The typed factory caps rate at 1-22000 Hz (the firmware's
+    STREAMING_ISR_MAX_HZ) before the SCPI even leaves the host (per PR #17
+    pass 6 #5). This is the contract that
     the streaming tests above rely on for picking 100/1000 Hz."""
     del device_info  # noqa: just gates the test on hardware presence
     with pytest.raises(ValueError, match="frequency must be between"):
         scpi_commands.start_streaming(0)
     with pytest.raises(ValueError, match="frequency must be between"):
-        scpi_commands.start_streaming(1001)
+        scpi_commands.start_streaming(22001)
     with pytest.raises(TypeError, match="frequency must be an int"):
         scpi_commands.start_streaming(100.0)  # type: ignore[arg-type]

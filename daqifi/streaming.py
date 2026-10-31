@@ -5,11 +5,12 @@ Provides real-time data acquisition with support for multiple channels,
 configurable sample rates, and data export.
 """
 
+import logging
 import math
 import time
 import threading
 from collections import deque
-from typing import List, Dict, Optional, Callable, Any, Deque
+from typing import List, Dict, Optional, Callable, Any, Deque, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -18,6 +19,17 @@ from ._internal.comm import SerialInterface
 from ._internal import scpi
 from .communication import ProtobufMessageParser
 from .exceptions import CommandError, ConfigurationError
+
+_LOGGER = logging.getLogger(__name__)
+
+# A poll that took a complete record which gave no sample (see
+# StreamManager._poll_sample): not idle, so no wait before the next poll.
+_SKIPPED = object()
+
+# Samples a StreamManager keeps in its buffer by default (about 100 s at
+# 1 kHz): enough to export a recent window, bounded so a long-running stream
+# can't exhaust memory. Pass buffer_size=None for an unbounded buffer.
+DEFAULT_BUFFER_SIZE = 100_000
 
 
 class StreamState(Enum):
@@ -28,6 +40,11 @@ class StreamState(Enum):
     ERROR = "ERROR"
 
 
+
+# How long a reader waits when a poll found nothing to deliver. Short enough
+# to keep up with the firmware's fastest rates; a reader never waits while
+# samples are waiting (#192).
+_IDLE_POLL_SECONDS = 0.001
 
 # The device's timestamp tick counter is an unsigned 32-bit value.
 _TICK_RANGE = 1 << 32
@@ -60,8 +77,9 @@ class Sample:
     units: Optional[str] = None
 
     def __getitem__(self, channel: int) -> float:
-        """Get channel value by index"""
-        return self.channels.get(channel, 0.0)
+        """Get channel value by index; NaN when this sample has no value for
+        the channel (it wasn't in the record), never a fake 0 V."""
+        return self.channels.get(channel, math.nan)
 
     def __repr__(self) -> str:
         ch_str = ", ".join(f"{ch}:{val:.3f}" for ch, val in sorted(self.channels.items()))
@@ -70,22 +88,59 @@ class Sample:
 
 @dataclass
 class SampleBuffer:
-    """Buffer of samples"""
+    """Buffer of samples.
+
+    ``max_samples`` bounds it: once it holds more than ``max_samples`` plus a
+    tenth again, the oldest samples are dropped down to ``max_samples`` (in
+    chunks, so adding stays cheap). None keeps every sample.
+
+    A streaming thread may add samples while another thread exports them.
+    Adding and clearing hold the buffer's lock, and every export works on one
+    snapshot of the samples taken under it, so a trim during an export can't
+    pair a value with another sample's timestamp.
+    """
     samples: List[Sample] = field(default_factory=list)
     channels: List[int] = field(default_factory=list)
     sample_rate: float = 0.0
     start_time: Optional[float] = None
+    max_samples: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        # Not a dataclass field: asdict(), deepcopy and pickle must not
+        # reach it (a lock can't be copied); each copy gets its own.
+        self._lock = threading.Lock()
+
+    def __getstate__(self) -> Dict[str, Any]:
+        state = dict(self.__dict__)
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
 
     def add_sample(self, sample: Sample):
         """Add sample to buffer"""
-        if self.start_time is None:
-            self.start_time = sample.timestamp
-        self.samples.append(sample)
+        with self._lock:
+            if self.start_time is None:
+                self.start_time = sample.timestamp
+            self.samples.append(sample)
+            if self.max_samples is not None:
+                excess = len(self.samples) - self.max_samples
+                if excess > max(1, self.max_samples // 10):
+                    del self.samples[:excess]
 
     def clear(self):
         """Clear buffer"""
-        self.samples.clear()
-        self.start_time = None
+        with self._lock:
+            self.samples.clear()
+            self.start_time = None
+
+    def snapshot(self) -> "Tuple[Optional[float], List[Sample]]":
+        """``(start_time, samples)`` as of one moment: a copy taken under
+        the buffer's lock, safe to iterate while samples are added."""
+        with self._lock:
+            return self.start_time, list(self.samples)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -94,7 +149,7 @@ class SampleBuffer:
         return self.samples[index]
 
     def __iter__(self):
-        return iter(self.samples)
+        return iter(self.snapshot()[1])
 
     def get_channel_data(self, channel: int) -> List[float]:
         """
@@ -104,9 +159,9 @@ class SampleBuffer:
             channel: Channel index
 
         Returns:
-            List of voltage values
+            List of voltage values (NaN where a sample has no value for it)
         """
-        return [sample[channel] for sample in self.samples]
+        return [sample[channel] for sample in self.snapshot()[1]]
 
     def get_timestamps(self) -> List[float]:
         """
@@ -115,25 +170,26 @@ class SampleBuffer:
         Returns:
             List of timestamps (seconds since start)
         """
-        if self.start_time is None:
-            return []
-        return [s.timestamp - self.start_time for s in self.samples]
+        start, samples = self.snapshot()
+        return _relative_timestamps(start, samples)
 
     def to_dict(self) -> Dict[str, Any]:
         """
         Export to dictionary.
 
         Returns:
-            Dictionary with timestamps and channel data
+            Dictionary with timestamps and channel data (NaN where a sample
+            has no value for a channel)
         """
+        start, samples = self.snapshot()
         result = {
-            'timestamps': self.get_timestamps(),
+            'timestamps': _relative_timestamps(start, samples),
             'sample_rate': self.sample_rate,
-            'num_samples': len(self.samples),
+            'num_samples': len(samples),
         }
 
         for ch in self.channels:
-            result[f'channel_{ch}'] = self.get_channel_data(ch)
+            result[f'channel_{ch}'] = [sample[ch] for sample in samples]
 
         return result
 
@@ -150,6 +206,7 @@ class SampleBuffer:
         """
         import csv
 
+        start, samples = self.snapshot()
         with open(filename, 'w', newline='') as f:
             writer = csv.writer(f)
 
@@ -158,12 +215,11 @@ class SampleBuffer:
                 header = ['timestamp'] + [f'channel_{ch}' for ch in sorted(self.channels)]
                 writer.writerow(header)
 
-            # Write data
-            timestamps = self.get_timestamps()
-            for i, ts in enumerate(timestamps):
+            # Write data: each row from one sample of the same snapshot
+            for ts, sample in zip(_relative_timestamps(start, samples), samples):
                 row = [ts]
                 for ch in sorted(self.channels):
-                    row.append(self.samples[i][ch])
+                    row.append(sample[ch])
                 writer.writerow(row)
 
     def to_json(self, filename: str):
@@ -178,8 +234,15 @@ class SampleBuffer:
         """
         import json
 
+        # A missing value is NaN for numeric use, but bare NaN isn't JSON:
+        # write it as null, and refuse any other non-finite value.
+        data = {
+            key: ([None if isinstance(v, float) and math.isnan(v) else v for v in value]
+                  if isinstance(value, list) else value)
+            for key, value in self.to_dict().items()
+        }
         with open(filename, 'w') as f:
-            json.dump(self.to_dict(), f, indent=2)
+            json.dump(data, f, indent=2, allow_nan=False)
 
     def to_dataframe(self):
         """
@@ -202,6 +265,13 @@ class SampleBuffer:
 
         data = self.to_dict()
         return pd.DataFrame(data)
+
+
+def _relative_timestamps(start: Optional[float], samples: List[Sample]) -> List[float]:
+    """Seconds since ``start`` for each of ``samples`` (empty without one)."""
+    if start is None:
+        return []
+    return [s.timestamp - start for s in samples]
 
 
 # Prompt forms that may lead the START reply, longest first so a prompt line
@@ -253,6 +323,7 @@ class StreamManager:
         sample_rate: int = 1000,
         format: int = 1,
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+        buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE,
         integer_units: Optional[str] = None,
     ):
         """
@@ -273,6 +344,10 @@ class StreamManager:
                 fans the sample out to per-channel ``SampleReceived``
                 handlers without callers having to wire dispatch
                 themselves. Closes daqifi-python-core#107.
+            buffer_size: Most samples :attr:`buffer` keeps (the newest);
+                older ones are dropped so a long-running stream can't
+                exhaust memory. Default :data:`DEFAULT_BUFFER_SIZE`; None
+                keeps all.
             integer_units: What integer JSON/CSV values mean. The firmware
                 writes volts with decimals by default (VoltagePrecision >=
                 1), integer millivolts at precision 0, and integer raw ADC
@@ -281,6 +356,8 @@ class StreamManager:
                 as raw codes and warns once per session. Decimal values are
                 volts either way.
         """
+        if buffer_size is not None and buffer_size <= 0:
+            raise ValueError("buffer_size must be positive (or None for unbounded).")
         from .sdcard import _INTEGER_UNITS
 
         if integer_units not in _INTEGER_UNITS:
@@ -295,7 +372,9 @@ class StreamManager:
         self._sample_rate = sample_rate
         self._format = format
         self._state = StreamState.STOPPED
-        self._buffer = SampleBuffer(channels=channels, sample_rate=sample_rate)
+        self._buffer = SampleBuffer(
+            channels=channels, sample_rate=sample_rate, max_samples=buffer_size
+        )
         self._callback: Optional[Callable[[Sample], None]] = None
         self._per_channel_dispatch = per_channel_dispatch
         # Anchor for relative-device-time → wall-clock conversion in
@@ -342,6 +421,10 @@ class StreamManager:
         self._device_channels: Optional[List[int]] = None
         self._pb_parser: Optional[ProtobufMessageParser] = None
         self._pending_pb_samples: Deque[Sample] = deque()
+        # Set by a parser when it takes a complete record off its buffer;
+        # tells a record that gave no sample (metadata, digital-only,
+        # malformed) from a poll that found nothing. See _poll_sample.
+        self._consumed_record = False
 
     def _new_value_reader(self):
         """The firmware value rule (shared with the SD-log parsers); a new
@@ -370,7 +453,8 @@ class StreamManager:
 
     @property
     def buffer(self) -> SampleBuffer:
-        """Get sample buffer (for reading collected samples)"""
+        """The newest samples collected this session, at most ``buffer_size``
+        (see :class:`SampleBuffer`); cleared by :meth:`start`."""
         return self._buffer
 
     def start(self, callback: Optional[Callable[[Sample], None]] = None):
@@ -715,20 +799,22 @@ class StreamManager:
                 raise
             raise CommandError(f"Failed to stop streaming: {e}") from e
 
-    def read(self, num_samples: int = 1, timeout: float = 1.0) -> List[Sample]:
+    def read(self, num_samples: int = 1, timeout: Optional[float] = None) -> List[Sample]:
         """
         Read samples from stream (blocking).
 
         Args:
             num_samples: Number of samples to read
-            timeout: Timeout in seconds per sample
+            timeout: Total seconds to wait for all ``num_samples``. None
+                (the default) allows twice their duration at the configured
+                sample rate, plus one second.
 
         Returns:
             List of samples
 
         Raises:
             RuntimeError: If not streaming
-            TimeoutError: If timeout exceeded
+            TimeoutError: If ``num_samples`` didn't arrive within ``timeout``
 
         Example:
             stream.start()
@@ -739,16 +825,22 @@ class StreamManager:
         if self._state != StreamState.RUNNING:
             raise RuntimeError("Not streaming")
 
+        if timeout is None:
+            timeout = 2.0 * num_samples / max(self._sample_rate, 1) + 1.0
         samples = []
-        start_time = time.time()
+        deadline = time.monotonic() + timeout
 
         while len(samples) < num_samples:
-            # Check timeout
-            if time.time() - start_time > timeout * num_samples:
-                raise TimeoutError(f"Timeout reading {num_samples} samples")
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Timeout reading {num_samples} samples: {len(samples)} "
+                    f"arrived in {timeout:.3g} s"
+                )
 
             # Try to read sample
-            sample = self._read_sample()
+            sample = self._poll_sample()
+            if sample is _SKIPPED:
+                continue
             if sample is not None:
                 samples.append(sample)
                 self._buffer.add_sample(sample)
@@ -756,31 +848,66 @@ class StreamManager:
                 # — silently skipping it left polling-mode callers' channel
                 # handlers stuck on stale samples (Qodo PR #142 pass 3 #1).
                 self._dispatch_per_channel(sample)
-
-            time.sleep(0.001)  # Small delay to avoid busy loop
+            else:
+                # Back off only when idle: a delay after every sample made
+                # the reader fall behind a board at its configured rate
+                # (#192).
+                time.sleep(_IDLE_POLL_SECONDS)
 
         return samples
 
     def read_all(self, duration: float) -> SampleBuffer:
         """
-        Read all samples for specified duration.
+        Read every sample that arrives during ``duration`` seconds.
+
+        Returns after ``duration`` seconds whether or not the device sent
+        anything (a stalled stream gives an empty buffer, never a hang).
 
         Args:
             duration: Duration in seconds
 
         Returns:
-            SampleBuffer with all samples
+            SampleBuffer with the samples read in that time (only those)
 
         Example:
             stream.start()
             buffer = stream.read_all(duration=10.0)
             buffer.to_csv("data.csv")
         """
-        expected_samples = int(duration * self._sample_rate)
-        samples = self.read(num_samples=expected_samples)
+        if self._state != StreamState.RUNNING:
+            raise RuntimeError("Not streaming")
+        collected = SampleBuffer(sample_rate=self._sample_rate)
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            sample = self._poll_sample()
+            if sample is _SKIPPED:
+                continue
+            if sample is not None:
+                collected.add_sample(sample)
+                self._buffer.add_sample(sample)
+                self._dispatch_per_channel(sample)
+            else:
+                time.sleep(0.001)
+        # Channels as known now: a CSV stream names its channels in a header
+        # that arrives with the data. Without any, those the samples carry.
+        collected.channels = list(self._channels) or sorted(
+            {ch for sample in collected for ch in sample.channels}
+        )
+        return collected
 
-        # Return buffer with all samples
-        return self._buffer
+    def _poll_sample(self) -> Any:
+        """One poll of the stream: a :class:`Sample`; ``_SKIPPED`` when a
+        complete record was taken but gave no sample (metadata, a
+        digital-only or malformed record); or None when nothing was there.
+
+        Callers wait only on None: a skipped record means more may be
+        queued right behind it.
+        """
+        self._consumed_record = False
+        sample = self._read_sample()
+        if sample is None and self._consumed_record:
+            return _SKIPPED
+        return sample
 
     def _read_sample(self) -> Optional[Sample]:
         """
@@ -789,7 +916,8 @@ class StreamManager:
         Dispatches to format-specific parser based on self._format.
 
         Returns:
-            Sample or None if no data available
+            Sample, or None if none came of this read (a parser that took a
+            record without producing a sample sets ``_consumed_record``)
         """
         if self._format == 0:
             return self._read_sample_protobuf()
@@ -850,9 +978,9 @@ class StreamManager:
             # Extract and parse JSON
             json_str = self._read_buffer[start_idx:end_idx]
             self._read_buffer = self._read_buffer[end_idx:]  # Remove parsed data
+            self._consumed_record = True
 
-            # Show raw JSON data received (for debugging/verification)
-            print(f"JSON data received: {json_str}")
+            _LOGGER.debug("JSON data received: %s", json_str)
 
             data = json.loads(json_str)
 
@@ -861,7 +989,7 @@ class StreamManager:
                 # Extract and store tick rate for future timestamp conversion
                 if 'tick_hz' in data['meta']:
                     self._tick_rate_hz = data['meta']['tick_hz']
-                    print(f"Metadata received: {data['meta']}")
+                    _LOGGER.debug("Metadata received: %s", data['meta'])
                 return None  # Not a sample, skip
 
             # Parse ADC data (new field name: 'ai' not 'adc'). Values follow
@@ -877,6 +1005,13 @@ class StreamManager:
                     return None  # mixes decimals and integers: not firmware output
                 values, units = read
                 channels_data = dict(zip(ch_ids, values))
+
+            if not channels_data:
+                # A digital-only record ({"ts":..,"di":[..]}: the firmware
+                # sends one per DIO read when DIO streaming is on) has no
+                # analog value; it isn't an analog sample, and must not
+                # become a fake 0 V one.
+                return None
 
             # Get timestamp from firmware (new field: 'ts' not 'timestamp')
             if 'ts' in data and self._tick_rate_hz:
@@ -895,14 +1030,14 @@ class StreamManager:
             return sample
 
         except json.JSONDecodeError:
-            # Invalid JSON, clear buffer and try again
-            self._read_buffer = ""
+            # The malformed object was already cut from the buffer; the
+            # complete objects behind it are still good.
+            _LOGGER.warning("Skipping a malformed JSON record")
             return None
         except Warning:
             raise  # a promoted warning isn't a malformed record
         except Exception as e:
-            # Other error, log and return None
-            print(f"Error reading sample: {e}")
+            _LOGGER.warning("Error reading sample: %s", e)
             return None
 
     def _read_values(self, raw, record: str):
@@ -945,6 +1080,7 @@ class StreamManager:
             # Extract line
             line = self._read_buffer[:newline_idx].strip()
             self._read_buffer = self._read_buffer[newline_idx + 1:]  # Remove parsed data
+            self._consumed_record = True
 
             if not line:
                 return None  # Empty line
@@ -959,7 +1095,7 @@ class StreamManager:
                         if len(parts) > 1:
                             tick_str = parts[1].strip().replace(' Hz', '')
                             self._tick_rate_hz = int(tick_str)
-                            print(f"CSV Metadata: Tick rate = {self._tick_rate_hz} Hz")
+                            _LOGGER.debug("CSV metadata: tick rate %s Hz", self._tick_rate_hz)
                     except ValueError:
                         pass
                 return None  # Skip header lines
@@ -975,11 +1111,10 @@ class StreamManager:
                     # Keep the buffer's channel list in step: exports
                     # (to_dict/to_csv/to_dataframe) read it.
                     self._buffer.channels = list(self._channels)
-                    print(f"CSV Column Headers detected: Enabled channels = {self._channels}")
+                    _LOGGER.debug("CSV column headers: enabled channels %s", self._channels)
                 return None
 
-            # Show raw CSV data received (for debugging/verification)
-            print(f"CSV data received: {line}")
+            _LOGGER.debug("CSV data received: %s", line)
 
             # Parse CSV values
             values = line.split(',')
@@ -1047,7 +1182,7 @@ class StreamManager:
         except Warning:
             raise  # a promoted warning isn't a malformed record
         except Exception as e:
-            print(f"Error parsing CSV sample: {e}")
+            _LOGGER.warning("Error parsing CSV sample: %s", e)
             return None
 
     def _read_sample_protobuf(self) -> Optional[Sample]:
@@ -1115,6 +1250,7 @@ class StreamManager:
             )
             if consumed:
                 del self._pb_buffer[:consumed]
+                self._consumed_record = True
             elif len(self._pb_buffer) > self._PB_BUFFER_HARD_CAP:
                 # Parser made no forward progress and the buffer keeps
                 # growing — the wire is desynced (firmware reboot mid-
@@ -1251,23 +1387,27 @@ class StreamManager:
         stop_event = stop_event if stop_event is not None else self._stop_event
         while not stop_event.is_set():
             try:
-                sample = self._read_sample()
+                sample = self._poll_sample()
+                if sample is _SKIPPED:
+                    continue
                 if sample is not None:
                     self._buffer.add_sample(sample)
                     self._dispatch_per_channel(sample)
                     if self._callback is not None:
                         self._callback(sample)
-
-                time.sleep(1.0 / self._sample_rate)
+                else:
+                    # Wait only when there was nothing to deliver. Pacing
+                    # every sample by the sample period, as before, could
+                    # never keep up: reading a sample takes time too, so the
+                    # backlog grew for the whole session (#192).
+                    time.sleep(_IDLE_POLL_SECONDS)
 
             except Warning:
                 # Promoted to an error, with no caller on this thread to
                 # raise it to; the record was kept for the next read.
-                import logging
-                logging.getLogger(__name__).warning("Streaming warning", exc_info=True)
+                _LOGGER.warning("Streaming warning", exc_info=True)
             except Exception:
-                import logging
-                logging.getLogger(__name__).exception("Streaming error")
+                _LOGGER.exception("Streaming error")
                 self._state = StreamState.ERROR
                 break
 
@@ -1357,6 +1497,7 @@ class AsyncStreamManager:
         sample_rate: int = 1000,
         format: int = 1,
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
+        buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE,
         integer_units: Optional[str] = None,
     ):
         """
@@ -1369,6 +1510,7 @@ class AsyncStreamManager:
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
             per_channel_dispatch: See :class:`StreamManager`. Forwarded
                 to the wrapped synchronous manager.
+            buffer_size: See :class:`StreamManager`.
             integer_units: See :class:`StreamManager`.
         """
         self._stream = StreamManager(
@@ -1377,6 +1519,7 @@ class AsyncStreamManager:
             sample_rate,
             format,
             per_channel_dispatch=per_channel_dispatch,
+            buffer_size=buffer_size,
             integer_units=integer_units,
         )
 
@@ -1390,12 +1533,14 @@ class AsyncStreamManager:
         import asyncio
         await asyncio.get_event_loop().run_in_executor(None, self._stream.stop)
 
-    async def read(self, num_samples: int = 1) -> List[Sample]:
+    async def read(self, num_samples: int = 1, timeout: Optional[float] = None) -> List[Sample]:
         """
         Read samples (async).
 
         Args:
             num_samples: Number of samples to read
+            timeout: Total seconds for all of them; see
+                :meth:`StreamManager.read`
 
         Returns:
             List of samples
@@ -1405,10 +1550,10 @@ class AsyncStreamManager:
                 samples = await stream.read(100)
         """
         import asyncio
+        import functools
         return await asyncio.get_event_loop().run_in_executor(
             None,
-            self._stream.read,
-            num_samples
+            functools.partial(self._stream.read, num_samples, timeout),
         )
 
     async def __aenter__(self):

@@ -16,7 +16,6 @@ A clean, Pythonic API for controlling DAQiFi Nyquist devices (NQ1, NQ2, NQ3).
 - **SD Card Operations**: Inspect, transfer, and delete on-device SD card files with structured error types (busy / not present / filesystem / generic)
 - **Error Queue Drain**: Inspect and drain the device's SCPI error queue (`drain_errors`) to surface silent failures
 - **Firmware Updates**: PIC32 + WIFI module flashing with optional post-reconnect application-readiness probe
-- **Comprehensive Test Suite**: YAML-configured test suite for complete device validation
 - **Type Hints**: Full type annotation for IDE support
 - **Context Managers**: Automatic cleanup with `with` statement
 
@@ -31,7 +30,7 @@ pip install -e .
 
 ### Dependencies
 
-Runtime: `pyserial`, `pyyaml`, `protobuf` (declared in `setup.py`).
+Runtime: `pyserial`, `protobuf`, `ifaddr` (declared in `setup.py`).
 
 For testing and data analysis (optional):
 ```bash
@@ -41,7 +40,7 @@ pip install pandas matplotlib
 ## Quick Start
 
 ```python
-from daqifi import NyquistDevice, DeviceFinder
+from daqifi import BoardVariant, DeviceFinder, NyquistDevice
 
 # Discover devices
 devices = DeviceFinder.discover()
@@ -53,11 +52,13 @@ device = NyquistDevice.connect(devices[0])
 # Power up
 device.power_up()
 
-# Control DAC (NQ3 only)
-device.analog_outputs[0].voltage = 5.0
+# Control DAC (NQ3 only; raises FeatureNotSupportedError on NQ1/NQ2)
+if device.variant == BoardVariant.NQ3:
+    device.analog_outputs[0].voltage = 5.0
 
-# Configure ADC
-device.analog_inputs[0].range = "10V"
+# Configure ADC (the input range is fixed on NQ1/NQ2, configurable on NQ3)
+if device.variant == BoardVariant.NQ3:
+    device.analog_inputs[0].range = "10V"
 device.analog_inputs[0].enabled = True
 
 # Control DIO
@@ -120,7 +121,7 @@ voltage = device.analog_outputs[0].voltage
 ### ADC Configuration
 
 ```python
-# Single channel
+# Single channel (range is NQ3 only: NQ1/NQ2 have a fixed input range)
 device.analog_inputs[0].range = "10V"
 device.analog_inputs[0].enabled = True
 
@@ -190,6 +191,8 @@ are read as raw codes with a one-time warning. Each sample's `units` says
 how its values were read.
 
 ```python
+import time
+
 # Basic streaming (JSON format)
 stream = device.create_stream(channels=[0, 1, 2], sample_rate=1000, format=1)
 stream.start()
@@ -197,7 +200,8 @@ samples = stream.read(num_samples=100)
 stream.stop()
 
 for sample in samples:
-    print(f"Timestamp: {sample.timestamp}, Values: {sample.values}")
+    # sample.channels maps channel number to volts
+    print(f"Timestamp: {sample.timestamp}, Values: {sample.channels}")
 
 # CSV format streaming
 stream = device.create_stream(channels=[0], sample_rate=10, format=2)
@@ -219,12 +223,10 @@ with device.create_stream(channels=[0, 1], sample_rate=1000, format=1) as stream
 def on_sample(sample):
     print(f"Received: {sample}")
 
+stream = device.create_stream(channels=[0], sample_rate=100, format=1)
 stream.start(callback=on_sample)
 time.sleep(10)
 stream.stop()
-
-# WiFi TCP Streaming
-# See testing/suites/README.md for WiFi configuration examples
 ```
 
 ### CSV Export
@@ -245,8 +247,14 @@ class InMemorySource(SampleSource):
         self._samples = samples
     def get_channels(self): return self._channels
     def get_sample_count(self): return len(self._samples)
-    def stream_samples(self): yield from self._samples
+    def stream_samples(self, cancel_event=None):
+        # The exporter passes a threading.Event; stop early once it is set.
+        for row in self._samples:
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            yield row
 
+values = [0.0, 0.5, 1.0]  # your samples, in volts
 source = InMemorySource(
     channels=[ChannelDescriptor("NQ1", "9090...", "AI0", "Analog")],
     samples=[SampleRow(timestamp_ticks=t, channel_key="NQ1:9090...:AI0", value=v)
@@ -260,26 +268,40 @@ with open("export.csv", "w") as f:
     )
 ```
 
+Relative time defaults to 3 decimals (1 ms); set
+`CsvExportOptions(relative_time_decimals=...)` up to 7 for streams faster
+than 1 kHz.
+
 ### SD Card Operations
 
+These operations are on `DaqifiStreamingDevice`, which
+`DaqifiDeviceFactory` connects (the `NyquistDevice` above has a smaller,
+older set: `sd_list_files()`, `sd_get_file()`, `sd_delete_file()`).
+
 ```python
+from daqifi.devices import DaqifiDeviceFactory
 from daqifi.exceptions import (
-    SdCardBusyException, SdCardNotPresentException,
-    SdCardFilesystemException, SdCardOperationException,
+    SdCardNotPresentException, SdCardFilesystemException,
+    SdCardListIncompleteException, SdCardOperationException,
 )
 
+device = DaqifiDeviceFactory.connect_serial("/dev/ttyACM0")  # a COM port on Windows
 try:
-    files = device.request_sd_card_file_list()
+    files = device.get_sd_card_files()
     for f in files:
-        print(f.name, f.size_bytes)
-except SdCardBusyException:
-    print("SD logging in progress — stop it first")
+        print(f.file_name, f.size)
+except RuntimeError as e:
+    print(f"Not possible right now: {e}")  # e.g. SD logging in progress
 except SdCardNotPresentException:
     print("No SD card inserted")
 except SdCardFilesystemException as e:
     print(f"Filesystem error: {e}")
+except SdCardListIncompleteException as e:
+    print(f"Listing incomplete, try again: {e}")
 except SdCardOperationException as e:
     print(f"Generic SD failure: {e}")
+finally:
+    device.disconnect()
 ```
 
 Listing, downloading and deleting refuse while this session is logging to
@@ -320,11 +342,11 @@ from daqifi.firmware.update_options import FirmwareUpdateServiceOptions
 opts = FirmwareUpdateServiceOptions()
 
 def app_ready(device, deadline):
-    try:
-        device.send("SYST:INFo?")     # any quick status query
-        return True
-    except Exception:
-        return False
+    # Ready once the application's SCPI console answers. drain_errors()
+    # asks SYSTem:ERRor? until the queue reads empty, and ends its result
+    # with a DRAIN_INCONCLUSIVE entry when nothing answered.
+    popped = device.drain_errors(max_iterations=8, empty_budget=1)
+    return not any("DRAIN_INCONCLUSIVE" in e for e in popped)
 
 opts.post_reconnect_readiness_probe = app_ready
 opts.post_reconnect_readiness_timeout = 30.0   # bound the wait
@@ -336,6 +358,27 @@ opts.validate()                                # raises ValueError on misconfig
 # tests/portomatic-generated/test_default_firmware_update_service.py
 # for a full wiring example.
 ```
+
+### What a PIC32 update checks, and how a failed one ends
+
+- **The image.** Since firmware #909 the bootloader erases only the lower
+  program-flash panel (physical 0x1D000000-0x1D0FFFFF) and programs only
+  there. An image with data anywhere else (the upper panel, boot flash) is
+  refused before anything is sent to the board; it would be skipped or
+  written over unerased flash. Bootloader-linked release images never have
+  such data. Records in the protected calibration range are still dropped.
+- **Verifying.** After programming, the service asks the bootloader for the
+  CRC of every programmed region (`READ_CRC`) and compares it with the
+  image's. A mismatch fails the update in `VERIFYING`.
+- **A failure while erasing, programming or verifying** (or a cancel then)
+  re-erases the flash while the bootloader is still connected: the state
+  goes `CLEANING_UP`, then `RECOVERED`. The board then stays in its
+  bootloader instead of starting a half-written application. This updater
+  starts from the running application, so it can't re-flash a board
+  that's in its bootloader; program it through the bootloader with another
+  tool, or with a programmer. If the re-erase can't run or fails, the state
+  is `FAILED` and the exception's `recovery_guidance` says the board may be
+  half-written.
 
 ### Several boards on one host: which bootloader gets flashed
 
@@ -417,11 +460,13 @@ from datetime import timedelta
 finder = WiFiDeviceFinder()
 infos = finder.discover(timeout=timedelta(seconds=5))
 
-# Each result carries its origin NIC's IP for multi-homed setups:
 for info in infos:
-    print(f"{info.serial_number}  IP={info.ip_address}  "
-          f"via NIC {info.local_interface_address}")
+    print(f"{info.serial_number}  IP={info.ip_address}")
 ```
+
+`DeviceInfo.local_interface_address` is not filled in yet, and a TCP
+connection still goes out over the default route
+([#196](https://github.com/daqifi/daqifi-python-core/issues/196)).
 
 
 ## API Reference
@@ -476,6 +521,7 @@ SD card operations (port of upstream PR #182):
 - **`SdCardBusyException`**: SD logging is in progress; stop it before the operation
 - **`SdCardNotPresentException`**: No card inserted
 - **`SdCardFilesystemException`**: Filesystem-level failure (corrupt, unreadable, etc.)
+- **`SdCardTransferErrorException`**: the device hit a read error part-way through a download (`__TRANSFER_ERROR__`); the `bytes_received` bytes written are real content, but the file is incomplete
 
 ## Device Variants
 
@@ -496,33 +542,17 @@ SD card operations (port of upstream PR #182):
 
 ## Testing
 
-### Comprehensive Test Suite
+### Unit Tests
 
-A complete YAML-configured test suite is available in `testing/suites/`:
+The unit tests need no hardware:
 
 ```bash
-cd testing/suites
-
-# Copy template and configure
-cp test_config.yaml.template test_config.yaml
-# Edit test_config.yaml with your WiFi credentials
-
-# Run all tests (USB CDC + WiFi)
-python3 comprehensive_test.py
-
-# Run USB-only tests (quick test)
-python3 comprehensive_test.py test_config_usb_only.yaml
+pip install pytest pytest-asyncio
+python -m pytest tests --ignore=tests/integration/hardware
 ```
 
-**Test Coverage:**
-- ✓ USB CDC connection and SCPI commands
-- ✓ Power management
-- ✓ ADC/DIO configuration
-- ✓ USB streaming (JSON, CSV, ProtoBuf)
-- ✓ WiFi configuration (STA/AP modes)
-- ✓ WiFi TCP streaming (all formats)
-
-See [testing/suites/README.md](testing/suites/README.md) for detailed documentation.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the tests that run against a
+connected device.
 
 ### Individual Examples
 
@@ -563,9 +593,9 @@ daqifi/
   ├── devices.py          - DaqifiDevice, DaqifiStreamingDevice, DaqifiDeviceFactory
   ├── transport.py        - SerialStreamTransport, TcpStreamTransport
   ├── device_finders.py   - SerialDeviceFinder, WiFiDeviceFinder
-  ├── communication.py    - ProtobufMessageParser, ProtobufMessage
-  ├── streaming.py        - StreamingChannelDispatcher
-  ├── network.py          - WiFi/LAN configuration
+  ├── communication.py    - ProtobufMessageParser, StreamMessageConsumer
+  ├── streaming.py        - StreamManager, AsyncStreamManager, Sample
+  ├── network.py          - NetworkConfiguration (WiFi/LAN settings)
   ├── sdcard.py           - SD card file operations
   ├── export.py           - CsvExporter + SampleSource
   ├── firmware/           - DefaultFirmwareUpdateService + bootloader, hex parser, etc.
@@ -651,7 +681,7 @@ stream.start()
 ```
 
 ### WiFi TCP Connection Timing
-When testing multiple streaming formats over WiFi TCP, allow 1 second between tests for the device to clean up connections. The comprehensive test suite handles this automatically.
+When testing multiple streaming formats over WiFi TCP, allow 1 second between tests for the device to clean up connections.
 
 ## Troubleshooting
 
@@ -702,5 +732,5 @@ MIT License - Copyright (c) DAQiFi
 ## Support
 
 For issues or questions:
-- Create an issue in the [GitHub repository](https://github.com/daqifi/daqifi-nyquist-firmware/issues)
+- Create an issue in the [GitHub repository](https://github.com/daqifi/daqifi-python-core/issues)
 - Contact DAQiFi support

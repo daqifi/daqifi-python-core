@@ -6,7 +6,7 @@ Nyquist devices (NQ1, NQ2, NQ3) via serial/USB connection.
 
 Example:
     Basic usage:
-        >>> from daqifi import NyquistDevice, DeviceFinder
+        >>> from daqifi import BoardVariant, DeviceFinder, NyquistDevice
         >>>
         >>> # Discover devices
         >>> devices = DeviceFinder.discover()
@@ -15,11 +15,13 @@ Example:
         >>> device = NyquistDevice.connect("/dev/ttyACM0")
         >>> device.power_up()
         >>>
-        >>> # Control DAC (NQ3 only)
-        >>> device.analog_outputs[0].voltage = 5.0
+        >>> # Control DAC (NQ3 only; NQ1/NQ2 raise FeatureNotSupportedError)
+        >>> if device.variant == BoardVariant.NQ3:
+        ...     device.analog_outputs[0].voltage = 5.0
         >>>
-        >>> # Read ADC
-        >>> device.analog_inputs[0].range = "10V"
+        >>> # Read ADC (the range is configurable on NQ3 only)
+        >>> if device.variant == BoardVariant.NQ3:
+        ...     device.analog_inputs[0].range = "10V"
         >>> device.analog_inputs[0].enabled = True
         >>>
         >>> # Control DIO
@@ -32,7 +34,7 @@ Example:
     Context manager:
         >>> with NyquistDevice.connect("/dev/ttyACM0") as device:
         ...     device.power_up()
-        ...     device.analog_outputs[0].voltage = 5.0
+        ...     device.analog_inputs[0].enabled = True
         ...     # Device automatically disconnects on exit
 
 For more information, see the documentation at:
