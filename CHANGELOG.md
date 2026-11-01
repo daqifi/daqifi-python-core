@@ -15,6 +15,39 @@ aims to follow [Semantic Versioning](https://semver.org/).
   configuration (#155).
 - `HidLibraryTransport.connect(..., device_path=...)` opens exactly the
   enumerated device; `SerialStreamTransport.port_name` (#161).
+- `SdCardLogEntry.analog_channels` names the channel of each analog value;
+  `SdCardParseOptions.analog_channels` gives a protobuf log's channels,
+  which the log doesn't record (#194).
+- PIC32 updates verify the flash: `VERIFYING` reads each programmed region's
+  CRC back from the bootloader (`READ_CRC`) and compares it with the image's.
+  `Pic32BootloaderProtocol.compute_crc_regions`, `create_read_crc_message`
+  and `decode_read_crc_response`, and `FlashCrcRegion` (#198).
+- A PIC32 update that fails (or is canceled) while erasing, programming or
+  verifying re-erases the flash: new states `FirmwareUpdateState.CLEANING_UP`
+  and `RECOVERED` (#198).
+- `CsvExportOptions.relative_time_decimals` (0–7, default 3) sets the
+  relative-time resolution (#195).
+- `TimestampProcessor.set_timestamp_frequency(device_id, hz)` and
+  `get_tick_period(device_id)`: a device's reported `timestamp_freq` sets
+  its tick period instead of the fixed 20 ns (#204).
+- `StreamManager`/`AsyncStreamManager`/`NyquistDevice.create_stream(...,
+  integer_units=...)` and `Sample.units` for live JSON/CSV streams (#222).
+- `TcpStreamTransport(..., local_interface=...)` and
+  `DaqifiDeviceFactory.connect_tcp(..., local_interface=...)` bind the TCP
+  connection to a local IP as its source address; `connect_from_device_info`
+  passes the discovering NIC's IP. This doesn't select the outgoing NIC: on
+  Linux the routing table still picks the route (#196).
+- Typed errors (#201): `DeviceNotConnectedError` (a `RuntimeError`, as the
+  not-connected guards raised before; `is_shutting_down` when a disconnect
+  cut a send off) and `SerialPortConnectError` with `reason`
+  (`SerialPortConnectFailure`: not found, in use, access denied, unknown;
+  also a `serial.SerialException`). `SerialInterface.last_open_error` keeps
+  why `open()` failed.
+- SD card listing, download, delete and format work over WiFi on firmware
+  v3.7.0 and later (the firmware routes the SD reply back over the TCP
+  connection), keeping the LAN interface up; older or unknown firmware is
+  refused with `FeatureNotSupportedError`. SD logging stays USB-only.
+  `start_sd_card_logging` returns the log file name (#200).
 
 ### Changed
 - The hardware-free test run (`pytest tests --ignore=tests/integration/hardware`)
@@ -31,6 +64,24 @@ aims to follow [Semantic Versioning](https://semver.org/).
   of the generated bindings (#155).
 - `requirements.txt` now lists the full runtime set (pyserial, protobuf,
   ifaddr), matching `install_requires` (#155).
+- `StreamManager.read()`'s `timeout` is the total for all samples, not per
+  sample; its default allows twice the samples' duration at the configured
+  rate plus 1 s. `read_all(duration)` collects for `duration` seconds and
+  returns just those samples, even on a stalled stream. The stream buffer
+  keeps the newest `buffer_size` samples (default 100,000; `None` for
+  unbounded). A channel absent from a `Sample` reads NaN, not 0.0 (#199).
+- python-core opens serial ports exclusively (`exclusive=True`: an advisory
+  `flock` on POSIX; Windows COM ports already were), in `SerialInterface`,
+  `SerialStreamTransport` and serial discovery. A second python-core open of
+  a port in use now fails instead of sharing it. Clients that don't take the
+  lock (a terminal program, a raw file descriptor) can still share a port on
+  POSIX (#196).
+- `DeviceUnresponsiveError` is now also a `TimeoutError`, and
+  `DaqifiDevice.initialize()` refuses a non-positive `response_timeout_s`
+  with `ValueError` (#201).
+- `ConnectionRetryOptions` rejects invalid values when set: fewer than one
+  attempt, negative delays, a backoff multiplier below 1, a connection
+  timeout under 1 ms (#201).
 
 ### Fixed
 - An SD download the device ended with `__TRANSFER_ERROR__` (a card read
@@ -287,6 +338,115 @@ aims to follow [Semantic Versioning](https://semver.org/).
   `teardown_lock_timeout` (30 s) and then only marks the device
   Disconnected. A transport loss is reported as `Lost` without tearing the
   consumer down from the transport's thread (#164).
+- `StreamManager` fell behind a board streaming at its configured rate:
+  the callback thread slept a whole sample period after every sample, and
+  `read()` slept 1 ms after every sample, so the backlog of undelivered
+  samples grew for the whole session (about 70 a second at 1 kHz) until
+  buffers overflowed. Readers now wait only when a poll finds nothing
+  (#192).
+- README examples that failed as written now run: streaming reads
+  `sample.channels` and imports `time`; the SD example uses
+  `get_sd_card_files()` and `file_name`/`size`; the CSV export's source
+  accepts `cancel_event`; the firmware readiness probe uses
+  `drain_errors()`; the Quick Start, `examples/basic_adc.py` and the
+  package docstring set the DAC and input range only on NQ3.
+  `examples/streaming_callback.py` measures its duration in device time.
+  The README no longer points at a missing `testing/suites/`, names
+  classes that don't exist, lists `pyyaml` as a runtime dependency or
+  sends support requests to the firmware repo. `tests/test_readme_examples.py`
+  runs the examples against fakes (#197).
+- Docstrings that had gone stale: text replies on `DaqifiStreamingDevice`,
+  per-channel DIO commands, the SD CSV/JSON parsers, the TCP socket view's
+  end of stream and HID `disconnect()` waiting for a read (#197).
+- SD CSV rows with an empty `,,` pair (a channel with no conversion that
+  period, or every analog pair of a DIO-only row) were dropped whole; the
+  missing channel is now left out of that row. A stray `ch` line before the
+  column header no longer hides it. Protobuf logs' raw ADC codes are marked
+  `analog_units="raw"` and warn when nothing supplies the scaling, float
+  values are marked `"volts"`, and calibration follows the channels given
+  in `analog_channels` rather than the packed position. The calibration
+  offset is added after the internal scale factor, as the firmware does
+  (#194).
+- A PIC32 HEX image with data outside the lower program-flash panel (the
+  upper panel, boot flash), which the bootloader neither erases nor programs
+  since firmware #909, is refused before any device I/O instead of being
+  flashed partly or over unerased flash (#198).
+- `DaqifiStreamingDevice` reported every DIO pin as an input and every
+  analog channel as disabled: it now reads the status message's direction
+  mask (field 37, bit set = input) and enable mask (field 22). A pin or
+  channel the device doesn't report keeps the old default (#202).
+- Two legacy `DigitalIOChannel` direction or state setters run at once on
+  one device could lose one update (an unlocked read-modify-write of the
+  port mask); they now share a per-device lock (#202).
+- `NyquistDevice.create_stream` raised `NameError` instead of
+  `ConfigurationError` for an invalid channel (and for every call on a
+  board with no analog inputs, which now says so); `sd_get_file_size`
+  raised `AttributeError` before `sd_list_files` had run and now returns
+  0 (#203).
+- After a WiFi module update, restoring LAN sent `LAN:APPLY` then
+  `LAN:SAVE`; when the firmware's apply gate refused the apply (a REINIT
+  in flight), the separate SAVE still persisted the unapplied settings. It
+  now sends `LAN:APPLY 1`, which saves only an accepted apply (#220).
+- CSV export progress fired only when the running count landed exactly on
+  a multiple of 5000 (with 7 channels, twice in 70,000 samples); it now
+  fires as each multiple is passed. Formula neutralisation skips any
+  Unicode whitespace before `=`, `+`, `-` or `@`, and fields with
+  whitespace at their edges are quoted (#195).
+- Live JSON streaming: a digital-only record no longer becomes a fake 0 V
+  sample; one malformed record no longer discards the good ones buffered
+  behind it; records are logged at debug level instead of printed to stdout
+  (#199).
+- Items carried forward from #163 (#206): `start_streaming` accepts up to
+  the firmware's 22000 Hz ceiling instead of 1000 (the device refuses a
+  rate its channel configuration can't sustain); `TimestampProcessor` no
+  longer accumulates whole-microsecond rounding step by step; an unusable
+  CSV `# Timestamp Tick Rate:` header reads as absent instead of aborting
+  the parse; the CSV row parser lets `MemoryError` through.
+- Live JSON and CSV streaming read the firmware's values as millivolts. At
+  the firmware's default voltage precision they are volts with decimals, so
+  JSON reported 2.5 V as 0.0025 V and CSV dropped the channel. Both now use
+  the SD-log parsers' rule: decimals are volts, integers follow
+  `integer_units` (unset: raw codes, with a warning). A stream at voltage
+  precision 0 now needs `integer_units="millivolts"` (#222).
+- Serial discovery (`DeviceFinder`, `SerialDeviceFinder`) probes only DAQiFi
+  application ports (USB 04D8:F794, plus CDC-ACM ports whose IDs can't be
+  read) instead of every port, so it no longer writes SCPI (including a
+  power-on) to unrelated devices; on macOS a board is listed once. Each
+  probe has a hard timeout: one hung port no longer blocks discovery, and
+  isn't probed again while its abandoned probe runs (#196).
+- `WiFiDeviceFinder` fills `DeviceInfo.local_interface_address` with the NIC
+  a device answered on (#196).
+- `update_network_configuration` ends with `LAN:APPLY 1`, which applies the
+  configuration and, only if the apply is accepted, saves it, in one
+  firmware handler. The save it sent after the apply never arrived over a
+  WiFi/TCP control link (the apply restarts the WiFi module), and the old
+  configuration came back at the next reboot (#196).
+- `execute_text_command` caps every exchange at five times
+  `response_timeout_ms` when `max_total_ms` isn't given, reads LF-only
+  replies, and treats a blank-only reply as an answer instead of waiting
+  out the timeout (#201).
+- `send()` cut off by a `disconnect()` on another thread raised a raw
+  `ValueError` and overwrote Disconnected with Lost/Error; it now raises
+  `DeviceNotConnectedError(is_shutting_down=True)` and the status stays
+  Disconnected (#201).
+- An SD operation (list, delete, format, download) that stopped a live
+  stream left the device state saying Streaming. It now leaves the device
+  Ready and logs that it stopped the stream; it doesn't resume it, so call
+  `start_streaming()` again when you're ready (#200).
+- A transport error after `DELete` was sent now raises
+  `SdCardDeleteOutcomeUnknownException` with the cause chained, since the
+  file may be gone or not; one before it was sent stays a definite failure
+  (#200).
+- A delete the device refused returned success with the file still there,
+  because the first reply's code was thrown away. It now raises
+  `SdCardOperationException`. A -200 from a card fault partway through a
+  delete also reads as refused, though the file is gone; list the card to
+  check (#200, #242).
+- `enable_adc_channels` (and `start_sd_card_logging(channel_mask=...)`) take
+  a decimal mask only: a hex mask like `"FF"` was sent, the firmware refused
+  it, and the recording ran with the previous channel set (#200).
+- `run_sd_benchmark` takes its size in KB, 1 to 1024, as the firmware does
+  (#200).
 
 ## [0.1.0]
 
