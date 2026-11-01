@@ -464,9 +464,12 @@ for info in infos:
     print(f"{info.serial_number}  IP={info.ip_address}")
 ```
 
-`DeviceInfo.local_interface_address` is not filled in yet, and a TCP
-connection still goes out over the default route
-([#196](https://github.com/daqifi/daqifi-python-core/issues/196)).
+`DeviceInfo.local_interface_address` is the IP of the NIC that found the
+board, and connecting from that `DeviceInfo` binds the TCP socket to it. That
+sets the connection's source address, not its outgoing NIC: on Linux the
+routing table still picks the route, so with two NICs on one subnet the
+lower-metric one carries the traffic. A strict NIC needs policy routing or
+`SO_BINDTODEVICE`, which this library doesn't do.
 
 
 ## API Reference

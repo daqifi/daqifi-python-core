@@ -6,6 +6,7 @@ Not intended for direct use - use the public API instead.
 """
 
 import serial
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1188,6 +1189,57 @@ class PowerState(IntEnum):
     POWERED_UP_EXT_DOWN = 2  # Partial power, external power disabled (low battery mode)
 
 
+class PortCancelled(serial.SerialException):
+    """The port's user was cancelled (given up on); nothing more may be done
+    on the port but closing it."""
+
+
+class CancellablePort:
+    """A serial port that refuses every operation but ``close`` once
+    ``cancel_event`` is set.
+
+    A discovery probe abandoned after its hard timeout stops at its next
+    operation: attribute reads and writes are checked, and a method is
+    checked again when it is called, not only when it is looked up (in
+    ``port.read(port.in_waiting)`` the ``read`` is resolved before
+    ``in_waiting`` runs). The first refused operation raises
+    :class:`PortCancelled`, a SerialException, which the probes already
+    handle by stopping.
+
+    This keeps an abandoned probe from acting on the board. It can't reach
+    into the port's constructor or into a call already running; what stops
+    such a call from touching a newer session's data is that python-core
+    opens ports exclusively (see :class:`SerialInterface`), so no newer
+    python-core session can open the port while the probe holds it.
+    """
+
+    _ALWAYS_ALLOWED = frozenset({"close", "is_open"})
+
+    def __init__(self, port: Any, cancel_event: threading.Event) -> None:
+        object.__setattr__(self, "_port", port)
+        object.__setattr__(self, "_cancel_event", cancel_event)
+
+    def _check(self, name: str) -> None:
+        if name not in self._ALWAYS_ALLOWED and self._cancel_event.is_set():
+            raise PortCancelled(f"port operation {name!r} after cancellation")
+
+    def __getattr__(self, name: str) -> Any:
+        self._check(name)
+        value = getattr(self._port, name)
+        if not callable(value):
+            return value
+
+        def _checked(*args: Any, **kwargs: Any) -> Any:
+            self._check(name)
+            return value(*args, **kwargs)
+
+        return _checked
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self._check(name)
+        setattr(self._port, name, value)
+
+
 class SerialInterface:
     """Low-level serial communication with Nyquist devices"""
 
@@ -1204,6 +1256,14 @@ class SerialInterface:
         self.baudrate = baudrate
         self.timeout = timeout
         self._serial: Optional[serial.Serial] = None
+        # Set by a caller that has given up on this interface (a discovery
+        # probe past its hard timeout): from then on the port is used for
+        # nothing but closing (see CancellablePort), so a late open or a
+        # stalled call can't disturb a newer session on it.
+        self.cancel_event: Optional[threading.Event] = None
+
+    def _cancelled(self) -> bool:
+        return self.cancel_event is not None and self.cancel_event.is_set()
 
     def open(self) -> bool:
         """
@@ -1220,6 +1280,11 @@ class SerialInterface:
         ``sd_get_file*`` are intentionally retained as defense-in-depth
         for transports where the echo-disable command itself is lost
         (a flaky pre-stable USB CDC enumeration, for example).
+
+        The port is opened exclusively (``exclusive=True``: an advisory
+        ``flock`` on POSIX; Windows COM ports are exclusive anyway), so a
+        second python-core session can't open it meanwhile, and one that
+        tries gets an error rather than a share of this one's data.
 
         Returns:
             True if connection successful, False otherwise.
@@ -1241,8 +1306,16 @@ class SerialInterface:
                 write_timeout=write_timeout,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE
+                stopbits=serial.STOPBITS_ONE,
+                exclusive=True,
             )
+            if self.cancel_event is not None:
+                self._serial = CancellablePort(self._serial, self.cancel_event)
+            if self._cancelled():
+                # Opened only after the caller gave up: close, send nothing.
+                self._serial.close()
+                self._serial = None
+                return False
             # Wait for device to stabilize
             time.sleep(0.1)
             # Clear any pending data
@@ -1261,7 +1334,15 @@ class SerialInterface:
                 pass
             return True
         except (serial.SerialException, OSError) as e:
-            # Return False instead of raising to allow discovery to continue
+            # Return False instead of raising to allow discovery to continue.
+            # Close a port that opened before the failure (a cancelled one
+            # included), rather than leave its handle behind.
+            if self._serial is not None:
+                try:
+                    self._serial.close()
+                except (serial.SerialException, OSError):
+                    pass
+                self._serial = None
             return False
 
     def _send_disable_echo(self) -> None:
@@ -1326,6 +1407,7 @@ class SerialInterface:
         port in a serial terminal afterward sees the prompt."""
         if self._serial and self._serial.is_open:
             try:
+                # Refused by CancellablePort once the caller has given up.
                 self._serial.write(b"SYSTem:ECHO 1\r\n")
                 self._serial.flush()
                 time.sleep(0.05)

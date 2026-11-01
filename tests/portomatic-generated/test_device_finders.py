@@ -98,10 +98,7 @@ class TestSerialDeviceFinder:
             SerialDeviceFinder(baud_rate=-1)
 
     def test_no_ports_returns_empty(self, monkeypatch):
-        monkeypatch.setattr(
-            "daqifi.transport.SerialStreamTransport.get_available_port_names",
-            staticmethod(lambda: []),
-        )
+        monkeypatch.setattr("daqifi.device_finders.daqifi_serial_ports", lambda: [])
         f = SerialDeviceFinder()
         assert f.discover() == []
 
