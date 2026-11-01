@@ -11,6 +11,7 @@ against a fake device on a loopback socket.
 """
 
 import io
+import selectors
 import socket
 import threading
 import time
@@ -158,6 +159,82 @@ def test_a_finished_download_still_restarts_the_consumer(device_on) -> None:
     device = device_on(_FakeDevice(file_bytes=b"hello-sd"))
     device.download_sd_card_file("log_a.bin", io.BytesIO(), expected_size=8)
     assert _wait_until(lambda: device._consumer.is_running)
+
+
+class _AlwaysReadable:
+    """A poll that says readable with nothing there (a stale one)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def register(self, *args):
+        pass
+
+    def select(self, _timeout):
+        return [object()]
+
+
+@pytest.mark.skipif(not hasattr(socket, "MSG_DONTWAIT"), reason="no per-call non-blocking receive")
+def test_in_waiting_doesnt_block_on_a_stale_poll(monkeypatch) -> None:
+    # Audit r8: the peek on a blocking socket blocked forever when the bytes
+    # the poll saw were gone.
+    import daqifi.transport as transport
+
+    a, b = socket.socketpair()
+    monkeypatch.setattr(transport.selectors, "DefaultSelector", _AlwaysReadable)
+    stream = _SocketStream(a, 0.5, 1, lambda _s: None)
+    result = []
+    worker = threading.Thread(target=lambda: result.append(stream.in_waiting), daemon=True)
+    try:
+        worker.start()
+        worker.join(2)
+        assert result == [0] and not stream.peer_closed
+    finally:
+        b.close()
+        worker.join(2)
+        a.close()
+
+
+def test_a_reader_cant_drain_what_in_waitings_poll_saw(monkeypatch) -> None:
+    # Where there's no per-call non-blocking receive (Windows), the lock is
+    # what keeps the peek from blocking: another reader arrives between the
+    # poll and the peek, and must wait for the peek.
+    import daqifi.transport as transport
+
+    monkeypatch.setattr(transport, "_PEEK_FLAGS", socket.MSG_PEEK)
+    real_selector = selectors.DefaultSelector
+    a, b = socket.socketpair()
+    stream = _SocketStream(a, 2.0, 1, lambda _s: None)
+    read_result, peek_result = [], []
+    reader = threading.Thread(target=lambda: read_result.append(stream.read(5)), daemon=True)
+    polls = []
+
+    class _ReaderArrivesAfterThePoll(real_selector):
+        def select(self, timeout=None):
+            ready = super().select(timeout)
+            if not polls:
+                polls.append(1)
+                reader.start()
+                time.sleep(0.2)
+            return ready
+
+    monkeypatch.setattr(transport.selectors, "DefaultSelector", _ReaderArrivesAfterThePoll)
+    peeker = threading.Thread(target=lambda: peek_result.append(stream.in_waiting), daemon=True)
+    b.sendall(b"12345")
+    try:
+        peeker.start()
+        peeker.join(2)
+        assert peek_result == [5]
+        reader.join(2)
+        assert read_result == [b"12345"]
+    finally:
+        b.close()
+        peeker.join(2)
+        reader.join(2)
+        a.close()
 
 
 def test_the_tcp_stream_reports_bytes_waiting_without_consuming_them() -> None:

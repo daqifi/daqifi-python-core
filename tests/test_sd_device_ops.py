@@ -255,6 +255,54 @@ def test_a_delete_the_device_answered_keeps_its_own_error() -> None:
         device.disconnect()
 
 
+class _RefusesDelete:
+    """The DELete is refused: its SYSTem:ERRor? answers ``error`` (ahead of
+    it, ``volunteered``, as the firmware's SCPI_ErrorPush writes), then the
+    listing and a clean terminator. The file is still there."""
+
+    def __init__(self, device, error=b'-200,"Execution error"', volunteered=b""):
+        self.stream = device._transport.stream
+        self.error, self.volunteered = error, volunteered
+        self.deleted, self.answered = False, False
+        self._write = self.stream.write
+        self.stream.write = self.write
+
+    def write(self, data):
+        data = bytes(data)
+        if data.startswith(_DELETE):
+            self.deleted = True
+            self.stream.written.append(data)
+            self.stream.feed(self.volunteered)
+            return len(data)
+        if self.deleted and not self.answered and data.startswith(_ERROR_QUERY):
+            self.answered = True
+            self.stream.written.append(data)
+            self.stream.feed(self.error + b"\r\n")
+            return len(data)
+        return self._write(data)
+
+
+@pytest.mark.parametrize(
+    "volunteered",
+    [b"", b'**ERROR: -200, "Execution error"\r\n'],
+    ids=["queued", "also-volunteered"],
+)
+def test_a_refused_delete_raises_a_definite_error(volunteered) -> None:
+    # Audit r8: the first reply's code was thrown away, so this returned None
+    # with the file still there.
+    from daqifi.exceptions import SdCardDeleteOutcomeUnknownException, SdCardOperationException
+
+    device = _device()
+    fake = _RefusesDelete(device, volunteered=volunteered)
+    try:
+        with pytest.raises(SdCardOperationException, match="-200") as excinfo:
+            device.delete_sd_card_file("log_a.bin")
+        assert not isinstance(excinfo.value, SdCardDeleteOutcomeUnknownException)
+        assert fake.answered
+    finally:
+        device.disconnect()
+
+
 # ---- 2: WiFi on firmware >= 3.7.0 -------------------------------------------
 
 

@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
+from itertools import takewhile
 from typing import IO, Any, Callable, List, Optional, Sequence, Tuple
 
 _log = logging.getLogger(__name__)
@@ -2562,7 +2563,8 @@ class DaqifiStreamingDevice(DaqifiDevice):
           device repeats each command) are dropped, and a reply glued to the
           end-of-listing marker is split off it.
         - ``leading_reply``: the delete path sends ``SYSTem:ERRor?`` straight
-          after ``DELete`` too, so the first reply is the DELete's, and the
+          after ``DELete`` too, so the first reply is the DELete's (non-zero:
+          the device refused it, :class:`SdCardOperationException`), and the
           listing's terminator stays the listing's own.
         - No terminator reply means the reply never finished:
           :class:`SdCardListIncompleteException`.
@@ -2576,7 +2578,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
           directory only with a clean (0) terminator.
         """
         from ._internal import scpi as _scpi
-        from .exceptions import SdCardListIncompleteException
+        from .exceptions import SdCardListIncompleteException, SdCardOperationException
         from .sdcard import (
             sd_card_listing_status,
             split_glued_error_reply,
@@ -2598,9 +2600,22 @@ class DaqifiStreamingDevice(DaqifiDevice):
         # ending is judged.
         throw_if_sd_card_reported_error(lines)
         if leading_reply:
-            if not lines or _scpi.find_system_error_reply([lines[0]]) is None:
+            # A refusal comes twice: SCPI_ErrorPush writes "**ERROR ..." to
+            # the wire ahead of the query's reply, and queues it.
+            volunteered = list(
+                takewhile(lambda line: _scpi.contains_scpi_error([line]), lines)
+            )
+            reply = _scpi.find_system_error_reply(lines[len(volunteered):][:1])
+            if reply is None:
                 raise SdCardListIncompleteException(
                     lines, "no reply to the SYSTem:ERRor? sent after DELete"
+                )
+            if volunteered or _scpi.parse_system_error(reply)[0] != 0:
+                refusal = (volunteered[0] if volunteered else reply).strip()
+                raise SdCardOperationException(
+                    f"The device refused to delete the file: {refusal}",
+                    lines,
+                    refusal,
                 )
             lines = lines[1:]
         marker_expected = self._sd_listing_marker_expected()

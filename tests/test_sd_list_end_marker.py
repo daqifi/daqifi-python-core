@@ -15,7 +15,7 @@ import pytest
 
 import daqifi.exceptions as _exc
 import daqifi.sdcard as _sd
-from daqifi.exceptions import SdCardFilesystemException
+from daqifi.exceptions import SdCardFilesystemException, SdCardOperationException
 from daqifi.sdcard import parse_sd_card_file_list
 
 
@@ -334,13 +334,27 @@ def test_a_filename_shaped_like_a_reply_is_not_a_terminator_on_older_firmware() 
 
 
 def test_a_failed_delete_does_not_hide_an_aborted_relisting() -> None:
-    # The DELete's own error is read by its own SYSTem:ERRor?, so the
-    # listing's -200 is the listing's again (it was ignored on this path).
+    # The DELete's own error is read by its own SYSTem:ERRor?, and it's the
+    # answer: the device refused (#200 audit r8; it used to be thrown away,
+    # leaving only the listing's -200 to fail on).
     device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OLD_LISTING})
     device._metadata.firmware_version = "3.7.3"
     _with_error_queue(
         device,
         [b'0,"No error"\r\n', b'-256,"File name not found"\r\n', b'-200,"Execution error"\r\n'],
+    )
+    with pytest.raises(SdCardOperationException, match="-256"):
+        device.delete_sd_card_file("log_a.bin")
+
+
+def test_a_delete_answered_clean_does_not_hide_an_aborted_relisting() -> None:
+    # The listing's -200 is the listing's own, so the delete's outcome is
+    # unknown (a subclass of the listing's error).
+    device = _fakes._make_device_with_serial_facade({b"SD:LIST?": OLD_LISTING})
+    device._metadata.firmware_version = "3.7.3"
+    _with_error_queue(
+        device,
+        [b'0,"No error"\r\n', b'0,"No error"\r\n', b'-200,"Execution error"\r\n'],
     )
     with pytest.raises(SdCardListIncompleteException):
         device.delete_sd_card_file("log_a.bin")
