@@ -522,6 +522,9 @@ SD card operations (port of upstream PR #182):
 - **`SdCardNotPresentException`**: No card inserted
 - **`SdCardFilesystemException`**: Filesystem-level failure (corrupt, unreadable, etc.)
 - **`SdCardTransferErrorException`**: the device hit a read error part-way through a download (`__TRANSFER_ERROR__`); the `bytes_received` bytes written are real content, but the file is incomplete
+- **`SdCardDeleteOutcomeUnknownException`**: a delete was sent but its outcome couldn't be confirmed (no complete reply, or a transport error after it was sent); the file may be gone, so list the card to check
+
+Every SD operation (list, download, delete, format) stops any running stream, leaves the device Ready and logs a warning that it did. The stream isn't resumed: call `start_streaming()` again when you're ready.
 
 ## Device Variants
 

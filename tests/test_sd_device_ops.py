@@ -1,8 +1,11 @@
 """#200: SD device operations.
 
 1. SD list, delete, format and download stopped a live stream and never
-   restarted it; the device state still said Streaming. They now resume the
-   stream they paused (upstream daqifi-core 874c5fb / 9717b32).
+   restarted it, while the device state still said Streaming. They still
+   don't restart it (operator ruling: stopping is the user's call for
+   anything beyond a health query), but they now leave the device Ready and
+   log that they stopped it. A transport error after DELete is sent is
+   SdCardDeleteOutcomeUnknownException; one before it stays definite.
 2. They refused WiFi outright. Firmware v3.7.0+ routes SD replies back over
    the requesting TCP connection (#598/#599, SCPIStorageSD.c), so over WiFi
    they now work on that firmware, keep LAN up, and refuse older or unknown
@@ -15,7 +18,9 @@
 
 import importlib.util
 import io
+import logging
 import os
+import threading
 import time
 
 import pytest
@@ -33,35 +38,10 @@ _spec.loader.exec_module(_fakes)
 LISTING = b"Daqifi/log_a.bin 3\r\n"
 
 
-def _frame(**fields) -> bytes:
-    from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
-
-    body = DaqifiOutMessage(**fields).SerializeToString()
-    return bytes([len(body)]) + body
-
-
-# One sample, as the device streams it once START is accepted.
-SAMPLE = _frame(msg_time_stamp=100, analog_in_data_float=[1.0])
-
-
-def _live(device):
-    """Wire the protobuf pipeline as initialize() does, so the device sees
-    the samples a resumed stream sends (the restore waits for one)."""
-    from daqifi.protocol import ProtobufProtocolHandler
-
-    device._protocol_handler = ProtobufProtocolHandler(
-        status_message_handler=device._on_status_message_received,
-        stream_message_handler=device._on_stream_message_received,
-    )
-    device._consumer.add_message_received(device._on_inbound_message)
-    return device
-
-
 def _device(response_map=None, **kwargs):
-    # An accepted START streams a sample.
-    responses = {b"SD:LIST?": LISTING, b"SYSTem:STReam:START": SAMPLE}
+    responses = {b"SD:LIST?": LISTING}
     responses.update(response_map or {})
-    return _live(_fakes._make_device_with_serial_facade(responses, **kwargs))
+    return _fakes._make_device_with_serial_facade(responses, **kwargs)
 
 
 def _written(device):
@@ -70,107 +50,207 @@ def _written(device):
 
 def _streaming(device):
     device.start_streaming()
-    # Let the reader take the sample that START streamed before the test
-    # pauses the stream.
-    deadline = time.monotonic() + 2
-    while device._transport.stream.in_waiting and time.monotonic() < deadline:
-        time.sleep(0.01)
     device._transport.stream.written.clear()
     return device
 
 
-# ---- 1: resume ------------------------------------------------------------
+# ---- 1: stop, don't resume ---------------------------------------------------
 
 
-@pytest.mark.parametrize("op", ["list", "delete", "request_list"])
-def test_an_sd_operation_resumes_the_stream_it_paused(op) -> None:
-    device = _streaming(_device())
-    try:
-        {
-            "list": device.get_sd_card_files,
-            "delete": lambda: device.delete_sd_card_file("log_a.bin"),
-            "request_list": device.request_sd_card_file_list,
-        }[op]()
-        commands = _written(device)
-        assert commands[0].startswith("SYSTem:STReam:STOP")
-        # Resumed with START, confirmed by the sample it streamed; nothing
-        # is queried as text once the stream runs.
-        assert commands[-1].startswith("SYSTem:STReam:START")
-        assert device.is_streaming and device.state == DeviceState.Streaming
-    finally:
-        device.disconnect()
+_SD_GET = {b"SD:GET": b"abc__END_OF_FILE__\r\n"}
 
 
-def test_a_format_stops_the_stream_and_doesnt_resume_it(caplog) -> None:
-    # Maintainer decision: the device can't be expected to stream while it
-    # is reformatted, and the erase runs on after the call returns.
-    import logging
+def _sd_operation(device, op):
+    return {
+        "list": device.get_sd_card_files,
+        "request_list": device.request_sd_card_file_list,
+        "delete": lambda: device.delete_sd_card_file("log_a.bin"),
+        "download": lambda: device.download_sd_card_file("log_a.bin", io.BytesIO(), expected_size=3),
+        "format": device.format_sd_card,
+    }[op]()
 
-    device = _streaming(_device())
+
+_ALL_SD_OPERATIONS = ["list", "request_list", "delete", "download", "format"]
+
+
+@pytest.mark.parametrize("op", _ALL_SD_OPERATIONS)
+def test_an_sd_operation_stops_the_stream_and_doesnt_resume_it(op, caplog) -> None:
+    device = _streaming(_device(_SD_GET))
     try:
         with caplog.at_level(logging.WARNING, logger="daqifi.devices"):
-            device.format_sd_card()
+            _sd_operation(device, op)
         commands = _written(device)
         assert commands[0].startswith("SYSTem:STReam:STOP")
-        assert any(c.startswith("SYSTem:STORage:SD:FORmat") for c in commands)
         assert not any(c.startswith("SYSTem:STReam:START") for c in commands)
-        assert not any("FORmat?" in c for c in commands)  # no status poll
         assert not device.is_streaming and device.state == DeviceState.Ready
         assert any("isn't resumed" in r.getMessage() for r in caplog.records)
     finally:
         device.disconnect()
 
 
-def test_a_format_with_no_stream_running_says_nothing(caplog) -> None:
-    import logging
-
-    device = _device()
+@pytest.mark.parametrize("op", _ALL_SD_OPERATIONS)
+def test_an_sd_operation_with_no_stream_running_says_nothing(op, caplog) -> None:
+    device = _device(_SD_GET)
     try:
         with caplog.at_level(logging.WARNING, logger="daqifi.devices"):
-            device.format_sd_card()
+            _sd_operation(device, op)
+        assert not any(c.startswith("SYSTem:STReam:START") for c in _written(device))
         assert not any("isn't resumed" in r.getMessage() for r in caplog.records)
         assert not device.is_streaming
     finally:
         device.disconnect()
 
 
-def test_a_download_resumes_the_stream_it_paused() -> None:
-    device = _streaming(_device({b"SD:GET": b"abc__END_OF_FILE__\r\n"}))
-    try:
-        device.download_sd_card_file("log_a.bin", io.BytesIO(), expected_size=3)
-        assert any(c.startswith("SYSTem:STReam:START") for c in _written(device))
-        assert device.is_streaming
-    finally:
-        device.disconnect()
-
-
-def test_no_stream_is_started_when_none_was_running() -> None:
+def test_a_format_doesnt_poll_the_format_status() -> None:
     device = _device()
     try:
-        device.get_sd_card_files()
-        assert not any(c.startswith("SYSTem:STReam:START") for c in _written(device))
-        assert not device.is_streaming
+        device.format_sd_card()
+        commands = _written(device)
+        assert any(c.startswith("SYSTem:STORage:SD:FORmat") for c in commands)
+        assert not any("FORmat?" in c for c in commands)
     finally:
         device.disconnect()
 
 
-def test_a_failed_resume_leaves_the_device_marked_not_streaming(monkeypatch) -> None:
-    device = _streaming(_device())
+# ---- 1: a delete's outcome ------------------------------------------------------
+
+
+class _FailsOnWrite:
+    """The link fails on the first write of a command starting with
+    ``prefix``, once ``behind`` has been written if given. With
+    ``after_bytes``, those bytes of it go out first."""
+
+    def __init__(self, device, prefix, error, after_bytes=0, behind=None):
+        self.stream = device._transport.stream
+        self.prefix, self.error, self.after_bytes = prefix, error, after_bytes
+        self.behind_seen = behind is None
+        self.behind = behind
+        self.armed = True
+        self._write = self.stream.write
+        self.stream.write = self.write
+
+    def write(self, data):
+        data = bytes(data)
+        if self.armed and self.behind_seen and data.startswith(self.prefix):
+            self.armed = False
+            if self.after_bytes:
+                self._write(data[:self.after_bytes])
+            raise self.error
+        if self.behind is not None and data.startswith(self.behind):
+            self.behind_seen = True
+        return self._write(data)
+
+
+_DELETE = b"SYSTem:STORage:SD:DELete"
+_ERROR_QUERY = b"SYSTem:ERRor?"
+
+
+def _assert_outcome_unknown(excinfo, cause):
+    assert excinfo.value.__cause__ is cause
+    assert excinfo.value.file_name == "log_a.bin"
+
+
+def test_a_write_failing_after_delete_is_sent_is_outcome_unknown() -> None:
+    from daqifi.exceptions import SdCardDeleteOutcomeUnknownException
+
+    device = _device()
+    error = OSError("link dropped")
+    # The SYSTem:ERRor? right behind the DELete.
+    fake = _FailsOnWrite(device, _ERROR_QUERY, error, behind=_DELETE)
     try:
-        real_drain = device.drain_errors
-        calls = []
+        with pytest.raises(SdCardDeleteOutcomeUnknownException) as excinfo:
+            device.delete_sd_card_file("log_a.bin")
+        _assert_outcome_unknown(excinfo, error)
+        assert not fake.armed
+    finally:
+        device.disconnect()
 
-        def _fail_on_restore(*args, **kwargs):
-            # The listing's own drain works; the restore's raises.
-            calls.append(1)
-            if len(calls) > 1:
-                raise OSError("link dropped")
-            return real_drain(*args, **kwargs)
 
-        monkeypatch.setattr(device, "drain_errors", _fail_on_restore)
-        files = device.get_sd_card_files()  # the listing's own outcome stands
-        assert [f.file_name for f in files] == ["log_a.bin"]
-        assert not device.is_streaming and device.state != DeviceState.Streaming
+def test_a_read_failing_after_delete_is_sent_is_outcome_unknown() -> None:
+    from daqifi.exceptions import SdCardDeleteOutcomeUnknownException
+
+    device = _device()
+    stream = device._transport.stream
+    error = OSError("link dropped")
+    real_write = stream.write
+
+    def _write(data):
+        result = real_write(data)
+        if bytes(data).startswith(_DELETE):
+            def _read(*_args):
+                raise error
+
+            stream.read = _read
+        return result
+
+    stream.write = _write
+    try:
+        with pytest.raises(SdCardDeleteOutcomeUnknownException) as excinfo:
+            device.delete_sd_card_file("log_a.bin")
+        _assert_outcome_unknown(excinfo, error)
+    finally:
+        del stream.read
+        device.disconnect()
+
+
+@pytest.mark.parametrize("after_bytes", [0, 10], ids=["nothing-out", "part-way"])
+def test_a_write_of_delete_that_fails_is_outcome_unknown(after_bytes) -> None:
+    # A failed write may have reached the device, at least in part.
+    from daqifi.exceptions import SdCardDeleteOutcomeUnknownException
+
+    device = _device()
+    error = OSError("write failed")
+    _FailsOnWrite(device, _DELETE, error, after_bytes)
+    try:
+        with pytest.raises(SdCardDeleteOutcomeUnknownException) as excinfo:
+            device.delete_sd_card_file("log_a.bin")
+        _assert_outcome_unknown(excinfo, error)
+    finally:
+        device.disconnect()
+
+
+@pytest.mark.parametrize(
+    "error", [OSError("link dropped"), TimeoutError("write timed out")], ids=["oserror", "timeout"]
+)
+def test_a_transport_error_before_delete_is_sent_stays_definite(error) -> None:
+    # A TimeoutError here read as "the file may already be gone"; nothing was sent.
+    device = _device()
+    _FailsOnWrite(device, b"SYSTem:STORage:SD:ENAble", error)
+    try:
+        with pytest.raises(type(error)) as excinfo:
+            device.delete_sd_card_file("log_a.bin")
+        assert excinfo.value is error
+        assert not any("DELete" in c for c in _written(device))
+    finally:
+        device.disconnect()
+
+
+def test_a_link_lost_before_delete_goes_out_stays_definite(monkeypatch) -> None:
+    device = _device()
+    real_prepare = device.prepare_sd_interface
+
+    def _prepare_then_lose_the_link():
+        real_prepare()
+        monkeypatch.setattr(type(device), "is_connected", property(lambda _self: False))
+
+    device.prepare_sd_interface = _prepare_then_lose_the_link
+    try:
+        with pytest.raises(RuntimeError, match="not connected"):
+            device.delete_sd_card_file("log_a.bin")
+        assert not any("DELete" in c for c in _written(device))
+    finally:
+        monkeypatch.undo()
+        device.disconnect()
+
+
+def test_a_delete_the_device_answered_keeps_its_own_error() -> None:
+    from daqifi.exceptions import SdCardDeleteOutcomeUnknownException, SdCardNotPresentException
+
+    device = _device({_DELETE: b"No SD Card Detected\r\n"})
+    try:
+        with pytest.raises(SdCardNotPresentException) as excinfo:
+            device.delete_sd_card_file("log_a.bin")
+        assert not isinstance(excinfo.value, SdCardDeleteOutcomeUnknownException)
     finally:
         device.disconnect()
 
@@ -250,150 +330,7 @@ def test_the_benchmark_size_is_1_to_1024_kb(size, ok) -> None:
             scpi_commands.run_sd_benchmark(size)
 
 
-# ---- audit r2: a refused restart ---------------------------------------------
-
-
-class _RefusesStart:
-    """Firmware that refuses START (-200 in the error queue) and streams
-    nothing: a restart the device didn't accept."""
-
-    def __init__(self, device):
-        self.stream = device._transport.stream
-        self.errors = []
-        self.refused = []
-        self._write = self.stream.write
-        self.stream.write = self.write
-
-    def write(self, data):
-        b = bytes(data)
-        command = b.decode(errors="replace").strip()
-        if command.startswith("SYSTem:STReam:START"):
-            self.stream.written.append(b)
-            self.errors.append(b'-200,"Execution error"')
-            self.refused.append(command)
-            return len(b)
-        if command.startswith("SYSTem:ERRor?") and self.errors:
-            self.stream.written.append(b)
-            self.stream.feed(self.errors.pop(0) + b"\r\n")
-            return len(b)
-        return self._write(data)
-
-
-def test_a_refused_start_leaves_the_device_ready_not_streaming() -> None:
-    device = _streaming(_device())
-    fake = _RefusesStart(device)
-    try:
-        device.get_sd_card_files()
-        assert fake.refused and fake.refused[-1].startswith("SYSTem:STReam:START")
-        assert not device.is_streaming and device.state != DeviceState.Streaming
-        assert _written(device)[-1].startswith("SYSTem:STReam:STOP")
-    finally:
-        device.disconnect()
-
-
-# ---- audit r3: the resume is confirmed by the stream, not by text -------------
-
-import threading
-
-
-def test_a_sample_ahead_of_any_text_reply_doesnt_undo_a_good_resume() -> None:
-    # The resumed stream's first frame lands ahead of the reply to a text
-    # query sent after START; read as text, the two fuse into one line with
-    # no parsable reply, and a stream that started fine was stopped again.
-    device = _streaming(_device())
-    try:
-        assert [f.file_name for f in device.get_sd_card_files()] == ["log_a.bin"]
-        assert device.is_streaming and device.state == DeviceState.Streaming
-        assert _written(device)[-1].startswith("SYSTem:STReam:START")
-    finally:
-        device.disconnect()
-
-
-class _StreamsUntilStopped:
-    """After START, streams frames whose bytes include CR LF, every 20 ms,
-    until STOP: a peer that never goes quiet for a text reader."""
-
-    def __init__(self, device, frame):
-        self.stream = device._transport.stream
-        self.frame = frame
-        self.running = threading.Event()
-        self.done = threading.Event()
-        self._write = self.stream.write
-        self.stream.write = self.write
-        self.thread = threading.Thread(target=self._pump, daemon=True)
-        self.thread.start()
-
-    def write(self, data):
-        command = bytes(data).decode(errors="replace").strip()
-        if command.startswith("SYSTem:STReam:START"):
-            self.running.set()
-        elif command.startswith("SYSTem:STReam:STOP"):
-            self.running.clear()
-        return self._write(data)
-
-    def _pump(self):
-        while not self.done.is_set():
-            if self.running.is_set():
-                self.stream.feed(self.frame)
-            time.sleep(0.02)
-
-    def close(self):
-        self.done.set()
-        self.running.clear()
-        self.thread.join(2)
-
-
-def test_a_resume_returns_promptly_while_the_stream_runs_and_keeps_its_samples() -> None:
-    frame = _frame(msg_time_stamp=100, digital_data=b"\r\n")
-    assert b"\r\n" in frame
-    device = _streaming(_device({b"SYSTem:STReam:START": b""}))
-    fake = _StreamsUntilStopped(device, frame)
-    samples = []
-    device.add_message_received(lambda args: samples.append(args))
-    outcome = {}
-
-    def _run():
-        try:
-            outcome["files"] = device.get_sd_card_files()
-        except Exception as exc:  # pragma: no cover - reported below
-            outcome["error"] = exc
-
-    worker = threading.Thread(target=_run, daemon=True)
-    try:
-        fake.running.set()  # the stream the listing pauses
-        samples.clear()
-        worker.start()
-        worker.join(8)  # bounds the test: the listing must return
-        assert not worker.is_alive(), "the SD listing never returned while the stream ran"
-        assert "error" not in outcome, outcome
-        assert [f.file_name for f in outcome["files"]] == ["log_a.bin"]
-        assert device.is_streaming and device.state == DeviceState.Streaming
-        # The resumed stream's samples reach subscribers, not a text reader.
-        deadline = time.monotonic() + 2
-        while not samples and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert samples
-    finally:
-        fake.close()
-        worker.join(5)
-        device.disconnect()
-
-
-def test_a_start_that_streams_nothing_isnt_a_resume() -> None:
-    # START accepted (no error queued) but no sample ever arrives: the
-    # device isn't streaming, and the wait is bounded.
-    device = _streaming(_device({b"SYSTem:STReam:START": b""}))
-    try:
-        began = time.monotonic()
-        device.get_sd_card_files()
-        assert time.monotonic() - began < 15
-        assert not device.is_streaming and device.state != DeviceState.Streaming
-        assert _written(device)[-1].startswith("SYSTem:STReam:STOP")
-    finally:
-        device.disconnect()
-
-
-# ---- audit r4: no resume after a failed operation, nor after a stop ---------
+# ---- audit r4: a failed download comes back at once ---------------------------
 
 
 class _FullDisk(io.RawIOBase):
@@ -434,10 +371,9 @@ class _EndlessGet:
         self.thread.join(2)
 
 
-def test_a_failed_download_raises_promptly_and_doesnt_resume() -> None:
+def test_a_failed_download_raises_promptly() -> None:
     # The destination fails mid-GET while the device goes on sending the
-    # file: the error must come back at once, with no resume attempted
-    # (a text exchange then would read the rest of the file).
+    # file: the error must come back at once.
     device = _streaming(_device())
     feed = _EndlessGet(device)
     outcome = {}
@@ -459,54 +395,6 @@ def test_a_failed_download_raises_promptly_and_doesnt_resume() -> None:
     finally:
         feed.close()
         worker.join(5)
-        device.disconnect()
-
-
-def test_a_stop_from_the_download_progress_callback_isnt_undone() -> None:
-    device = _streaming(_device({b"SD:GET": b"abc__END_OF_FILE__\r\n"}))
-    try:
-        device.download_sd_card_file(
-            "log_a.bin", io.BytesIO(), expected_size=3,
-            progress=lambda _p: device.stop_streaming(),
-        )
-        commands = _written(device)
-        stops = [i for i, c in enumerate(commands) if c.startswith("SYSTem:STReam:STOP")]
-        assert not any(c.startswith("SYSTem:STReam:START") for c in commands[stops[-1]:])
-        assert not device.is_streaming and device.state != DeviceState.Streaming
-    finally:
-        device.disconnect()
-
-
-def test_a_stop_from_a_handler_of_the_confirming_sample_isnt_undone() -> None:
-    device = _streaming(_device())
-    try:
-        stopped = []
-
-        def _on_sample(_args):
-            if not stopped:
-                stopped.append(1)
-                device.stop_streaming()
-
-        # Widen the window between the confirmation and the Streaming state
-        # being set, so the handler's stop always lands inside it.
-        real_set_state = device._set_state
-
-        def _slow_set_state(value):
-            if value == DeviceState.Streaming:
-                time.sleep(0.2)
-            real_set_state(value)
-
-        device._set_state = _slow_set_state
-        device.add_message_received(_on_sample)
-        assert [f.file_name for f in device.get_sd_card_files()] == ["log_a.bin"]
-        deadline = time.monotonic() + 2
-        while not stopped and time.monotonic() < deadline:
-            time.sleep(0.01)
-        time.sleep(0.3)
-        assert stopped
-        assert not device.is_streaming and device.state != DeviceState.Streaming
-        assert _written(device)[-1].startswith("SYSTem:STReam:STOP")
-    finally:
         device.disconnect()
 
 

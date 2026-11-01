@@ -224,10 +224,11 @@ class SdCardListIncompleteException(SdCardOperationException):
 
 class SdCardDeleteOutcomeUnknownException(SdCardListIncompleteException):
     """Raised when an SD card delete was sent but its outcome couldn't be
-    confirmed: the reply after ``DELete`` never came back complete (a
-    timeout, a dropped link). The file may already be gone; list the card
-    to find out. A delete the device refused raises a definite error
-    instead.
+    confirmed: the reply after ``DELete`` never came back complete, or a
+    transport error came after it was sent (a timeout, a dropped link; the
+    cause is chained). The file may already be gone; list the card to find
+    out. A delete the device refused, or a failure before ``DELete`` was
+    sent, raises a definite error instead.
 
     A subclass of :class:`SdCardListIncompleteException`, which the delete
     raised in this case before, so existing handlers still catch it.
