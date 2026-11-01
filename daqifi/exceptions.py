@@ -289,6 +289,31 @@ class SdCardListIncompleteException(SdCardOperationException):
         self.reason = reason
 
 
+class SdCardDeleteOutcomeUnknownException(SdCardListIncompleteException):
+    """Raised when an SD card delete was sent but its outcome couldn't be
+    confirmed: the reply after ``DELete`` never came back complete, or a
+    transport error came after it was sent (a timeout, a dropped link; the
+    cause is chained). The file may already be gone; list the card to find
+    out. A delete the device refused, or a failure before ``DELete`` was
+    sent, raises a definite error instead.
+
+    A subclass of :class:`SdCardListIncompleteException`, which the delete
+    raised in this case before, so existing handlers still catch it.
+    """
+
+    def __init__(self, file_name: str, raw_device_response, reason: str):
+        SdCardOperationException.__init__(
+            self,
+            f"Deleting {file_name!r} from the SD card couldn't be confirmed "
+            f"({reason}); the file may already be gone. List the card to "
+            "check.",
+            raw_device_response,
+            None,
+        )
+        self.reason = reason
+        self.file_name = file_name
+
+
 class SdCardNotPresentException(SdCardOperationException):
     """Raised when an SD card operation fails because no SD card is
     installed in the device. Detected from the firmware's

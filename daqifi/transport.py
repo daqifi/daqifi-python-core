@@ -78,6 +78,11 @@ def _validate_usb_identifier(value: int, name: str) -> None:
 # ---- TcpStreamTransport ------------------------------------------------------
 
 
+# Where the OS has it (not Windows), a peek that can't block even if the poll
+# before it was stale.
+_PEEK_FLAGS = socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
+
+
 class _SocketStream(io.RawIOBase):
     """The TCP transport's stream: a socket with bounded reads.
 
@@ -109,6 +114,10 @@ class _SocketStream(io.RawIOBase):
         self.session = session
         self._on_peer_closed = on_peer_closed
         self.peer_closed = False
+        # Held from in_waiting's poll through its peek, and around a read's
+        # receive, so another reader can't drain what the poll saw and leave
+        # the peek waiting on a blocking socket.
+        self._receive_lock = threading.Lock()
         # Set when this connection is being closed by us, or its loss has
         # already been reported, so the loss is reported at most once.
         self.loss_reported = False
@@ -122,6 +131,36 @@ class _SocketStream(io.RawIOBase):
     def fileno(self) -> int:
         return self._sock.fileno()
 
+    @property
+    def in_waiting(self) -> int:
+        """Bytes ready to read now, without blocking (pyserial's name, so
+        raw readers poll a socket and a serial port the same way).
+
+        A zero-timeout selector poll (as :meth:`readinto` uses; unlike
+        ``select.select`` it takes any descriptor number) and, if the socket
+        is readable, a ``MSG_PEEK`` receive that leaves the bytes for the
+        next read. A readable socket with nothing to peek is end of stream,
+        reported as :meth:`readinto` reports it; so is a socket error from
+        the receive. A failure of the poll itself is raised, not taken for
+        a closed peer."""
+        if self.peer_closed or self._sock is None:
+            return 0
+        with self._receive_lock:
+            with selectors.DefaultSelector() as selector:
+                selector.register(self._sock, selectors.EVENT_READ)
+                if not selector.select(0):
+                    return 0
+            try:
+                peeked = self._sock.recv(65536, _PEEK_FLAGS)
+            except (BlockingIOError, InterruptedError):
+                return 0
+            except OSError:
+                peeked = b""  # ends the connection, as end of stream does
+        if not peeked:
+            self._mark_peer_closed()
+            return 0
+        return len(peeked)
+
     def readinto(self, buffer) -> int:  # type: ignore[override]
         if self.peer_closed:
             return 0
@@ -130,7 +169,8 @@ class _SocketStream(io.RawIOBase):
             if not selector.select(self._read_timeout):
                 raise socket.timeout("timed out")
         try:
-            received = self._sock.recv_into(buffer)
+            with self._receive_lock:
+                received = self._sock.recv_into(buffer)
         except OSError:
             # A reset or other socket failure ends the connection too; it
             # is reported, and the error itself still reaches the caller.

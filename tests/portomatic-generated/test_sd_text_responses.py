@@ -17,6 +17,8 @@ from typing import List, Optional
 
 import pytest
 
+from daqifi.exceptions import FeatureNotSupportedError
+
 from daqifi.devices import DaqifiStreamingDevice
 
 
@@ -118,7 +120,7 @@ class TestRequestSdCardFileList:
     def test_requires_usb_transport(self) -> None:
         sd = _make_device(usb=False)
         try:
-            with pytest.raises(RuntimeError, match="USB"):
+            with pytest.raises(FeatureNotSupportedError, match="v3.7.0"):
                 sd.request_sd_card_file_list()
         finally:
             sd.disconnect()
