@@ -3107,8 +3107,8 @@ class DaqifiDeviceFactory:
         local_interface: Optional[str] = None,
     ) -> DaqifiStreamingDevice:
         """Connect over TCP. ``local_interface`` binds the socket to that
-        local IP, so the connection leaves by that NIC (see
-        :class:`TcpStreamTransport`)."""
+        local IP as its source address; it doesn't select the outgoing NIC
+        (see :class:`TcpStreamTransport`)."""
         if not host or not host.strip():
             raise ValueError("Host cannot be null or empty.")
         DaqifiDeviceFactory._validate_port(port)
@@ -3223,8 +3223,9 @@ class DaqifiDeviceFactory:
             # Strip the host before forwarding so leading/trailing
             # whitespace can't pass connect_tcp's strip-validation
             # but still reach the transport unstripped.
-            # Leave by the NIC that discovered the device: on a multi-homed
-            # host the routing table may prefer another (daqifi-core#187).
+            # Source address of the NIC that discovered the device
+            # (daqifi-core#187); the routing table still picks the outgoing
+            # NIC (see TcpStreamTransport).
             local = str(getattr(device_info, "local_interface_address", "") or "").strip()
             return DaqifiDeviceFactory.connect_tcp(
                 host=str(ip).strip(),

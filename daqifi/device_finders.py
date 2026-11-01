@@ -83,10 +83,10 @@ class DeviceInfo:
     # discovery responses.
     mac_address: str = ""
     # WiFi-only: dotted-decimal IPv4 of the local interface that
-    # received the discovery broadcast (e.g. "192.168.1.42"). Lets
-    # callers route a follow-up TCP connection back through the same
-    # interface in multi-homed setups. Empty for non-WiFi finders
-    # or when discovery didn't capture per-interface origin info.
+    # received the discovery broadcast (e.g. "192.168.1.42"). A follow-up
+    # TCP connection binds to it as its source address, which doesn't
+    # select the outgoing NIC (see TcpStreamTransport). Empty for non-WiFi
+    # finders or when discovery didn't capture per-interface origin info.
     # Mirrors C# ``IDeviceInfo.LocalInterfaceAddress``.
     local_interface_address: str = ""
 
@@ -781,8 +781,8 @@ class WiFiDeviceFinder:
 
         ``local_interface_address`` is the IP the socket is bound to (the
         NIC a reply arrived on), recorded on each DeviceInfo so a later TCP
-        connection can leave by the same NIC. Empty for a socket bound to
-        any interface.
+        connection can bind to it as its source address. Empty for a socket
+        bound to any interface.
         """
         if broadcast_addr is None:
             transport.send_broadcast(self.DAQIFI_FINDER_QUERY, self._discovery_port)

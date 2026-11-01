@@ -213,10 +213,12 @@ class TcpStreamTransport:
     ) -> None:
         self._host = host
         self._port = port
-        # The local IP to bind the outbound socket to, so the connection
-        # leaves by that NIC on a multi-homed host rather than whichever the
-        # routing table prefers (upstream ``localInterface``, daqifi-core#187).
-        # None lets the OS choose.
+        # The local IP to bind the outbound socket to (upstream
+        # ``localInterface``, daqifi-core#187). This sets the source address,
+        # not the outgoing NIC: on Linux the routing table still picks the
+        # route, so with two NICs on one subnet the lower-metric one carries
+        # the traffic. A strict NIC needs policy routing or SO_BINDTODEVICE,
+        # which this doesn't do. None lets the OS choose.
         self._local_interface = local_interface or None
         self._socket: Optional[socket.socket] = None
         self._stream: Optional[IO[bytes]] = None
@@ -250,8 +252,9 @@ class TcpStreamTransport:
 
     @property
     def local_interface(self) -> Optional[str]:
-        """The local IP the outbound socket binds to, or None for the OS's
-        choice (C# ``TcpStreamTransport.LocalInterface``)."""
+        """The local IP the outbound socket binds to as its source address,
+        or None for the OS's choice (C# ``TcpStreamTransport.LocalInterface``).
+        It doesn't select the outgoing NIC; see ``__init__``."""
         return self._local_interface
 
     @property
