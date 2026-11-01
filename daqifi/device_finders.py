@@ -23,15 +23,16 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any, Callable, List, Optional, Tuple
 
-from ._internal.comm import HidDeviceInfo
+from ._internal.comm import CancellablePort, HidDeviceInfo
 from ._internal.scpi import StreamInterface
 from ._internal import scpi_commands
 from ._internal.hid_enumerator import HidLibraryDeviceEnumerator
-from .transport import SerialStreamTransport, UdpTransport
+from ._internal.usb_ports import daqifi_serial_ports, run_port_probe
+from .transport import UdpTransport
 
 
 __all__ = [
@@ -82,10 +83,10 @@ class DeviceInfo:
     # discovery responses.
     mac_address: str = ""
     # WiFi-only: dotted-decimal IPv4 of the local interface that
-    # received the discovery broadcast (e.g. "192.168.1.42"). Lets
-    # callers route a follow-up TCP connection back through the same
-    # interface in multi-homed setups. Empty for non-WiFi finders
-    # or when discovery didn't capture per-interface origin info.
+    # received the discovery broadcast (e.g. "192.168.1.42"). A follow-up
+    # TCP connection binds to it as its source address, which doesn't
+    # select the outgoing NIC (see TcpStreamTransport). Empty for non-WiFi
+    # finders or when discovery didn't capture per-interface origin info.
     # Mirrors C# ``IDeviceInfo.LocalInterfaceAddress``.
     local_interface_address: str = ""
 
@@ -217,6 +218,24 @@ _SERIAL_RESPONSE_TIMEOUT_S = 4.0
 _SERIAL_MAX_RETRIES = 3
 _SERIAL_RETRY_INTERVAL_S = 1.0
 _SERIAL_POLL_INTERVAL_S = 0.1
+_SERIAL_INIT_COMMANDS = 4  # DisableEcho, StopStreaming, TurnOn, PB format
+_SERIAL_INIT_COMMAND_DELAY_S = 0.1
+# The probe's longest healthy run: wake-up; each init command's write (up to
+# the write timeout, _SERIAL_PROBE_TIMEOUT_S) and wait; the response loop,
+# whose GetDeviceInfo writes can each block up to the write timeout too (its
+# reads don't block: the port is opened with timeout=0); then a poll
+# interval.
+_SERIAL_PROBE_WORST_HEALTHY_S = (
+    _SERIAL_DEVICE_WAKEUP_DELAY_S
+    + _SERIAL_INIT_COMMANDS * (_SERIAL_PROBE_TIMEOUT_S + _SERIAL_INIT_COMMAND_DELAY_S)
+    + _SERIAL_RESPONSE_TIMEOUT_S
+    + _SERIAL_MAX_RETRIES * _SERIAL_PROBE_TIMEOUT_S
+    + _SERIAL_POLL_INTERVAL_S
+)
+# The hard timeout adds room for the port open itself (a fresh
+# enumeration can take seconds). A probe past it is abandoned.
+_SERIAL_PROBE_HARD_TIMEOUT_S = _SERIAL_PROBE_WORST_HEALTHY_S + 3.0
+assert _SERIAL_PROBE_HARD_TIMEOUT_S > _SERIAL_PROBE_WORST_HEALTHY_S
 
 
 class SerialDeviceFinder:
@@ -269,10 +288,14 @@ class SerialDeviceFinder:
         self,
         port_filter: Optional[List[str]] = None,
     ) -> List[DeviceInfo]:
-        """Probe each available serial port; return DAQiFi candidates.
+        """Probe each DAQiFi serial port; return DAQiFi candidates.
 
-        ``port_filter`` overrides auto-enumeration -- pass an explicit
-        list to skip ports of known non-DAQiFi devices.
+        Auto-enumeration lists only USB serial ports with the DAQiFi
+        application's VID/PID (04D8:F794), plus CDC-ACM ports whose IDs
+        can't be read, so the probe's SCPI (including a power-on) never
+        goes to an unrelated device. ``port_filter`` overrides it: the
+        ports given are probed as they are. Each probe is bounded by a hard
+        timeout, so one hung port can't block discovery.
         """
         if self._disposed:
             raise RuntimeError("SerialDeviceFinder has been closed.")
@@ -281,15 +304,15 @@ class SerialDeviceFinder:
             if port_filter is not None:
                 ports = list(port_filter)
             else:
-                ports = SerialStreamTransport.get_available_port_names()
+                ports = daqifi_serial_ports()
 
             discovered: List[DeviceInfo] = []
             for port_name in ports:
-                try:
-                    info = self._try_get_device_info(port_name)
-                except Exception:
-                    # Mirrors upstream "skip ports that fail" comment.
-                    info = None
+                # Failures and overruns give None (upstream: skip ports
+                # that fail).
+                info = run_port_probe(
+                    port_name, self._try_get_device_info, _SERIAL_PROBE_HARD_TIMEOUT_S
+                )
                 if info is not None:
                     discovered.append(info)
         # Fire callbacks OUTSIDE the lock — same deadlock concern
@@ -299,7 +322,9 @@ class SerialDeviceFinder:
         self._fire_completed()
         return discovered
 
-    def _try_get_device_info(self, port_name: str) -> Optional[DeviceInfo]:
+    def _try_get_device_info(
+        self, port_name: str, cancelled: Optional[threading.Event] = None
+    ) -> Optional[DeviceInfo]:
         """Probe one port and return DeviceInfo if it looks like DAQiFi.
 
         Simplified vs upstream's full TaskCompletionSource flow: open
@@ -313,9 +338,21 @@ class SerialDeviceFinder:
             with serial.Serial(
                 port=port_name,
                 baudrate=self._baud_rate,
-                timeout=_SERIAL_PROBE_TIMEOUT_S,
+                # Reads return at once (the loop polls): one can't block
+                # across the probe being abandoned.
+                timeout=0,
                 write_timeout=_SERIAL_PROBE_TIMEOUT_S,
-            ) as port:
+                # Held exclusively, so no other python-core session shares
+                # the port while the probe runs (or hangs) on it.
+                exclusive=True,
+            ) as raw_port:
+                # Once discover() gives up on this probe (run_port_probe sets
+                # the event), every operation on the port raises
+                # PortCancelled, a SerialException: the probe stops without
+                # touching the board, and leaving the block closes the port.
+                port = (
+                    CancellablePort(raw_port, cancelled) if cancelled is not None else raw_port
+                )
                 # DTR-up wakes the device.
                 port.dtr = True
                 time.sleep(_SERIAL_DEVICE_WAKEUP_DELAY_S)
@@ -334,14 +371,14 @@ class SerialDeviceFinder:
                     pass
 
                 # SCPI init sequence (matches DaqifiDevice.initialize).
-                port.write(scpi_commands.disable_device_echo().get_bytes())
-                time.sleep(0.1)
-                port.write(scpi_commands.stop_streaming().get_bytes())
-                time.sleep(0.1)
-                port.write(scpi_commands.turn_device_on().get_bytes())
-                time.sleep(0.1)
-                port.write(scpi_commands.set_protobuf_stream_format().get_bytes())
-                time.sleep(0.1)
+                for command in (
+                    scpi_commands.disable_device_echo(),
+                    scpi_commands.stop_streaming(),
+                    scpi_commands.turn_device_on(),
+                    scpi_commands.set_protobuf_stream_format(),
+                ):
+                    port.write(command.get_bytes())
+                    time.sleep(_SERIAL_INIT_COMMAND_DELAY_S)
 
                 # GetDeviceInfo with retry. Use monotonic clock so a
                 # wall-clock jump (NTP / DST) can't corrupt the
@@ -356,6 +393,7 @@ class SerialDeviceFinder:
                         port.write(scpi_commands.get_device_info().get_bytes())
                         last_send = now
                         retry_count += 1
+                    # Non-blocking (timeout=0): only bytes already waiting.
                     chunk = port.read(256)
                     if chunk:
                         received.extend(chunk)
@@ -712,6 +750,7 @@ class WiFiDeviceFinder:
                     discovered,
                     dedup_lock,
                     broadcast_addr=nic.broadcast,
+                    local_interface_address=nic.ip,
                 )
             except Exception:
                 # Receive-loop crash on one NIC is non-fatal for the
@@ -732,12 +771,18 @@ class WiFiDeviceFinder:
         discovered: List[DeviceInfo],
         dedup_lock: threading.Lock,
         broadcast_addr: Optional[str],
+        local_interface_address: str = "",
     ) -> None:
         """Send the two finder queries and drain the receive loop on
         a single transport until ``deadline``. Shared seen_keys /
         discovered list let multiple per-NIC callers cooperate on
         de-duplication. ``broadcast_addr=None`` falls back to
         255.255.255.255 (legacy single-socket behavior).
+
+        ``local_interface_address`` is the IP the socket is bound to (the
+        NIC a reply arrived on), recorded on each DeviceInfo so a later TCP
+        connection can bind to it as its source address. Empty for a socket
+        bound to any interface.
         """
         if broadcast_addr is None:
             transport.send_broadcast(self.DAQIFI_FINDER_QUERY, self._discovery_port)
@@ -769,7 +814,10 @@ class WiFiDeviceFinder:
             ):
                 continue
 
-            info = self._build_device_info(data, text, ip)
+            info = replace(
+                self._build_device_info(data, text, ip),
+                local_interface_address=local_interface_address,
+            )
             key = (
                 f"mac:{info.mac_address}"
                 if info.mac_address
