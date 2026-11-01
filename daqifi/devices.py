@@ -1097,20 +1097,22 @@ class DaqifiDevice:
                     pass
         finally:
             # Restart the protobuf consumer so streaming resumes — even if
-            # setup_action raised — unless the connection was lost during
-            # the exchange: the stream is dead, and a restarted reader
-            # would just poll it.
-            if (
-                was_running
-                and self._status == ConnectionStatus.Connected
-                and not getattr(stream, "peer_closed", False)
-            ):
+            # setup_action raised — unless the connection was lost.
+            if was_running and self._consumer_can_restart_on(stream):
                 try:
                     self._consumer.start()
                 except Exception:
                     pass
 
         return captured
+
+    def _consumer_can_restart_on(self, stream: Any) -> bool:
+        """False once the connection was lost during an exchange: the stream
+        is dead, and a restarted reader would just poll it."""
+        return (
+            self._status == ConnectionStatus.Connected
+            and not getattr(stream, "peer_closed", False)
+        )
 
     def drain_errors(
         self,
@@ -2728,6 +2730,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
                     consumer.clear_buffer()
                 except Exception:
                     pass
+            if (
+                consumer is not None
+                and was_running
+                and self._consumer_can_restart_on(raw_stream)
+            ):
                 try:
                     consumer.start()
                 except Exception as restart_exc:

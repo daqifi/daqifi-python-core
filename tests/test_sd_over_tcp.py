@@ -13,9 +13,11 @@ against a fake device on a loopback socket.
 import io
 import socket
 import threading
+import time
 
 import pytest
 
+from daqifi._internal.scpi import ConnectionStatus
 from daqifi.devices import DaqifiStreamingDevice
 from daqifi.transport import TcpStreamTransport, _SocketStream
 
@@ -23,13 +25,17 @@ from daqifi.transport import TcpStreamTransport, _SocketStream
 class _FakeDevice:
     """A loopback 'device' answering SD commands as the firmware does."""
 
-    def __init__(self, listing=b"Daqifi/log_a.bin 3\r\n", file_bytes=b"abc", silent_after=None):
+    def __init__(self, listing=b"Daqifi/log_a.bin 3\r\n", file_bytes=b"abc", silent_after=None,
+                 close_on=None):
         self.listing = listing
         self.file_bytes = file_bytes
         # A command after which the device answers nothing more (a link
         # that drops just after the device acted on it).
         self.silent_after = silent_after
         self.silent = False
+        # A command on which the device sends ``close_on[1]``, then closes
+        # the connection.
+        self.close_on = close_on
         self.commands = []
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.bind(("127.0.0.1", 0))
@@ -61,6 +67,9 @@ class _FakeDevice:
                         self.silent = True
                     if self.silent:
                         continue
+                    if self.close_on and command.startswith(self.close_on[0]):
+                        conn.sendall(self.close_on[1])
+                        return
                     if command.startswith("SYSTem:ERRor?"):
                         conn.sendall(b'0,"No error"\r\n')
                     elif command.startswith("SYSTem:STORage:SD:LIST?"):
@@ -122,6 +131,33 @@ def test_an_unconfirmed_delete_says_the_outcome_is_unknown(device_on) -> None:
     with pytest.raises(SdCardDeleteOutcomeUnknownException, match="may already be gone"):
         device.delete_sd_card_file("log_a.bin")
     assert any(c.startswith("SYSTem:STORage:SD:DELete") for c in fake.commands)
+
+
+def _wait_until(predicate, timeout_s=2.0):
+    deadline = time.monotonic() + timeout_s
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_a_peer_close_mid_download_leaves_no_consumer_polling_the_dead_socket(device_on) -> None:
+    # Audit r7: the capture's finally restarted the consumer on the dead
+    # socket, which then polled it until an explicit disconnect.
+    fake = _FakeDevice(close_on=("SYSTem:STORage:SD:GET", b"partial"))
+    device = device_on(fake)
+    device._SD_DOWNLOAD_IDLE_TIMEOUT_S = 0.5
+    assert device._consumer.is_running
+    with pytest.raises((TimeoutError, OSError)):
+        device.download_sd_card_file("log_a.bin", io.BytesIO(), expected_size=1000)
+    assert device.status == ConnectionStatus.Lost
+    time.sleep(0.2)  # a restarted consumer would still be polling
+    assert not device._consumer.is_running
+
+
+def test_a_finished_download_still_restarts_the_consumer(device_on) -> None:
+    device = device_on(_FakeDevice(file_bytes=b"hello-sd"))
+    device.download_sd_card_file("log_a.bin", io.BytesIO(), expected_size=8)
+    assert _wait_until(lambda: device._consumer.is_running)
 
 
 def test_the_tcp_stream_reports_bytes_waiting_without_consuming_them() -> None:
