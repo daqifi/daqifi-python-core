@@ -21,6 +21,7 @@ from .discovery import DeviceInfo, BoardVariant
 from .exceptions import (
     ConnectionError as DAQiFiConnectionError,
     CommandError,
+    ConfigurationError,
     FeatureNotSupportedError
 )
 
@@ -98,6 +99,8 @@ class NyquistDevice:
         self._variant = BoardVariant.UNKNOWN
         self._device_info: Dict[str, Any] = {}
         self._connected = False
+        # File sizes from the last sd_list_files(); empty until one runs.
+        self._file_sizes: Dict[str, int] = {}
         # Protobuf-populated metadata (real SN, MAC, IP, SSID, ...).
         # Best-effort populated during `_connect()`; callers can re-
         # fetch on demand via :meth:`refresh_metadata` (e.g. after a
@@ -726,7 +729,8 @@ class NyquistDevice:
         return files
 
     def sd_get_file_size(self, filename: str) -> int:
-        """Get cached file size from last LIST command."""
+        """Get cached file size from last LIST command (0 if the file wasn't
+        in it, or no listing has run yet)."""
         return self._file_sizes.get(filename, 0)
 
     def sd_get_file(self, filename: str, timeout: float = 30.0) -> str:
@@ -954,7 +958,8 @@ class NyquistDevice:
         channels: List[int],
         sample_rate: int = 1000,
         format: int = 1,
-        async_mode: bool = False
+        async_mode: bool = False,
+        integer_units: Optional[str] = None,
     ) -> Union[StreamManager, AsyncStreamManager]:
         """
         Create a stream manager for data acquisition.
@@ -964,6 +969,9 @@ class NyquistDevice:
             sample_rate: Sample rate in Hz (default 1000)
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
             async_mode: If True, return AsyncStreamManager for async/await
+            integer_units: What integer JSON/CSV values mean ("millivolts"
+                at voltage precision 0, "raw" in raw mode); see
+                :class:`StreamManager`. Decimal values are volts either way.
 
         Returns:
             StreamManager or AsyncStreamManager
@@ -1000,6 +1008,11 @@ class NyquistDevice:
         """
         # Validate channels
         max_channels = len(self.analog_inputs._channels) if self._analog_inputs else 0
+        if max_channels == 0:
+            raise ConfigurationError(
+                "This device has no analog inputs to stream (not connected, or "
+                f"its board variant is {self._variant.name})."
+            )
         for ch in channels:
             if ch < 0 or ch >= max_channels:
                 raise ConfigurationError(
@@ -1013,11 +1026,13 @@ class NyquistDevice:
             return AsyncStreamManager(
                 self._comm, channels, sample_rate, format,
                 per_channel_dispatch=dispatch,
+                integer_units=integer_units,
             )
         else:
             return StreamManager(
                 self._comm, channels, sample_rate, format,
                 per_channel_dispatch=dispatch,
+                integer_units=integer_units,
             )
 
     def _build_per_channel_dispatch(self):

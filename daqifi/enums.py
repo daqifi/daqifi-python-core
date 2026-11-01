@@ -47,6 +47,11 @@ class FirmwareUpdateState(IntEnum):
     JUMPING_TO_APP = 7
     COMPLETE = 8
     FAILED = 9
+    # A PIC32 update that failed while erasing, programming or verifying
+    # re-erases the flash (CLEANING_UP), so the board isn't left with a
+    # half-written application. RECOVERED: the re-erase worked.
+    CLEANING_UP = 10
+    RECOVERED = 11
 
 
 class ProtobufMessageType(IntEnum):

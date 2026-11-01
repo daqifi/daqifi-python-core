@@ -21,12 +21,14 @@ def main():
     # Sample counter
     sample_count = [0]  # Use list for mutable closure
     start_time = [None]
+    last_time = [None]
 
     def on_sample(sample: Sample):
         """Callback function called for each sample"""
         if start_time[0] is None:
             start_time[0] = sample.timestamp
 
+        last_time[0] = sample.timestamp
         sample_count[0] += 1
 
         # Print every 100th sample
@@ -71,7 +73,9 @@ def main():
 
         # Display summary
         total_samples = sample_count[0]
-        duration = time.time() - start_time[0] if start_time[0] else 0
+        # Sample timestamps are device-relative seconds, so measure the
+        # duration between the first and last sample, not against time.time().
+        duration = last_time[0] - start_time[0] if start_time[0] is not None else 0
         avg_rate = total_samples / duration if duration > 0 else 0
 
         print(f"\nStreaming summary:")

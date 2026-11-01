@@ -209,19 +209,26 @@ def get_stream_interface() -> ScpiMessage:
     return ScpiMessage("SYSTem:STReam:INTerface?")
 
 
-def start_streaming(frequency: int) -> ScpiMessage:
-    """Start streaming at ``frequency`` Hz (1-1000).
+# The firmware's absolute streaming ceiling (STREAMING_ISR_MAX_HZ,
+# streaming.h). Each channel configuration has a lower cap the firmware
+# enforces itself, refusing START with -222 (Streaming_ComputeMaxFreqForConfig).
+STREAMING_MAX_HZ = 22000
 
-    Raises ``ValueError`` if ``frequency`` is outside the firmware's
-    accepted range so the bug surfaces here rather than as silent
-    no-streaming behaviour on the device (Qodo PR 17 pass 6 #5).
+
+def start_streaming(frequency: int) -> ScpiMessage:
+    """Start streaming at ``frequency`` Hz (1 to :data:`STREAMING_MAX_HZ`).
+
+    Raises ``ValueError`` outside the firmware's absolute range, so the bug
+    surfaces here rather than as silent no-streaming behaviour on the device
+    (Qodo PR 17 pass 6 #5). A rate within it but above what the enabled
+    channels and interface allow is refused by the device (-222).
     """
     # Reject bool explicitly: bool is an int subclass in Python so
     # `True/False` would otherwise pass the range check as 1/0.
     if isinstance(frequency, bool) or not isinstance(frequency, int):
         raise TypeError("frequency must be an int.")
-    if frequency < 1 or frequency > 1000:
-        raise ValueError("frequency must be between 1 and 1000 Hz.")
+    if frequency < 1 or frequency > STREAMING_MAX_HZ:
+        raise ValueError(f"frequency must be between 1 and {STREAMING_MAX_HZ} Hz.")
     return ScpiMessage(f"SYSTem:STReam:START {frequency}")
 
 
@@ -355,6 +362,13 @@ def apply_network_lan() -> ScpiMessage:
 
 def save_network_lan() -> ScpiMessage:
     return ScpiMessage("SYSTem:COMMunicate:LAN:SAVE")
+
+
+def apply_and_save_network_lan() -> ScpiMessage:
+    """``LAN:APPLY 1``: apply the staged settings and, only if the apply is
+    accepted, save them to NVM, in one firmware handler
+    (``SCPI_LANSettingsApply``)."""
+    return ScpiMessage("SYSTem:COMMunicate:LAN:APPLY 1")
 
 
 def set_lan_firmware_update_mode() -> ScpiMessage:

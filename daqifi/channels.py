@@ -25,6 +25,23 @@ _log = logging.getLogger(__name__)
 _check_setter_response = check_setter_response
 
 
+_DIO_PORT_LOCKS_GUARD = threading.Lock()
+
+
+def _dio_port_lock(comm: Any) -> "threading.RLock":
+    """The lock every DIO channel on one device shares around its port
+    read-modify-write (the direction and state masks are per device, not
+    per pin). Kept on the comm object, created once (#163 item 12, #202)."""
+    lock = getattr(comm, "_dio_port_lock", None)
+    if lock is None:
+        with _DIO_PORT_LOCKS_GUARD:
+            lock = getattr(comm, "_dio_port_lock", None)
+            if lock is None:
+                lock = threading.RLock()
+                comm._dio_port_lock = lock
+    return lock
+
+
 class _SampleReceivedMixin:
     """Per-channel SampleReceived event + ActiveSample cache surface.
 
@@ -572,21 +589,24 @@ class DigitalIOChannel(_SampleReceivedMixin):
             raise ConfigurationError(f"Direction must be 'input' or 'output', got '{value}'")
 
         try:
-            # Read current port direction
-            response = self._comm.send_query(scpi.DigitalIO.PORT_DIRECTION_QUERY)
-            port_dir = scpi.parse_int(response)
+            # The read and the write-back are one unit per device: another
+            # pin's setter in between would be overwritten by this mask.
+            with _dio_port_lock(self._comm):
+                # Read current port direction
+                response = self._comm.send_query(scpi.DigitalIO.PORT_DIRECTION_QUERY)
+                port_dir = scpi.parse_int(response)
 
-            # Modify bit for this channel
-            if value_lower == "output":
-                port_dir |= (1 << self._channel)  # Set bit
-            else:
-                port_dir &= ~(1 << self._channel)  # Clear bit
+                # Modify bit for this channel
+                if value_lower == "output":
+                    port_dir |= (1 << self._channel)  # Set bit
+                else:
+                    port_dir &= ~(1 << self._channel)  # Clear bit
 
-            # Write back entire port direction
-            success, error_response = self._comm.send_set_with_error(
-                scpi.DigitalIO.PORT_DIRECTION_SET, port_dir,
-            )
-            _check_setter_response(success, error_response, "set direction")
+                # Write back entire port direction
+                success, error_response = self._comm.send_set_with_error(
+                    scpi.DigitalIO.PORT_DIRECTION_SET, port_dir,
+                )
+                _check_setter_response(success, error_response, "set direction")
         except CommandError as e:
             raise CommandError(
                 f"Failed to set direction on channel {self._channel}: {e}"
@@ -633,36 +653,39 @@ class DigitalIOChannel(_SampleReceivedMixin):
         Raises:
             ConfigurationError: If channel is configured as input
         """
-        if self.direction != "output":
-            raise ConfigurationError(f"Cannot set state on input channel {self._channel}")
+        with _dio_port_lock(self._comm):
+            if self.direction != "output":
+                raise ConfigurationError(f"Cannot set state on input channel {self._channel}")
 
-        try:
-            # Read current port state
-            response = self._comm.send_query(scpi.DigitalIO.PORT_STATE_QUERY)
-            port_state = scpi.parse_int(response)
+            try:
+                # Read current port state; held with the write-back (and
+                # the direction check above) so another pin's setter can't
+                # land in between and be overwritten.
+                response = self._comm.send_query(scpi.DigitalIO.PORT_STATE_QUERY)
+                port_state = scpi.parse_int(response)
 
-            # Modify bit for this channel
-            if value:
-                port_state |= (1 << self._channel)  # Set bit
-            else:
-                port_state &= ~(1 << self._channel)  # Clear bit
+                # Modify bit for this channel
+                if value:
+                    port_state |= (1 << self._channel)  # Set bit
+                else:
+                    port_state &= ~(1 << self._channel)  # Clear bit
 
-            # Write back entire port state
-            success, error_response = self._comm.send_set_with_error(
-                scpi.DigitalIO.PORT_STATE_SET, port_state,
-            )
-            _check_setter_response(success, error_response, "set state")
-        except CommandError as e:
-            raise CommandError(
-                f"Failed to set state on channel {self._channel}: {e}"
-            ) from e
-        except Exception as e:
-            raise CommandError(f"Failed to set state on channel {self._channel}: {e}")
+                # Write back entire port state
+                success, error_response = self._comm.send_set_with_error(
+                    scpi.DigitalIO.PORT_STATE_SET, port_state,
+                )
+                _check_setter_response(success, error_response, "set state")
+            except CommandError as e:
+                raise CommandError(
+                    f"Failed to set state on channel {self._channel}: {e}"
+                ) from e
+            except Exception as e:
+                raise CommandError(f"Failed to set state on channel {self._channel}: {e}")
 
-        # Update the local cache only after the device confirms the
-        # write succeeded — `output_value` should never report a
-        # value the device rejected.
-        self._output_value = value
+            # Update the local cache only after the device confirms the
+            # write succeeded — `output_value` should never report a
+            # value the device rejected.
+            self._output_value = value
 
     def __repr__(self) -> str:
         try:
