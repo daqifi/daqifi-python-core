@@ -155,6 +155,11 @@ class NyquistDevice:
         """Internal connection and initialization"""
         # Open serial connection
         if not self._comm.open():
+            cause = getattr(self._comm, "last_open_error", None)
+            if cause is not None:
+                # A SerialPortConnectError (a DAQiFiConnectionError) that
+                # names the cause: not found, in use or access denied.
+                raise cause
             raise DAQiFiConnectionError(f"Failed to open serial port {self._comm.port}")
 
         self._connected = True

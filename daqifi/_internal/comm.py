@@ -5,7 +5,10 @@ This module provides low-level SCPI command interface over serial port.
 Not intended for direct use - use the public API instead.
 """
 
+import errno
+import math
 import serial
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -44,6 +47,13 @@ class ConnectionRetryOptions:
 
     Ports the C# ``ConnectionRetryOptions``. Durations are floats in
     seconds (Pythonic) instead of ``System.TimeSpan``.
+
+    Values are checked when set, at construction or later, as upstream's
+    setters check them (daqifi-core 14fb907): at least one attempt,
+    non-negative delays, a backoff multiplier of at least 1, and a
+    connection timeout of at least 1 ms. An invalid value raises
+    :class:`ValueError` (a non-number, :class:`TypeError`) instead of
+    being retried with backoff or skipping every attempt.
     """
 
     max_attempts: int = 3
@@ -52,6 +62,10 @@ class ConnectionRetryOptions:
     backoff_multiplier: float = 2.0
     connection_timeout: float = 5.0     # seconds
     enabled: bool = True
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        _validate_retry_option(name, value)
+        super().__setattr__(name, value)
 
     @classmethod
     def no_retry(cls) -> "ConnectionRetryOptions":
@@ -86,6 +100,91 @@ class ConnectionRetryOptions:
             return 0.0
         delay = self.initial_delay * (self.backoff_multiplier ** (attempt_number - 2))
         return min(delay, self.max_delay)
+
+
+_NOT_FOUND_ERRNOS = {errno.ENOENT, errno.ENODEV, errno.ENXIO}
+_IN_USE_ERRNOS = {errno.EBUSY, errno.EAGAIN, errno.EWOULDBLOCK}
+_DENIED_ERRNOS = {errno.EACCES, errno.EPERM}
+
+
+def classify_serial_open_error(exc: BaseException, platform: Optional[str] = None):
+    """Why a serial port didn't open, from the error the open raised
+    (port of daqifi-core da74a4c's classification, on what pyserial
+    reports).
+
+    POSIX pyserial carries the ``errno``: ENOENT/ENODEV/ENXIO is a
+    missing port; EBUSY, or EAGAIN from the exclusive lock, is a port in
+    use; EACCES/EPERM is a permission gate (``dialout``). Windows pyserial
+    carries no errno, only the ``WinError`` text: "cannot find the file"
+    is a missing port, and "Access is denied" is a port another program
+    holds (Windows has no permission gate on COM ports). Anything else is
+    UNKNOWN. The error's cause and context are searched too.
+    """
+    from ..exceptions import SerialPortConnectFailure as F
+
+    platform = platform or sys.platform
+    seen = set()
+    chain = []
+    node: Optional[BaseException] = exc
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        chain.append(node)
+        node = node.__cause__ or node.__context__
+    for err in chain:
+        if isinstance(err, FileNotFoundError):
+            return F.NOT_FOUND
+        code = getattr(err, "errno", None)
+        if isinstance(code, int):
+            if code in _NOT_FOUND_ERRNOS:
+                return F.NOT_FOUND
+            if code in _IN_USE_ERRNOS:
+                return F.IN_USE
+            if code in _DENIED_ERRNOS:
+                return F.IN_USE if platform.startswith("win") else F.ACCESS_DENIED
+        text = str(err).lower()
+        if "cannot find the file" in text or "filenotfounderror" in text:
+            return F.NOT_FOUND
+        if "exclusively lock" in text or "resource busy" in text:
+            return F.IN_USE
+        if "access is denied" in text or "permissionerror" in text:
+            return F.IN_USE if platform.startswith("win") else F.ACCESS_DENIED
+    return F.UNKNOWN
+
+
+def serial_open_error(port: str, exc: BaseException):
+    """A :class:`SerialPortConnectError` for ``exc``, raised opening ``port``."""
+    from ..exceptions import SerialPortConnectError
+
+    return SerialPortConnectError(port, classify_serial_open_error(exc), str(exc))
+
+
+def _validate_retry_option(name: str, value: Any) -> None:
+    if name == "enabled":
+        return
+    if name not in (
+        "max_attempts", "initial_delay", "max_delay", "backoff_multiplier",
+        "connection_timeout",
+    ):
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a number (got {value!r}).")
+    if name == "max_attempts":
+        if not isinstance(value, int) or value < 1:
+            raise ValueError(
+                f"max_attempts must be an integer of at least 1 (got {value!r}): "
+                "at least one connection attempt must be allowed."
+            )
+        return
+    if math.isnan(value) or math.isinf(value):
+        raise ValueError(f"{name} must be finite (got {value!r}).")
+    if name in ("initial_delay", "max_delay") and value < 0:
+        raise ValueError(f"{name} must not be negative (got {value!r}).")
+    if name == "backoff_multiplier" and value < 1:
+        raise ValueError(f"backoff_multiplier must be at least 1 (got {value!r}).")
+    if name == "connection_timeout" and value < 0.001:
+        raise ValueError(
+            f"connection_timeout must be at least 1 ms (got {value!r} s)."
+        )
 
 
 @runtime_checkable
@@ -1256,6 +1355,9 @@ class SerialInterface:
         self.baudrate = baudrate
         self.timeout = timeout
         self._serial: Optional[serial.Serial] = None
+        # Why the last open() failed, as a SerialPortConnectError (open()
+        # returns False so discovery can go on probing).
+        self.last_open_error: Optional[BaseException] = None
         # Set by a caller that has given up on this interface (a discovery
         # probe past its hard timeout): from then on the port is used for
         # nothing but closing (see CancellablePort), so a late open or a
@@ -1298,6 +1400,7 @@ class SerialInterface:
         write_timeout = 1.0
         if self.timeout is not None and self.timeout > 0:
             write_timeout = self.timeout
+        self.last_open_error = None
         try:
             self._serial = serial.Serial(
                 port=self.port,
@@ -1334,7 +1437,11 @@ class SerialInterface:
                 pass
             return True
         except (serial.SerialException, OSError) as e:
-            # Return False instead of raising to allow discovery to continue.
+            # Return False instead of raising to allow discovery to continue;
+            # keep the cause for callers that report it.
+            error = serial_open_error(self.port, e)
+            error.__cause__ = e
+            self.last_open_error = error
             # Close a port that opened before the failure (a cancelled one
             # included), rather than leave its handle behind.
             if self._serial is not None:

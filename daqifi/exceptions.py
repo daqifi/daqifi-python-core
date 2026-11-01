@@ -4,7 +4,13 @@ Exception hierarchy for DAQiFi Python API.
 Provides structured error handling for device operations.
 """
 
+import enum
 from typing import Optional, Tuple
+
+try:
+    from serial import SerialException as _SerialException
+except ImportError:  # pragma: no cover - pyserial is a dependency
+    _SerialException = OSError
 
 
 class DAQiFiError(Exception):
@@ -42,17 +48,78 @@ class PowerStateError(DAQiFiError):
     pass
 
 
-class DeviceUnresponsiveError(DAQiFiError):
-    """Transport connected but the device's SCPI listener never replied.
+class DeviceUnresponsiveError(DAQiFiError, TimeoutError):
+    """Transport connected but the device never reported itself.
 
-    Raised by :meth:`DaqifiDevice.initialize` on TCP transports when
-    the protobuf SYSInfoPB? response does not arrive within the
-    configured timeout. The TCP socket is healthy, but the device's
-    WiFi-SCPI parser has wedged — typically after cumulative
-    connect/disconnect cycles in the same session. Recovery: reboot
-    the device via USB (``SYSTem:REboot``).
+    Raised by :meth:`DaqifiDevice.initialize` when no status reply
+    reporting the device's channels arrives within the timeout of its
+    ``SYSInfoPB?``. Over TCP this is typically
+    the device's WiFi-SCPI parser wedged after cumulative
+    connect/disconnect cycles (recovery: reboot it via USB,
+    ``SYSTem:REboot``). A :class:`TimeoutError`, as upstream's
+    ``TimeoutException``.
     """
     pass
+
+
+class DeviceNotConnectedError(DAQiFiError, RuntimeError):
+    """The operation needs a connected device and this one isn't.
+
+    Also raised, with ``is_shutting_down`` set, when a disconnect on
+    another thread tears the connection down while a send is in flight:
+    an ordinary race for a long-lived sender, not a defect. A
+    :class:`RuntimeError`, which these guards raised before.
+    """
+
+    def __init__(self, message: str = "Device is not connected.", *, is_shutting_down: bool = False):
+        super().__init__(message)
+        self.is_shutting_down = is_shutting_down
+
+    def __reduce__(self):
+        # Pickle (multiprocessing) rebuilds from args, which hold only the
+        # message; the keyword travels in the state.
+        return (type(self), self.args, self.__dict__)
+
+
+class SerialPortConnectFailure(enum.Enum):
+    """Why a serial port couldn't be opened."""
+
+    NOT_FOUND = "not_found"
+    IN_USE = "in_use"
+    ACCESS_DENIED = "access_denied"
+    UNKNOWN = "unknown"
+
+
+class SerialPortConnectError(ConnectionError, _SerialException):
+    """A serial port couldn't be opened; ``reason`` says why
+    (:class:`SerialPortConnectFailure`) and the message names the port and
+    the cause. The original error is the ``__cause__``.
+
+    Also a ``serial.SerialException``, which the open raised before, so
+    existing handlers still catch it.
+    """
+
+    def __init__(self, port: str, reason: SerialPortConnectFailure, detail: str = ""):
+        message = {
+            SerialPortConnectFailure.NOT_FOUND: f"Serial port {port!r} was not found.",
+            SerialPortConnectFailure.IN_USE: (
+                f"Serial port {port!r} is in use by another program or connection."
+            ),
+            SerialPortConnectFailure.ACCESS_DENIED: (
+                f"Access to serial port {port!r} is denied (on Linux, the user "
+                "usually needs to be in the 'dialout' group)."
+            ),
+            SerialPortConnectFailure.UNKNOWN: f"Serial port {port!r} could not be opened.",
+        }[reason]
+        if detail:
+            message = f"{message} ({detail})"
+        super().__init__(message)
+        self.port = port
+        self.reason = reason
+        self.detail = detail
+
+    def __reduce__(self):
+        return (type(self), (self.port, self.reason, self.detail), self.__dict__)
 
 
 class SdCardOperationException(DAQiFiError):

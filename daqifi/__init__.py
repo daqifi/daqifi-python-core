@@ -84,6 +84,9 @@ from .exceptions import (
     ConfigurationError,
     FeatureNotSupportedError,
     PowerStateError,
+    DeviceNotConnectedError,
+    SerialPortConnectError,
+    SerialPortConnectFailure,
 )
 
 # Public API exports
@@ -124,4 +127,7 @@ __all__ = [
     'ConfigurationError',
     'FeatureNotSupportedError',
     'PowerStateError',
+    'DeviceNotConnectedError',
+    'SerialPortConnectError',
+    'SerialPortConnectFailure',
 ]
