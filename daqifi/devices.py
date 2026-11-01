@@ -1341,21 +1341,21 @@ class DaqifiDevice:
 
         Ports the upstream ``InitializeAsync`` (sync here per project
         convention). Wires the protocol handler, then sends the text-mode
-        setup commands. Whether the device accepted them isn't checked: no
-        reply can be matched to its command until the firmware tags replies
-        (#241).
+        setup commands, then queries device info -- the protobuf consumer's
+        status callback updates :attr:`metadata`. Neither whether the device
+        accepted the setup commands nor, on serial, whether it reported its
+        channels is checked: see #241.
 
-        Then it sends ``SYSInfoPB?`` once and waits for a status reply that
-        reports the device's channels: the protobuf consumer's status
-        callback fills :attr:`metadata` and :attr:`channels` (upstream
-        8c97c47, without its re-sends, which can leave a reply owed). Only
-        then is the device Ready.
-
-        :param response_timeout_s: how long to wait for that status reply.
-            Defaults to 8.0 s on serial transports (upstream's default)
-            and 5.0 s on TCP. Without it, :class:`DeviceUnresponsiveError`
-            is raised on any transport (on TCP, typically the WiFi-SCPI
-            wedge, #73) rather than reporting Ready with empty metadata.
+        :param response_timeout_s: max time to wait for the protobuf
+            ``SYSInfoPB?`` reply after sending ``get_device_info()``.
+            Polled every 50 ms, so a healthy device returns well under
+            a second. Defaults to 1.0 s on serial transports (matches
+            historical fixed sleep) and 5.0 s on TCP. On TCP, a
+            timeout raises :class:`DeviceUnresponsiveError` to surface
+            the WiFi-SCPI silence pattern (#73) instead of returning
+            with empty metadata; on other transports, a timeout
+            currently completes silently for backwards compatibility
+            with fakes that never deliver a status frame.
         """
         if response_timeout_s is not None and not response_timeout_s > 0:
             raise ValueError(
@@ -1420,28 +1420,29 @@ class DaqifiDevice:
                 self.send(scpi_commands.set_stream_interface(interface))
                 time.sleep(0.1)
 
-            # Query device info until a status reply reports the channels
-            # (the protobuf consumer dispatches it to
-            # _on_status_message_received, which fills metadata and
-            # channels). TCP keeps its shorter ceiling: the WiFi-SCPI
-            # wedge (#73) is the case to report there.
+            # Query device info -- the protobuf consumer dispatches the
+            # response to OnStatusMessageReceived which fills metadata.
+            # Polled (was a fixed 1.0 s sleep) so a healthy device
+            # returns early — needed roughly 500 ms over USB CDC on
+            # the 2026-04-23 NQ1 hardware run. TCP gets a longer
+            # ceiling because the WiFi-SCPI wedge (#73) is the case
+            # we want to detect distinctly from a routine slow reply.
             is_tcp = isinstance(self._transport, TcpStreamTransport)
             if response_timeout_s is None:
-                response_timeout_s = 5.0 if is_tcp else 8.0
-            if not self._wait_for_channels(response_timeout_s):
-                if is_tcp:
-                    raise DeviceUnresponsiveError(
-                        f"No SYSInfoPB? reply on TCP within "
-                        f"{response_timeout_s:.1f} s — TCP socket is up "
-                        f"but the device's WiFi-SCPI listener appears "
-                        f"wedged. Recovery: reboot the device via USB "
-                        f"(SYSTem:REboot)."
-                    )
+                response_timeout_s = 5.0 if is_tcp else 1.0
+            self.send(scpi_commands.get_device_info())
+            deadline = time.monotonic() + response_timeout_s
+            while time.monotonic() < deadline:
+                if self._metadata.serial_number:
+                    break
+                time.sleep(0.05)
+            if not self._metadata.serial_number and is_tcp:
                 raise DeviceUnresponsiveError(
-                    f"Device {self.name!r} did not report its channel "
-                    f"configuration within {response_timeout_s:.1f} s "
-                    f"of SYSInfoPB?. The device may be unresponsive or still "
-                    f"starting up."
+                    f"No SYSInfoPB? reply on TCP within "
+                    f"{response_timeout_s:.1f} s — TCP socket is up "
+                    f"but the device's WiFi-SCPI listener appears "
+                    f"wedged. Recovery: reboot the device via USB "
+                    f"(SYSTem:REboot)."
                 )
 
             self._is_initialized = True
@@ -1477,35 +1478,6 @@ class DaqifiDevice:
                 # the old). Qodo PR #75 /agentic_review pass 2 bug #3.
                 if not self._metadata.serial_number:
                     self._metadata.serial_number = prev_serial_number
-
-    def _wait_for_channels(self, timeout_s: float) -> bool:
-        """Send ``SYSInfoPB?`` once and wait up to ``timeout_s`` for a status
-        reply reporting at least one channel.
-
-        Once, not re-sent (upstream re-sends every second): a second query
-        crossing a slow first reply would leave a reply owed when this
-        returns, and that late binary frame would fuse into the next text
-        reply. With one query in flight no reply can be owed."""
-        populated = threading.Event()
-
-        def _on_populated(args: ChannelsPopulatedEventArgs) -> None:
-            # A status with no channels would satisfy the wait with an
-            # empty device, the outcome this exists to prevent.
-            if args.analog_channel_count + args.digital_channel_count > 0:
-                populated.set()
-
-        # A setup command's refusal (the firmware volunteers **ERROR) can be
-        # in the parser's buffer, its bytes read as a frame's length: the
-        # status reply would wait behind them for bytes that never come.
-        if self._consumer is not None:
-            self._consumer.clear_buffer()
-        # Subscribed before the send, so a fast reply can't be missed.
-        self.add_channels_populated(_on_populated)
-        try:
-            self.send(scpi_commands.get_device_info())
-            return populated.wait(timeout_s)
-        finally:
-            self.remove_channels_populated(_on_populated)
 
     def close(self) -> None:
         if self._disposed:

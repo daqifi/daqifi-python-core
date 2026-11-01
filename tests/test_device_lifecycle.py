@@ -1,10 +1,8 @@
 """#201: device lifecycle drift from daqifi-core.
 
-1. initialize() on serial reported Ready with empty metadata (one
-   SYSInfoPB?, a 1 s poll, no error). It now waits for one status that
-   reports channels, else raises (upstream 8c97c47, without its re-sends).
-   Its setup commands stay fire-and-forget: a check of them needs a firmware
-   way to tag replies (#241, operator ruling CE: B).
+1. (Taken out by operator rulings: initialize() behaves as on main. Its setup
+   commands are fire-and-forget, and on serial it doesn't require channels
+   before Ready: #241. These pins keep it that way.)
 2. send() racing disconnect() raised a raw ValueError and overwrote
    Disconnected with Lost/Error (upstream baabf0c).
 3. execute_text_command had no overall cap (upstream caps every exchange
@@ -139,12 +137,33 @@ def _device(stream):
 # ---- 1: initialize ------------------------------------------------------------
 
 
-def test_serial_initialize_without_a_status_raises_instead_of_reporting_ready() -> None:
+def test_serial_initialize_without_a_status_reports_ready_as_on_main() -> None:
     device = _device(_Stream(status_after=None))
     try:
-        with pytest.raises(TimeoutError, match="channel configuration"):
-            device.initialize(response_timeout_s=0.5)
-        assert device.state != DeviceState.Ready
+        device.initialize(response_timeout_s=0.2)
+        assert device.state == DeviceState.Ready
+        assert device.metadata.serial_number == ""
+    finally:
+        device.disconnect()
+
+
+def test_a_partial_frame_in_the_parser_isnt_cut_before_the_status_query() -> None:
+    # Audit r6: clearing the buffer here dropped a frame's head with its tail
+    # still in flight; the parser took the tail for a length and the status
+    # behind it never came, failing a healthy device.
+    frame = _status_frame()
+    stream = _Stream(
+        status_after=None,
+        on_write={
+            b"SYSTem:STReam:STOP": frame[:3],
+            b"SYSTem:SYSInfoPB?": frame[3:] + frame,
+        },
+    )
+    device = _device(stream)
+    try:
+        device.initialize(response_timeout_s=2.0)
+        assert device.state == DeviceState.Ready
+        assert len(device.channels) == 2
     finally:
         device.disconnect()
 
@@ -185,9 +204,8 @@ def test_a_refused_setup_command_doesnt_fail_the_connect() -> None:
     stream = _Stream(refuse=(b"SYSTem:POWer:STATe 1",))
     device = _device(stream)
     try:
-        device.initialize(response_timeout_s=2.0)
+        device.initialize(response_timeout_s=0.2)
         assert device.state == DeviceState.Ready
-        assert len(device.channels) == 2
     finally:
         device.disconnect()
 
@@ -204,33 +222,11 @@ def test_a_line_that_never_goes_quiet_doesnt_fail_the_connect() -> None:
     device = _device(stream)
     worker.start()
     try:
-        device.initialize(response_timeout_s=4.0)
+        device.initialize(response_timeout_s=0.2)
         assert device.state == DeviceState.Ready
     finally:
         done.set()
         worker.join(2)
-        device.disconnect()
-
-
-def test_a_slow_status_reply_is_waited_for_with_one_query_and_none_left_owed() -> None:
-    # SYSInfoPB? answered 2.5 s late. One query, waited for: Ready with the
-    # channels, and nothing still owed to land in the next text reply (a
-    # re-send every second left replies due at 3.5 and 4.5 s).
-    from daqifi._internal.scpi_commands import ScpiMessage
-
-    stream = _Stream(status_delay=2.5, on_write={b"X?": (b"VALUE\r\n", 1.2)})
-    device = _device(stream)
-    try:
-        device.initialize(response_timeout_s=6.0)
-        assert device.state == DeviceState.Ready
-        assert len(device.channels) == 2
-        assert stream.info_requests == 1
-        lines = device.execute_text_command(
-            lambda: device.send(ScpiMessage("X?")),
-            response_timeout_ms=2500, completion_timeout_ms=1500,
-        )
-        assert lines == ["VALUE"]
-    finally:
         device.disconnect()
 
 
@@ -294,24 +290,6 @@ def test_a_short_reply_comes_back_at_once_on_a_port_that_blocks_for_its_read_tim
         # Measured at the read: stopping the consumers around the exchange
         # takes their own read timeouts.
         assert stream.read_at - stream.sent_at < 0.3
-    finally:
-        device.disconnect()
-
-
-def test_no_status_reply_is_left_owed_to_corrupt_the_next_text_reply() -> None:
-    # Each SYSInfoPB? is answered 1.1 s later (a re-send at 1 s would cross
-    # it). A text query straight after initialize(), answered 1.2 s later,
-    # must read clean: no owed frame may land in front of it.
-    from daqifi._internal.scpi_commands import ScpiMessage
-
-    device = _device(_Stream(status_delay=1.1, on_write={b"X?": (b"VALUE\r\n", 1.2)}))
-    try:
-        device.initialize(response_timeout_s=4.0)
-        lines = device.execute_text_command(
-            lambda: device.send(ScpiMessage("X?")),
-            response_timeout_ms=2500, completion_timeout_ms=1500,
-        )
-        assert lines == ["VALUE"]
     finally:
         device.disconnect()
 
