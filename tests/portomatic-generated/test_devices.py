@@ -45,10 +45,9 @@ def _status_frame() -> bytes:
 
 
 class _FakeStream:
-    """Answers as a healthy device does: ``0,"No error"`` to
-    ``SYSTem:ERRor?`` (initialize()'s check of its setup commands) and a
-    status frame reporting a channel to ``SYSInfoPB?``. ``silent`` turns
-    both off, for a device that never replies."""
+    """Answers as a healthy device does: a status frame reporting a channel
+    to ``SYSInfoPB?``. ``silent`` turns it off, for a device that never
+    replies."""
 
     def __init__(self, silent: bool = False):
         self.written: list = []
@@ -61,11 +60,8 @@ class _FakeStream:
         # `None` from write() raise IOError).
         b = bytes(data)
         self.written.append(b)
-        if not self.silent:
-            if b.startswith(b"SYSTem:ERRor?"):
-                self._rx.extend(b'0,"No error"\r\n')
-            elif b.startswith(b"SYSTem:SYSInfoPB?"):
-                self._rx.extend(_status_frame())
+        if not self.silent and b.startswith(b"SYSTem:SYSInfoPB?"):
+            self._rx.extend(_status_frame())
         return len(b)
 
     def flush(self) -> None:
@@ -673,8 +669,7 @@ class TestSilentInitDetection:
 
     def test_serial_silent_init_raises_unresponsive(self):
         """#201: a serial device that never answers isn't Ready with empty
-        metadata either; it raises (here at the init commands' check, which
-        gets no reply)."""
+        metadata either; it raises."""
         from daqifi.exceptions import DeviceUnresponsiveError
         from daqifi.transport import SerialStreamTransport
         t = _make_fake_transport(SerialStreamTransport)
@@ -718,12 +713,13 @@ class TestSilentInitDetection:
             t0 = time.monotonic()
             dev.initialize(response_timeout_s=5.0)
             elapsed = time.monotonic() - t0
-            # Init's SCPI settles (~0.6 s) plus the quiet it waits for
-            # before its first query (1.25 s, #201); the status reply then
-            # arrives at once, so well under the 5 s ceiling.
-            assert elapsed < 3.5, (
+            # Pre-init SCPI sleeps total ~0.5 s; SN-wait loop returns
+            # immediately on first iteration (synthetic_send already
+            # populated SN), so total should be well under the 5 s
+            # ceiling.
+            assert elapsed < 1.5, (
                 f"TCP init with synthetic SN took {elapsed:.2f} s; "
-                f"it should have returned in well under 3.5 s"
+                f"poll-loop should have returned in well under 1.5 s"
             )
         finally:
             try:

@@ -117,13 +117,15 @@ def test_get_channel_data_returns_per_channel_series() -> None:
     assert buf.get_channel_data(1) == [0.5, 0.6, 0.7]
 
 
-def test_get_channel_data_returns_zeros_for_missing_channel() -> None:
-    """A channel that doesn't appear in a sample returns the
-    Sample default (0.0) — matches Sample.__getitem__'s ``.get(ch,
-    0.0)`` semantics."""
+def test_get_channel_data_returns_nan_for_missing_channel() -> None:
+    """A channel that doesn't appear in a sample reads NaN, not a fake
+    0 V (#199): Sample.__getitem__ returns NaN for an absent channel."""
+    import math
+
     buf = SampleBuffer(channels=[0, 9])
     buf.add_sample(_make_sample(1.0, **{"0": 0.1}))  # no channel 9
-    assert buf.get_channel_data(9) == [0.0]
+    (value,) = buf.get_channel_data(9)
+    assert math.isnan(value)
 
 
 def test_get_timestamps_returns_offset_from_start() -> None:

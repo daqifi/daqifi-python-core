@@ -623,6 +623,7 @@ class StreamMessageConsumer(Generic[T]):
         message_parser: Any,  # Duck-typed: anything with parse_messages(bytes)
         buffer_size: int = DEFAULT_BUFFER_SIZE,
         is_wifi_device: bool = False,
+        health_sink: Optional[Any] = None,
         read_available: bool = False,
     ) -> None:
         """``read_available``: read only what the stream reports waiting
@@ -641,6 +642,10 @@ class StreamMessageConsumer(Generic[T]):
         self._parser = message_parser
         self._buffer_size = buffer_size
         self._read_available = read_available
+        # Optional transport told how each read went (report_io_fault /
+        # report_io_success), so it can notice a device that went away
+        # (#191). A timeout is neither.
+        self._health_sink = health_sink
         self._message_buffer = bytearray()
         # Hard cap to prevent unbounded growth if the parser
         # consistently fails to consume bytes (e.g. fed garbage
@@ -827,6 +832,7 @@ class StreamMessageConsumer(Generic[T]):
                     # with non-blocking reads); coerce to empty bytes.
                     if bytes_read is None:
                         bytes_read = b""
+                    self._report_health(None)
                     if bytes_read:
                         tel.read_calls += 1
                         n = len(bytes_read)
@@ -845,6 +851,7 @@ class StreamMessageConsumer(Generic[T]):
                 except Exception as exc:
                     if not self._is_running:
                         return
+                    self._report_health(exc)
                     self._on_error(exc)
                     time.sleep(0.1)  # back off on error
                     continue
@@ -973,6 +980,18 @@ class StreamMessageConsumer(Generic[T]):
                 h(args)
             except Exception as exc:
                 self._on_error(exc, raw_data)
+
+    def _report_health(self, error: Optional[BaseException]) -> None:
+        sink = self._health_sink
+        if sink is None:
+            return
+        try:
+            if error is None:
+                sink.report_io_success()
+            else:
+                sink.report_io_fault(error)
+        except Exception:
+            pass
 
     def _on_error(self, error: BaseException, raw_data: Optional[bytes] = None) -> None:
         args = _ConsumerErrorArgs(

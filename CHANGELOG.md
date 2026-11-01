@@ -7,14 +7,6 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- Typed errors (#201): `DeviceNotConnectedError` (a `RuntimeError`, as the
-  not-connected guards raised before; `is_shutting_down` when a disconnect
-  cut a send off), `ScpiInitializationError` (a `CommandError`),
-  `InitializationUnconfirmedError` (a `DeviceUnresponsiveError`), and
-  `SerialPortConnectError` with `reason` (`SerialPortConnectFailure`:
-  not found, in use, access denied, unknown; also a
-  `serial.SerialException`). `SerialInterface.last_open_error` keeps why
-  `open()` failed.
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -25,26 +17,11 @@ aims to follow [Semantic Versioning](https://semver.org/).
   enumerated device; `SerialStreamTransport.port_name` (#161).
 
 ### Changed
-- `DaqifiDevice.initialize()` checks its setup commands: each attempt stops
-  any stream, waits for the line to go quiet, empties the error queue one
-  query at a time, then sends them and one `SYSTem:ERRor?`, retried once.
-  At most one query is outstanding, and after any unanswered one the line
-  must go quiet again before a reply is attributed (replies up to 1 s late
-  are accepted). A refusal that persists raises
-  `ScpiInitializationError`; an outcome it can't read (no reply, a reply
-  garbled by stream bytes, a queue that won't empty) raises
-  `InitializationUnconfirmedError` and leaves the device out of Error. It then sends
-  `SYSInfoPB?` once and waits for a status that reports the channels, and
-  raises `DeviceUnresponsiveError` (now also a `TimeoutError`) on any
-  transport if none does: on serial it reported Ready with empty metadata
-  before. The serial default timeout is 8 s (#201).
-- `execute_text_command` caps every exchange at five times
-  `response_timeout_ms` when `max_total_ms` isn't given, reads LF-only
-  replies, and treats a blank-only reply as an answer instead of waiting
-  out the timeout (#201).
-- `ConnectionRetryOptions` rejects invalid values when set: fewer than one
-  attempt, negative delays, a backoff multiplier below 1, a connection
-  timeout under 1 ms (#201).
+- The hardware-free test run (`pytest tests --ignore=tests/integration/hardware`)
+  no longer probes serial ports: the device smoke test moved under
+  `tests/integration/hardware`, and a layout test keeps any test that needs a
+  board out of the hardware-free path. The download-service tests now drive
+  `GitHubFirmwareDownloadService` itself (#205).
 - A PIC32 update now refuses to start while more than one DAQiFi board is
   connected over USB (application serial ports with 04D8:F794, plus boards
   already in bootloader mode), and says to disconnect the others; it also
@@ -56,10 +33,14 @@ aims to follow [Semantic Versioning](https://semver.org/).
   ifaddr), matching `install_requires` (#155).
 
 ### Fixed
-- `send()` cut off by a `disconnect()` on another thread raised a raw
-  `ValueError` and overwrote Disconnected with Lost/Error; it now raises
-  `DeviceNotConnectedError(is_shutting_down=True)` and the status stays
-  Disconnected (#201).
+- An SD download the device ended with `__TRANSFER_ERROR__` (a card read
+  error part-way through the file) waited out its whole timeout (30 s, or
+  30 min for `SdCardFileReceiver`) and could leave the marker in the file.
+  `SdCardFileReceiver` and `download_sd_card_file` now raise
+  `SdCardTransferErrorException` (`file_name`, `bytes_received`), keeping
+  the real content received before it. With a known size, marker text in
+  the file is still content; a real mid-file error there surfaces at the
+  idle timeout (#154).
 - Live streaming timestamps jumped back to near zero every time the
   device's 32-bit tick counter rolled over (about every 86 s at 50 MHz,
   102 s at 42 MHz), in all three stream formats, so any session longer than
@@ -69,6 +50,15 @@ aims to follow [Semantic Versioning](https://semver.org/).
   and the first sample of a session keeps its raw time. Limit: a gap in the
   device's own samples longer than half a period (42.9 s at 50 MHz) reads as
   a step back; a running stream doesn't produce one (#193).
+- An unplugged serial (USB) device was never reported lost: pyserial's
+  port stays open after an unplug, so the device stayed `Connected` while
+  its reader logged a read error ten times a second forever. The reader
+  now tells the serial transport how each read went, and five failed reads
+  in a row with no success between are taken as the device gone: the
+  transport reports itself disconnected, the device moves to
+  `ConnectionStatus.Lost` and its reader stops, as for TCP. A single
+  failed read that recovers changes nothing, and `disconnect()` is never
+  reported as a loss (#191).
 - SD listings on current firmware returned a file named `__END_OF_LIST__`:
   the firmware ends every listing with `__END_OF_LIST__ OK`, `INCOMPLETE`
   or `FAILED`, and a listing marked INCOMPLETE or FAILED came back as if

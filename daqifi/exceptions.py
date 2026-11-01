@@ -5,7 +5,7 @@ Provides structured error handling for device operations.
 """
 
 import enum
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 try:
     from serial import SerialException as _SerialException
@@ -79,43 +79,6 @@ class DeviceNotConnectedError(DAQiFiError, RuntimeError):
         # Pickle (multiprocessing) rebuilds from args, which hold only the
         # message; the keyword travels in the state.
         return (type(self), self.args, self.__dict__)
-
-
-class ScpiInitializationError(CommandError):
-    """The device reported a SCPI error during :meth:`DaqifiDevice.initialize`
-    that persisted after a retry, so it isn't in the state the init
-    sequence sets (echo off, stream stopped, powered on, protobuf format).
-
-    ``lines`` are the lines captured from the last attempt; ``error_line``
-    is the one that reported the error.
-    """
-
-    def __init__(self, message: str, lines: Sequence[str], error_line: str):
-        super().__init__(message)
-        self.lines = tuple(lines)
-        self.error_line = error_line
-
-    def __reduce__(self):
-        return (type(self), (str(self), self.lines, self.error_line), self.__dict__)
-
-
-class InitializationUnconfirmedError(DeviceUnresponsiveError):
-    """:meth:`DaqifiDevice.initialize` couldn't tell whether the device
-    accepted its setup commands: the error queue couldn't be emptied
-    first, or the reply to the ``SYSTem:ERRor?`` after them was missing or
-    unreadable (stream bytes still arriving can garble it), on every
-    attempt. A device that answers nothing at all ends here too, hence a
-    :class:`DeviceUnresponsiveError`. Not a refusal, so the device isn't
-    put in the Error state; retrying ``initialize()`` is reasonable.
-    ``lines`` are the lines from the last attempt.
-    """
-
-    def __init__(self, message: str, lines: Sequence[str] = ()):
-        super().__init__(message)
-        self.lines = tuple(lines)
-
-    def __reduce__(self):
-        return (type(self), (str(self), self.lines), self.__dict__)
 
 
 class SerialPortConnectFailure(enum.Enum):
@@ -218,6 +181,31 @@ class SdCardOperationException(DAQiFiError):
         else:
             s = str(last_scpi_error).strip()
             self.last_scpi_error = s or None
+
+
+class SdCardTransferErrorException(SdCardOperationException):
+    """The device reported a read error part-way through sending an SD card
+    file, ending the transfer with ``__TRANSFER_ERROR__`` instead of
+    ``__END_OF_FILE__`` (firmware #725). The ``bytes_received`` bytes already
+    written to the destination are genuine file content, but the file is
+    incomplete. Port of upstream ``SdCardTransferErrorException`` (#154).
+    """
+
+    def __init__(self, file_name: str, bytes_received: int):
+        super().__init__(
+            f"The device reported a read error while sending SD card file "
+            f"{file_name!r} and ended the transfer after {bytes_received} bytes. "
+            "Those bytes are genuine file content, but the file is incomplete; "
+            "retry the download, and if it keeps failing the card or that file "
+            "may be damaged.",
+            (),
+        )
+        self.file_name = file_name
+        self.bytes_received = bytes_received
+
+    def __reduce__(self):
+        # Pickle (multiprocessing) rebuilds from these, not the message.
+        return (type(self), (self.file_name, self.bytes_received), self.__dict__)
 
 
 class SdCardBusyException(SdCardOperationException):

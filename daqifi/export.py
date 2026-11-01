@@ -151,7 +151,7 @@ class CsvExportOptions:
     delimiter: str = ","
 
     #: When ``True``, the time column contains seconds elapsed since
-    #: the first sample (formatted to 3 decimal places). When
+    #: the first sample, to :attr:`relative_time_decimals` places. When
     #: ``False``, it contains an ISO 8601 round-trip timestamp.
     use_relative_time: bool = False
 
@@ -161,6 +161,12 @@ class CsvExportOptions:
     #: samples (across all channels) and one averaged row is written
     #: per window.
     average_window: Optional[int] = None
+    #: Decimal places of the relative time column, 0 to 7 (7 is the tick
+    #: resolution, 100 ns). The default 3 (1 ms, as upstream) gives
+    #: samples above 1 kHz repeated labels (2 kHz: 0.000, 0.001, 0.001,
+    #: ...); use 6 or 7 for fast streams (#195). Last, so existing
+    #: positional calls keep their meaning.
+    relative_time_decimals: int = 3
 
 
 class CsvExporter:
@@ -207,6 +213,15 @@ class CsvExporter:
             raise ValueError(
                 f"options.average_window must be greater than zero "
                 f"(got {options.average_window})"
+            )
+        if (
+            isinstance(options.relative_time_decimals, bool)
+            or not isinstance(options.relative_time_decimals, int)
+            or not 0 <= options.relative_time_decimals <= 7
+        ):
+            raise ValueError(
+                f"options.relative_time_decimals must be an int from 0 to 7 "
+                f"(got {options.relative_time_decimals!r})"
             )
         if (
             len(options.delimiter) != 1
@@ -286,6 +301,7 @@ class CsvExporter:
         current_tick: Optional[int] = None
         bucket: List[SampleRow] = []
         processed = 0
+        reported = 0
 
         for sample in source.stream_samples(cancel_event):
             _check_cancel(cancel_event)
@@ -297,7 +313,7 @@ class CsvExporter:
                     writer, bucket, channel_keys, first_ticks, options
                 )
                 processed += len(bucket)
-                self._report_progress(progress, processed, total_samples)
+                reported = self._report_progress(progress, processed, total_samples, reported)
                 bucket = []
 
             current_tick = sample.timestamp_ticks
@@ -321,7 +337,9 @@ class CsvExporter:
         options: CsvExportOptions,
     ) -> None:
         ticks = bucket[0].timestamp_ticks
-        timestamp = _format_timestamp(ticks, first_ticks, options.use_relative_time)
+        timestamp = _format_timestamp(
+            ticks, first_ticks, options.use_relative_time, options.relative_time_decimals
+        )
         parts: List[str] = [
             _escape_csv_field(timestamp, options.delimiter, formula_safe=False)
         ]
@@ -361,6 +379,7 @@ class CsvExporter:
         last_tick = 0
         window_count = 0
         processed = 0
+        reported = 0
 
         for sample in source.stream_samples(cancel_event):
             _check_cancel(cancel_event)
@@ -390,7 +409,7 @@ class CsvExporter:
                     counts[key] = 0
                 window_count = 0
 
-                self._report_progress(progress, processed, total_samples)
+                reported = self._report_progress(progress, processed, total_samples, reported)
 
         # Flush any trailing samples that didn't fill a complete window.
         if window_count > 0 and first_ticks is not None:
@@ -417,7 +436,9 @@ class CsvExporter:
         first_ticks: int,
         options: CsvExportOptions,
     ) -> None:
-        timestamp = _format_timestamp(last_tick, first_ticks, options.use_relative_time)
+        timestamp = _format_timestamp(
+            last_tick, first_ticks, options.use_relative_time, options.relative_time_decimals
+        )
         parts: List[str] = [
             _escape_csv_field(timestamp, options.delimiter, formula_safe=False)
         ]
@@ -439,12 +460,20 @@ class CsvExporter:
         progress: Optional[Callable[[int], None]],
         processed: int,
         total: int,
-    ) -> None:
+        reported: int,
+    ) -> int:
+        """Report (capped at 99) each time ``processed`` passes another
+        multiple of 5000, and return how many multiples have been passed.
+
+        Upstream reports only when the count lands exactly on a multiple,
+        but it grows by a whole timestamp's samples at a time, so with 7
+        channels 70,000 samples reported only twice (#195)."""
+        crossed = processed // cls._PROGRESS_REPORT_EVERY
         if progress is None or total <= 0:
-            return
-        # Mirrors upstream's "every 5000 samples, report capped at 99".
-        if processed % cls._PROGRESS_REPORT_EVERY == 0:
+            return crossed
+        if crossed > reported:
             progress(min(99, int((processed / total) * 100)))
+        return crossed
 
 
 def _check_cancel(cancel_event: Optional[threading.Event]) -> None:
@@ -462,7 +491,7 @@ def _check_cancel(cancel_event: Optional[threading.Event]) -> None:
 
 
 def _format_timestamp(
-    ticks: int, first_ticks: int, use_relative_time: bool
+    ticks: int, first_ticks: int, use_relative_time: bool, relative_decimals: int = 3
 ) -> str:
     """Format a tick value as an ISO 8601 absolute string or as
     seconds elapsed since ``first_ticks``.
@@ -481,7 +510,7 @@ def _format_timestamp(
 
     if use_relative_time:
         seconds = (ticks - first_ticks) / _TICKS_PER_SECOND
-        return f"{seconds:.3f}"
+        return f"{seconds:.{relative_decimals}f}"
 
     # ISO 8601 round-trip (matches C# DateTime.ToString("O") shape:
     # `YYYY-MM-DDTHH:MM:SS.fffffffZ` for UTC, with 7-digit fractional
@@ -530,10 +559,17 @@ def _escape_csv_field(value: str, delimiter: str, *, formula_safe: bool = True) 
         # for quoting if needed. Strip leading whitespace before the
         # formula-char check — spreadsheets ignore leading whitespace
         # when detecting a formula (e.g. " =SUM(A1)" still evaluates).
-        leading = value.lstrip(" \t")
+        # Any Unicode whitespace, not just space and tab: injection
+        # payloads put NBSP, thin spaces or U+2028 before "=" and
+        # spreadsheets still evaluate the cell (upstream 4f3766f).
+        leading = value.lstrip()
         if leading and leading[0] in ("=", "+", "-", "@"):
             value = "'" + value
-    must_quote = any(ch in value for ch in (delimiter, '"', "\r", "\n"))
+    # Leading or trailing whitespace is quoted too: many readers (Excel,
+    # Google Sheets, pandas) trim unquoted whitespace and lose it.
+    must_quote = (bool(value) and (value[0].isspace() or value[-1].isspace())) or any(
+        ch in value for ch in (delimiter, '"', "\r", "\n")
+    )
     if must_quote:
         value = value.replace('"', '""')
         return f'"{value}"'

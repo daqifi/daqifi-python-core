@@ -1,11 +1,10 @@
 """#201: device lifecycle drift from daqifi-core.
 
 1. initialize() on serial reported Ready with empty metadata (one
-   SYSInfoPB?, a 1 s poll, no error), and sent its setup commands
-   fire-and-forget, so a refused one passed silently. It now re-sends
-   SYSInfoPB? every second until a status reports channels (else raises,
-   upstream 8c97c47), and checks the setup commands with a SYSTem:ERRor?
-   terminator, retrying once (upstream 1ce13b2 / 1142893).
+   SYSInfoPB?, a 1 s poll, no error). It now waits for one status that
+   reports channels, else raises (upstream 8c97c47, without its re-sends).
+   Its setup commands stay fire-and-forget: a check of them needs a firmware
+   way to tag replies (#241, operator ruling CE: B).
 2. send() racing disconnect() raised a raw ValueError and overwrote
    Disconnected with Lost/Error (upstream baabf0c).
 3. execute_text_command had no overall cap (upstream caps every exchange
@@ -37,26 +36,19 @@ def _status_frame() -> bytes:
 
 
 class _Stream:
-    """A scripted device with an error queue. ``stale_errors`` are in the
-    queue from the start; ``refuse`` maps a command prefix to how many times
-    the device refuses it (None: always), each refusal queueing -200;
-    SYSTem:ERRor? pops the queue (``0,"No error"`` when empty).
+    """A scripted device. ``refuse`` maps a command prefix to how the device
+    refuses it, always: it answers ``**ERROR`` as the firmware does.
     ``status_after`` is how many SYSInfoPB? requests go unanswered before
     one is answered (None: never); ``on_write`` maps a command prefix to
-    bytes to send back; ``frame_before_replies`` is sent ahead of every
-    SYSTem:ERRor? reply (a stream still running)."""
+    bytes to send back."""
 
-    def __init__(self, stale_errors=0, refuse=None, status_after=0, on_write=None,
-                 frame_before_replies=b"", status_delay=0.0, reply_delay=0.0):
+    def __init__(self, refuse=(), status_after=0, on_write=None, status_delay=0.0):
         self.written = []
-        self.queue = [b'-200,"Execution error"'] * stale_errors
-        self.refuse = dict(refuse or {})
+        self.refuse = tuple(refuse)
         self.status_after = status_after
         self.info_requests = 0
         self.on_write = dict(on_write or {})
-        self.frame_before_replies = frame_before_replies
         self.status_delay = status_delay
-        self.reply_delay = reply_delay
         self._rx = bytearray()
         self._lock = threading.Lock()
 
@@ -67,21 +59,9 @@ class _Stream:
     def write(self, data) -> int:
         b = bytes(data)
         self.written.append(b)
-        for prefix, times in self.refuse.items():
-            if b.startswith(prefix) and (times is None or times > 0):
-                self.queue.append(b'-200,"Execution error"')
-                if times is not None:
-                    self.refuse[prefix] = times - 1
-        if b.startswith(b"SYSTem:ERRor?"):
-            reply = self.queue.pop(0) if self.queue else b'0,"No error"'
-            data = self.frame_before_replies + reply + b"\r\n"
-            if self.reply_delay:
-                timer = threading.Timer(self.reply_delay, self.feed, (data,))
-                timer.daemon = True
-                timer.start()
-            else:
-                self.feed(data)
-        elif b.startswith(b"SYSTem:SYSInfoPB?"):
+        if b.startswith(self.refuse):
+            self.feed(b'**ERROR: -200, "Execution error"\r\n')
+        if b.startswith(b"SYSTem:SYSInfoPB?"):
             self.info_requests += 1
             if self.status_after is not None and self.info_requests > self.status_after:
                 if self.status_delay:
@@ -169,6 +149,69 @@ def test_serial_initialize_without_a_status_raises_instead_of_reporting_ready() 
         device.disconnect()
 
 
+# Echo off, stream stop, power on, protobuf format, stream interface.
+_SETUP = ["SYSTem:ECHO", "SYSTem:STReam:STOP", "SYSTem:POWer:STATe 1",
+          "SYSTem:STReam:FORmat", "SYSTem:STReam:INTerface", "SYSTem:SYSInfoPB?"]
+
+
+def test_the_setup_commands_go_out_as_on_main_with_no_query_of_their_own() -> None:
+    # Ruling CE: B. No SYSTem:ERRor? and no retry: a check needs a firmware
+    # way to tag replies (#241).
+    stream = _Stream()
+    device = _device(stream)
+    try:
+        device.initialize(response_timeout_s=2.0)
+        commands = stream.commands()
+        assert len(commands) == len(_SETUP)
+        assert all(c.startswith(want) for c, want in zip(commands, _SETUP)), commands
+        assert device.state == DeviceState.Ready
+    finally:
+        device.disconnect()
+
+
+def test_initialize_waits_for_no_quiet_window() -> None:
+    # Main's four 0.1 s settles and the interface's; the check's quiet window
+    # added 1.25 s to every connect.
+    device = _device(_Stream())
+    try:
+        began = time.monotonic()
+        device.initialize(response_timeout_s=2.0)
+        assert time.monotonic() - began < 1.0
+    finally:
+        device.disconnect()
+
+
+def test_a_refused_setup_command_doesnt_fail_the_connect() -> None:
+    stream = _Stream(refuse=(b"SYSTem:POWer:STATe 1",))
+    device = _device(stream)
+    try:
+        device.initialize(response_timeout_s=2.0)
+        assert device.state == DeviceState.Ready
+        assert len(device.channels) == 2
+    finally:
+        device.disconnect()
+
+
+def test_a_line_that_never_goes_quiet_doesnt_fail_the_connect() -> None:
+    stream = _Stream()
+    done = threading.Event()
+
+    def _chatter():
+        while not done.wait(0.05):
+            stream.feed(b"chatter\r\n")
+
+    worker = threading.Thread(target=_chatter, daemon=True)
+    device = _device(stream)
+    worker.start()
+    try:
+        device.initialize(response_timeout_s=4.0)
+        assert device.state == DeviceState.Ready
+    finally:
+        done.set()
+        worker.join(2)
+        device.disconnect()
+
+
 def test_a_slow_status_reply_is_waited_for_with_one_query_and_none_left_owed() -> None:
     # SYSInfoPB? answered 2.5 s late. One query, waited for: Ready with the
     # channels, and nothing still owed to land in the next text reply (a
@@ -187,83 +230,6 @@ def test_a_slow_status_reply_is_waited_for_with_one_query_and_none_left_owed() -
             response_timeout_ms=2500, completion_timeout_ms=1500,
         )
         assert lines == ["VALUE"]
-    finally:
-        device.disconnect()
-
-
-def test_a_persistently_refused_init_command_raises_typed() -> None:
-    stream = _Stream(refuse={b"SYSTem:POWer:STATe 1": None})
-    device = _device(stream)
-    try:
-        with pytest.raises(exc_mod.CommandError, match="-200") as info:
-            device.initialize(response_timeout_s=1.0)
-        assert type(info.value).__name__ == "ScpiInitializationError"
-        assert device.state == DeviceState.Error
-    finally:
-        device.disconnect()
-
-
-def test_a_refusal_the_device_also_volunteers_raises() -> None:
-    # The firmware's SCPI_ErrorPush both queues the error and writes
-    # "**ERROR: ..." to the wire (SCPI_USB_Error / SCPI_TCP_Error).
-    stream = _Stream(
-        refuse={b"SYSTem:POWer:STATe 1": None},
-        on_write={b"SYSTem:POWer:STATe 1": b"**ERROR: -200, \"Execution error\"\r\n"},
-    )
-    device = _device(stream)
-    try:
-        with pytest.raises(exc_mod.CommandError, match="-200"):
-            device.initialize(response_timeout_s=1.0)
-    finally:
-        device.disconnect()
-
-
-def test_a_transient_init_error_is_retried_once() -> None:
-    stream = _Stream(refuse={b"SYSTem:POWer:STATe 1": 1})
-    device = _device(stream)
-    try:
-        device.initialize(response_timeout_s=2.0)
-        assert device.state == DeviceState.Ready
-        power_on = [c for c in stream.commands() if c.startswith("SYSTem:POWer:STATe 1")]
-        assert len(power_on) == 2
-    finally:
-        device.disconnect()
-
-
-def test_errors_left_in_the_queue_dont_fail_a_healthy_init() -> None:
-    # Two errors from earlier commands; every init command succeeds.
-    device = _device(_Stream(stale_errors=2))
-    try:
-        device.initialize(response_timeout_s=2.0)
-        assert device.state == DeviceState.Ready
-    finally:
-        device.disconnect()
-
-
-def test_two_first_attempt_errors_then_a_clean_retry_initialise() -> None:
-    stream = _Stream(refuse={b"SYSTem:POWer:STATe 1": 1, b"SYSTem:STReam:FORmat": 1})
-    device = _device(stream)
-    try:
-        device.initialize(response_timeout_s=2.0)
-        assert device.state == DeviceState.Ready
-    finally:
-        device.disconnect()
-
-
-def test_a_reply_merged_with_stream_bytes_isnt_taken_for_success() -> None:
-    # Still streaming (STOP refused): sample bytes with no LF land ahead of
-    # every reply, so "-200,..." fuses into an unreadable line.
-    stream = _Stream(
-        refuse={b"SYSTem:STReam:STOP": None},
-        frame_before_replies=bytes.fromhex("050801120102"),
-    )
-    device = _device(stream)
-    try:
-        with pytest.raises(exc_mod.DAQiFiError) as info:
-            device.initialize(response_timeout_s=1.0)
-        assert type(info.value).__name__ == "InitializationUnconfirmedError"
-        # Unknown, not refused: no Ready, and no Error on a guess.
-        assert device.state not in (DeviceState.Ready, DeviceState.Error)
     finally:
         device.disconnect()
 
@@ -297,13 +263,37 @@ class _BlockingReadStream(_Stream):
             return out
 
 
-def test_init_reads_short_replies_on_a_port_that_blocks_for_its_read_timeout() -> None:
-    # A healthy device answering at once; the text reader must not wait out
-    # the port's read timeout for each short reply.
-    device = _device(_BlockingReadStream())
+def test_a_short_reply_comes_back_at_once_on_a_port_that_blocks_for_its_read_timeout() -> None:
+    # The text reader must not wait out the port's read timeout for a short
+    # reply.
+    from daqifi._internal.scpi_commands import ScpiMessage
+
+    class _TimesTheReply(_BlockingReadStream):
+        sent_at = read_at = None
+
+        def write(self, data):
+            if bytes(data).startswith(b"X?"):
+                self.sent_at = time.monotonic()
+            return super().write(data)
+
+        def read(self, n):
+            out = super().read(n)
+            if out and self.sent_at is not None and self.read_at is None:
+                self.read_at = time.monotonic()
+            return out
+
+    stream = _TimesTheReply(on_write={b"X?": b"VALUE\r\n"})
+    device = _device(stream)
     try:
         device.initialize(response_timeout_s=4.0)
-        assert device.state == DeviceState.Ready
+        lines = device.execute_text_command(
+            lambda: device.send(ScpiMessage("X?")),
+            response_timeout_ms=2000, completion_timeout_ms=50,
+        )
+        assert lines == ["VALUE"]
+        # Measured at the read: stopping the consumers around the exchange
+        # takes their own read timeouts.
+        assert stream.read_at - stream.sent_at < 0.3
     finally:
         device.disconnect()
 
@@ -322,47 +312,6 @@ def test_no_status_reply_is_left_owed_to_corrupt_the_next_text_reply() -> None:
             response_timeout_ms=2500, completion_timeout_ms=1500,
         )
         assert lines == ["VALUE"]
-    finally:
-        device.disconnect()
-
-
-def test_late_error_replies_dont_confirm_a_refused_init_command() -> None:
-    # Every SYSTem:ERRor? reply comes 650 ms late and power-on is always
-    # refused. A query answered after its window must not leave its reply
-    # to satisfy the next question: the refusal must be seen.
-    stream = _Stream(refuse={b"SYSTem:POWer:STATe 1": None}, reply_delay=0.65)
-    device = _device(stream)
-    try:
-        with pytest.raises(exc_mod.CommandError, match="-200"):
-            device.initialize(response_timeout_s=3.0)
-        assert device.state != DeviceState.Ready
-    finally:
-        device.disconnect()
-
-
-def test_late_error_replies_dont_corrupt_the_status_reply() -> None:
-    # Every command accepted, every SYSTem:ERRor? reply 600 ms late: no
-    # reply may still be outstanding when the status query goes out.
-    stream = _Stream(reply_delay=0.6)
-    device = _device(stream)
-    try:
-        device.initialize(response_timeout_s=3.0)
-        assert device.state == DeviceState.Ready
-        assert len(device.channels) == 2
-    finally:
-        device.disconnect()
-
-
-def test_error_replies_slower_than_accepted_end_unconfirmed_never_ready() -> None:
-    # Replies 1.3 s late, past the 1 s init accepts: no reply can be
-    # attributed, so the outcome is unknown, not Ready and not Error.
-    stream = _Stream(reply_delay=1.3)
-    device = _device(stream)
-    try:
-        with pytest.raises(exc_mod.DAQiFiError) as info:
-            device.initialize(response_timeout_s=3.0)
-        assert type(info.value).__name__ == "InitializationUnconfirmedError"
-        assert device.state not in (DeviceState.Ready, DeviceState.Error)
     finally:
         device.disconnect()
 
@@ -746,13 +695,11 @@ def _assert_close_mid_send_is_typed(device, entered, release) -> None:
     "build",
     [
         lambda: exc_mod.DeviceNotConnectedError("gone", is_shutting_down=True),
-        lambda: exc_mod.ScpiInitializationError("refused", ["a", "b"], "-200,x"),
-        lambda: exc_mod.InitializationUnconfirmedError("unknown", ["l"]),
         lambda: exc_mod.SerialPortConnectError(
             "COM41", exc_mod.SerialPortConnectFailure.IN_USE, "detail"
         ),
     ],
-    ids=["not_connected", "scpi_init", "unconfirmed", "serial_connect"],
+    ids=["not_connected", "serial_connect"],
 )
 def test_the_new_exceptions_survive_pickling(build) -> None:
     # A multiprocessing worker that raises one sends it back pickled; one
