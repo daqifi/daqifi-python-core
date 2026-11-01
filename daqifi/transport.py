@@ -90,8 +90,9 @@ class _SocketStream(io.RawIOBase):
       used for this: after one timeout it refuses all further reads.
     * End of stream (the device closed the connection: reboot, Wi-Fi
       drop) is reported to the transport, on the reading thread, and
-      every read from then on raises ``ConnectionResetError``. It used to
-      read as an endless run of empty, "idle" reads.
+      that read and every one after it return ``b""``, the standard end
+      of stream; a socket error is reported the same way and re-raised.
+      It used to read as an endless run of empty, "idle" reads.
     """
 
     def __init__(
@@ -194,8 +195,9 @@ class TcpStreamTransport:
     """TCP implementation of :class:`StreamTransport` Protocol.
 
     Ports the C# ``TcpStreamTransport``. Wraps a :class:`socket.socket`
-    in a ``rwb`` file-like view (via :meth:`socket.makefile`) so it
-    matches the ``IO[bytes]`` shape consumers expect.
+    in a buffered read/write view (:class:`_SocketStream`, not
+    :meth:`socket.makefile`) so it matches the ``IO[bytes]`` shape
+    consumers expect.
 
     Like upstream, accepts either an explicit IP address string or a
     hostname; hostname resolution happens at :meth:`connect` time.
@@ -526,6 +528,10 @@ class SerialStreamTransport:
     DEFAULT_OS_RX_BUFFER_BYTES = 64 * 1024
     DEFAULT_OS_TX_BUFFER_BYTES = 64 * 1024
 
+    #: Consecutive I/O failures, with no success in between, taken as the
+    #: device having gone away (as upstream).
+    IO_FAULT_LIMIT = 5
+
     def __init__(
         self,
         port_name: str,
@@ -556,6 +562,17 @@ class SerialStreamTransport:
         self._serial: Optional[serial.Serial] = None
         self._disposed = False
         self._status_handlers: List[Callable[[TransportStatusEventArgs], None]] = []
+        # Loss detection from the reader's I/O outcomes (report_io_fault /
+        # report_io_success): pyserial's port stays "open" after a USB
+        # unplug, so the reader is the first to know (#191).
+        self._io_lock = threading.Lock()
+        self._io_faults = 0
+        self._loss_armed = False
+        self._lost = False
+        # Counts connections, so a report or loss event from an earlier one
+        # (a reader still running down, a slow status handler) is told apart
+        # from the current connection's (as TcpStreamTransport.session).
+        self._session = 0
 
     @property
     def stream(self) -> Optional[IO[bytes]]:
@@ -569,7 +586,45 @@ class SerialStreamTransport:
 
     @property
     def is_connected(self) -> bool:
-        return self._serial is not None and self._serial.is_open
+        return self._serial is not None and self._serial.is_open and not self._lost
+
+    @property
+    def session(self) -> int:
+        """Identifies the current connection; changes on every connect()."""
+        return self._session
+
+    def report_io_fault(
+        self, error: BaseException, session: Optional[int] = None
+    ) -> None:
+        """A read or write on :attr:`stream` failed for a reason other than
+        a timeout. ``IO_FAULT_LIMIT`` failures in a row, with no success in
+        between, are taken as the device gone: the transport reports itself
+        disconnected, once per connection, with that connection's
+        ``session`` (#191, upstream daqifi-core ITransportHealthSink). A
+        report that doesn't name the current connection (an earlier
+        ``session``, or none) is ignored. Safe from any thread."""
+        with self._io_lock:
+            # A report must name the current connection: a missing id is no
+            # proof it isn't stale.
+            if session != self._session:
+                return
+            if not self._loss_armed:
+                return
+            self._io_faults += 1
+            if self._io_faults < self.IO_FAULT_LIMIT:
+                return
+            self._loss_armed = False
+            self._lost = True
+            lost_session = self._session
+        self._notify_status(False, error, session=lost_session)
+
+    def report_io_success(self, session: Optional[int] = None) -> None:
+        """A read or write on :attr:`stream` succeeded; any run of
+        failures on that connection is forgotten."""
+        with self._io_lock:
+            if session != self._session:
+                return
+            self._io_faults = 0
 
     @property
     def connection_info(self) -> str:
@@ -608,6 +663,15 @@ class SerialStreamTransport:
                     if delay > 0:
                         time.sleep(delay)
 
+                # A handle left open by a lost connection (the port object
+                # stays open after an unplug) is closed first: Windows opens
+                # a COM port exclusively, so a second open is refused.
+                if self._serial is not None:
+                    try:
+                        self._serial.close()
+                    except Exception:
+                        pass
+                    self._serial = None
                 self._serial = serial.Serial(
                     port=self._port_name,
                     baudrate=self._baud_rate,
@@ -664,7 +728,12 @@ class SerialStreamTransport:
                 # so consumer threads can be stopped promptly.
                 self._serial.timeout = 0.5
 
-                self._notify_status(True, None)
+                with self._io_lock:
+                    self._session += 1
+                    self._io_faults = 0
+                    self._lost = False
+                    self._loss_armed = True
+                self._notify_status(True, None, session=self._session)
                 return
             except Exception as exc:
                 last_exc = exc
@@ -703,6 +772,10 @@ class SerialStreamTransport:
         # the actual failure instead of a clean (False, None) that
         # immediately overwrites the (False, exc) from the except path.
         disconnect_error: Optional[BaseException] = None
+        # Disarmed first: our own close makes the reader fail, and that is
+        # a disconnect, not a loss.
+        with self._io_lock:
+            self._loss_armed = False
         try:
             if self._serial is not None:
                 self._serial.close()
@@ -733,13 +806,19 @@ class SerialStreamTransport:
 
         return [p.device for p in list_ports.comports()]
 
-    def _notify_status(self, is_connected: bool, error: Optional[BaseException]) -> None:
+    def _notify_status(
+        self,
+        is_connected: bool,
+        error: Optional[BaseException],
+        session: Optional[int] = None,
+    ) -> None:
         _notify(
             self._status_handlers,
             TransportStatusEventArgs(
                 is_connected=is_connected,
                 connection_info=self.connection_info,
                 error=error,
+                session=session,
             ),
         )
 
@@ -946,8 +1025,9 @@ class HidLibraryTransport:
 
     Ports the C# ``HidLibraryTransport``. Uses two
     :class:`threading.Lock` instances (mirrors the upstream
-    ``SemaphoreSlim(1, 1)`` connection + io locks) so disconnects can
-    happen while a long read is still draining without re-entering.
+    ``SemaphoreSlim(1, 1)`` connection + io locks). :meth:`disconnect`
+    takes the io lock, so it waits for an in-flight read to finish, up
+    to :attr:`read_timeout` (10 s by default); upstream waits the same.
 
     Default :class:`HidPlatform` is :class:`HidApiPlatform` (lazy-loads
     the ``hid`` package on first use); pass a fake to avoid the

@@ -121,6 +121,22 @@ class _FakeHidTransport:
         self.disconnect()
 
 
+class _RespondingHidTransport(_FakeHidTransport):
+    """Answers each write with the next scripted reply, as the bootloader
+    does: nothing is readable before the request it answers. A retry drains
+    stale reports first (#198), so a reply queued before its request would
+    be drained."""
+
+    def __init__(self, replies: Sequence[bytes]) -> None:
+        super().__init__()
+        self._script = [bytes(r) for r in replies]
+
+    def write(self, data: bytes) -> None:
+        super().write(data)
+        if self._script:
+            self.enqueue_read(self._script.pop(0))
+
+
 class _FakeHidEnumerator:
     """Returns a queued list of device-batches per ``enumerate`` call."""
 
@@ -566,13 +582,15 @@ class TestUpdateFirmwareFailureModes:
 
     def test_when_program_ack_fails_retries_and_completes(self) -> None:
         device = _FakeStreamingDevice("fake-port-3")
-        hid = _FakeHidTransport()
-        hid.enqueue_read(bytes([0x01, 0x10]))  # version
-        hid.enqueue_read(bytes([0x01, 0x02]))  # erase ack
-        hid.enqueue_read(bytes([0x00]))         # invalid program ack
-        hid.enqueue_read(bytes([0x01, 0x03]))  # retry program ack 1
-        hid.enqueue_read(bytes([0x01, 0x03]))  # program ack 2
-        hid.enqueue_read(bytes([0x01, 0x10]))  # verify version
+        hid = _RespondingHidTransport([
+            bytes([0x01, 0x10]),  # version
+            bytes([0x01, 0x02]),  # erase ack
+            bytes([0x00]),        # invalid program ack
+            bytes([0x01, 0x03]),  # retry program ack 1
+            bytes([0x01, 0x03]),  # program ack 2
+            bytes([0x01, 0x10]),  # verify version
+            bytes([0x01, 0x10]),  # (jump: no reply read)
+        ])
 
         info = HidDeviceInfo(0x04D8, 0x003C, "path-1", "SN-1", "Bootloader")
         enumerator = _FakeHidEnumerator([[], [info]])
@@ -2145,8 +2163,7 @@ class TestUpdateWifiModule:
             "SYSTem:COMMunicate:LAN:APPLY",
             "SYSTem:USB:SetTransparentMode 0",
             "SYSTem:COMMunicate:LAN:ENAbled 1",
-            "SYSTem:COMMunicate:LAN:APPLY",
-            "SYSTem:COMMunicate:LAN:SAVE",
+            "SYSTem:COMMunicate:LAN:APPLY 1",
         ]
         assert device.disconnect_calls == 1
         assert device.connect_attempts >= 1
