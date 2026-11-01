@@ -38,7 +38,10 @@ def _di(ts):
 
 
 def _manager(data, **kwargs):
-    sm = _f._manager(_f._FakeSerial(on_start=data), channels=[0], sample_rate=10, format=1, **kwargs)
+    # _ai writes integer millivolts, which the stream can't tell from raw
+    # codes: the caller says which (#222).
+    sm = _f._manager(_f._FakeSerial(on_start=data), channels=[0], sample_rate=10, format=1,
+                     integer_units="millivolts", **kwargs)
     sm.start()
     return sm
 
@@ -225,7 +228,8 @@ def test_an_export_never_pairs_a_value_with_another_samples_timestamp() -> None:
 def test_read_all_keeps_channels_a_csv_header_names_later() -> None:
     data = (b"# Timestamp Tick Rate: 1000 Hz\n" b"ain3_ts,ain3_val\n"
             b"1000,2500\n" b"1100,2600\n")
-    sm = _f._manager(_f._FakeSerial(on_start=data), channels=[0], sample_rate=10, format=2)
+    sm = _f._manager(_f._FakeSerial(on_start=data), channels=[0], sample_rate=10, format=2,
+                     integer_units="millivolts")
     sm.start()
     try:
         buffer = sm.read_all(duration=0.3)

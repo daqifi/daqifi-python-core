@@ -2587,9 +2587,15 @@ class _FirmwareValueReader:
     (daqifi-nyquist-firmware#1179). One instance per parse, so the
     unspecified-integers warning is emitted once per parse."""
 
-    def __init__(self, config: Optional[SdCardDeviceConfiguration], integer_units: Optional[str]) -> None:
+    def __init__(
+        self,
+        config: Optional[SdCardDeviceConfiguration],
+        integer_units: Optional[str],
+        warning: str = "",
+    ) -> None:
         self._config = config
         self._integer_units = integer_units
+        self._warning = warning or _INTEGER_UNITS_WARNING
         self._warned = False
 
     def read(
@@ -2612,7 +2618,7 @@ class _FirmwareValueReader:
             return [v / 1000.0 for v in raw], "millivolts"
         if self._integer_units is None and not self._warned:
             self._warned = True
-            warnings.warn(_INTEGER_UNITS_WARNING, UserWarning, stacklevel=4)
+            warnings.warn(self._warning, UserWarning, stacklevel=4)
         units = "raw" if self._integer_units == "raw" else "raw-assumed"
         return _scale_raw_analog_values([int(v) for v in raw], self._config, channels), units
 

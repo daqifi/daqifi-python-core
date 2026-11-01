@@ -958,7 +958,8 @@ class NyquistDevice:
         channels: List[int],
         sample_rate: int = 1000,
         format: int = 1,
-        async_mode: bool = False
+        async_mode: bool = False,
+        integer_units: Optional[str] = None,
     ) -> Union[StreamManager, AsyncStreamManager]:
         """
         Create a stream manager for data acquisition.
@@ -968,6 +969,9 @@ class NyquistDevice:
             sample_rate: Sample rate in Hz (default 1000)
             format: Streaming format - 0=ProtoBuf, 1=JSON (default), 2=CSV
             async_mode: If True, return AsyncStreamManager for async/await
+            integer_units: What integer JSON/CSV values mean ("millivolts"
+                at voltage precision 0, "raw" in raw mode); see
+                :class:`StreamManager`. Decimal values are volts either way.
 
         Returns:
             StreamManager or AsyncStreamManager
@@ -1022,11 +1026,13 @@ class NyquistDevice:
             return AsyncStreamManager(
                 self._comm, channels, sample_rate, format,
                 per_channel_dispatch=dispatch,
+                integer_units=integer_units,
             )
         else:
             return StreamManager(
                 self._comm, channels, sample_rate, format,
                 per_channel_dispatch=dispatch,
+                integer_units=integer_units,
             )
 
     def _build_per_channel_dispatch(self):
