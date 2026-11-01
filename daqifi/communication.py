@@ -71,13 +71,24 @@ class LineBasedMessageParser:
     SCPI / DAQiFi text-protocol responses.
     """
 
-    def __init__(self, line_ending: str = "\r\n", encoding: str = "utf-8") -> None:
+    def __init__(
+        self,
+        line_ending: str = "\r\n",
+        encoding: str = "utf-8",
+        emit_empty_lines: bool = False,
+    ) -> None:
+        """``line_ending="\n"`` reads LF- and CRLF-terminated lines alike
+        (the CR is stripped with the line). ``emit_empty_lines`` emits a
+        complete line with no content as an empty message instead of
+        dropping it: the text exchange counts a lone CRLF as an answer
+        (upstream a57a86a)."""
         if not line_ending:
             # An empty line-ending would make `bytes.find` return 0 on every
             # iteration, putting `parse_messages` into an infinite loop.
             raise ValueError("line_ending must not be empty")
         self._encoding = encoding
         self._line_ending = line_ending.encode(encoding)
+        self._emit_empty_lines = emit_empty_lines
 
     def parse_messages(self, data: bytes) -> Tuple[List[InboundMessage[str]], int]:
         """Parse `data` into a list of text messages plus consumed-byte count.
@@ -102,6 +113,7 @@ class LineBasedMessageParser:
                 break
 
             line_length = line_end_index - search_start
+            cleaned = ""
             if line_length > 0:
                 line_data = data[search_start:line_end_index]
                 # Use errors="replace" so a malformed byte sequence in the
@@ -112,8 +124,8 @@ class LineBasedMessageParser:
                 # whitespace inside a SCPI response (e.g. \"  X1234\")
                 # isn't silently mangled (Qodo PR 17 pass 46 #1).
                 cleaned = message_text.rstrip("\r\n")
-                if cleaned:
-                    messages.append(InboundMessage(data=cleaned))
+            if cleaned or self._emit_empty_lines:
+                messages.append(InboundMessage(data=cleaned))
 
             search_start = line_end_index + line_ending_len
             consumed_bytes = search_start
@@ -612,7 +624,14 @@ class StreamMessageConsumer(Generic[T]):
         buffer_size: int = DEFAULT_BUFFER_SIZE,
         is_wifi_device: bool = False,
         health_sink: Optional[Any] = None,
+        read_available: bool = False,
     ) -> None:
+        """``read_available``: read only what the stream reports waiting
+        (``in_waiting``), or one byte when nothing is, instead of
+        ``buffer_size`` bytes. A serial port's ``read(n)`` returns early only
+        once ``n`` bytes arrive, so a short reply otherwise lands only after
+        the port's whole read timeout. For the text exchange; a stream
+        without ``in_waiting`` is read as before."""
         if stream is None:  # type: ignore[unreachable]
             raise TypeError("stream must not be None.")
         if message_parser is None:  # type: ignore[unreachable]
@@ -622,6 +641,7 @@ class StreamMessageConsumer(Generic[T]):
         self._stream = stream
         self._parser = message_parser
         self._buffer_size = buffer_size
+        self._read_available = read_available
         # Optional transport told how each read went (report_io_fault /
         # report_io_success), so it can notice a device that went away
         # (#191). A timeout is neither.
@@ -780,6 +800,18 @@ class StreamMessageConsumer(Generic[T]):
 
     # ---- internals ---------------------------------------------------------
 
+    def _read_size(self) -> int:
+        if not self._read_available:
+            return self._buffer_size
+        try:
+            waiting = self._stream.in_waiting
+        except AttributeError:
+            return self._buffer_size
+        except Exception:
+            # Let the read itself report a broken stream.
+            return 1
+        return max(1, min(int(waiting or 0), self._buffer_size))
+
     def _process_messages(self) -> None:
         # `socket.timeout` is the canonical "no data within window"
         # signal when the underlying transport is a TCP socket with a
@@ -795,7 +827,7 @@ class StreamMessageConsumer(Generic[T]):
                 bytes_read = b""
                 _read_start = time.monotonic()
                 try:
-                    bytes_read = self._stream.read(self._buffer_size)
+                    bytes_read = self._stream.read(self._read_size())
                     # Some stream-like objects return None on timeout (pyserial
                     # with non-blocking reads); coerce to empty bytes.
                     if bytes_read is None:

@@ -46,7 +46,10 @@ from .communication import (
     StreamMessageConsumer,
 )
 from .enums import SdCardLogFormat, WifiMode, WifiSecurityType
-from .exceptions import DeviceUnresponsiveError
+from .exceptions import (
+    DeviceNotConnectedError,
+    DeviceUnresponsiveError,
+)
 from .network import NetworkConfiguration
 from .protocol import ProtobufProtocolHandler
 from .firmware.version import FirmwareVersion
@@ -782,11 +785,30 @@ class DaqifiDevice:
         :class:`NotImplementedError` to match upstream behaviour.
         """
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
         if isinstance(message, ScpiMessage):
             data = message.get_bytes()
-            stream = self._transport.stream if self._transport is not None else None
+            # Read once, under the lock connect() bumps the generation
+            # with: disconnect() on another thread closes the stream under
+            # no lock this path takes (upstream baabf0c), and the
+            # generation tells this connection from a newer one on the
+            # same transport object. connect() bumps it before installing
+            # the new stream, so the pair read here is consistent.
+            with self._state_lock:
+                generation = self._connect_generation
+                transport = self._transport
+                try:
+                    stream = transport.stream if transport is not None else None
+                except Exception:
+                    # A closed transport's getter raises.
+                    stream = None
             if stream is None:
+                if self._shutting_down_since(transport, generation, None):
+                    raise DeviceNotConnectedError(
+                        "The message could not be sent: a disconnect completed "
+                        "while it was in flight.",
+                        is_shutting_down=True,
+                    )
                 raise NotImplementedError(
                     "Sending without a transport-backed stream is not supported."
                 )
@@ -824,15 +846,65 @@ class DaqifiDevice:
                     stream.flush()
                 except AttributeError:
                     pass
-            except Exception:
-                self._set_status(ConnectionStatus.Lost)
-                self._set_state(DeviceState.Error)
+            except Exception as exc:
+                # Decided and applied under the lock connect() bumps the
+                # generation with, so no disconnect/reconnect can land
+                # between the check and the Lost transition.
+                with self._state_lock:
+                    stale = self._shutting_down_since(transport, generation, stream)
+                    evt = None
+                    if not stale:
+                        evt = self._change_status(ConnectionStatus.Lost)
+                        self._state = DeviceState.Error
+                if stale:
+                    # A disconnect on another thread closed the stream under
+                    # this write, or a reconnect has replaced it since: an
+                    # expected race, not a loss of the current link. The
+                    # current status stands (upstream baabf0c).
+                    raise DeviceNotConnectedError(
+                        "The message could not be sent: a disconnect was in "
+                        "progress and closed the connection.",
+                        is_shutting_down=True,
+                    ) from exc
+                if evt is not None:
+                    self._deliver_status_event(evt)
                 raise
         else:
             raise NotImplementedError(
                 "Direct message sending without a string-typed ScpiMessage is "
                 "not yet implemented."
             )
+
+    def _shutting_down_since(
+        self, transport: Any, generation: int, stream: Any
+    ) -> bool:
+        """Whether a disconnect, or a new connection (even on the same
+        transport object), has replaced the connection a send started on.
+        A link that dropped by itself (status Lost) isn't one: that send
+        failure is the loss.
+
+        Called under ``_state_lock``. The generation alone isn't enough:
+        connect() bumps it before ``transport.connect()`` installs the new
+        stream, so a send can capture the new generation with the old
+        stream. The stream's identity settles it: the transport's current
+        stream no longer being the captured one means it was replaced. The
+        device fields come first, and a getter that raises (a closed
+        transport) counts as replaced."""
+        if (
+            self._disposed
+            or self._is_disconnecting
+            or self._status in (ConnectionStatus.Disconnected, ConnectionStatus.Connecting)
+            or self._transport is not transport
+            or self._connect_generation != generation
+        ):
+            return True
+        if stream is None:
+            return False
+        try:
+            current = transport.stream
+        except Exception:
+            return True
+        return current is not stream
 
     def _acquire_text_exchange_lock(self, operation: str) -> None:
         """Take the text-exchange lock; from the consumer thread, only if free.
@@ -893,15 +965,19 @@ class DaqifiDevice:
             response_timeout_ms: phase-1 budget for the first byte.
             completion_timeout_ms: phase-2 inactivity budget after the
                 first line.
-            max_total_ms: optional cap on the whole capture, measured from
-                ``setup_action()``. Without it a device that keeps sending
-                lines keeps phase 2 going; ``None`` (the default) keeps
-                that behaviour.
+            max_total_ms: cap on the whole capture, measured from
+                ``setup_action()``, so a device that keeps sending lines
+                can't keep phase 2 going. ``None`` (the default) is five
+                times ``response_timeout_ms``, upstream's ceiling.
+
+        Lines may end in CRLF or a bare LF. A blank line is an answer (it
+        ends phase 1: the firmware ends an empty ``SYSTem:LOG?`` with one)
+        but isn't returned.
 
         Returns:
-            List of text lines captured between ``setup_action()`` and the
-            inactivity timeout. Empty list when the device returned
-            nothing within ``response_timeout_ms``.
+            List of non-blank text lines captured between ``setup_action()``
+            and the inactivity timeout. Empty list when the device returned
+            nothing (or only blank lines) within ``response_timeout_ms``.
         """
         tid = threading.get_ident()
         if (
@@ -969,7 +1045,7 @@ class DaqifiDevice:
                 "disconnecting or disposed."
             )
         if self._consumer is None:
-            raise RuntimeError(
+            raise DeviceNotConnectedError(
                 "execute_text_command requires an active consumer; "
                 "call connect() first."
             )
@@ -997,6 +1073,18 @@ class DaqifiDevice:
                 "disconnecting."
             )
 
+        # A stream the text reader can't poll (no in_waiting) is read in
+        # blocking chunks that return only at its read timeout: no wait
+        # below may be shorter than that, or a reply on its way is cut off.
+        if not hasattr(stream, "in_waiting"):
+            read_timeout = getattr(stream, "timeout", None)
+            if isinstance(read_timeout, (int, float)) and read_timeout > 0:
+                floor_ms = int(read_timeout * 1000) + 250
+                response_timeout_ms = max(response_timeout_ms, floor_ms)
+                completion_timeout_ms = max(completion_timeout_ms, floor_ms)
+                # An explicit max_total_ms is the caller's hard window and
+                # is kept exactly: nothing back within it is the answer.
+
         was_running = self._consumer.is_running
         if was_running:
             try:
@@ -1013,11 +1101,16 @@ class DaqifiDevice:
         line_queue: "queue.Queue[str]" = queue.Queue()
 
         try:
-            text_parser = LineBasedMessageParser(line_ending="\r\n")
+            # LF-terminated replies too; blank lines count as an answer
+            # (upstream a57a86a / 5a9f917) and are dropped on return.
+            text_parser = LineBasedMessageParser(line_ending="\n", emit_empty_lines=True)
+            # Read what's waiting: a short reply then arrives at once, not
+            # after the serial port's whole read timeout.
             text_consumer = StreamMessageConsumer[str](
                 stream,
                 text_parser,
                 health_sink=self._transport_health_sink(stream_session),
+                read_available=True,
             )
 
             def _on_text_line(args: MessageReceivedEventArgs[str]) -> None:
@@ -1031,14 +1124,13 @@ class DaqifiDevice:
             text_consumer.start()
 
             try:
-                # Optional absolute cap, measured from setup_action: a
-                # device that keeps sending lines (a stream left running)
-                # would otherwise keep phase 2 going. Without one, the waits
-                # below are exactly as they always were.
-                total_deadline = (
-                    None if max_total_ms is None
-                    else time.monotonic() + max_total_ms / 1000.0
-                )
+                # Absolute cap, measured from setup_action: a device that
+                # keeps sending lines (a stream left running) would otherwise
+                # keep phase 2 going. Upstream caps every exchange at five
+                # times the first-response timeout.
+                if max_total_ms is None:
+                    max_total_ms = response_timeout_ms * 5
+                total_deadline = time.monotonic() + max_total_ms / 1000.0
 
                 def _drain_queued() -> None:
                     while True:
@@ -1052,11 +1144,10 @@ class DaqifiDevice:
                 # Phase 1: block up to response_timeout_ms for the first
                 # line. Returns immediately as soon as a line arrives,
                 # so we don't waste cycles polling.
-                first_wait = response_timeout_ms / 1000.0
-                if total_deadline is not None:
-                    first_wait = max(
-                        0.0, min(first_wait, total_deadline - time.monotonic())
-                    )
+                first_wait = max(
+                    0.0,
+                    min(response_timeout_ms / 1000.0, total_deadline - time.monotonic()),
+                )
                 try:
                     captured.append(line_queue.get(timeout=first_wait))
                 except queue.Empty:
@@ -1070,14 +1161,12 @@ class DaqifiDevice:
                 # queue.Empty, we've hit the inactivity gap.
                 inactivity_threshold = completion_timeout_ms / 1000.0
                 while True:
-                    wait = inactivity_threshold
-                    if total_deadline is not None:
-                        remaining = total_deadline - time.monotonic()
-                        if remaining <= 0:
-                            # Cap reached: keep what has already arrived.
-                            _drain_queued()
-                            break
-                        wait = min(wait, remaining)
+                    remaining = total_deadline - time.monotonic()
+                    if remaining <= 0:
+                        # Cap reached: keep what has already arrived.
+                        _drain_queued()
+                        break
+                    wait = min(inactivity_threshold, remaining)
                     try:
                         captured.append(line_queue.get(timeout=wait))
                     except queue.Empty:
@@ -1109,7 +1198,8 @@ class DaqifiDevice:
                 except Exception:
                     pass
 
-        return captured
+        # Blank lines were answers, not content.
+        return [line for line in captured if line.strip()]
 
     def drain_errors(
         self,
@@ -1183,7 +1273,7 @@ class DaqifiDevice:
         # Match the precondition the docstring promises and the
         # convention used by send() / other DaqifiDevice methods.
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
 
         from ._internal import scpi as _scpi
         from ._internal import scpi_commands as _scpi_commands
@@ -1250,9 +1340,11 @@ class DaqifiDevice:
         """Run the standard SCPI init sequence.
 
         Ports the upstream ``InitializeAsync`` (sync here per project
-        convention). Wires the protocol handler before sending the
-        text-mode setup commands, then queries device info -- the
-        protobuf consumer's status callback updates :attr:`metadata`.
+        convention). Wires the protocol handler, then sends the text-mode
+        setup commands, then queries device info -- the protobuf consumer's
+        status callback updates :attr:`metadata`. Neither whether the device
+        accepted the setup commands nor, on serial, whether it reported its
+        channels is checked: see #241.
 
         :param response_timeout_s: max time to wait for the protobuf
             ``SYSInfoPB?`` reply after sending ``get_device_info()``.
@@ -1265,8 +1357,12 @@ class DaqifiDevice:
             currently completes silently for backwards compatibility
             with fakes that never deliver a status frame.
         """
+        if response_timeout_s is not None and not response_timeout_s > 0:
+            raise ValueError(
+                f"response_timeout_s must be positive (got {response_timeout_s!r})."
+            )
         if not self.is_connected:
-            raise RuntimeError(
+            raise DeviceNotConnectedError(
                 "Device must be connected before initialization."
             )
         if self._is_initialized:
@@ -1982,7 +2078,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         busy (#187).
         """
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
         if not self.is_usb_connection:
             raise RuntimeError(
                 "SD card operations require a USB/serial connection. "
@@ -2044,7 +2140,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
           stream is mixed in with the binary samples.
         """
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
         return self._is_logging_to_sd
 
     def delete_sd_file(self, file_name: str) -> None:
@@ -2067,7 +2163,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         share the SPI bus on Nyquist hardware.
         """
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
         if not self.is_usb_connection:
             raise RuntimeError(
                 "SD card logging requires a USB/serial connection. "
@@ -2135,7 +2231,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
     def stop_sd_card_logging(self) -> None:
         """Stop the active SD-card logging session and restore LAN."""
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
 
         # Defensive: always send stop streaming even if state is stale.
         self.send(scpi_commands.stop_streaming())
@@ -2169,7 +2265,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         side.
         """
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
         # SD ops disable LAN to grab the shared SPI bus — refusing on
         # non-USB transports keeps the call from severing the caller's
         # control connection mid-operation.
@@ -2234,7 +2330,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         (LAN must be off before SD takes the SPI bus).
         """
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
         if not self.is_usb_connection:
             raise RuntimeError(
                 "SD card operations require a USB/serial connection. "
@@ -2265,7 +2361,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
     def get_sd_card_files(self) -> Sequence[SdCardFileInfo]:
         """Fetch + return the SD-card file listing (and refresh the cache)."""
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
         if not self.is_usb_connection:
             raise RuntimeError(
                 "SD card operations require a USB/serial connection. "
@@ -2345,7 +2441,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         (daqifi-nyquist-firmware#1180).
         """
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
         if not self.is_usb_connection:
             raise RuntimeError(
                 "SD card file download is only supported over USB "
@@ -2964,7 +3060,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         if configuration is None:
             raise TypeError("configuration must not be None.")
         if not self.is_connected:
-            raise RuntimeError("Device is not connected.")
+            raise DeviceNotConnectedError()
         if not configuration.ssid:
             raise ValueError("WiFi SSID must be a non-empty string.")
         if (
