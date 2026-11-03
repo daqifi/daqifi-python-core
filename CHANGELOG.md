@@ -84,6 +84,17 @@ aims to follow [Semantic Versioning](https://semver.org/).
   timeout under 1 ms (#201).
 
 ### Fixed
+- A WiFi module update canceled while the flash tool was running no longer
+  reports `FAILED` when the flash had already succeeded. The tool's success
+  line is the authority on whether the module was programmed; what follows it
+  leaves the USB-transparent bridge and restores the LAN configuration, so
+  honouring a cancel there both misreported a completed update and left the
+  device bridged with its LAN down. A cancel observed after that line is logged
+  and the update completes; a cancel before it still recovers and reports
+  `FAILED` (#190).
+- A canceled firmware update chains `FirmwareUpdateCancelledError` as the
+  `FirmwareUpdateException`'s `__cause__`. Telling "the user canceled" apart
+  from "the update failed" previously meant naming a private sentinel (#190).
 - An SD download the device ended with `__TRANSFER_ERROR__` (a card read
   error part-way through the file) waited out its whole timeout (30 s, or
   30 min for `SdCardFileReceiver`) and could leave the marker in the file.
