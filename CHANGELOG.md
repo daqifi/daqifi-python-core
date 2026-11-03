@@ -7,6 +7,15 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `DaqifiDevice.run_exclusive(fn)` runs `fn()` as one exchange, so a
+  sequence of commands cannot be interleaved with another thread's `send()`
+  or text exchange — including a configure-then-query sequence or an SD
+  listing, since holding the exchange lock is the whole permission to nest
+  an exchange. Re-entrant for a thread already inside an exchange on that
+  device; refused on the message-received callback thread, and inside a
+  text capture (from a `setup_action`), which is the nesting that would
+  pause an already-paused consumer or move the SPI bus under a live
+  reader (#225).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).
@@ -50,6 +59,21 @@ aims to follow [Semantic Versioning](https://semver.org/).
   `start_sd_card_logging` returns the log file name (#200).
 
 ### Changed
+- `send()` is serialized against text exchanges: while another thread runs
+  one (`execute_text_command`, `drain_errors`, an SD listing or download) a
+  `send()` waits, so its command lands after that exchange instead of in the
+  middle of it, where the exchange could read its reply as its own. The
+  thread that owns the exchange is exempt (its `setup_action` is what
+  sends), and so is the message-received callback thread, whose `send()`
+  must not wait on a lock whose holder may be waiting for that thread.
+  A `send()` that waited now re-checks the connection after acquiring, so
+  it no longer puts its command on a link the exchange ahead of it lost
+  (which left the device `Lost` and `Streaming` at once) (#225).
+- A status event is never delivered while the exchange lock is held: a
+  subscriber can hand recovery to another thread and wait for it, and that
+  thread's `send()` or exchange needs the lock the subscriber's own caller
+  cannot release until the subscriber returns. Events raised under the lock
+  are queued and delivered by whichever frame releases it (#225).
 - The hardware-free test run (`pytest tests --ignore=tests/integration/hardware`)
   no longer probes serial ports: the device smoke test moved under
   `tests/integration/hardware`, and a layout test keeps any test that needs a
@@ -84,6 +108,23 @@ aims to follow [Semantic Versioning](https://semver.org/).
   timeout under 1 ms (#201).
 
 ### Fixed
+- A text exchange started from a message-received callback is refused
+  outright instead of killing the protobuf consumer. It ran on the
+  consumer's own thread, so pausing the consumer stopped the thread it ran
+  on, the restart raised and was swallowed, and the call returned a
+  plausible result while nothing read the stream again — a later
+  `start_streaming()` then reported streaming with no reader. The guard
+  refused only when another exchange held the lock, so a callback that
+  found it free — the common case — went through. `drain_errors`,
+  `get_sd_card_files`, `request_sd_card_file_list`, `delete_sd_card_file`
+  and `format_sd_card` now raise a `RuntimeError` naming the thread, and
+  the consumer keeps reading (#238).
+- An SD operation or text exchange started from a download's progress
+  callback read the download's own remaining bytes and its end-of-file
+  marker off the stream: the nested call reported success with the outer
+  file's data while the download itself timed out short. A capture —
+  whether it reads text or raw bytes — now marks itself for its whole
+  duration, so a second one underneath it is refused (#225).
 - An SD download the device ended with `__TRANSFER_ERROR__` (a card read
   error part-way through the file) waited out its whole timeout (30 s, or
   30 min for `SdCardFileReceiver`) and could leave the marker in the file.

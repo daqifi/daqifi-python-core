@@ -13,6 +13,7 @@ thread that delivers parsed protobuf messages via callback.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import os
@@ -23,7 +24,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from itertools import takewhile
-from typing import IO, Any, Callable, List, Optional, Sequence, Tuple
+from typing import IO, Any, Callable, Iterator, List, Optional, Sequence, Tuple
 
 _log = logging.getLogger(__name__)
 
@@ -325,32 +326,23 @@ def _exclusive_sd_operation(method):
     restore, as upstream does since daqifi-core #406/#417, makes each SD
     operation one exchange. execute_text_command calls inside it run under
     the lock already held.
+
+    This is :meth:`DaqifiDevice.run_exclusive` plus one refusal: an SD
+    operation started from inside a text CAPTURE (from a ``setup_action``)
+    would switch the SPI bus out from under the reader currently on the
+    stream. Note what the condition is NOT: merely holding the exchange
+    lock is fine, and is how ``run_exclusive`` groups an SD listing with
+    other commands.
     """
 
     @functools.wraps(method)
     def wrapper(self: "DaqifiDevice", *args: Any, **kwargs: Any) -> Any:
-        tid = threading.get_ident()
-        if self._text_exchange_lock_owner == tid:
-            raise RuntimeError(
-                f"{method.__name__} cannot run inside another exchange on the "
-                "same device (for example from a setup_action callback)."
-            )
-        self._acquire_text_exchange_lock(method.__name__)
-        try:
-            self._text_exchange_lock_owner = tid
-            self._sd_operation_owner = tid
-            try:
-                if self._disposed or self._is_disconnecting:
-                    raise RuntimeError(
-                        f"{method.__name__} cannot run while the device is "
-                        "disconnecting or disposed."
-                    )
-                return method(self, *args, **kwargs)
-            finally:
-                self._sd_operation_owner = None
-                self._text_exchange_lock_owner = None
-        finally:
-            self._text_exchange_lock.release()
+        # The capture refusal lives in _run_exclusive's entry, which every
+        # path reaches, rather than being repeated here: a copy beside the
+        # call is what let the ownership fast path through.
+        return self._run_exclusive(
+            lambda: method(self, *args, **kwargs), method.__name__
+        )
 
     return wrapper
 
@@ -429,8 +421,20 @@ class DaqifiDevice:
         self._text_exchange_lock_owner: Optional[int] = None
         # Thread running an _exclusive_sd_operation (it holds the lock), and
         # whether one of its text exchanges is in progress.
-        self._sd_operation_owner: Optional[int] = None
-        self._sd_text_exchange_active = False
+        # The thread currently inside a CAPTURE, if any -- text or raw.
+        # ⛔ PER THREAD, not a device-wide flag: _exclusive_sd_operation
+        # reads this BEFORE taking the lock, so a plain flag made one
+        # thread's capture refuse every other thread's SD operation, and
+        # shadowed the consumer-thread refusal that should fire there.
+        # ⛔ ONE marker for BOTH capture kinds, set only by _capture():
+        # when only the text path set it, a raw SD download looked like no
+        # capture at all and its own progress callback could start a
+        # listing or a second download, which then read the outer
+        # download's remaining bytes and its EOF marker off the stream.
+        self._capture_owner: Optional[int] = None
+        # Status events raised while the exchange lock was held, delivered
+        # by whoever releases it (see _deliver_status_event).
+        self._pending_status_events: List[DeviceStatusEventArgs] = []
 
         if transport is not None:
             transport.add_status_changed(self._on_transport_status_changed)
@@ -786,9 +790,74 @@ class DaqifiDevice:
         string-typed messages are dispatched today (the rest require a
         message-producer abstraction not yet ported); other types raise
         :class:`NotImplementedError` to match upstream behaviour.
+
+        Serialized against text exchanges (#225): while another thread runs
+        one -- :meth:`execute_text_command`, :meth:`drain_errors`, an SD
+        listing or download -- this waits, so the command lands after that
+        exchange rather than in the middle of it, where the exchange would
+        read this command's reply as its own or the device would act on it
+        between the steps of a multi-command sequence.
+
+        Two callers never wait. The thread that owns the exchange: its
+        ``setup_action`` is what sends, so waiting would deadlock it. And
+        the message-received (protobuf consumer) thread: a send from a
+        callback -- ``stop_streaming()`` from one, say -- must not wait on a
+        lock whose holder may be waiting for that same thread to stop the
+        consumer. A bare send neither pauses nor replaces the consumer, so
+        unlike a text exchange it is safe to run there unserialized.
         """
         if not self.is_connected:
             raise DeviceNotConnectedError()
+        tid = threading.get_ident()
+        if self._text_exchange_lock_owner == tid or self._on_consumer_thread():
+            self._send_unserialized(message)
+            return
+        self._text_exchange_lock.acquire()
+        # _text_exchange_lock_owner means exactly "this thread holds the
+        # exchange lock", and two rules read it: who may nest an exchange,
+        # and who must defer status events instead of delivering them (see
+        # _deliver_status_event). A send holds the lock, so it must be
+        # recorded here or a failing send would deliver Lost under the lock
+        # again -- which is the deadlock, by a different route.
+        self._text_exchange_lock_owner = tid
+        try:
+            # Re-check AFTER acquiring, not only before. Waiting here can
+            # take as long as the exchange ahead of us, and that exchange
+            # may be what loses the connection: a send that validated only
+            # on the way in then put its command on a link already marked
+            # Lost, leaving the device Lost and Streaming at once.
+            #
+            # ⚠ NOT `not self.is_connected`. That also catches Connecting,
+            # and a send that captured the old stream while a reconnect is
+            # installing the new one is DESIGNED to go ahead and fail
+            # harmlessly: _shutting_down_since then spares the reconnect
+            # rather than marking it Lost (test_device_lifecycle's
+            # ..._spares_the_reconnect pins that, and a blunt is_connected
+            # re-check broke it). What must stop a queued send is a link
+            # that is gone with nothing newer coming.
+            if (
+                self._disposed
+                or self._is_disconnecting
+                or self._status in (ConnectionStatus.Lost,
+                                    ConnectionStatus.Disconnected)
+            ):
+                raise DeviceNotConnectedError(
+                    "The message could not be sent: the connection was lost "
+                    "while it waited for another exchange to finish.",
+                    is_shutting_down=bool(
+                        self._disposed or self._is_disconnecting
+                    ),
+                )
+            self._send_unserialized(message)
+        finally:
+            self._text_exchange_lock_owner = None
+            self._text_exchange_lock.release()
+            # Outside the lock, always: a queued status event runs user
+            # callbacks. See _flush_pending_status_events.
+            self._flush_pending_status_events()
+
+    def _send_unserialized(self, message: Any) -> None:
+        """:meth:`send`'s body, with the exchange lock already settled."""
         if isinstance(message, ScpiMessage):
             data = message.get_bytes()
             # Read once, under the lock connect() bumps the generation
@@ -909,25 +978,147 @@ class DaqifiDevice:
             return True
         return current is not stream
 
-    def _acquire_text_exchange_lock(self, operation: str) -> None:
-        """Take the text-exchange lock; from the consumer thread, only if free.
-
-        From a message-received callback the lock's holder may be waiting
-        for this very thread to stop the consumer: waiting here would stall
-        both, the stop would time out and the consumer would be left dead.
-        """
+    def _on_consumer_thread(self) -> bool:
+        """Whether the calling thread is the protobuf consumer's own thread,
+        i.e. whether we are inside a message-received callback."""
         consumer = self._consumer
-        if consumer is not None and (
-            threading.current_thread() is getattr(consumer, "_thread", None)
-        ):
-            if not self._text_exchange_lock.acquire(blocking=False):
-                raise RuntimeError(
-                    f"{operation} cannot run from a message-received callback "
-                    "while another exchange is in progress on the same "
-                    "device; call it from another thread."
-                )
-        else:
-            self._text_exchange_lock.acquire()
+        if consumer is None:
+            return False
+        return threading.current_thread() is getattr(consumer, "_thread", None)
+
+    def _acquire_text_exchange_lock(self, operation: str) -> None:
+        """Take the text-exchange lock, refusing outright on the consumer
+        thread.
+
+        A text exchange pauses the protobuf consumer, swaps a text reader
+        onto the same stream, and restarts the consumer afterwards. Run from
+        a message-received callback, it is the consumer's own thread doing
+        that to itself: the stop cannot join, the restart raises inside the
+        callback and is swallowed, and the call returns normally while the
+        consumer thread has exited -- a later ``start_streaming()`` then
+        reports streaming with nothing reading (#238).
+
+        That is true whether or not the lock is contended, so the refusal
+        must not be conditional on acquiring it. It used to be: this
+        refused only when the lock was already held, which let through the
+        common case of a quiet callback finding it free -- the broken case,
+        not a safe one. Serializing against an exchange on another thread
+        was never what made it unsafe.
+        """
+        if self._on_consumer_thread():
+            raise RuntimeError(
+                f"{operation} cannot run on the protobuf consumer thread, "
+                "that is, from a message-received callback: a text exchange "
+                "pauses and restarts that very thread. Call it from another "
+                "thread."
+            )
+        self._text_exchange_lock.acquire()
+
+    def run_exclusive(self, fn: Callable[[], Any]) -> Any:
+        """Run ``fn()`` as a single exchange, returning its result.
+
+        No other thread's :meth:`send` or text exchange can interleave with
+        it, so several commands run as one unit -- a configure-then-query
+        sequence that a command in the middle would corrupt (#225). ``fn``
+        takes no arguments; use a closure or :func:`functools.partial`.
+
+        Re-entrant for the thread already inside an exchange on this
+        device: there, it simply runs ``fn`` under the lock that thread
+        already holds.
+
+        Raises:
+            RuntimeError: when called on the message-received (protobuf
+                consumer) thread, or while the device is disconnecting or
+                disposed.
+        """
+        return self._run_exclusive(fn, "run_exclusive")
+
+    def _run_exclusive(self, fn: Callable[[], Any], operation: str) -> Any:
+        """Shared body of :meth:`run_exclusive` and
+        :func:`_exclusive_sd_operation`.
+
+        **Holding the exchange lock is the single permission to nest an
+        exchange.** There is no separate SD-only permission: that was what
+        made ``run_exclusive`` refuse the text queries it exists to group,
+        since a grouped sequence is normally configure-then-query and only
+        an SD operation was allowed the query. What forbids the nesting
+        that is genuinely broken is ``_capture_owner`` -- a capture
+        in progress on this thread -- not who owns the lock.
+
+        ⛔ THE CAPTURE CHECK IS AT THE ENTRY, BEFORE EITHER PATH RUNS
+        ``fn``. It used to sit only in :func:`_exclusive_sd_operation`,
+        which the ownership fast path below does not pass through, so
+        ``run_exclusive`` from inside a ``setup_action`` RAN the grouped
+        sequence: its first command reached the device and only a later
+        capture inside the group raised. A refusal that arrives after the
+        device has changed state is not a refusal -- so it has to precede
+        the first write, which means it belongs here, where the operation
+        is entered, and nowhere else.
+        """
+        tid = threading.get_ident()
+        if self._capture_owner == tid:
+            raise RuntimeError(
+                f"{operation} cannot run inside another exchange on the "
+                "same device (for example from a setup_action callback)."
+            )
+        if self._text_exchange_lock_owner == tid:
+            # Already ours: run under the lock we hold. Whoever took it
+            # flushes the status-event queue on the way out.
+            self._refuse_if_unusable(operation)
+            return fn()
+        with self._exchange_lock(operation):
+            self._refuse_if_unusable(operation)
+            return fn()
+
+    def _refuse_if_unusable(self, operation: str) -> None:
+        if self._disposed or self._is_disconnecting:
+            raise RuntimeError(
+                f"{operation} cannot run while the device is "
+                "disconnecting or disposed."
+            )
+
+    @contextlib.contextmanager
+    def _capture(self, refusal: str) -> Iterator[None]:
+        """Mark a capture in progress on this thread for the body's duration.
+
+        A capture pauses the protobuf consumer and reads the stream
+        directly, so a second one started underneath it -- from a
+        ``setup_action`` or a download's progress callback -- reads the
+        first one's bytes. **Every capture path goes through here**, text
+        and raw alike, which is the point: when the marker was set by the
+        text path only, the raw download path silently had no guard, and
+        the nested operation stole the outer file's data and EOF marker
+        while reporting success. A new capture path cannot set it wrongly
+        because it has nowhere else to set it.
+        """
+        tid = threading.get_ident()
+        if self._capture_owner == tid:
+            raise RuntimeError(refusal)
+        previous = self._capture_owner
+        self._capture_owner = tid
+        try:
+            yield
+        finally:
+            self._capture_owner = previous
+
+    @contextlib.contextmanager
+    def _exchange_lock(self, operation: str) -> Iterator[None]:
+        """Hold the text-exchange lock for the body, then flush any status
+        event the body produced.
+
+        The one place the lock is taken and released for an exchange, so
+        the flush cannot be forgotten by a new caller: a status event runs
+        user callbacks and must never be delivered while the lock is held
+        (see :meth:`_deliver_status_event`).
+        """
+        self._acquire_text_exchange_lock(operation)
+        self._text_exchange_lock_owner = threading.get_ident()
+        try:
+            yield
+        finally:
+            self._text_exchange_lock_owner = None
+            self._text_exchange_lock.release()
+            self._flush_pending_status_events()
 
     def execute_text_command(
         self,
@@ -983,49 +1174,57 @@ class DaqifiDevice:
             nothing (or only blank lines) within ``response_timeout_ms``.
         """
         tid = threading.get_ident()
-        if (
-            self._sd_operation_owner == tid
-            and self._text_exchange_lock_owner == tid
-            and not self._sd_text_exchange_active
-        ):
-            # Inside an SD operation, which already holds the lock.
-            self._sd_text_exchange_active = True
-            try:
-                return self._execute_text_command_locked(
-                    setup_action, response_timeout_ms, completion_timeout_ms,
-                    max_total_ms,
-                )
-            finally:
-                self._sd_text_exchange_active = False
         if self._text_exchange_lock_owner == tid:
-            # Re-entrant call from inside a setup_action callback.
-            # Surfacing as RuntimeError instead of letting Lock.acquire
-            # deadlock keeps the caller's process responsive while
-            # still preventing the consumer-swap corruption the lock
-            # exists to guard against.
-            raise RuntimeError(
-                "execute_text_command is not re-entrant on the same device; "
-                "do not call it from inside a setup_action callback."
+            # We hold the lock already -- from run_exclusive or an SD
+            # operation -- so run the capture under it. Holding the lock is
+            # the whole permission; what is refused below is a capture
+            # nested inside a capture, which is the case that corrupts.
+            return self._run_text_capture(
+                setup_action, response_timeout_ms, completion_timeout_ms,
+                max_total_ms,
+            )
+        # All validation happens INSIDE the lock to close the TOCTOU
+        # window: a competing thread can call disconnect() (which clears
+        # self._consumer / self._transport without acquiring this lock)
+        # while we're blocked on the lock. Re-checking after acquisition
+        # guarantees the consumer, transport and stream we operate on are
+        # still live.
+        with self._exchange_lock("execute_text_command"):
+            return self._run_text_capture(
+                setup_action, response_timeout_ms, completion_timeout_ms,
+                max_total_ms,
             )
 
-        self._acquire_text_exchange_lock("execute_text_command")
-        try:
-            # All validation happens INSIDE the lock to close the
-            # TOCTOU window: a competing thread can call disconnect()
-            # (which clears self._consumer / self._transport without
-            # acquiring this lock) while we're blocked on the lock.
-            # Re-checking after acquisition guarantees the consumer,
-            # transport, and stream we operate on are still live.
-            self._text_exchange_lock_owner = tid
-            try:
-                return self._execute_text_command_locked(
-                    setup_action, response_timeout_ms, completion_timeout_ms,
-                    max_total_ms,
-                )
-            finally:
-                self._text_exchange_lock_owner = None
-        finally:
-            self._text_exchange_lock.release()
+    def _run_text_capture(
+        self,
+        setup_action: Callable[[], None],
+        response_timeout_ms: int,
+        completion_timeout_ms: int,
+        max_total_ms: Optional[int],
+    ) -> List[str]:
+        """Run one text capture, refusing a capture nested inside a capture.
+
+        ``_execute_text_command_locked`` pauses the protobuf consumer and
+        swaps a text reader onto the stream. A second capture started from
+        inside the first -- from its own ``setup_action`` -- would pause an
+        already-paused consumer and restore it twice, which is the
+        corruption the refusal exists for. Surfacing it as a RuntimeError
+        rather than letting ``Lock.acquire`` deadlock keeps the caller's
+        process responsive.
+
+        Whether THIS THREAD is inside a capture, not lock ownership, is
+        the discriminator: a thread can hold the lock without being inside
+        a capture (``run_exclusive``, an SD operation), and those nestings
+        are legitimate.
+        """
+        with self._capture(
+            "execute_text_command is not re-entrant on the same device; "
+            "do not call it from inside a setup_action callback."
+        ):
+            return self._execute_text_command_locked(
+                setup_action, response_timeout_ms, completion_timeout_ms,
+                max_total_ms,
+            )
 
     def _execute_text_command_locked(
         self,
@@ -1857,6 +2056,22 @@ class DaqifiDevice:
         return DeviceStatusEventArgs(status=value)
 
     def _deliver_status_event(self, evt: DeviceStatusEventArgs) -> None:
+        # ⛔ NO USER CALLBACK RUNS WHILE THIS THREAD HOLDS THE EXCHANGE
+        # LOCK. A handler can do anything, including hand recovery to
+        # another thread and wait for it; that thread's send() or exchange
+        # needs this lock, which the handler's own caller cannot release
+        # until the handler returns, and both stop. Recording the owner
+        # thread cannot help -- the waiting is done by a DIFFERENT thread,
+        # so no same-thread re-entry rule can see it. The only fix is not
+        # to call out while holding it.
+        #
+        # The test is here rather than at each delivery site so that a new
+        # site cannot miss it: the deferral co-occurs with the delivery.
+        # Whoever releases the lock flushes the queue.
+        if self._text_exchange_lock_owner == threading.get_ident():
+            with self._state_lock:
+                self._pending_status_events.append(evt)
+            return
         # Changes are decided under the lock but delivered outside it, so
         # two threads' events can arrive out of order. One that is no
         # longer true by now (a "Connected" overtaken by "Lost") is
@@ -1870,6 +2085,20 @@ class DaqifiDevice:
                 h(evt)
             except Exception:
                 pass
+
+    def _flush_pending_status_events(self) -> None:
+        """Deliver status events queued while the exchange lock was held.
+
+        Called by whichever frame releases the lock, in its ``finally``, so
+        a failure on the way out still delivers. Never called with the lock
+        held -- that is the whole point.
+        """
+        while True:
+            with self._state_lock:
+                if not self._pending_status_events:
+                    return
+                evt = self._pending_status_events.pop(0)
+            self._deliver_status_event(evt)
 
     def _set_state(self, value: DeviceState) -> None:
         self._state = value
@@ -2805,7 +3034,23 @@ class DaqifiStreamingDevice(DaqifiDevice):
         runs *after* the consumer has paused but *before* ``capture_action``
         receives the raw stream — useful for sending SCPI commands whose
         response should not be eaten by the consumer.
+
+        Marked as a capture for its whole duration, including
+        ``capture_action``, because that is where a download's progress
+        callback runs: an SD operation started there would read this
+        download's remaining bytes and its EOF marker off the same stream.
         """
+        with self._capture(
+            "a raw SD capture cannot run inside another capture on the same "
+            "device (for example from a download's progress callback)."
+        ):
+            return self._execute_raw_capture_marked(capture_action, pre_capture)
+
+    def _execute_raw_capture_marked(
+        self,
+        capture_action: Callable[[Any], Any],
+        pre_capture: Optional[Callable[[], Any]] = None,
+    ) -> Any:
         if self._transport is None:
             raise RuntimeError("Device has no transport configured.")
         raw_stream = self._transport.stream
@@ -2817,15 +3062,21 @@ class DaqifiStreamingDevice(DaqifiDevice):
         if consumer is not None and was_running:
             stopped = consumer.stop_safely()
             if stopped is False:
-                # `stop_safely` returns False when called from inside
-                # the consumer thread itself (it can't `.join()` on
-                # itself). Calling `.stop()` here would also try to
-                # join and deadlock. Refuse instead — raw-capture
-                # SD-card ops can't run from a consumer callback.
+                # `stop_safely` returns False for two different reasons,
+                # and only one of them used to be named here: called from
+                # the consumer thread (it can't `.join()` itself), or the
+                # join timed out with the thread still alive. The first is
+                # now refused once and for all in
+                # `_acquire_text_exchange_lock`, which every path into this
+                # method passes through (`@_exclusive_sd_operation`), so
+                # what reaches here is the second. Refuse it too: capturing
+                # from the raw stream while the consumer thread is still
+                # reading the same stream is the interleaving the lock
+                # exists to prevent.
                 raise RuntimeError(
-                    "Cannot perform raw-capture SD-card operations "
-                    "from inside the protobuf consumer thread or its "
-                    "message-received callbacks."
+                    "Cannot perform raw-capture SD-card operations: the "
+                    "protobuf consumer did not stop within the timeout and "
+                    "is still reading the stream."
                 )
             try:
                 consumer.clear_buffer()
