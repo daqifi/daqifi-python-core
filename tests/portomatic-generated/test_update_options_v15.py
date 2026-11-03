@@ -188,8 +188,8 @@ def test_wifi_flash_tool_file_name_rejects_blank(bad_name):
 def test_wifi_port_override_can_be_set_and_cleared():
     o = FirmwareUpdateServiceOptions()
     assert o.wifi_port_override is None
-    o.wifi_port_override = "COM7"
-    assert o.wifi_port_override == "COM7"
+    o.wifi_port_override = "COM255"
+    assert o.wifi_port_override == "COM255"
     o.wifi_port_override = None
     assert o.wifi_port_override is None
 

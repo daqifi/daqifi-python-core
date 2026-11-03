@@ -1534,7 +1534,7 @@ class DefaultFirmwareUpdateService:
                     f"WiFi flash tool {tool_path!r} is on a network or Linux "
                     "filesystem path, which cmd.exe cannot use as its working "
                     "directory. Put the WiFi firmware bundle on a local Windows "
-                    "drive (under WSL, e.g. under /mnt/c/)."
+                    "drive (under WSL, a path on the mounted Windows drive)."
                 )
             executable_arguments = _cmd_exe_arguments(
                 os.path.basename(tool_path),

@@ -1,7 +1,7 @@
 """B4 — Single-channel ADC streaming hardware tests.
 
 Drives :class:`StreamMessageConsumer` + protobuf parsing against a real
-Nyquist1 on COM7 at multiple sample rates. For each rate, asserts:
+Nyquist1 at multiple sample rates. For each rate, asserts:
 
 * PC parsed-frame count tracks firmware ``TotalSamplesStreamed`` delta
 * ``UsbDroppedBytes == 0``  (PR #19 regression guard for the OS RX
@@ -14,12 +14,19 @@ The long-window 10s @ 1 kHz test is the PR #19 specific regression
 guard — before that PR, the unbounded-buffer parser bug surfaced as
 yield <80% over multi-second windows.
 
-Sample-rate cap: ``scpi_commands.start_streaming`` enforces 1-1000 Hz
-(per PR #17 pass 6 #5 — the typed factory's job is to surface
-out-of-range arguments before they become silent no-streaming on the
-device). 5 kHz / 10 kHz coverage would have to bypass the typed factory
-with raw SCPI; it's deferred to a follow-up slice that owns that
-expansion.
+Sample-rate cap: ``scpi_commands.start_streaming`` accepts 1 Hz up to
+``scpi_commands.STREAMING_MAX_HZ`` and raises ``ValueError`` outside it,
+so an out-of-range argument surfaces at the call rather than as silent
+no-streaming on the device. The rates exercised here are a deliberate
+subset, not the limit of what the factory allows: a rate inside the
+range but beyond what the enabled channels and interface support is
+refused by the device itself with -222.
+
+(This paragraph previously said the factory enforced "1-1000 Hz" and
+concluded that 5 kHz / 10 kHz coverage would have to bypass it with raw
+SCPI. Both halves were stale -- the cap is the named constant, and it is
+well above those rates -- so the figure is cited from the constant now
+rather than restated.)
 """
 from __future__ import annotations
 
@@ -100,7 +107,7 @@ class _StreamHarness:
             return
         # ``msg_time_stamp`` is a non-optional ``uint32`` in the proto3
         # schema, so ``HasField`` raises ``ValueError`` for it — read
-        # the scalar directly. Unset reads as the default 0; on COM7
+        # the scalar directly. Unset reads as the default 0; on the bench unit
         # fw 3.4.6b1 the firmware reports a constant boot-tick value
         # across all streaming frames (timestamp_freq=0 => the
         # per-frame timestamp counter is disabled), so monotonicity
@@ -160,7 +167,7 @@ def test_single_channel_streaming_supported_rates(
     PC-side decode errors.
 
     Yield floor of 90% accommodates the 1-2 frame stream-startup
-    latency observed across COM7 runs (frame 0 is enqueued in the
+    latency observed across bench runs (frame 0 is enqueued in the
     firmware before the consumer thread's first read pass).
 
     The strict PC-vs-firmware cross-check lives in
@@ -191,7 +198,7 @@ def test_single_channel_streaming_supported_rates(
 
     # No firmware-side drops. (Note: ``TotalSamplesStreamed`` itself
     # is too noisy to assert on at sub-3-second windows — observed 0
-    # *and* near-100% across consecutive runs at 100 Hz × 2s on COM7
+    # *and* near-100% across consecutive runs at 100 Hz × 2s on the bench unit
     # fw 3.4.6b1. The PC yield assertion above is the load-bearing
     # "streaming engaged" check; the firmware-counter cross-check is
     # done in :func:`test_long_window_1khz_10s_no_drops` where the
@@ -261,7 +268,7 @@ def test_long_window_1khz_10s_no_drops(
     firmware_stats_diff.assert_no_drops()
 
     # The firmware ``TotalSamplesStreamed`` counter is observed to be
-    # order-sensitive on COM7 fw 3.4.6b1: when the test runs alone the
+    # order-sensitive on the bench unit, fw 3.4.6b1: when the test runs alone the
     # delta agrees with PC parsed_frames within 2%, but when it runs
     # after other streaming tests in the same session the delta
     # under-reports by up to ~25% — likely a firmware-side accounting

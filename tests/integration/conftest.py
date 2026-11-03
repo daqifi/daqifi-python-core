@@ -320,7 +320,7 @@ def error_drainer(serial_transport: SerialStreamTransport):
 def clean_device(serial_transport: SerialStreamTransport):
     """Bring the device to a known-clean state before yielding it.
 
-    Steps (mirrors the wake/init sequence proven on COM7 fw 3.4.6b1):
+    Steps (mirrors the wake/init sequence proven on the bench unit, fw 3.4.6b1):
       1. Drain any stale SCPI errors
       2. Stop any in-flight streaming
       3. Disable all ADC channels

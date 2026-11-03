@@ -6,7 +6,7 @@ asserts the per-frame *shape* invariant: every streaming frame must
 carry exactly ``popcount(bitmask)`` analog samples.
 
 The 0xFFFF (all 16 ADCs) case is the slice's headline focus. A
-diagnostic run via ``scripts/hw_streaming_validation.py`` against COM7
+diagnostic run against the bench unit
 fw 3.4.6b1 saw ~16 % of length-prefix-passed payloads fail to decode as
 :class:`DaqifiOutMessage` at this bitmask, an order of magnitude worse
 than the single-channel case. The all-16 test asserts a 5 % decode-
@@ -286,8 +286,8 @@ def test_all_sixteen_channels_decode_rate_under_5_pct(
     """Regression bound on the multi-channel decode-failure rate.
 
     Diagnostic context: a one-off run of
-    ``scripts/hw_streaming_validation.py`` (5 s @ 1 kHz, bitmask
-    0xFFFF) on COM7 fw 3.4.6b1 saw ~16 % of length-prefix-passed
+    a 5 s @ 1 kHz diagnostic run (bitmask
+    0xFFFF) on the bench unit, fw 3.4.6b1, saw ~16 % of length-prefix-passed
     payloads fail :meth:`DaqifiOutMessage.FromString`. That rate is
     much higher than the single-channel baseline (effectively 0 %)
     and is the slice's "investigate or file a bug" target.
@@ -297,7 +297,7 @@ def test_all_sixteen_channels_decode_rate_under_5_pct(
     * Tight enough that the historical ~16 % diagnostic rate fails the
       test loudly — if the rate ever returns to that level the suite
       will surface it instead of silently passing. (The bound was set
-      after a clean run on COM7 confirmed the production parser path
+      after a clean bench run confirmed the production parser path
       actually delivers ~0 % when paired with the wake/echo/format
       init the ``clean_device`` fixture now covers — see PR #28 Qodo
       bug-1 fix.)
@@ -351,7 +351,7 @@ def test_all_sixteen_channels_decode_rate_under_5_pct(
 # ---- Typed factory rejects bitmask shapes that would break SCPI framing ----
 #
 # Hex-literal note: the typed factory ``enable_adc_channels`` accepts
-# decimal *and* hex digit strings on the host side, but COM7 fw 3.4.6b1
+# decimal *and* hex digit strings on the host side, but the bench unit on fw 3.4.6b1
 # only honours the decimal form on the device side — sending the hex
 # literal ``FFFF`` enables zero channels rather than all 16. The host-
 # side factory acceptance is exercised by the rejection test below;

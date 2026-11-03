@@ -244,7 +244,7 @@ def test_n_restart_cycles_no_firmware_drops(
     that would race the stats fixture's serial reads.
 
     NB: ``TotalSamplesStreamed`` is *not* asserted on here. B4 already
-    documents that this counter is order-sensitive on COM7 fw 3.4.6b1
+    documents that this counter is order-sensitive on the bench unit, fw 3.4.6b1
     (it under-reports across back-to-back start/stop cycles, and on
     the cycle-batch path observed during B6 development it can even
     snapshot to a value below the pre-snapshot — likely a 32-bit
