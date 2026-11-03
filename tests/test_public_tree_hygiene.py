@@ -60,16 +60,41 @@ ALLOWED_BIG_INTS = {
     "1234567890123456",     # synthetic example in daqifi/_internal/serial_identity
 }
 
-#: 16-hex-character serials. Requires at least one letter, so a 16-digit
-#: decimal is left to BIG_INT_RE and a long git SHA does not match at all
-#: (the word boundaries require exactly sixteen characters).
+#: 16-hex-character serials, in either spelling.
+#:
+#: ⛔ THE FIRST VERSION MISSED THE ``0x`` FORM, which CONTRIBUTING.md documents
+#: as how to set the expected serial. It opened with ``\b``, and between the
+#: ``x`` of a prefix and the first hex digit BOTH characters are word
+#: characters -- so there is no boundary there and the pattern never engaged.
+#: A 0x-prefixed sixteen-character serial sailed straight through a gate
+#: written to catch exactly that.
+#:
+#: Two changes, so neither spelling depends on an accident:
+#:
+#: * an explicit optional ``0[xX]`` prefix replaces the leading ``\b``, with a
+#:   lookbehind that keeps the token from matching inside a longer word;
+#: * the "at least one letter" requirement is GONE. It was what forced a
+#:   16-digit hex literal to fall through to BIG_INT_RE, which caught it only
+#:   because ``x`` happens not to be a hex character and so slipped past that
+#:   rule's lookbehind. True today, silently false the moment someone widens
+#:   that character class. One rule now owns every 16-hex token.
+#:
+#: The capture group excludes the prefix, so a single allowlist serves both
+#: spellings: ``0x0123456789ABCDEF`` and the bare form resolve to one value.
 HEX_SN_RE = re.compile(
-    r"\b(?=[0-9A-Fa-f]{16}\b)(?=[0-9A-Fa-f]*[A-Fa-f])[0-9A-Fa-f]{16}\b"
+    r"(?<![0-9A-Za-z_])"                       # not inside a longer token
+    r"(?:0[xX])?"                              # optional C-style prefix
+    r"(?=[0-9A-Fa-f]{16}(?![0-9A-Fa-f]))"      # exactly sixteen, no more
+    r"([0-9A-Fa-f]{16})"
 )
 ALLOWED_HEX_SNS = {
     # the firmware's own documented example value; tests/fixtures/README.md
     # records that every captured fixture header was rewritten to it
     "0123456789ABCDEF",
+    # the synthetic in daqifi/_internal/serial_identity.py, whose own comment
+    # notes it is "also the hex spelling of another valid" serial -- so it is
+    # legitimate in both spellings and belongs in both allowlists
+    "1234567890123456",
 }
 
 #: Device identity strings, as a hardware run records them.
@@ -137,6 +162,16 @@ def test_each_rule_rejects_a_plausible_leak():
         (BIG_INT_RE, ALLOWED_BIG_INTS, "device_sn = " + "9" * 19),
         # a MADE-UP hex serial, in the 16-character shape a real one takes
         (HEX_SN_RE, ALLOWED_HEX_SNS, "sn: " + "DEADBEEF" + "CAFE1234"),
+        # ...and the 0x spelling CONTRIBUTING.md documents, which the first
+        # version of this rule let through
+        (HEX_SN_RE, ALLOWED_HEX_SNS,
+         'DAQIFI_EXPECTED_SERIAL_NUMBER="0x' + "DEADBEEF" + 'CAFE1234"'),
+        (HEX_SN_RE, ALLOWED_HEX_SNS,
+         'DAQIFI_EXPECTED_SERIAL_NUMBER="0X' + "DEADBEEF" + 'CAFE1234"'),
+        # an ALL-DIGIT hex literal: no letters to key on, so this is the shape
+        # that used to depend on BIG_INT_RE's lookbehind by accident
+        (HEX_SN_RE, ALLOWED_HEX_SNS,
+         'sn = 0x' + "98765432" + "10987654"),
         # the serial is split too: written whole it is a 16-character token
         # and the scan above rejected THIS FILE on the first run, which is
         # the no-exemption design working as intended
@@ -162,6 +197,16 @@ def test_rules_accept_what_the_tree_legitimately_contains():
     assert not BIG_INT_RE.findall(":10000000AABBCCDDEEFF00112233445566778899F8")
     # a 40-character git SHA is not a 16-character serial
     assert not HEX_SN_RE.findall("7519918a73570613c4d16312e2926bb934d7ea0b")
+    # nor is a 17-hex-character token: the rule wants exactly sixteen
+    assert not HEX_SN_RE.findall("x = " + "ABCDEF0123456789A")
+    # ⛔ THE CONVERSE OF THE 0x FIX, and the pin that keeps the capture group
+    # excluding the prefix: an ALLOWLISTED value stays allowed in the 0x
+    # spelling too. A rule that caught `0x<allowed>` would fail the tree it
+    # is meant to protect, which is the other way to get this wrong.
+    for spelling in ("0123456789ABCDEF", "0x0123456789ABCDEF",
+                     "0X0123456789ABCDEF", "0x1234567890123456"):
+        assert not [t for t in HEX_SN_RE.findall('sn="%s"' % spelling)
+                    if t not in ALLOWED_HEX_SNS], spelling
 
 
 def test_scan_actually_reads_files():
