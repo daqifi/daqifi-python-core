@@ -710,22 +710,37 @@ class StreamMessageConsumer(Generic[T]):
 
     # ---- lifecycle ---------------------------------------------------------
 
+    #: Grace period, in milliseconds, that :meth:`start` waits for a
+    #: stopped-but-not-yet-exited reader thread to finish. A reader asked to
+    #: stop while it is inside a message-received callback cannot exit until
+    #: that callback returns, so a restart that refused immediately turned a
+    #: momentary overlap into a permanently dead pipeline. Waiting lets the
+    #: restart succeed on the same instance instead of failing the caller.
+    #: Mirrors daqifi-core's StaleReaderGraceMs (daqifi/daqifi-core#383).
+    STALE_READER_GRACE_MS = 1000
+
     def start(self) -> None:
         self._raise_if_disposed()
         if self._is_running:
             return
         # Refuse to start if a previous thread didn't fully stop —
         # otherwise we'd race two daemon threads on the same stream
-        # (Qodo PR #68 review #3). The 1.0s join in ``stop()`` can
-        # time out if the underlying ``stream.read()`` is blocked;
-        # caller should ``stop_safely(timeout_ms=...)`` with a longer
-        # window or close the stream before retrying.
+        # (Qodo PR #68 review #3). But give it STALE_READER_GRACE_MS to
+        # exit first: a reader stopped while inside a callback is alive
+        # only until that callback returns, and refusing outright in that
+        # window is what left the consumer dead for good (#238 residual).
+        # Only a reader that OUTLASTS the grace is a real overlap.
         if self._thread is not None and self._thread.is_alive():
-            raise RuntimeError(
-                "previous consumer thread is still alive; "
-                "call stop_safely() with a larger timeout or close "
-                "the underlying stream before restarting"
-            )
+            if threading.current_thread() is not self._thread:
+                self._thread.join(timeout=self.STALE_READER_GRACE_MS / 1000.0)
+            if self._thread.is_alive():
+                raise RuntimeError(
+                    "previous consumer thread is still alive after "
+                    f"{self.STALE_READER_GRACE_MS} ms; "
+                    "call stop_safely() with a larger timeout or close "
+                    "the underlying stream before restarting"
+                )
+            self._thread = None
         # Reset telemetry so each start/stop cycle reports its own
         # counters (#18 §3).
         self._telemetry = StreamConsumerTelemetry()

@@ -314,10 +314,13 @@ def test_a_send_from_a_callback_does_not_wait_on_the_exchange_lock() -> None:
         release = threading.Event()
 
         def holder():
-            device._text_exchange_lock.acquire()
-            held.set()
-            release.wait(10.0)
-            device._text_exchange_lock.release()
+            # Hold it the way production does -- through _exchange_lock --
+            # not with a raw acquire/release. The backlog of parked sends is
+            # drained by whoever RELEASES the lock, so a raw release would
+            # strand it and the test would be measuring its own scaffolding.
+            with device._exchange_lock("test-holder"):
+                held.set()
+                release.wait(10.0)
 
         h = threading.Thread(target=holder, name="lock-holder")
         h.start()
@@ -332,8 +335,24 @@ def test_a_send_from_a_callback_does_not_wait_on_the_exchange_lock() -> None:
         )
         kind, _payload = callback.outcome
         assert kind == "returned", f"stop_streaming from a callback {callback.outcome!r}"
-        assert [w for w in stream.written if b"STReam:STOP" in w] != []
+        # ⚠ CONTRACT CHANGED, DELIBERATELY. It used to go straight out from
+        # here, because send() exempted the consumer thread from the lock.
+        # That exemption let a callback's command land INSIDE a
+        # run_exclusive group; it is gone, and the command is parked
+        # instead. Not blocking is still the thing under test, and is still
+        # asserted above -- what changed is that the command now lands
+        # after the holder releases rather than during. See
+        # test_a_callbacks_send_cannot_interleave_inside_run_exclusive.
+        assert [w for w in stream.written if b"STReam:STOP" in w] == [], (
+            "the callback's send bypassed the queue while the lock was held"
+        )
         assert device._consumer.is_running
+        release.set()
+        h.join(5)
+        _wait_for(
+            lambda: [w for w in stream.written if b"STReam:STOP" in w] != [],
+            10.0, "the parked send to be replayed once the lock is free",
+        )
     finally:
         release.set()
         h.join(5)
@@ -673,12 +692,23 @@ def test_a_send_queued_behind_the_lock_rechecks_the_connection() -> None:
         assert a_done.wait(10.0)
         b.join(10.0)
 
-        assert b_outcome == ["DeviceNotConnectedError"], (
-            f"B sent after the connection was lost: {b_outcome}"
+        # ⚠ CONTRACT CHANGED, DELIBERATELY, and the HARM assertion below is
+        # unchanged. B no longer waits on the lock, so it cannot be told by
+        # an exception that the link died while it waited: it parks, returns,
+        # and the drop is recorded instead. The defect this test exists for
+        # -- a queued command reaching a dead link -- is still asserted
+        # exactly as before, and still fails without the fix.
+        assert b_outcome == ["sent"], (
+            f"B's send should have parked and returned: {b_outcome}"
         )
         assert not [c for c in calls if b"STReam:START" in c], (
             "a START reached the wire after the device went Lost"
         )
+        assert device.delivery_fault is not None, (
+            "the parked command was dropped with no trace, so the caller "
+            "has no way to learn its command never went out"
+        )
+        assert "dropped" in device.delivery_fault
     finally:
         device.disconnect()
 

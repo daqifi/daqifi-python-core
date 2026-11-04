@@ -90,6 +90,19 @@ class SerialPortConnectFailure(enum.Enum):
     UNKNOWN = "unknown"
 
 
+class DeliveryFaultError(DAQiFiError, RuntimeError):
+    """Something the device was told to do provably did not happen.
+
+    Raised by operations that would otherwise report success over a
+    pipeline known to be broken: a command queued during an exchange that
+    was dropped or failed after ``send()`` returned, or a message consumer
+    that could not be restarted, leaving nothing reading the stream. A
+    ``RuntimeError``, like the other not-usable guards here. The condition
+    is sticky by design -- it describes a connection that can no longer be
+    trusted -- and a successful ``connect()`` clears it.
+    """
+
+
 class SerialPortConnectError(ConnectionError, _SerialException):
     """A serial port couldn't be opened; ``reason`` says why
     (:class:`SerialPortConnectFailure`) and the message names the port and

@@ -49,6 +49,7 @@ from .communication import (
 )
 from .enums import SdCardLogFormat, WifiMode, WifiSecurityType
 from .exceptions import (
+    DeliveryFaultError,
     DeviceNotConnectedError,
     DeviceUnresponsiveError,
     FeatureNotSupportedError,
@@ -436,6 +437,14 @@ class DaqifiDevice:
         # Status events raised while the exchange lock was held, delivered
         # by whoever releases it (see _deliver_status_event).
         self._pending_status_events: List[DeviceStatusEventArgs] = []
+        # Sends that arrived while another flow held the exchange, replayed
+        # in order by that flow on its way out (see _park_send).
+        self._parked_sends: List[Any] = []
+        # Set when something the device was told to do provably did not
+        # happen: a dropped or failed parked send, or a consumer that could
+        # not be restarted. Read by is_streaming / start_streaming so they
+        # cannot report success over a dead pipeline.
+        self._delivery_fault: Optional[str] = None
 
         if transport is not None:
             transport.add_status_changed(self._on_transport_status_changed)
@@ -627,6 +636,11 @@ class DaqifiDevice:
                     # A fresh consumer has no message handlers yet; the
                     # caller's initialize() must register them again.
                     self._is_initialized = False
+                    # A new connection with a fresh reader is exactly the
+                    # recovery a delivery fault asks for, so clear it here
+                    # -- and only here, so the fault cannot be lost by
+                    # anything short of actually reconnecting.
+                    self._delivery_fault = None
             if superseded:
                 # A nested connect() (from a status handler, during the
                 # teardown above) already established a newer connection;
@@ -719,6 +733,10 @@ class DaqifiDevice:
             # A loss event still in flight for this connection must not
             # match any later one.
             self._transport_session = None
+        # Anything still parked can never reach the device now, and its
+        # callers were told it would be sent. Record rather than discard
+        # quietly -- a dropped command must not read like a delivered one.
+        self._discard_parked_sends("the device was disconnected")
         # Hoisted out of `try` so the `finally` block can branch on
         # whether the transport failed (Qodo PR 17 pass 26 #2).
         transport_error: Optional[Exception] = None
@@ -792,28 +810,71 @@ class DaqifiDevice:
         message-producer abstraction not yet ported); other types raise
         :class:`NotImplementedError` to match upstream behaviour.
 
-        Serialized against text exchanges (#225): while another thread runs
-        one -- :meth:`execute_text_command`, :meth:`drain_errors`, an SD
-        listing or download -- this waits, so the command lands after that
-        exchange rather than in the middle of it, where the exchange would
-        read this command's reply as its own or the device would act on it
-        between the steps of a multi-command sequence.
+        Serialized against text exchanges (#225): while another flow runs
+        one -- :meth:`execute_text_command`, :meth:`drain_errors`,
+        :meth:`run_exclusive`, an SD listing or download -- the command is
+        PARKED and replayed, in order, when that flow releases the device.
+        So it lands after the exchange rather than in the middle of it,
+        where the exchange would read this command's reply as its own or
+        the device would act on it between the steps of a sequence.
 
-        Two callers never wait. The thread that owns the exchange: its
-        ``setup_action`` is what sends, so waiting would deadlock it. And
-        the message-received (protobuf consumer) thread: a send from a
-        callback -- ``stop_streaming()`` from one, say -- must not wait on a
-        lock whose holder may be waiting for that same thread to stop the
-        consumer. A bare send neither pauses nor replaces the consumer, so
-        unlike a text exchange it is safe to run there unserialized.
+        **This never blocks.** Parking rather than waiting is what makes it
+        safe to call from anywhere, including a message-received callback: a
+        send that waited there could be waiting on a flow that is itself
+        waiting for the consumer thread, which is how the consumer ended up
+        dead (#238). The only caller that bypasses the queue is the thread
+        that already owns the exchange, whose ``setup_action`` is what
+        sends.
+
+        Because parking returns before the command goes out, a failure
+        afterwards has nowhere to raise: a parked command that is dropped
+        or fails is recorded in :attr:`delivery_fault` instead, so it never
+        reads as delivered.
+
+        ⚠ **A STATUS QUERY ISSUED AFTER A PARKED SEND CAN OBSERVE
+        PRE-COMMAND DEVICE STATE.** Returning here does not mean the device
+        has acted, so a send-then-poll flow can read the status from before
+        its own command was delivered -- and where a device reports "idle"
+        and "finished" with the same value, a waiter that treats "not busy"
+        as "done" will conclude the operation completed instantly when it
+        has not started. Group the command and its polling inside
+        :meth:`run_exclusive`: the grouping thread owns the exchange, so
+        its own sends are not parked and the ordering inside the group is
+        guaranteed. A waiter should also require a positive transition into
+        the busy state before accepting a later idle reading as meaningful.
+        
         """
         if not self.is_connected:
             raise DeviceNotConnectedError()
         tid = threading.get_ident()
-        if self._text_exchange_lock_owner == tid or self._on_consumer_thread():
-            self._send_unserialized(message)
+        if self._text_exchange_lock_owner == tid:
+            # Ours already: the exchange's own setup_action is what sends.
+            self._write_message(message)
             return
-        self._text_exchange_lock.acquire()
+        # ⛔ NO EXEMPTION FOR THE CONSUMER THREAD. It used to send straight
+        # out from here, because BLOCKING on that thread was the dangerous
+        # thing; parking removes the block, so the exemption bought nothing
+        # and cost correctness -- a message callback's send interleaved
+        # inside a run_exclusive group (MAXSize 1024, the callback's
+        # MAXSize 2048, MAXSize?) and the group's own query read the
+        # callback's value back. Parking is safe on any thread, so every
+        # non-owner goes through the same path.
+        # ⛔ PARK, NEVER BLOCK. A send that waited here could be waiting on
+        # a lock whose holder is waiting for the sender's own caller: a
+        # message-received callback that delegates a send to a worker and
+        # joins it stalls the consumer thread, the exchange's attempt to
+        # stop that consumer times out, and the consumer ends up dead for
+        # good (#238 residual). Parking removes the wait entirely, which is
+        # also what lets the callback return promptly so the consumer can
+        # exit and be restarted within its grace period -- the two halves
+        # are one mechanism, not two improvements.
+        #
+        # The ordering callers rely on is unchanged: the holder replays the
+        # backlog, in order, on its way out, so a command issued during an
+        # exchange still goes out after it.
+        if not self._text_exchange_lock.acquire(blocking=False):
+            self._park_send(message)
+            return
         # _text_exchange_lock_owner means exactly "this thread holds the
         # exchange lock", and two rules read it: who may nest an exchange,
         # and who must defer status events instead of delivering them (see
@@ -836,12 +897,7 @@ class DaqifiDevice:
             # ..._spares_the_reconnect pins that, and a blunt is_connected
             # re-check broke it). What must stop a queued send is a link
             # that is gone with nothing newer coming.
-            if (
-                self._disposed
-                or self._is_disconnecting
-                or self._status in (ConnectionStatus.Lost,
-                                    ConnectionStatus.Disconnected)
-            ):
+            if self._link_is_gone():
                 raise DeviceNotConnectedError(
                     "The message could not be sent: the connection was lost "
                     "while it waited for another exchange to finish.",
@@ -849,16 +905,27 @@ class DaqifiDevice:
                         self._disposed or self._is_disconnecting
                     ),
                 )
-            self._send_unserialized(message)
+            self._write_message(message)
         finally:
+            # Replay BEFORE the release, so the backlog goes out as part
+            # of this flow rather than racing the next one for the stream.
+            self._replay_parked_sends()
             self._text_exchange_lock_owner = None
             self._text_exchange_lock.release()
             # Outside the lock, always: a queued status event runs user
             # callbacks. See _flush_pending_status_events.
             self._flush_pending_status_events()
 
-    def _send_unserialized(self, message: Any) -> None:
-        """:meth:`send`'s body, with the exchange lock already settled."""
+    def _write_message(self, message: Any) -> None:
+        """Put ``message`` on the wire. :meth:`send`'s body, once the
+        serialization question is settled.
+
+        Named for what it does rather than for the lock state, because the
+        lock state differs per caller: the exchange's owner bypassed the
+        queue, a plain send holds the lock, and the replay of a parked
+        command holds it too. Calling this "unserialized", as it was, is
+        true of only the first.
+        """
         if isinstance(message, ScpiMessage):
             data = message.get_bytes()
             # Read once, under the lock connect() bumps the generation
@@ -1018,10 +1085,16 @@ class DaqifiDevice:
     def run_exclusive(self, fn: Callable[[], Any]) -> Any:
         """Run ``fn()`` as a single exchange, returning its result.
 
-        No other thread's :meth:`send` or text exchange can interleave with
+        No other flow's :meth:`send` or text exchange can interleave with
         it, so several commands run as one unit -- a configure-then-query
-        sequence that a command in the middle would corrupt (#225). ``fn``
-        takes no arguments; use a closure or :func:`functools.partial`.
+        sequence that a command in the middle would corrupt (#225). That
+        holds for a send from ANY other thread, the protobuf consumer's
+        included: such a send is parked and replayed after this group
+        releases. (It did not hold for the consumer thread before parking:
+        a message callback's send went straight out between this group's
+        commands, and the group's own query read the callback's value.)
+        ``fn`` takes no arguments; use a closure or
+        :func:`functools.partial`.
 
         Re-entrant for the thread already inside an exchange on this
         device: there, it simply runs ``fn`` under the lock that thread
@@ -1117,6 +1190,9 @@ class DaqifiDevice:
         try:
             yield
         finally:
+            # Order matters: replay the backlog while we still hold the
+            # lock, then release, then run user callbacks.
+            self._replay_parked_sends()
             self._text_exchange_lock_owner = None
             self._text_exchange_lock.release()
             self._flush_pending_status_events()
@@ -1293,11 +1369,23 @@ class DaqifiDevice:
             try:
                 stopped = self._consumer.stop_safely()
                 if stopped is False:
-                    self._consumer.stop()
+                    # The reader was asked to stop and has not exited yet
+                    # -- it is inside a message-received callback. Its
+                    # _is_running flag is already clear, so it WILL exit
+                    # once that callback returns, and start() below waits
+                    # out its grace period for exactly this case. Calling
+                    # stop() again cannot help (it can neither join itself
+                    # nor force the exit), so don't.
+                    #
+                    # The comment that used to sit here called this
+                    # "degraded but not catastrophic". That was wrong: the
+                    # flag is clear, so a restart that fails leaves NOTHING
+                    # reading the stream, which is the #238 residual.
+                    pass
             except Exception:
-                # Best-effort pause; if we can't stop the protobuf
-                # consumer we'll race it for stream bytes (degraded
-                # but not catastrophic).
+                # The pause is best-effort only in the sense that a broken
+                # consumer must not stop the caller from capturing; a
+                # consumer left unreadable is recorded at the restart below.
                 pass
 
         captured: List[str] = []
@@ -1392,8 +1480,24 @@ class DaqifiDevice:
             if was_running and self._consumer_can_restart_on(stream):
                 try:
                     self._consumer.start()
-                except Exception:
-                    pass
+                except Exception as restart_exc:
+                    # ⛔ NOT swallowed any more. This is the line that made
+                    # the whole failure silent: the exchange returned a
+                    # plausible result while the reader was gone, and a
+                    # later start_streaming() reported success with nothing
+                    # on the stream. Raising here would discard the
+                    # caller's captured reply and could mask setup_action's
+                    # own error, so the damage goes where the misreporting
+                    # calls read it instead (#238 residual).
+                    self._record_delivery_fault(
+                        "the message consumer could not be restarted after "
+                        f"a text exchange, so nothing is reading the "
+                        f"stream: {restart_exc}"
+                    )
+                    _log.warning(
+                        "consumer restart failed after a text exchange; "
+                        "reconnect required: %s", restart_exc,
+                    )
 
         # Blank lines were answers, not content.
         return [line for line in captured if line.strip()]
@@ -2087,6 +2191,114 @@ class DaqifiDevice:
             except Exception:
                 pass
 
+    def _link_is_gone(self) -> bool:
+        """Whether this connection is gone with nothing newer coming.
+
+        ⚠ Deliberately NOT ``not self.is_connected``: that is also true
+        while Connecting, and a send that captured the old stream during a
+        reconnect is designed to go ahead and fail harmlessly so the
+        reconnect is not marked Lost (pinned by test_device_lifecycle's
+        ..._spares_the_reconnect). One definition, read by both the
+        post-acquire check in :meth:`send` and the replay of parked sends,
+        so the two cannot drift apart -- they did: parking the sends
+        reopened the very defect the post-acquire check had closed, because
+        the replay went straight to the writer.
+        """
+        return bool(
+            self._disposed
+            or self._is_disconnecting
+            or self._status in (ConnectionStatus.Lost,
+                                ConnectionStatus.Disconnected)
+        )
+
+    def _park_send(self, message: Any) -> None:
+        """Queue a send that arrived while another flow held the exchange.
+
+        Replayed, in order, by that flow on its way out. Parking keeps the
+        backlog ordered against the exchange: a message sent straight out
+        while the backlog drains would overtake messages parked before it,
+        which is why :meth:`_replay_parked_sends` keeps parking until it
+        has finished.
+
+        ⛔ INVARIANT: the backlog is drained by whoever RELEASES the
+        exchange lock, so every acquisition must go through :meth:`send` or
+        :meth:`_exchange_lock`, which both drain. A raw
+        ``_text_exchange_lock.acquire()`` elsewhere would strand the
+        backlog until some later flow happened to release it.
+        """
+        with self._state_lock:
+            self._parked_sends.append(message)
+
+    def _replay_parked_sends(self) -> None:
+        """Send everything parked while this flow held the exchange.
+
+        Called by whichever frame releases the lock, BEFORE the release, so
+        the backlog goes out as part of the exchange rather than racing the
+        next one for the stream.
+
+        A replay that fails is recorded on the device rather than only
+        logged: ``send()`` has already returned to its caller by then, so
+        the exception has nowhere to go, and a command that never reached
+        the device must not read as one that did (#238 residual).
+        """
+        while True:
+            # Re-checked per message, not once: the exchange that queued
+            # these, or an earlier replay, may be what lost the link.
+            if self._link_is_gone():
+                self._discard_parked_sends(
+                    "the connection was lost before they could be sent"
+                )
+                return
+            with self._state_lock:
+                if not self._parked_sends:
+                    return
+                message = self._parked_sends.pop(0)
+            try:
+                self._write_message(message)
+            except Exception as exc:
+                self._record_delivery_fault(
+                    f"a command queued during an exchange could not be "
+                    f"sent: {exc}"
+                )
+                _log.warning(
+                    "parked send failed after the exchange that queued it: "
+                    "%s", exc,
+                )
+
+    def _discard_parked_sends(self, why: str) -> None:
+        """Drop the backlog, recording it. Only for a device that can no
+        longer send at all -- the sends can never reach anything, but the
+        callers were told they would."""
+        with self._state_lock:
+            dropped = len(self._parked_sends)
+            self._parked_sends = []
+        if dropped:
+            self._record_delivery_fault(
+                f"{dropped} command(s) queued during an exchange were "
+                f"dropped: {why}"
+            )
+            _log.warning(
+                "dropped %d parked send(s): %s", dropped, why,
+            )
+
+    def _record_delivery_fault(self, detail: str) -> None:
+        """Remember that something the device was told to do never happened.
+
+        The pipeline failing silently is the whole defect here, so a fault
+        is kept on the device where the calls that would otherwise misreport
+        consult it, not just written to a log nobody reads.
+        """
+        self._delivery_fault = detail
+
+    @property
+    def delivery_fault(self) -> Optional[str]:
+        """Why the device can no longer be trusted to have received what it
+        was told, or ``None``. Set when a queued command was dropped or
+        failed after ``send()`` returned, or when the message consumer
+        could not be restarted after an exchange. Cleared by a successful
+        :meth:`connect`."""
+        return self._delivery_fault
+
     def _flush_pending_status_events(self) -> None:
         """Deliver status events queued while the exchange lock was held.
 
@@ -2206,7 +2418,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
     @property
     def is_streaming(self) -> bool:
-        return self._is_streaming
+        """Whether this session has streaming running AND the pipeline can
+        be believed. A recorded delivery fault (see
+        :attr:`delivery_fault`) makes this False: the stream was started,
+        but nothing is reading it or the start never reached the device,
+        and answering True there is the misreport the #238 residual is
+        about."""
+        return self._is_streaming and self._delivery_fault is None
 
     @property
     def streaming_frequency(self) -> int:
@@ -2219,9 +2437,28 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._streaming_frequency = int(value)
 
     def start_streaming(self) -> None:
+        """Start streaming.
+
+        Raises:
+            DeliveryFaultError: when a command the device was told to
+                execute provably did not reach it, or nothing is reading
+                the stream. Streaming cannot be reported honestly over
+                that, and reporting it anyway is the #238 residual: the
+                call returned True and no frames ever arrived. Reconnect
+                to clear it.
+        """
+        self._raise_if_delivery_faulted("start_streaming")
         self.send(scpi_commands.start_streaming(self._streaming_frequency))
         self._is_streaming = True
         self._set_state(DeviceState.Streaming)
+
+    def _raise_if_delivery_faulted(self, operation: str) -> None:
+        fault = self._delivery_fault
+        if fault is not None:
+            raise DeliveryFaultError(
+                f"{operation} cannot be trusted on this connection: "
+                f"{fault}. Reconnect before continuing."
+            )
 
     def stop_streaming(self) -> None:
         self.send(scpi_commands.stop_streaming())

@@ -13,6 +13,13 @@ aims to follow [Semantic Versioning](https://semver.org/).
   up-to-date module cannot be reflashed at all, so the WiFi update path cannot
   be exercised on a bench whose boards are already current. It overrides the
   version check only — every other refusal on the path still applies (#190).
+- `DaqifiDevice.delivery_fault` and `DeliveryFaultError`: why this
+  connection can no longer be trusted to have received what it was told —
+  a command queued during an exchange that was dropped or failed after
+  `send()` returned, or a message consumer that could not be restarted so
+  nothing is reading the stream. `start_streaming()` raises it instead of
+  reporting success, `is_streaming` reads False, and a successful
+  `connect()` clears it (#238).
 - `DaqifiDevice.run_exclusive(fn)` runs `fn()` as one exchange, so a
   sequence of commands cannot be interleaved with another thread's `send()`
   or text exchange — including a configure-then-query sequence or an SD
@@ -65,16 +72,24 @@ aims to follow [Semantic Versioning](https://semver.org/).
   `start_sd_card_logging` returns the log file name (#200).
 
 ### Changed
-- `send()` is serialized against text exchanges: while another thread runs
-  one (`execute_text_command`, `drain_errors`, an SD listing or download) a
-  `send()` waits, so its command lands after that exchange instead of in the
-  middle of it, where the exchange could read its reply as its own. The
-  thread that owns the exchange is exempt (its `setup_action` is what
-  sends), and so is the message-received callback thread, whose `send()`
-  must not wait on a lock whose holder may be waiting for that thread.
-  A `send()` that waited now re-checks the connection after acquiring, so
-  it no longer puts its command on a link the exchange ahead of it lost
-  (which left the device `Lost` and `Streaming` at once) (#225).
+- `send()` is serialized against text exchanges: a command issued while
+  another thread runs one (`execute_text_command`, `drain_errors`, an SD
+  listing or download) goes out after that exchange rather than in the
+  middle of it, where the exchange could read its reply as its own. It is
+  PARKED rather than blocked — the holder replays the backlog, in order, on
+  its way out — so a send can never wait on a lock whose holder is waiting
+  for the sender's own caller. The thread that owns the exchange is exempt
+  (its `setup_action` is what sends), as is the message-received callback
+  thread. A send that took the lock re-checks the connection after
+  acquiring, so it no longer puts its command on a link the exchange ahead
+  of it lost (which left the device `Lost` and `Streaming` at once) (#225).
+- `StreamMessageConsumer.start()` waits up to
+  `STALE_READER_GRACE_MS` (1 s) for a stopped-but-not-yet-exited reader
+  instead of refusing at once. A reader asked to stop while it is inside a
+  message-received callback cannot exit until that callback returns, and
+  refusing in that window turned a momentary overlap into a permanently
+  dead pipeline. A reader that outlasts the grace is still refused
+  (#238; mirrors daqifi-core#383).
 - A status event is never delivered while the exchange lock is held: a
   subscriber can hand recovery to another thread and wait for it, and that
   thread's `send()` or exchange needs the lock the subscriber's own caller
@@ -125,6 +140,15 @@ aims to follow [Semantic Versioning](https://semver.org/).
 - A canceled firmware update chains `FirmwareUpdateCancelledError` as the
   `FirmwareUpdateException`'s `__cause__`. Telling "the user canceled" apart
   from "the update failed" previously meant naming a private sentinel (#190).
+- A text exchange no longer leaves the protobuf consumer dead when a
+  message-received callback delegates work to another thread and waits for
+  it. The delegated `send()` blocked on the exchange lock, which stalled the
+  callback, which made the exchange's consumer-stop time out; the capture
+  went ahead anyway and the restart's failure was swallowed, so the consumer
+  exited for good and a later `start_streaming()` reported success with
+  nothing reading. Parking the send removes the stall, the grace period lets
+  the restart succeed, and a restart that still fails is recorded on the
+  device instead of discarded (#238).
 - A text exchange started from a message-received callback is refused
   outright instead of killing the protobuf consumer. It ran on the
   consumer's own thread, so pausing the consumer stopped the thread it ran

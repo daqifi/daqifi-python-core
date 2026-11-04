@@ -85,6 +85,7 @@ from .exceptions import (
     FeatureNotSupportedError,
     PowerStateError,
     DeviceNotConnectedError,
+    DeliveryFaultError,
     SerialPortConnectError,
     SerialPortConnectFailure,
 )
@@ -128,6 +129,7 @@ __all__ = [
     'FeatureNotSupportedError',
     'PowerStateError',
     'DeviceNotConnectedError',
+    'DeliveryFaultError',
     'SerialPortConnectError',
     'SerialPortConnectFailure',
 ]
