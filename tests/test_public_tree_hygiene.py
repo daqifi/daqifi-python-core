@@ -60,61 +60,56 @@ ALLOWED_BIG_INTS = {
     "1234567890123456",     # synthetic example in daqifi/_internal/serial_identity
 }
 
-#: 16-hex-character serials. TWO rules, each decided by the TOKEN'S OWN SHAPE.
+#: 16-hex-character serials: EVERY standalone one, with no context exclusions
+#: at all (ruling DY=A).
 #:
-#: ⛔ FOUR AUDIT ROUNDS LANDED ON ONE REGEX, AND THE DESIGN WAS THE PROBLEM.
-#: Every round I adjusted a lookaround -- the characters AROUND the token -- to
-#: separate "hex serial" from "float". Context cannot make that distinction,
-#: and each adjustment bought one case and sold another:
+#: ⛔ FOUR AUDIT ROUNDS WENT INTO DECIDING WHICH 16-HEX TOKENS ARE *NOT*
+#: SERIALS, and the attempt produced one real leak and three false-positive
+#: classes. The sequence is worth keeping, because the lesson is the design
+#: and not the regex:
 #:
-#:   r1  a ``0x``-prefixed serial escaped, because ``\b`` finds no boundary
-#:       between the ``x`` and a hex digit
-#:   r2  dropping the letter requirement to fix r1 let the rule fire on the
+#:   r1  a ``0x``-prefixed serial escaped -- ``\b`` finds no boundary between
+#:       the ``x`` and a hex digit
+#:   r2  dropping the "has a letter" test to fix r1 let the rule fire on the
 #:       fractional digits of a float
-#:   r3  excluding decimal points to fix r2 then (a) EXEMPTED a lettered
-#:       serial sitting beside a dot -- ``run1.<serial>.json``, a real leak --
-#:       and (b) still failed Python's ``.5``-style and ``5.``-style floats,
-#:       because the exclusion demanded a digit on BOTH sides of the dot
+#:   r3  excluding decimal points to fix r2 EXEMPTED a lettered serial beside
+#:       a dot (``run1.<serial>.json`` -- the real leak), and still failed
+#:       Python's one-sided ``.5`` and ``5.`` float forms
+#:   r4  and the premise underneath all of it was false anyway: "a token with
+#:       a letter cannot be a float" fails for scientific notation, because
+#:       ``e`` IS a hex letter, so a mantissa-plus-exponent run of sixteen
+#:       hex characters was reported as a serial. The trailing lookahead
+#:       also matched inside longer tokens, so a base64 run was reported
+#:       too. (Not spelled out here: this gate scans its own file, and
+#:       writing the example in full is what tripped it.)
 #:
-#: The token's own shape decides it instead, and then no lookaround has to
-#: guess:
-#:
-#: * A TOKEN CONTAINING A LETTER CANNOT BE A FLOAT. So the lettered rule has
-#:   NO dot exclusions at all, and a serial beside a dot is caught again.
-#: * AN ALL-DIGIT TOKEN IS ONLY UNAMBIGUOUS WITH AN EXPLICIT ``0x``. The
-#:   prefix is itself what rules out a float, so that rule requires it.
-#: * A BARE ALL-DIGIT RUN stays with BIG_INT_RE as a decimal, whose float
-#:   exclusions are unchanged and correct for exactly that ambiguous case.
-#:
-#: ⚠ KNOWN LIMIT, inherent rather than unfixed: a bare all-digit 16-digit
-#: serial written adjacent to a dot is genuinely indistinguishable from a
-#: float, so BIG_INT_RE does not flag it. Nothing can separate those two
-#: without the ``0x`` the second rule asks for. Said out loud because the
-#: alternative is a rule that pretends otherwise, which is what the last
-#: three rounds were.
-#:
-#: The capture group excludes the ``0x`` prefix in both rules, so one
-#: allowlist serves every spelling: the bare and prefixed forms of a value
-#: resolve to the same token.
-#:
-#: ⚠ Describe a serial's SHAPE in these comments; never spell one out. Doing
-#: that tripped this gate on its own file four separate times -- correctly,
-#: since there are no file exemptions.
-HEX_SN_RE = re.compile(
-    r"(?<![0-9A-Za-z_])"                       # not inside a longer token
-    r"(?:0[xX])?"                              # optional C-style prefix
-    r"(?=[0-9A-Fa-f]{16}(?![0-9A-Fa-f]))"      # exactly sixteen, no more
-    r"(?=[0-9A-Fa-f]{0,15}[A-Fa-f])"           # at least one LETTER: not a float
-    r"([0-9A-Fa-f]{16})"
-)
+#: So the rule stops guessing. It flags every standalone 16-hex token and the
+#: exceptions are ALLOWLISTED, because the two failure modes are not
+#: symmetric: a false positive fails loudly in CI and costs one line here,
+#: while a false negative publishes a serial silently. Measured before
+#: adopting it -- this rule reports ZERO unallowlisted tokens on the base
+#: commit, so the blunt form costs nothing on real code.
+HEX_SN_RE = re.compile(r"\b(?:0[xX])?([0-9A-Fa-f]{16})\b")
 
-#: An all-digit 16-character token is only unambiguously hex when it carries
-#: the prefix; without it, it is a decimal and BIG_INT_RE owns it.
-HEX_0X_DIGITS_RE = re.compile(
-    r"(?<![0-9A-Za-z_])0[xX]([0-9]{16})(?![0-9A-Fa-f])"
-)
+#: Digit strings that appear in this repository only as parts of FLOATS.
+#:
+#: ⛔ Under ruling DY=A the hex rule takes no context exclusions, so a
+#: 16-digit run inside a float matches it -- and these same strings are
+#: 16-digit runs, so the DECIMAL rule matches them too. They therefore have
+#: to be allowlisted for BOTH rules, which the gate demonstrated by flagging
+#: its own allowlist on the first run. One definition, shared below.
+#:
+#: ⚠ The cost, stated rather than overlooked: allowlisting by VALUE means a
+#: real serial with these exact sixteen digits would also be exempt.
+#: Accepted as vanishingly unlikely; it is the trade the ruling chose, on the
+#: grounds that a wrong allowlist entry is visible on this line while a
+#: wrong exclusion is not.
+ALLOWED_FLOAT_DIGITS = frozenset({
+    "2345678901234567",
+    "1234567890123457",
+})
 
-ALLOWED_HEX_SNS = {
+ALLOWED_HEX_SNS = ALLOWED_FLOAT_DIGITS | {
     # the firmware's own documented example value; tests/fixtures/README.md
     # records that every captured fixture header was rewritten to it
     "0123456789ABCDEF",
@@ -125,6 +120,10 @@ ALLOWED_HEX_SNS = {
 }
 
 #: Device identity strings, as a hardware run records them.
+#: The float digit strings are 16-digit runs, so the decimal rule sees
+#: them too. Shared rather than duplicated.
+ALLOWED_BIG_INTS = ALLOWED_BIG_INTS | ALLOWED_FLOAT_DIGITS
+
 IDN_RE = re.compile(r"DAQiFi,[A-Za-z0-9 ]+,([0-9A-Fa-f]{8,})")
 ALLOWED_IDN_SNS = ALLOWED_HEX_SNS | ALLOWED_BIG_INTS
 
@@ -149,7 +148,6 @@ RULES = (
     ("serial port", PORT_RE, ALLOWED_PORTS),
     ("long decimal serial", BIG_INT_RE, ALLOWED_BIG_INTS),
     ("hex serial", HEX_SN_RE, ALLOWED_HEX_SNS),
-    ("0x hex serial", HEX_0X_DIGITS_RE, ALLOWED_HEX_SNS),
     ("identity string", IDN_RE, ALLOWED_IDN_SNS),
     ("absolute Windows path", WIN_PATH_RE, frozenset()),
     ("bench lane name", LANE_RE, frozenset()),
@@ -304,32 +302,64 @@ def test_a_dot_beside_a_lettered_serial_never_excuses_it():
         assert violations_in(text), position
 
 
-def test_each_shape_is_owned_by_the_rule_that_should_own_it():
-    """WHICH rule fires, not merely that one does.
+def test_every_rule_has_a_shape_only_it_reports():
+    """Each rule in RULES owns at least one shape that NO other rule reports.
 
-    ⛔ A mutant that unregistered the 0x-all-digit rule SURVIVED every control
-    above, because the decimal rule still catches ``0x`` + sixteen digits --
-    its lookbehind excludes hex characters and ``x`` is not one. That is the
-    very accident the r3 redesign set out to replace with something
-    deliberate, so "some rule caught it" is too weak a claim here: the
-    coverage has to belong to the rule whose job it is, or widening the
-    decimal rule's character class silently reopens the hole.
+    ⛔ r4's blind leg found that IDN_RE could be replaced with a
+    never-matching pattern and every test still passed: the identity control
+    was satisfied by the hex rule, and the previous ownership test covered
+    only the three rules a surviving mutant had pointed at. Fixing the rules
+    a mutant named, rather than the whole table, is the same fix-the-instance
+    habit that has now cost two rounds here.
 
-    The general controls stay rule-agnostic on purpose. This one is about
-    ownership, which is a different question.
+    So the samples are keyed to the RULES table and the test asserts the
+    table is FULLY covered. A rule added without an exclusive sample fails
+    this immediately, and a rule whose pattern stops matching fails it too.
     """
-    L = "DEADBEEF" + "CAFE1234"
-    D = "98765432" + "10987654"
-    owners = {
-        "lettered, bare":  ("hex serial", "sn: %s" % L),
-        "lettered, 0x":    ("hex serial", "sn: 0x%s" % L),
-        "all-digit, 0x":   ("0x hex serial", "sn: 0x%s" % D),
-        "all-digit, 0X":   ("0x hex serial", "sn: 0X%s" % D),
-        "all-digit, bare": ("long decimal serial", "sn: %s" % D),
+    L = "DEADBEEF" + "CAFE1234"          # 16 hex WITH letters
+    exclusive = {
+        # a port: no other rule looks at this shape
+        "serial port": "connected on " + "COM" + "7",
+        # 19 digits: too long for the 16-hex rule, which needs exactly 16
+        "long decimal serial": "device_sn = " + "9" * 19,
+        # 16 hex with letters: no 15-digit run, so the decimal rule is blind
+        "hex serial": "sn: " + L,
+        # an EIGHT-character serial in an identity string: long enough for
+        # IDN_RE's {8,} and too short for the 16-hex rule. Without this the
+        # identity rule has no shape of its own, which is exactly what the
+        # blind leg caught.
+        "identity string": "*IDN? -> " + "DAQiFi,Nq1," + "FEEDFACE" + ",1.0",
+        "absolute Windows path": "saved under " + "/mnt/" + "c" + "/Users/x",
+        "bench lane name": "captured by the " + "nq" + "-a" + " bench lane",
     }
-    for label, (want_rule, text) in owners.items():
-        rules = {rule for _rel, _ln, rule, _tok in violations_in(text)}
-        assert want_rule in rules, f"{label}: {want_rule!r} did not fire ({rules})"
+    table = [name for name, _p, _a in RULES]
+    assert set(exclusive) == set(table), (
+        "every rule needs an exclusive sample; missing %r, stale %r"
+        % (sorted(set(table) - set(exclusive)),
+           sorted(set(exclusive) - set(table))))
+    for name, text in exclusive.items():
+        fired = {rule for _rel, _ln, rule, _tok in violations_in(text)}
+        assert fired == {name}, (
+            "%s: expected only that rule to fire, got %r" % (name, fired))
+
+
+def test_a_float_is_flagged_and_then_ALLOWLISTED():
+    """Under DY=A the floats are not excluded by pattern -- they match and
+    are forgiven. Pinning that distinction keeps the mechanism honest: if
+    someone 'tidies' the allowlist away and adds an exclusion instead, the
+    four rounds of lookaround churn start again.
+    """
+    for text in ("voltage = 1.2345678901234567",
+                 "sample = 0.1234567890123457",
+                 "scale = .2345678901234567",
+                 "scale = 2345678901234567."):
+        # the HEX rule really does match it ...
+        tokens = HEX_SN_RE.findall(text)
+        assert tokens, f"expected a match in {text!r}"
+        # ... and every token it found is forgiven by the allowlist
+        assert all(tok in ALLOWED_HEX_SNS for tok in tokens), tokens
+        # so the scan reports nothing
+        assert not violations_in(text)
 
 
 def test_scan_actually_reads_files():
