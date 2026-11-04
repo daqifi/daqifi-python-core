@@ -18,7 +18,6 @@ every other refusal on the path still applies, which the last test here pins.
 import importlib.util
 import os
 import shutil
-import threading
 
 import pytest
 
@@ -97,7 +96,7 @@ def _run(service, device, **kwargs):
     return progress
 
 
-def test_without_the_flag_an_up_to_date_module_is_not_flashed(clock=None) -> None:
+def test_without_the_flag_an_up_to_date_module_is_not_flashed() -> None:
     """The control: today's behaviour, unchanged.
 
     Here so the next change to this path has to keep it. A flag that silently
@@ -114,7 +113,7 @@ def test_without_the_flag_an_up_to_date_module_is_not_flashed(clock=None) -> Non
     assert complete and "already up to date" in complete[-1].current_operation.lower()
 
 
-def test_with_the_flag_an_up_to_date_module_is_flashed(clock=None) -> None:
+def test_with_the_flag_an_up_to_date_module_is_flashed() -> None:
     """THE #190 REGRESSION. Fails on main: the parameter does not exist, so
     the call raises TypeError; once it exists but is ignored, the module is
     still skipped and FWUpdate is never sent."""
@@ -136,7 +135,7 @@ def test_with_the_flag_an_up_to_date_module_is_flashed(clock=None) -> None:
     assert "already up to date" not in complete[-1].current_operation.lower()
 
 
-def test_the_flag_overrides_only_the_version_check(clock=None) -> None:
+def test_the_flag_overrides_only_the_version_check() -> None:
     """⛔ THE ARM IS NOT WIDER THAN THE DEFECT.
 
     `skip_version_check` reaches the version check and nothing else. A device
