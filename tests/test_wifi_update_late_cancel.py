@@ -24,7 +24,6 @@ import threading
 import pytest
 
 from daqifi.enums import FirmwareUpdateState
-from daqifi.firmware.external_process import ExternalProcessResult
 from daqifi.firmware.update_events import (
     FirmwareUpdateCancelledError,
     FirmwareUpdateException,
@@ -78,7 +77,7 @@ class _CancellingRunner:
 
 
 def _run(device, runner, cancel):
-    """(states, service) for one update_wifi_module call against the fakes.
+    """The states observed during one update_wifi_module call against the fakes.
 
     `state_changed` is a single callable, not a list -- same wiring as
     test_pic32_flash_safety's observer.
@@ -100,7 +99,7 @@ def _run(device, runner, cancel):
         svc.update_wifi_module(device, firmware_dir, cancel_event=cancel)
     finally:
         shutil.rmtree(firmware_dir, ignore_errors=True)
-    return states, svc
+    return states
 
 
 def test_a_cancel_during_the_flash_still_completes_and_restores_lan(clock) -> None:
@@ -110,7 +109,7 @@ def test_a_cancel_during_the_flash_still_completes_and_restores_lan(clock) -> No
     device = _b._FirmwareModel(clock)
     runner = _CancellingRunner(cancel, _b._result())
 
-    states, _svc = _run(device, runner, cancel)
+    states = _run(device, runner, cancel)
 
     # The flash ran and the cancel really was pending by the time it returned.
     assert runner.calls == 1
