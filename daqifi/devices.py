@@ -404,6 +404,9 @@ class DaqifiDevice:
         # same safety guarantee (the bug never silently corrupts
         # state), strictly better failure mode for debugging.
         # Mirrors the fix expected upstream in daqifi-core#186.
+        # That owner field now answers "does this thread hold the lock",
+        # which two rules read: who may nest an exchange, and who must
+        # defer a status event instead of delivering it.
         self._text_exchange_lock = threading.Lock()
         # Guards the consumer/session/status handoff between connect(),
         # disconnect() and the transport-loss handler, which runs on the
@@ -419,8 +422,6 @@ class DaqifiDevice:
         # aside even when both ended up on the same transport session.
         self._connect_generation = 0
         self._text_exchange_lock_owner: Optional[int] = None
-        # Thread running an _exclusive_sd_operation (it holds the lock), and
-        # whether one of its text exchanges is in progress.
         # The thread currently inside a CAPTURE, if any -- text or raw.
         # ⛔ PER THREAD, not a device-wide flag: _exclusive_sd_operation
         # reads this BEFORE taking the lock, so a plain flag made one
@@ -2091,7 +2092,9 @@ class DaqifiDevice:
 
         Called by whichever frame releases the lock, in its ``finally``, so
         a failure on the way out still delivers. Never called with the lock
-        held -- that is the whole point.
+        held -- that is the whole point, and it is also why the drain
+        terminates: nothing can queue while the lock is released, so the
+        list only shrinks.
         """
         while True:
             with self._state_lock:
@@ -3062,17 +3065,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
         if consumer is not None and was_running:
             stopped = consumer.stop_safely()
             if stopped is False:
-                # `stop_safely` returns False for two different reasons,
-                # and only one of them used to be named here: called from
-                # the consumer thread (it can't `.join()` itself), or the
-                # join timed out with the thread still alive. The first is
-                # now refused once and for all in
-                # `_acquire_text_exchange_lock`, which every path into this
-                # method passes through (`@_exclusive_sd_operation`), so
-                # what reaches here is the second. Refuse it too: capturing
-                # from the raw stream while the consumer thread is still
-                # reading the same stream is the interleaving the lock
-                # exists to prevent.
+                # `stop_safely` returns False for TWO reasons: called from
+                # the consumer thread, or the join timed out with the
+                # thread still alive. The first is refused upstream in
+                # `_acquire_text_exchange_lock`, which every path here
+                # passes through, so this is the timeout. Refuse it too —
+                # capturing from a stream the consumer is still reading is
+                # the interleaving the lock exists to prevent.
                 raise RuntimeError(
                     "Cannot perform raw-capture SD-card operations: the "
                     "protobuf consumer did not stop within the timeout and "
