@@ -480,18 +480,17 @@ class DefaultFirmwareUpdateService:
     def _send_and_settle(self, device, message, delay, deadline) -> None:
         """Send a command the following delay depends on, then wait.
 
-        ⛔ A BARE send IS NOT ENOUGH HERE. ``DaqifiDevice.send`` parks a
-        command behind any other flow holding the device's exchange, so a
-        send followed by a wall-clock delay can start timing before the
-        command has reached the board -- and a ``disconnect()`` after the
-        delay discards the parked command outright, leaving the board in
-        application mode while the update waits for a bootloader that was
-        never asked for.
+        ⛔ A BARE send IS NOT ENOUGH HERE, and the reason outlived the
+        one it was written for. ``send()`` now blocks until the bytes are
+        out, so the delay no longer risks starting before the command
+        reaches the board. What remains is the DELAY itself: it is this
+        command's settling time -- a reboot, a mode change -- and another
+        flow's command landing inside it disturbs exactly the thing being
+        waited for. Owning the exchange across both the send and the wait
+        is what keeps the window clean.
 
-        Owning the device's exchange for the send makes it immediate, so
-        the delay measures what it is supposed to measure. The service's own
-        ``_operation_lock`` does NOT help: it serialises updates against
-        each other, not against the device's other flows.
+        The service's own ``_operation_lock`` does NOT help: it serialises
+        updates against each other, not against the device's other flows.
         """
         device.run_exclusive(lambda: device.send(message))
         if delay:

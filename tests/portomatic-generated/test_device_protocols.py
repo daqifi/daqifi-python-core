@@ -48,7 +48,7 @@ class TestDeviceProtocol:
             def remove_message_received(self, h): pass
             def connect(self): pass
             def disconnect(self): pass
-            def send(self, message, on_written=None): pass
+            def send(self, message): pass
 
         assert isinstance(_Stub(), Device)
 
@@ -81,7 +81,7 @@ class TestStreamingDeviceProtocol:
             def remove_message_received(self, h): pass
             def connect(self): pass
             def disconnect(self): pass
-            def send(self, message, on_written=None): pass
+            def send(self, message): pass
             def start_streaming(self): pass
             def stop_streaming(self): pass
 

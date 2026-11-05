@@ -86,6 +86,7 @@ from .exceptions import (
     PowerStateError,
     DeviceNotConnectedError,
     DeliveryFaultError,
+    ExchangeTimeoutError,
     SerialPortConnectError,
     SerialPortConnectFailure,
 )
@@ -130,6 +131,7 @@ __all__ = [
     'PowerStateError',
     'DeviceNotConnectedError',
     'DeliveryFaultError',
+    'ExchangeTimeoutError',
     'SerialPortConnectError',
     'SerialPortConnectFailure',
 ]

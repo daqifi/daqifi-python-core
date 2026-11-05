@@ -289,7 +289,7 @@ class TestStartSdCardLogging:
             real_send = sd.send
             seen: list = []
 
-            def failing_send(msg, on_written=None) -> None:
+            def failing_send(msg) -> None:
                 seen.append(getattr(msg, "data", str(msg)))
                 if "SD:FILE" in seen[-1]:
                     raise RuntimeError("simulated mid-sequence failure")

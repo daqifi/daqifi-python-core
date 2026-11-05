@@ -169,7 +169,7 @@ def test_a_cancelled_update_chains_a_public_cause(clock) -> None:
     device = _b._FirmwareModel(clock)
     real_send = device.send
 
-    def _send(message, on_written=None):
+    def _send(message):
         real_send(message)
         if (getattr(message, "data", None) or str(message)) == _b.FW_UPDATE:
             cancel.set()        # before the tool: an early cancel, honoured

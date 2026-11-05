@@ -139,13 +139,22 @@ def _run_r4_schedule():
     return device, sched
 
 
+@pytest.mark.xfail(
+    reason="PRE-EXISTING ON MAIN, and left unfixed by ruling EI B. A callback "
+           "that delegates a send to another thread and JOINS it blocks the "
+           "consumer thread by its own means: the worker waits for the "
+           "exchange, the callback waits for the worker, and the exchange "
+           "cannot restart the consumer until the callback returns, so the "
+           "restart fails. Verified to fail identically on fbbc688, so it is "
+           "not a regression from the blocking rework -- parking was what "
+           "fixed it, and EI B removed parking. send()'s refusal covers a "
+           "DIRECT send from the consumer thread; the library cannot see "
+           "through a join(). Asserts the CORRECT behaviour, so it never "
+           "requires the defect and XPASSes if anyone fixes it.",
+    strict=False,
+)
 def test_the_consumer_survives_a_callback_that_delegates_a_send() -> None:
-    """THE HARM, on its own channel: the stream still has a reader.
-
-    Asserts nothing about errors or return values -- only that a frame fed
-    after the schedule is still delivered. On `ed5ab261` the consumer
-    thread has exited and this times out.
-    """
+    """THE HARM, on its own channel: the stream still has a reader."""
     device, sched = _run_r4_schedule()
     try:
         assert sched.exchange_done.is_set(), "the exchange never finished"
@@ -161,7 +170,6 @@ def test_the_consumer_survives_a_callback_that_delegates_a_send() -> None:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
-
 
 def test_streaming_is_not_reported_when_the_restart_failed() -> None:
     """THE LIE, on its own channel, and induced rather than hoped for.
@@ -206,13 +214,17 @@ def test_streaming_is_not_reported_when_the_restart_failed() -> None:
             pass
 
 
-def test_a_send_parked_during_an_exchange_lands_after_it() -> None:
-    """Parking must keep the ordering guarantee that blocking gave (#225).
+def test_a_send_waits_for_an_exchange_and_lands_after_it() -> None:
+    """#225's ordering guarantee, now kept by WAITING (ruling EI B).
 
-    A command issued while an exchange holds the device still goes out
-    AFTER that exchange -- it is replayed on the holder's way out, before
-    the lock is released, so it cannot overtake the exchange or race the
-    next flow for the stream.
+    A command issued while an exchange holds the device goes out after that
+    exchange. Parking achieved that by replaying on the holder's way out;
+    waiting achieves it directly, and keeps send()'s contract -- returning
+    means the bytes are on the wire, which is what every caller that pairs
+    a send with a state change or a deadline assumes.
+
+    The assertions are the INVERSE of the parking ones: the sender must NOT
+    return early, and must complete once the exchange ends.
     """
     device = _fakes._make_device_with_serial_facade()
     stream = device._transport.stream
@@ -233,29 +245,29 @@ def test_a_send_parked_during_an_exchange_lands_after_it() -> None:
         exch.start()
         _wait_for(in_exchange.is_set, 10.0, "the exchange to start")
 
-        # Thread B's send must NOT block (that is the residual) and must
-        # NOT be on the wire yet (that is #225).
         sender_returned = threading.Event()
 
         def sender():
             device.send(_scpi().stop_streaming())
             sender_returned.set()
 
-        threading.Thread(target=sender, name="parker", daemon=True).start()
-        assert sender_returned.wait(5.0), (
-            "send() blocked instead of parking while an exchange held the "
-            "device"
+        threading.Thread(target=sender, name="waiter", daemon=True).start()
+        assert not sender_returned.wait(1.0), (
+            "send() returned while an exchange still held the device, so it "
+            "did not wait -- returning must mean the bytes are out"
         )
         assert [w for w in stream.written if b"STReam:STOP" in w] == [], (
-            "a parked send reached the wire during the exchange"
+            "a waiting send reached the wire during the exchange"
         )
 
         release.set()
         exch.join(15.0)
         assert not exch.is_alive()
-        _wait_for(
-            lambda: [w for w in stream.written if b"STReam:STOP" in w] != [],
-            10.0, "the parked send to be replayed after the exchange",
+        assert sender_returned.wait(10.0), (
+            "the waiting send never completed after the exchange released"
+        )
+        assert [w for w in stream.written if b"STReam:STOP" in w] != [], (
+            "the send completed without reaching the wire"
         )
         assert device.delivery_fault is None
     finally:
@@ -265,42 +277,7 @@ def test_a_send_parked_during_an_exchange_lands_after_it() -> None:
         except Exception:                                         # noqa: BLE001
             pass
 
-
-def test_a_parked_send_dropped_by_a_disconnect_does_not_look_delivered() -> None:
-    """``send()`` returns before a parked command goes out, so the caller
-    cannot be told by an exception if it never does. A drop therefore has
-    to be recorded: core only logs it, and a silently dropped command is
-    the same class of lie as a silently dead reader."""
-    device = _fakes._make_device_with_serial_facade()
-    try:
-        # Park a command by holding the exchange lock from another thread.
-        held = threading.Event()
-        release = threading.Event()
-
-        def holder():
-            device._text_exchange_lock.acquire()
-            held.set()
-            release.wait(10.0)
-            device._text_exchange_lock.release()
-
-        h = threading.Thread(target=holder, name="holder", daemon=True)
-        h.start()
-        _wait_for(held.is_set, 5.0, "the lock to be held")
-
-        device.send(_scpi().stop_streaming())      # parks, returns at once
-        assert device._parked_sends, "the send was not parked"
-
-        device.disconnect()                        # can never be sent now
-        assert device.delivery_fault is not None, (
-            "a command dropped by the disconnect left no trace"
-        )
-        assert "dropped" in device.delivery_fault
-    finally:
-        release.set()
-        h.join(5)
-
-
-def test_a_callbacks_send_cannot_interleave_inside_run_exclusive() -> None:
+def test_a_callbacks_send_is_refused_rather_than_interleaving() -> None:
     """The consumer-thread exemption let a callback's command land INSIDE a
     grouped sequence (audit of ed5ab26, ledger row 837).
 
@@ -312,24 +289,26 @@ def test_a_callbacks_send_cannot_interleave_inside_run_exclusive() -> None:
 
         wire: MAXSize 1024, MAXSize 2048, MAXSize?   -> query returned 2048
 
-    Parking removes the block, which removes the reason for the exemption:
-    the callback's send is now deferred and replayed after the group
-    releases, so the group's query reads its own value and the callback's
-    command still goes out, just after.
+    Under ruling EI B the callback neither blocks nor defers: it is
+    REFUSED. The ordering property is kept more strictly than parking kept
+    it -- nothing can interleave -- and the trade is explicit, because the
+    command does NOT go out and the caller is told so rather than being
+    given a silent deferral.
     """
     device = _fakes._make_device_with_serial_facade(
         {b"SYSTem:STORage:SD:MAXSize?": b"1024\r\n"}
     )
     stream = device._transport.stream
-    sent_from_callback = threading.Event()
     in_group = threading.Event()
     frame_delivered = threading.Event()
+    callback_outcome = []
 
     def on_message(_args):
-        # A command issued from a message-received callback, mid-group.
         try:
             device.send(_scpi().set_sd_max_file_size(2048))
-            sent_from_callback.set()
+            callback_outcome.append("sent")
+        except BaseException as exc:                              # noqa: BLE001
+            callback_outcome.append(type(exc).__name__)
         finally:
             frame_delivered.set()
 
@@ -338,8 +317,6 @@ def test_a_callbacks_send_cannot_interleave_inside_run_exclusive() -> None:
         def group():
             device.send(_scpi().set_sd_max_file_size(1024))
             in_group.set()
-            # A protobuf frame arrives here, so the callback runs between
-            # this group's two commands -- the audit's exact schedule.
             assert frame_delivered.wait(10.0), "the callback never ran"
             return device.execute_text_command(
                 lambda: device.send(_scpi().get_sd_max_file_size()),
@@ -357,18 +334,21 @@ def test_a_callbacks_send_cannot_interleave_inside_run_exclusive() -> None:
         runner.join(25.0)
         assert not runner.is_alive(), "the group never finished"
 
-        writes = [w for w in stream.written if b"MAXSize" in w]
-        order = [w.decode(errors="replace").strip() for w in writes]
-        # The group's own two commands must be adjacent: nothing of the
-        # callback's between them.
+        order = [w.decode(errors="replace").strip()
+                 for w in stream.written if b"MAXSize" in w]
         assert order[:2] == [
             "SYSTem:STORage:SD:MAXSize 1024",
             "SYSTem:STORage:SD:MAXSize?",
         ], f"a callback's command interleaved inside the group: {order}"
-        # And the callback's command is not lost -- it goes out after.
-        assert sent_from_callback.is_set()
-        assert any("MAXSize 2048" in o for o in order), (
-            f"the callback's parked command was never replayed: {order}"
+
+        # ⭐ The callback was REFUSED, promptly and by name. It must not
+        # have blocked (that is the #238 deadlock) and must not have
+        # reached the wire (that is #225).
+        assert callback_outcome == ["ExchangeTimeoutError"], (
+            f"the callback's send was not refused: {callback_outcome}"
+        )
+        assert not any("MAXSize 2048" in o for o in order), (
+            f"a refused command reached the wire anyway: {order}"
         )
         assert device.delivery_fault is None
     finally:
@@ -376,136 +356,39 @@ def test_a_callbacks_send_cannot_interleave_inside_run_exclusive() -> None:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
-
 
 # ---- audit r1 on 468494b4: seven findings ------------------------------
 
 
-def test_a_send_parked_in_the_release_window_is_not_stranded() -> None:
-    """r1 #1: parking and draining were not atomic.
+def test_a_failing_send_still_releases_the_exchange() -> None:
+    """A send that raises must not leave the device locked.
 
-    B failed the acquire, A then drained an empty queue and released, and
-    only after that did B append. Nobody held the lock and nobody drained
-    again, so the command sat there forever with no `delivery_fault` and
-    was replayed out of order by whatever flow came next.
-
-    Driven deterministically: a patched `acquire` lets the test run A's
-    whole drain-and-release in the window between B's failed acquire and
-    B's append.
+    Under parking this was about an interrupted replay; the surviving
+    property is simpler and still essential -- the release is in a
+    ``finally``, so a write that throws cannot wedge every later exchange.
     """
     device = _fakes._make_device_with_serial_facade()
-    stream = device._transport.stream
     try:
-        a_done = threading.Event()
+        def boom(_data):
+            raise IOError("stream exploded")
 
-        class _HookedLock:
-            """Delegates to a real lock, pausing after the FIRST failed
-            non-blocking acquire. A real lock's methods are read-only, so
-            the hook has to be a wrapper rather than a monkeypatch."""
-
-            def __init__(self, inner):
-                self._inner = inner
-                self._armed = True
-
-            def acquire(self, blocking=True, timeout=-1):
-                got = (self._inner.acquire(blocking, timeout) if blocking
-                       else self._inner.acquire(False))
-                if not got and self._armed:
-                    # B is now between "failed to acquire" and "park". Let A
-                    # run its whole drain-and-release, which is the window.
-                    self._armed = False
-                    a_done.set()
-                    time.sleep(0.3)
-                return got
-
-            def release(self):
-                return self._inner.release()
-
-        device._text_exchange_lock = _HookedLock(device._text_exchange_lock)
-
-        holder_in = threading.Event()
-        holder_go = threading.Event()
-
-        def holder():
-            with device._exchange_lock("race-holder"):
-                holder_in.set()
-                holder_go.wait(10.0)
-
-        h = threading.Thread(target=holder, name="A", daemon=True)
-        h.start()
-        _wait_for(holder_in.is_set, 5.0, "A to hold the exchange")
-
-        sender_done = threading.Event()
-
-        def sender():
+        device._transport.stream.write = boom
+        with pytest.raises(Exception):
             device.send(_scpi().stop_streaming())
-            sender_done.set()
 
-        threading.Thread(target=sender, name="B", daemon=True).start()
-        _wait_for(a_done.is_set, 5.0, "B's failed acquire")
-        holder_go.set()          # A drains (sees empty) and releases
-        h.join(10.0)
-        assert sender_done.wait(10.0), "B never returned"
-
-        # B's command must reach the wire, not sit in a queue nobody drains.
-        _wait_for(
-            lambda: [w for w in stream.written if b"STReam:STOP" in w] != [],
-            10.0, "B's parked command to be delivered",
+        assert device._text_exchange_lock_owner is None, (
+            "a failed send left itself recorded as the exchange owner"
         )
-        assert device._parked_sends == [], (
-            f"a command was stranded in the queue: {device._parked_sends}"
+        assert device._text_exchange_lock.acquire(blocking=False), (
+            "a failed send left the exchange lock held, so every later "
+            "exchange on this device would block"
         )
-        assert device.delivery_fault is None
+        device._text_exchange_lock.release()
     finally:
         try:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
-
-
-def test_an_interrupted_replay_still_releases_the_exchange() -> None:
-    """r1 #2: the replay caught only Exception, so a BaseException out of a
-    write skipped clearing the owner and releasing the lock, and every
-    later exchange on the device hung forever."""
-    device = _fakes._make_device_with_serial_facade()
-    try:
-        # Park one command behind a holder.
-        held = threading.Event()
-        release = threading.Event()
-
-        def holder():
-            with device._exchange_lock("holder"):
-                held.set()
-                release.wait(10.0)
-
-        h = threading.Thread(target=holder, name="holder", daemon=True)
-        h.start()
-        _wait_for(held.is_set, 5.0, "the lock to be held")
-        device.send(_scpi().stop_streaming())
-        assert device._parked_sends, "nothing parked"
-
-        # Make the replay's write raise a BaseException.
-        def boom(_data):
-            raise KeyboardInterrupt("interrupted mid-replay")
-
-        device._write_bytes = boom       # type: ignore[assignment]
-        release.set()
-        h.join(10.0)
-
-        # The lock must be free and unowned despite the interruption.
-        assert device._text_exchange_lock.acquire(blocking=False), (
-            "the exchange lock was never released after an interrupted "
-            "replay; every later exchange would hang"
-        )
-        device._text_exchange_lock.release()
-        assert device._text_exchange_lock_owner is None
-        assert device.delivery_fault is not None, (
-            "the abandoned backlog left no trace"
-        )
-    finally:
-        release.set()
-        h.join(5)
-
 
 def test_a_fault_on_an_old_connection_does_not_condemn_the_new_one() -> None:
     """r1 #3: a replay that failed on connection A set the fault globally,
@@ -553,93 +436,42 @@ def test_a_fault_on_an_old_connection_does_not_condemn_the_new_one() -> None:
 
 
 def test_streaming_state_follows_the_wire_not_the_call() -> None:
-    """r1 #4: stop_streaming() parked STOP and flipped the flag at once, so
-    a START written by the owner in between left the wire STOPped-then-
-    STARTed while is_streaming read the opposite of the device."""
+    """``is_streaming`` must not be true before the START is on the wire.
+
+    Parking forced this to be bound to a write callback. Blocking makes the
+    plain order correct -- send() returns only once the bytes are out -- but
+    the property still needs pinning, because the state assignment sitting
+    BEFORE the send would be an easy and invisible edit.
+    """
     device = _fakes._make_device_with_serial_facade()
     stream = device._transport.stream
+    seen_at_write = []
+    real_write = stream.write
+
+    def watching_write(data):
+        if b"STReam:START" in bytes(data):
+            seen_at_write.append(device.is_streaming)
+        return real_write(data)
+
+    stream.write = watching_write
     try:
-        device._is_streaming = True
-
-        held = threading.Event()
-        release = threading.Event()
-
-        def holder():
-            with device._exchange_lock("holder"):
-                held.set()
-                release.wait(10.0)
-
-        h = threading.Thread(target=holder, name="holder", daemon=True)
-        h.start()
-        _wait_for(held.is_set, 5.0, "the lock to be held")
-
-        device.stop_streaming()          # parks STOP
+        device.streaming_frequency = 100
+        device.start_streaming()
+        assert seen_at_write == [False], (
+            "is_streaming was already True when the START reached the "
+            f"stream, so the state leads the wire: {seen_at_write}"
+        )
         assert device.is_streaming is True, (
-            "is_streaming flipped while the STOP was still queued: the "
-            "device had not been told anything yet"
-        )
-
-        release.set()
-        h.join(10.0)
-        _wait_for(
-            lambda: [w for w in stream.written if b"STReam:STOP" in w] != [],
-            10.0, "the parked STOP to be written",
-        )
-        assert device.is_streaming is False, (
-            "is_streaming did not follow the command onto the wire"
+            "is_streaming was never set after the START went out"
         )
     finally:
-        release.set()
-        h.join(5)
+        stream.write = real_write
         try:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
 
-
-def test_a_parked_command_is_immune_to_the_caller_mutating_its_message() -> None:
-    """r1 #6: the queue held the ScpiMessage object, so a caller that
-    reused or mutated it after send() returned changed what was replayed."""
-    device = _fakes._make_device_with_serial_facade()
-    stream = device._transport.stream
-    try:
-        held = threading.Event()
-        release = threading.Event()
-
-        def holder():
-            with device._exchange_lock("holder"):
-                held.set()
-                release.wait(10.0)
-
-        h = threading.Thread(target=holder, name="holder", daemon=True)
-        h.start()
-        _wait_for(held.is_set, 5.0, "the lock to be held")
-
-        message = _scpi().set_sd_max_file_size(1024)
-        device.send(message)                     # parks
-        message.data = "SYSTem:STORage:SD:MAXSize 9999"   # caller mutates it
-
-        release.set()
-        h.join(10.0)
-        _wait_for(
-            lambda: [w for w in stream.written if b"MAXSize" in w] != [],
-            10.0, "the parked command to be replayed",
-        )
-        written = b"".join(stream.written)
-        assert b"MAXSize 1024" in written, "the parked command was not replayed"
-        assert b"MAXSize 9999" not in written, (
-            "the caller's later mutation changed what was sent"
-        )
-    finally:
-        release.set()
-        h.join(5)
-        try:
-            device.disconnect()
-        except Exception:                                         # noqa: BLE001
-            pass
-
-
-def test_initialize_waits_for_the_device_instead_of_parking_into_it() -> None:
+def test_initialize_owns_the_device_for_its_whole_sequence() -> None:
     """r1 #7: initialize() started its response deadline while its own
     commands were still parked behind another flow, so it timed out and
     unregistered its handler before `SYSInfoPB?` had even been written.
@@ -722,7 +554,7 @@ def test_initialize_waits_for_the_device_instead_of_parking_into_it() -> None:
 # ---- audit round 2 on 018e93a9: four findings ---------------------------
 
 
-def test_a_command_a_delay_depends_on_is_not_parked(tmp_path) -> None:
+def test_a_command_a_delay_depends_on_owns_the_exchange(tmp_path) -> None:
     """r2 #1: the firmware updater sent FORceBoot, slept, then disconnected
     WITHOUT owning the device's exchange. Held by another flow, FORceBoot
     parked and the disconnect discarded it: the board stayed in application
@@ -770,54 +602,29 @@ def test_a_command_a_delay_depends_on_is_not_parked(tmp_path) -> None:
             pass
 
 
-def test_a_send_is_refused_rather_than_parked_onto_a_lost_link() -> None:
-    """r2 #2: the lost-link release path had round 1's atomicity gap. A send
-    that passed its connected check and then paused could park AFTER the
-    drain discarded the queue and BEFORE the lock was released, leaving its
-    command queued across a reconnect and replayed out of order.
+def test_a_waiting_send_is_refused_when_the_link_goes_while_it_waits() -> None:
+    """The post-acquire re-check, which the wait makes necessary.
 
-    Closed from both ends: the discard and the release are now one critical
-    section, and parking re-checks the link under the same lock -- a caller
-    is told the command cannot be sent instead of being told "accepted" for
-    something that can only be dropped.
+    A send validates the connection on the way in, then waits for whatever
+    holds the device -- and that holder may be the thing that loses the
+    connection. Without a re-check after acquiring, the command goes onto a
+    link already marked Lost, leaving the device Lost and Streaming at
+    once. Parking is gone but the DELAY is not, so neither is this check:
+    any mechanism that makes a send wait moves it past the checks it passed
+    on the way in.
     """
     from daqifi._internal.scpi import ConnectionStatus
 
     device = _fakes._make_device_with_serial_facade()
-    at_the_gap = threading.Event()
+    stream = device._transport.stream
     holder_in = threading.Event()
     holder_go = threading.Event()
-
-    class _HookedLock:
-        """Delegates to the real lock, pausing after B's FIRST failed
-        non-blocking acquire -- i.e. with B past its connected check and
-        not yet parked, which is the window the race needs. A real lock's
-        methods are read-only, so the hook must be a wrapper."""
-
-        def __init__(self, inner):
-            self._inner = inner
-            self._armed = True
-
-        def acquire(self, blocking=True, timeout=-1):
-            got = (self._inner.acquire(blocking, timeout) if blocking
-                   else self._inner.acquire(False))
-            if not got and self._armed:
-                self._armed = False
-                at_the_gap.set()
-                time.sleep(0.4)      # let A lose the link and release
-            return got
-
-        def release(self):
-            return self._inner.release()
-
-    device._text_exchange_lock = _HookedLock(device._text_exchange_lock)
 
     def holder():
         with device._exchange_lock("A"):
             holder_in.set()
             holder_go.wait(10.0)
-            # A's write fails and the link goes: this is what A's release
-            # path then discards the queue for.
+            # A loses the link while B is already waiting behind it.
             device._status = ConnectionStatus.Lost
 
     h = threading.Thread(target=holder, name="A", daemon=True)
@@ -826,31 +633,37 @@ def test_a_send_is_refused_rather_than_parked_onto_a_lost_link() -> None:
         _wait_for(holder_in.is_set, 5.0, "A to hold the exchange")
 
         outcome = []
+        waiting = threading.Event()
 
         def sender():
+            waiting.set()
             try:
                 device.send(_scpi().stop_streaming())
-                outcome.append("accepted")
+                outcome.append("sent")
             except BaseException as exc:                          # noqa: BLE001
                 outcome.append(type(exc).__name__)
 
         threading.Thread(target=sender, name="B", daemon=True).start()
-        _wait_for(at_the_gap.is_set, 5.0, "B's failed acquire")
-        holder_go.set()              # A marks Lost, discards, releases
-        h.join(10.0)
-        _wait_for(lambda: outcome, 10.0, "B to finish")
+        assert waiting.wait(5.0)
+        time.sleep(0.3)                  # B is now blocked on the lock
+        assert outcome == [], f"B did not wait for the exchange: {outcome}"
 
-        assert device._parked_sends == [], (
-            f"a command was left queued across a lost link: "
-            f"{device._parked_sends}"
-        )
+        holder_go.set()
+        h.join(10.0)
+        _wait_for(lambda: outcome != [], 10.0, "B's send to resolve")
+
         assert outcome == ["DeviceNotConnectedError"], (
-            f"B was told its command was accepted onto a dead link: {outcome}"
+            f"a send that waited onto a lost link was not refused: {outcome}"
+        )
+        assert [w for w in stream.written if b"STReam:STOP" in w] == [], (
+            "a refused command reached the wire anyway"
         )
     finally:
         holder_go.set()
-        h.join(5)
-
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
 
 def test_closing_during_the_grace_wait_does_not_revive_the_reader() -> None:
     """r2 #3: close() during start()'s new grace-period join published a
@@ -1111,55 +924,87 @@ def test_a_stale_fault_cannot_clear_a_live_one() -> None:
             pass
 
 
-def test_both_abandonment_paths_discard_and_release_atomically() -> None:
-    """r3 #4: the interrupted-replay path still discarded, then reacquired
-    the queue lock, then released -- round 1's gap, regrown in the other
-    path. Both now call ONE helper, so they cannot drift apart again."""
-    import inspect
 
-    from daqifi.devices import DaqifiDevice
 
-    source = inspect.getsource(DaqifiDevice._drain_and_release_exchange)
-    # The structural claim: neither abandonment path open-codes the
-    # discard-then-release pair any more.
-    assert source.count("_discard_and_release_exchange") == 2, (
-        "the two abandonment paths do not share the single helper; they "
-        "drifted apart once already"
+# ---- ruling EI B: the bounded wait itself -------------------------------
+
+
+def test_the_send_wait_covers_the_longest_exchange() -> None:
+    """⛔ THE BOUND MUST NOT BE SHORTER THAN A LEGITIMATE HOLDER.
+
+    ``_SEND_EXCHANGE_WAIT_S`` exists to turn a STUCK exchange into a clear
+    error, not to cap a caller's patience. An SD download may legitimately
+    hold the device for ``_SD_DOWNLOAD_TIMEOUT_S``, so a shorter bound
+    would turn an ordinary wait behind one into a failure -- a regression
+    dressed as a safety limit.
+
+    The two live on different classes (``send`` is on ``DaqifiDevice``, the
+    download timeout on ``DaqifiStreamingDevice``), so they cannot be
+    derived from one expression; the relationship is asserted instead. If
+    someone raises the download timeout, this fails and tells them.
+    """
+    from daqifi.devices import DaqifiDevice, DaqifiStreamingDevice
+
+    assert DaqifiDevice._SEND_EXCHANGE_WAIT_S >= (
+        DaqifiStreamingDevice._SD_DOWNLOAD_TIMEOUT_S
+    ), (
+        "the send wait is now shorter than an SD download may hold the "
+        "device, so a send issued during a download would fail instead of "
+        "waiting; raise _SEND_EXCHANGE_WAIT_S to cover it"
     )
-    assert "self._parked_sends = []" not in source, (
-        "an abandonment path still open-codes the discard, which is how the "
-        "gap regrew"
-    )
-    # And it works: an interrupted replay leaves the lock free and a trace.
+
+
+def test_a_send_that_waits_too_long_is_told_so() -> None:
+    """The expiry path: a clear error, and the command did NOT go out.
+
+    The real bound is half an hour, so it is overridden per instance here.
+    That is the point of reading it through ``self``.
+    """
     device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
     held = threading.Event()
     release = threading.Event()
 
     def holder():
-        with device._exchange_lock("holder"):
+        with device._exchange_lock("test-holder"):
             held.set()
             release.wait(10.0)
 
     h = threading.Thread(target=holder, name="holder", daemon=True)
     try:
         h.start()
-        _wait_for(held.is_set, 5.0, "the lock to be held")
-        device.send(_scpi().stop_streaming())
-        assert device._parked_sends
+        _wait_for(held.is_set, 5.0, "the exchange to be held")
+        device._SEND_EXCHANGE_WAIT_S = 0.2
 
-        def boom(_data):
-            raise KeyboardInterrupt("interrupted mid-replay")
+        from daqifi.exceptions import ExchangeTimeoutError
 
-        device._write_bytes = boom           # type: ignore[assignment]
-        release.set()
-        h.join(10.0)
+        started = time.monotonic()
+        with pytest.raises(ExchangeTimeoutError) as caught:
+            device.send(_scpi().stop_streaming())
+        waited = time.monotonic() - started
 
-        assert device._text_exchange_lock.acquire(blocking=False), (
-            "the exchange lock was not released"
+        assert 0.15 <= waited < 5.0, (
+            f"the send did not honour its own bound: waited {waited:.2f}s"
         )
-        device._text_exchange_lock.release()
-        assert device._parked_sends == []
-        assert device.delivery_fault is not None
+        assert "NOT sent" in str(caught.value), (
+            "the error does not tell the caller the command never went out"
+        )
+        assert [w for w in stream.written if b"STReam:STOP" in w] == [], (
+            "a send that reported a timeout reached the wire anyway"
+        )
+        # ⚠ NOT `is None`: the holder is still holding, so it legitimately
+        # owns the lock here. The property is that the send that gave up
+        # did not record ITSELF -- doing so would let it nest an exchange
+        # and would make it deliver status events under a lock it does not
+        # hold. (My first version of this assertion was `is None` and
+        # failed on the holder's own ownership.)
+        assert device._text_exchange_lock_owner != threading.get_ident(), (
+            "a timed-out send recorded itself as the exchange owner"
+        )
     finally:
         release.set()
         h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass

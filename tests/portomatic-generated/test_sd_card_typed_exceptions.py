@@ -363,7 +363,7 @@ def _make_streaming_dev_with_canned_reply(reply_bytes: bytes):
     stream = t._stream
     enqueued = {"value": False}
 
-    def fake_send(message, on_written=None):
+    def fake_send(message):
         # The listing first drains the error queue with SYSTem:ERRor?
         # queries (#188): an empty queue answers 0. The canned reply goes
         # to the LIST? itself.
