@@ -472,6 +472,21 @@ class ProtobufMessageParser:
         unsound for exactly the same reason: a fragment of a real body
         decodes, so a decode at an offset is not evidence about the bytes
         before it. See the audit trail on #231.
+
+        ⭐ AND YET THE RESIDUAL IS UNREACHABLE FOR OUTPUT THIS DEVICE CAN
+        PRODUCE, which is why it is left alone rather than fixed. The
+        overlap needs a body beginning ``AQIFI> ``, and a protobuf body
+        begins with a TAG byte: ``0x41`` means field 8 with wire type 1,
+        while field 8 is ``device_status``, a uint32, so the encoder emits
+        ``0x40``. No field in this schema yields ``0x41``, so no real frame
+        starts with these bytes.
+
+        ⛔ That is a property of the SCHEMA, not a structural one. Add a
+        double, fixed64 or sfixed64 numbered 8 and ``0x41`` becomes
+        emittable and all of the above goes live.
+        ``test_no_real_frame_body_can_begin_with_the_prompts_second_byte``
+        derives the emittable tags from the compiled descriptor and fails
+        on the day that happens. Do not delete it without reopening #231.
         """
         n = self._take_matching_echo(remaining)
         if n:

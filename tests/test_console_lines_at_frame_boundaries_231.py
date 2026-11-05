@@ -888,3 +888,103 @@ def test_no_echo_is_registered_while_a_capture_owns_the_stream() -> None:
             device.disconnect()
         except Exception:
             pass
+
+
+def _tag_bytes_the_encoder_can_emit() -> dict:
+    """First body byte protobuf actually emits for each field, by asking
+    the encoder rather than by tabulating wire types by hand.
+
+    One field is set at a time and the message serialized; the first byte
+    of the result is that field's tag as the real encoder writes it, which
+    covers packed repeated fields without any special-casing here.
+    """
+    from google.protobuf.descriptor import FieldDescriptor as FD
+
+    def _repeated(field) -> bool:
+        # `.label` is deprecated in current protobuf and `is_repeated()`
+        # does not exist in the oldest one this package supports
+        # (python_requires >= 3.9), so prefer the new accessor and fall
+        # back rather than emitting a DeprecationWarning per field.
+        # ⚠ It is a PROPERTY in protobuf 6.x and a METHOD in others, so a
+        # `callable()` test alone silently fell through to the deprecated
+        # `.label` and kept emitting the warning it was added to avoid.
+        probe = getattr(field, "is_repeated", None)
+        if isinstance(probe, bool):
+            return probe
+        if callable(probe):
+            return bool(probe())
+        return field.label == FD.LABEL_REPEATED
+
+    emitted = {}
+    for field in DaqifiOutMessage.DESCRIPTOR.fields:
+        msg = DaqifiOutMessage()
+        try:
+            if _repeated(field):
+                if field.type == FD.TYPE_MESSAGE:
+                    getattr(msg, field.name).add()
+                elif field.type in (FD.TYPE_STRING,):
+                    getattr(msg, field.name).append("x")
+                elif field.type in (FD.TYPE_BYTES,):
+                    getattr(msg, field.name).append(b"x")
+                else:
+                    getattr(msg, field.name).append(1)
+            elif field.type == FD.TYPE_MESSAGE:
+                getattr(msg, field.name).SetInParent()
+            elif field.type == FD.TYPE_STRING:
+                setattr(msg, field.name, "x")
+            elif field.type == FD.TYPE_BYTES:
+                setattr(msg, field.name, b"x")
+            elif field.type == FD.TYPE_BOOL:
+                setattr(msg, field.name, True)
+            else:
+                setattr(msg, field.name, 1)
+        except Exception:                                    # noqa: BLE001
+            continue
+        raw = msg.SerializeToString()
+        if raw:
+            emitted[raw[0]] = field.name
+    return emitted
+
+
+def test_no_real_frame_body_can_begin_with_the_prompts_second_byte() -> None:
+    """⛔ THE GUARD ON THE ACCEPTED RESIDUAL at ``_take_console_noise``.
+
+    The whole prompt-versus-frame overlap needs ``DAQIFI> `` to be readable
+    as a frame: length ``0x44`` = 68, then a body beginning ``AQIFI> ``. A
+    protobuf body begins with a TAG byte, and ``0x41`` ('A') means field 8
+    with wire type 1 (fixed64). Field 8 is ``device_status``, a uint32, so
+    the encoder emits ``0x40`` — and no other field in this schema yields
+    ``0x41``. So no frame the firmware can produce has a body starting
+    ``AQIFI> ``, and the residual is unreachable for schema-conformant
+    output rather than merely improbable.
+
+    ⚠ That is a property of THIS SCHEMA, not a structural one. Add a
+    64-bit field numbered 8 — a double, fixed64 or sfixed64 — and ``0x41``
+    becomes emittable and the residual goes LIVE, including its worst form:
+    emitting a message that was never sent. This test is here to fail on
+    the day that happens, which is the only warning anyone will get.
+    """
+    emitted = _tag_bytes_the_encoder_can_emit()
+
+    # Positive control: a probe that silently set nothing would make the
+    # assertion below vacuous.
+    assert len(emitted) >= 10, (
+        f"only {len(emitted)} tag bytes were derived, so this test is not "
+        "actually exercising the schema"
+    )
+    assert 0x40 in emitted and emitted[0x40] == "device_status", (
+        "field 8 is no longer device_status-as-uint32; re-derive the "
+        "residual argument before trusting this guard"
+    )
+
+    prompt_second_byte = ProtobufMessageParser._CONSOLE_PROMPT[1]
+    assert prompt_second_byte == 0x41
+    assert prompt_second_byte not in emitted, (
+        f"0x41 is now emittable as a first body byte (field "
+        f"{emitted.get(prompt_second_byte)!r}), so a REAL frame can begin "
+        f"with the bytes {bytes(ProtobufMessageParser._CONSOLE_PROMPT)!r}. "
+        "The #231 residual documented on _take_console_noise is no longer "
+        "unreachable: taking the prompt while the frame reading is merely "
+        "incomplete can now destroy a real frame and emit a fabricated "
+        "message. Reopen it."
+    )
