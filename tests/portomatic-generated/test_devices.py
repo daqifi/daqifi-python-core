@@ -497,7 +497,7 @@ class TestStreamInterfaceAutoPin:
         # PR #75 /agentic_review pass 2 bug #4).
         original_send = dev.send
 
-        def synthetic_send(msg):
+        def synthetic_send(msg, on_written=None):
             text = msg.data if hasattr(msg, "data") else str(msg)
             result = original_send(msg)
             if "SYSInfoPB" in text:
@@ -559,7 +559,7 @@ class TestInitializeFailureUnwindsHandlerSubscription:
         original_send = dev.send
         call_count = [0]
 
-        def flaky_send(msg):
+        def flaky_send(msg, on_written=None):
             call_count[0] += 1
             if call_count[0] == 4:
                 raise RuntimeError("simulated mid-init failure")
@@ -580,7 +580,7 @@ class TestInitializeFailureUnwindsHandlerSubscription:
         original_send = dev.send
         first_attempt = [True]
 
-        def fail_first_attempt(msg):
+        def fail_first_attempt(msg, on_written=None):
             text = msg.data if hasattr(msg, "data") else str(msg)
             if first_attempt[0] and "STReam:FORmat" in text:
                 raise RuntimeError("first-attempt failure")
@@ -607,7 +607,7 @@ class TestInitializeFailureUnwindsHandlerSubscription:
         version skipped these; the finally-block version handles all."""
         original_send = dev.send
 
-        def interrupt_send(msg):
+        def interrupt_send(msg, on_written=None):
             text = msg.data if hasattr(msg, "data") else str(msg)
             if "STReam:FORmat" in text:
                 raise KeyboardInterrupt("simulated")
@@ -681,7 +681,7 @@ class TestSilentInitDetection:
         dev.connect()
         original_send = dev.send
 
-        def synthetic_send(msg):
+        def synthetic_send(msg, on_written=None):
             text = msg.data if hasattr(msg, "data") else str(msg)
             result = original_send(msg)
             if "SYSInfoPB" in text:

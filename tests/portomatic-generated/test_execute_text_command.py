@@ -461,7 +461,7 @@ def _drain_errors_dev_with_replies(replies: list[bytes]):
     # buffer, mimicking a device that responds promptly to SYST:ERR?.
     original_send = dev.send
 
-    def fake_send(message):
+    def fake_send(message, on_written=None):
         if queue:
             stream.feed(queue.pop(0))
         # Don't actually attempt to write — the fake stream's write
@@ -559,7 +559,7 @@ def test_drain_errors_bails_on_consecutive_empty_replies():
     empty/unparseable replies → bail with sentinel (queue inconclusive)."""
     # Stream is never fed anything — every send results in empty reply.
     dev = _make_dev_with_consumer()
-    dev.send = lambda message: None  # no-op send
+    dev.send = lambda message, on_written=None: None  # no-op send
 
     popped = dev.drain_errors(
         max_iterations=256,
@@ -588,7 +588,7 @@ def test_drain_errors_sentinel_parses_as_non_zero_scpi_error():
 
     # Trigger the sentinel by exhausting empty_budget.
     dev = _make_dev_with_consumer()
-    dev.send = lambda message: None  # no-op send → empty replies
+    dev.send = lambda message, on_written=None: None  # no-op send → empty replies
 
     popped = dev.drain_errors(
         max_iterations=10,

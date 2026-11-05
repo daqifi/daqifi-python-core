@@ -376,3 +376,326 @@ def test_a_callbacks_send_cannot_interleave_inside_run_exclusive() -> None:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
+
+
+# ---- audit r1 on 468494b4: seven findings ------------------------------
+
+
+def test_a_send_parked_in_the_release_window_is_not_stranded() -> None:
+    """r1 #1: parking and draining were not atomic.
+
+    B failed the acquire, A then drained an empty queue and released, and
+    only after that did B append. Nobody held the lock and nobody drained
+    again, so the command sat there forever with no `delivery_fault` and
+    was replayed out of order by whatever flow came next.
+
+    Driven deterministically: a patched `acquire` lets the test run A's
+    whole drain-and-release in the window between B's failed acquire and
+    B's append.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    try:
+        a_done = threading.Event()
+
+        class _HookedLock:
+            """Delegates to a real lock, pausing after the FIRST failed
+            non-blocking acquire. A real lock's methods are read-only, so
+            the hook has to be a wrapper rather than a monkeypatch."""
+
+            def __init__(self, inner):
+                self._inner = inner
+                self._armed = True
+
+            def acquire(self, blocking=True, timeout=-1):
+                got = (self._inner.acquire(blocking, timeout) if blocking
+                       else self._inner.acquire(False))
+                if not got and self._armed:
+                    # B is now between "failed to acquire" and "park". Let A
+                    # run its whole drain-and-release, which is the window.
+                    self._armed = False
+                    a_done.set()
+                    time.sleep(0.3)
+                return got
+
+            def release(self):
+                return self._inner.release()
+
+        device._text_exchange_lock = _HookedLock(device._text_exchange_lock)
+
+        holder_in = threading.Event()
+        holder_go = threading.Event()
+
+        def holder():
+            with device._exchange_lock("race-holder"):
+                holder_in.set()
+                holder_go.wait(10.0)
+
+        h = threading.Thread(target=holder, name="A", daemon=True)
+        h.start()
+        _wait_for(holder_in.is_set, 5.0, "A to hold the exchange")
+
+        sender_done = threading.Event()
+
+        def sender():
+            device.send(_scpi().stop_streaming())
+            sender_done.set()
+
+        threading.Thread(target=sender, name="B", daemon=True).start()
+        _wait_for(a_done.is_set, 5.0, "B's failed acquire")
+        holder_go.set()          # A drains (sees empty) and releases
+        h.join(10.0)
+        assert sender_done.wait(10.0), "B never returned"
+
+        # B's command must reach the wire, not sit in a queue nobody drains.
+        _wait_for(
+            lambda: [w for w in stream.written if b"STReam:STOP" in w] != [],
+            10.0, "B's parked command to be delivered",
+        )
+        assert device._parked_sends == [], (
+            f"a command was stranded in the queue: {device._parked_sends}"
+        )
+        assert device.delivery_fault is None
+    finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_an_interrupted_replay_still_releases_the_exchange() -> None:
+    """r1 #2: the replay caught only Exception, so a BaseException out of a
+    write skipped clearing the owner and releasing the lock, and every
+    later exchange on the device hung forever."""
+    device = _fakes._make_device_with_serial_facade()
+    try:
+        # Park one command behind a holder.
+        held = threading.Event()
+        release = threading.Event()
+
+        def holder():
+            with device._exchange_lock("holder"):
+                held.set()
+                release.wait(10.0)
+
+        h = threading.Thread(target=holder, name="holder", daemon=True)
+        h.start()
+        _wait_for(held.is_set, 5.0, "the lock to be held")
+        device.send(_scpi().stop_streaming())
+        assert device._parked_sends, "nothing parked"
+
+        # Make the replay's write raise a BaseException.
+        def boom(_data):
+            raise KeyboardInterrupt("interrupted mid-replay")
+
+        device._write_bytes = boom       # type: ignore[assignment]
+        release.set()
+        h.join(10.0)
+
+        # The lock must be free and unowned despite the interruption.
+        assert device._text_exchange_lock.acquire(blocking=False), (
+            "the exchange lock was never released after an interrupted "
+            "replay; every later exchange would hang"
+        )
+        device._text_exchange_lock.release()
+        assert device._text_exchange_lock_owner is None
+        assert device.delivery_fault is not None, (
+            "the abandoned backlog left no trace"
+        )
+    finally:
+        release.set()
+        h.join(5)
+
+
+def test_a_fault_on_an_old_connection_does_not_condemn_the_new_one() -> None:
+    """r1 #3: a replay that failed on connection A set the fault globally,
+    so a reconnected device -- Connected, healthy, a fresh reader -- raised
+    DeliveryFaultError from start_streaming()."""
+    from daqifi.exceptions import DeliveryFaultError
+
+    device = _fakes._make_device_with_serial_facade()
+    try:
+        # A fault recorded against the CURRENT connection applies.
+        device._record_delivery_fault("induced", device._connect_generation)
+        assert device.delivery_fault is not None
+        with pytest.raises(DeliveryFaultError):
+            device.start_streaming()
+
+        # The same fault, recorded against an OLDER connection, does not.
+        device._record_delivery_fault("induced", device._connect_generation - 1)
+        assert device.delivery_fault is None, (
+            "a fault from a replaced connection condemned the live one"
+        )
+        assert device.is_streaming is False or True   # no raise expected
+    finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_streaming_state_follows_the_wire_not_the_call() -> None:
+    """r1 #4: stop_streaming() parked STOP and flipped the flag at once, so
+    a START written by the owner in between left the wire STOPped-then-
+    STARTed while is_streaming read the opposite of the device."""
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    try:
+        device._is_streaming = True
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def holder():
+            with device._exchange_lock("holder"):
+                held.set()
+                release.wait(10.0)
+
+        h = threading.Thread(target=holder, name="holder", daemon=True)
+        h.start()
+        _wait_for(held.is_set, 5.0, "the lock to be held")
+
+        device.stop_streaming()          # parks STOP
+        assert device.is_streaming is True, (
+            "is_streaming flipped while the STOP was still queued: the "
+            "device had not been told anything yet"
+        )
+
+        release.set()
+        h.join(10.0)
+        _wait_for(
+            lambda: [w for w in stream.written if b"STReam:STOP" in w] != [],
+            10.0, "the parked STOP to be written",
+        )
+        assert device.is_streaming is False, (
+            "is_streaming did not follow the command onto the wire"
+        )
+    finally:
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_a_parked_command_is_immune_to_the_caller_mutating_its_message() -> None:
+    """r1 #6: the queue held the ScpiMessage object, so a caller that
+    reused or mutated it after send() returned changed what was replayed."""
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    try:
+        held = threading.Event()
+        release = threading.Event()
+
+        def holder():
+            with device._exchange_lock("holder"):
+                held.set()
+                release.wait(10.0)
+
+        h = threading.Thread(target=holder, name="holder", daemon=True)
+        h.start()
+        _wait_for(held.is_set, 5.0, "the lock to be held")
+
+        message = _scpi().set_sd_max_file_size(1024)
+        device.send(message)                     # parks
+        message.data = "SYSTem:STORage:SD:MAXSize 9999"   # caller mutates it
+
+        release.set()
+        h.join(10.0)
+        _wait_for(
+            lambda: [w for w in stream.written if b"MAXSize" in w] != [],
+            10.0, "the parked command to be replayed",
+        )
+        written = b"".join(stream.written)
+        assert b"MAXSize 1024" in written, "the parked command was not replayed"
+        assert b"MAXSize 9999" not in written, (
+            "the caller's later mutation changed what was sent"
+        )
+    finally:
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_initialize_waits_for_the_device_instead_of_parking_into_it() -> None:
+    """r1 #7: initialize() started its response deadline while its own
+    commands were still parked behind another flow, so it timed out and
+    unregistered its handler before `SYSInfoPB?` had even been written.
+
+    It now OWNS the exchange for the whole sequence, which is what the
+    sequence assumed all along. Observable without timing games: while
+    another flow holds the device, initialize must have written NOTHING --
+    if it were parking it would have queued all six commands and moved on
+    to its deadline.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    held = threading.Event()
+    release = threading.Event()
+    init_done = threading.Event()
+
+    def holder():
+        with device._exchange_lock("holder"):
+            held.set()
+            release.wait(10.0)
+
+    h = threading.Thread(target=holder, name="holder", daemon=True)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "the lock to be held")
+        writes_before = len(stream.written)
+
+        def do_init():
+            try:
+                device.initialize(response_timeout_s=0.3)
+            except Exception:                                     # noqa: BLE001
+                pass
+            finally:
+                init_done.set()
+
+        threading.Thread(target=do_init, name="init", daemon=True).start()
+        time.sleep(0.6)      # twice the response timeout
+
+        assert not init_done.is_set(), (
+            "initialize() ran to completion while another flow held the "
+            "device: its commands were parked and its deadline expired "
+            "before they were ever written"
+        )
+        assert stream.written[writes_before:] == [], (
+            "initialize() queued commands instead of waiting for the device"
+        )
+
+        release.set()
+        h.join(10.0)
+        assert init_done.wait(15.0), "initialize() never finished"
+        assert [w for w in stream.written if b"ECHO" in w or b"SYSInfoPB" in w], (
+            "initialize() wrote nothing even after the device was free"
+        )
+    finally:
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+# r1 #5 (a text capture robbed by a reader that had not exited) has NO test
+# here, deliberately, and that is a gap rather than a claim of coverage.
+#
+# The fix is a REVERT: an earlier revision of this branch removed the second
+# bounded join in _execute_text_command_locked, reasoning that stop() "can
+# neither join itself nor force the exit". That is true only when the caller
+# IS the reader; from any other thread stop() joins for another second, and
+# the audit demonstrated empirically that that second is what stops the old
+# reader consuming the text reply (it returned [] instead of the answer).
+#
+# Two constructions were tried here and NEITHER discriminated: one where the
+# stalled read returns the data (the reader consumes it either way, so the
+# second join cannot help) and one where it times out (the capture succeeds
+# on the defective head too). A test that passes on both sides is not a
+# control, so it is not here. The evidence for this fix is the audit's own
+# reproduction plus the pre-existing behaviour it restores.

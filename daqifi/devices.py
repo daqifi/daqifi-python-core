@@ -438,13 +438,25 @@ class DaqifiDevice:
         # by whoever releases it (see _deliver_status_event).
         self._pending_status_events: List[DeviceStatusEventArgs] = []
         # Sends that arrived while another flow held the exchange, replayed
-        # in order by that flow on its way out (see _park_send).
-        self._parked_sends: List[Any] = []
+        # in order by that flow on its way out (see _park_send). Entries are
+        # (bytes, on_written) -- BYTES, so a caller mutating its message
+        # object after send() returned cannot change what is replayed.
+        self._parked_sends: List[Tuple[bytes, Optional[Callable[[], None]]]] = []
+        # ⛔ Guards _parked_sends AND the two handoffs that must be atomic
+        # against each other: "fail to take the exchange, then park", and
+        # "find the queue empty, then release the exchange". Without one
+        # lock over both, a send can park in the window after the holder
+        # saw an empty queue, and nothing ever drains it.
+        self._queue_lock = threading.Lock()
         # Set when something the device was told to do provably did not
         # happen: a dropped or failed parked send, or a consumer that could
         # not be restarted. Read by is_streaming / start_streaming so they
         # cannot report success over a dead pipeline.
         self._delivery_fault: Optional[str] = None
+        # The connect generation the fault belongs to. A replay that fails
+        # on a connection that has since been replaced must not condemn the
+        # NEW one, which is live and healthy.
+        self._delivery_fault_generation: Optional[int] = None
 
         if transport is not None:
             transport.add_status_changed(self._on_transport_status_changed)
@@ -641,6 +653,7 @@ class DaqifiDevice:
                     # -- and only here, so the fault cannot be lost by
                     # anything short of actually reconnecting.
                     self._delivery_fault = None
+                    self._delivery_fault_generation = None
             if superseded:
                 # A nested connect() (from a status handler, during the
                 # teardown above) already established a newer connection;
@@ -802,7 +815,9 @@ class DaqifiDevice:
             self._is_initialized = False
             self._is_disconnecting = False
 
-    def send(self, message: Any) -> None:
+    def send(
+        self, message: Any, on_written: Optional[Callable[[], None]] = None
+    ) -> None:
         """Send an outbound message.
 
         Mirrors the C# ``Send<T>(IOutboundMessage<T>)`` -- only
@@ -850,6 +865,8 @@ class DaqifiDevice:
         if self._text_exchange_lock_owner == tid:
             # Ours already: the exchange's own setup_action is what sends.
             self._write_message(message)
+            if on_written is not None:
+                on_written()
             return
         # ⛔ NO EXEMPTION FOR THE CONSUMER THREAD. It used to send straight
         # out from here, because BLOCKING on that thread was the dangerous
@@ -872,9 +889,21 @@ class DaqifiDevice:
         # The ordering callers rely on is unchanged: the holder replays the
         # backlog, in order, on its way out, so a command issued during an
         # exchange still goes out after it.
-        if not self._text_exchange_lock.acquire(blocking=False):
-            self._park_send(message)
-            return
+        # The attempt and the park are ONE critical section: see
+        # _drain_and_release_exchange for why splitting them strands a
+        # command forever.
+        data = (
+            message.get_bytes() if isinstance(message, ScpiMessage) else None
+        )
+        with self._queue_lock:
+            if not self._text_exchange_lock.acquire(blocking=False):
+                if data is None:
+                    raise NotImplementedError(
+                        "Direct message sending without a string-typed "
+                        "ScpiMessage is not yet implemented."
+                    )
+                self._park_send(data, on_written)
+                return
         # _text_exchange_lock_owner means exactly "this thread holds the
         # exchange lock", and two rules read it: who may nest an exchange,
         # and who must defer status events instead of delivering them (see
@@ -906,12 +935,13 @@ class DaqifiDevice:
                     ),
                 )
             self._write_message(message)
+            if on_written is not None:
+                on_written()
         finally:
-            # Replay BEFORE the release, so the backlog goes out as part
-            # of this flow rather than racing the next one for the stream.
-            self._replay_parked_sends()
-            self._text_exchange_lock_owner = None
-            self._text_exchange_lock.release()
+            # Replay BEFORE the release, so the backlog goes out as part of
+            # this flow rather than racing the next one for the stream; the
+            # drain and the release are atomic against parking.
+            self._drain_and_release_exchange()
             # Outside the lock, always: a queued status event runs user
             # callbacks. See _flush_pending_status_events.
             self._flush_pending_status_events()
@@ -927,93 +957,117 @@ class DaqifiDevice:
         true of only the first.
         """
         if isinstance(message, ScpiMessage):
-            data = message.get_bytes()
-            # Read once, under the lock connect() bumps the generation
-            # with: disconnect() on another thread closes the stream under
-            # no lock this path takes (upstream baabf0c), and the
-            # generation tells this connection from a newer one on the
-            # same transport object. connect() bumps it before installing
-            # the new stream, so the pair read here is consistent.
-            with self._state_lock:
-                generation = self._connect_generation
-                transport = self._transport
-                try:
-                    stream = transport.stream if transport is not None else None
-                except Exception:
-                    # A closed transport's getter raises.
-                    stream = None
-            if stream is None:
-                if self._shutting_down_since(transport, generation, None):
-                    raise DeviceNotConnectedError(
-                        "The message could not be sent: a disconnect completed "
-                        "while it was in flight.",
-                        is_shutting_down=True,
-                    )
-                raise NotImplementedError(
-                    "Sending without a transport-backed stream is not supported."
-                )
-            # Loop on partial writes — unbuffered file-like objects
-            # (sock.makefile with buffering=0) may write fewer bytes
-            # than requested per call. Without the loop, the tail of
-            # the SCPI command can be silently dropped (Qodo PR 17
-            # pass 8 #4). On any write failure, transition the device
-            # to Lost/Error so callers don't keep using a zombie
-            # connection (Qodo PR 17 pass 24 #2).
-            try:
-                view = memoryview(data)
-                total_written = 0
-                while total_written < len(data):
-                    written = stream.write(view[total_written:])
-                    if written is None:
-                        # `RawIOBase.write` returns None when the
-                        # underlying stream would block — that means
-                        # zero bytes were written, NOT "wrote
-                        # everything." Surface as IOError rather than
-                        # silently dropping the rest of the SCPI
-                        # command (Qodo PR 17 pass 11 #2).
-                        raise IOError(
-                            f"Stream.write() returned None at offset "
-                            f"{total_written} of {len(data)}; cannot "
-                            f"verify SCPI command was fully transmitted."
-                        )
-                    if written <= 0:
-                        raise IOError(
-                            f"Stream write returned {written}; aborting "
-                            f"after {total_written} of {len(data)} bytes."
-                        )
-                    total_written += written
-                try:
-                    stream.flush()
-                except AttributeError:
-                    pass
-            except Exception as exc:
-                # Decided and applied under the lock connect() bumps the
-                # generation with, so no disconnect/reconnect can land
-                # between the check and the Lost transition.
-                with self._state_lock:
-                    stale = self._shutting_down_since(transport, generation, stream)
-                    evt = None
-                    if not stale:
-                        evt = self._change_status(ConnectionStatus.Lost)
-                        self._state = DeviceState.Error
-                if stale:
-                    # A disconnect on another thread closed the stream under
-                    # this write, or a reconnect has replaced it since: an
-                    # expected race, not a loss of the current link. The
-                    # current status stands (upstream baabf0c).
-                    raise DeviceNotConnectedError(
-                        "The message could not be sent: a disconnect was in "
-                        "progress and closed the connection.",
-                        is_shutting_down=True,
-                    ) from exc
-                if evt is not None:
-                    self._deliver_status_event(evt)
-                raise
-        else:
-            raise NotImplementedError(
-                "Direct message sending without a string-typed ScpiMessage is "
-                "not yet implemented."
+            # Serialized HERE, and parked as bytes, so a caller that mutates
+            # its ScpiMessage after send() returns cannot change what is
+            # actually replayed (the queue used to hold the object).
+            self._write_bytes(message.get_bytes())
+            return
+        raise NotImplementedError(
+            "Direct message sending without a string-typed ScpiMessage is "
+            "not yet implemented."
+        )
+
+    def _write_bytes(self, data: bytes) -> None:
+        """Put already-serialized bytes on the wire.
+
+        Split from :meth:`_write_message` because a parked command is held
+        as bytes: it must be immune to the caller mutating its message
+        object after ``send()`` has returned.
+
+        ⛔ Refuses a link that is gone, HERE, where the write is. Callers
+        checked this themselves and two successive rewrites of the replay
+        loop lost the check, each time putting a queued command onto a dead
+        connection. A guard beside the thing it guards gets dropped; one
+        inside it cannot.
+        """
+        if self._link_is_gone():
+            raise DeviceNotConnectedError(
+                "The message could not be sent: the connection is gone.",
+                is_shutting_down=bool(
+                    self._disposed or self._is_disconnecting
+                ),
             )
+        # Read once, under the lock connect() bumps the generation
+        # with: disconnect() on another thread closes the stream under
+        # no lock this path takes (upstream baabf0c), and the
+        # generation tells this connection from a newer one on the
+        # same transport object. connect() bumps it before installing
+        # the new stream, so the pair read here is consistent.
+        with self._state_lock:
+            generation = self._connect_generation
+            transport = self._transport
+            try:
+                stream = transport.stream if transport is not None else None
+            except Exception:
+                # A closed transport's getter raises.
+                stream = None
+        if stream is None:
+            if self._shutting_down_since(transport, generation, None):
+                raise DeviceNotConnectedError(
+                    "The message could not be sent: a disconnect completed "
+                    "while it was in flight.",
+                    is_shutting_down=True,
+                )
+            raise NotImplementedError(
+                "Sending without a transport-backed stream is not supported."
+            )
+        # Loop on partial writes — unbuffered file-like objects
+        # (sock.makefile with buffering=0) may write fewer bytes
+        # than requested per call. Without the loop, the tail of
+        # the SCPI command can be silently dropped (Qodo PR 17
+        # pass 8 #4). On any write failure, transition the device
+        # to Lost/Error so callers don't keep using a zombie
+        # connection (Qodo PR 17 pass 24 #2).
+        try:
+            view = memoryview(data)
+            total_written = 0
+            while total_written < len(data):
+                written = stream.write(view[total_written:])
+                if written is None:
+                    # `RawIOBase.write` returns None when the
+                    # underlying stream would block — that means
+                    # zero bytes were written, NOT "wrote
+                    # everything." Surface as IOError rather than
+                    # silently dropping the rest of the SCPI
+                    # command (Qodo PR 17 pass 11 #2).
+                    raise IOError(
+                        f"Stream.write() returned None at offset "
+                        f"{total_written} of {len(data)}; cannot "
+                        f"verify SCPI command was fully transmitted."
+                    )
+                if written <= 0:
+                    raise IOError(
+                        f"Stream write returned {written}; aborting "
+                        f"after {total_written} of {len(data)} bytes."
+                    )
+                total_written += written
+            try:
+                stream.flush()
+            except AttributeError:
+                pass
+        except Exception as exc:
+            # Decided and applied under the lock connect() bumps the
+            # generation with, so no disconnect/reconnect can land
+            # between the check and the Lost transition.
+            with self._state_lock:
+                stale = self._shutting_down_since(transport, generation, stream)
+                evt = None
+                if not stale:
+                    evt = self._change_status(ConnectionStatus.Lost)
+                    self._state = DeviceState.Error
+            if stale:
+                # A disconnect on another thread closed the stream under
+                # this write, or a reconnect has replaced it since: an
+                # expected race, not a loss of the current link. The
+                # current status stands (upstream baabf0c).
+                raise DeviceNotConnectedError(
+                    "The message could not be sent: a disconnect was in "
+                    "progress and closed the connection.",
+                    is_shutting_down=True,
+                ) from exc
+            if evt is not None:
+                self._deliver_status_event(evt)
+            raise
 
     def _shutting_down_since(
         self, transport: Any, generation: int, stream: Any
@@ -1191,10 +1245,9 @@ class DaqifiDevice:
             yield
         finally:
             # Order matters: replay the backlog while we still hold the
-            # lock, then release, then run user callbacks.
-            self._replay_parked_sends()
-            self._text_exchange_lock_owner = None
-            self._text_exchange_lock.release()
+            # lock, then release (atomically against parking), then run
+            # user callbacks.
+            self._drain_and_release_exchange()
             self._flush_pending_status_events()
 
     def execute_text_command(
@@ -1369,19 +1422,24 @@ class DaqifiDevice:
             try:
                 stopped = self._consumer.stop_safely()
                 if stopped is False:
-                    # The reader was asked to stop and has not exited yet
-                    # -- it is inside a message-received callback. Its
-                    # _is_running flag is already clear, so it WILL exit
-                    # once that callback returns, and start() below waits
-                    # out its grace period for exactly this case. Calling
-                    # stop() again cannot help (it can neither join itself
-                    # nor force the exit), so don't.
+                    # A SECOND bounded join, and it is load-bearing.
                     #
-                    # The comment that used to sit here called this
-                    # "degraded but not catastrophic". That was wrong: the
-                    # flag is clear, so a restart that fails leaves NOTHING
-                    # reading the stream, which is the #238 residual.
-                    pass
+                    # An earlier revision dropped this, reasoning that
+                    # stop() "can neither join itself nor force the exit".
+                    # That is true only when the caller IS the reader: from
+                    # any other thread stop() joins for another second, and
+                    # that second is what lets a reader whose read has just
+                    # timed out actually exit. Without it the text capture
+                    # below starts while the old protobuf reader is still
+                    # live, and the old reader consumes the text reply --
+                    # execute_text_command returned [] instead of the
+                    # device's answer. Measured, not reasoned.
+                    #
+                    # The comment before that called proceeding here
+                    # "degraded but not catastrophic", which was also
+                    # wrong: _is_running is already clear, so a restart
+                    # that fails leaves NOTHING reading the stream.
+                    self._consumer.stop()
             except Exception:
                 # The pause is best-effort only in the sense that a broken
                 # consumer must not stop the caller from capturing; a
@@ -1492,7 +1550,8 @@ class DaqifiDevice:
                     self._record_delivery_fault(
                         "the message consumer could not be restarted after "
                         f"a text exchange, so nothing is reading the "
-                        f"stream: {restart_exc}"
+                        f"stream: {restart_exc}",
+                        self._connect_generation,
                     )
                     _log.warning(
                         "consumer restart failed after a text exchange; "
@@ -1646,6 +1705,21 @@ class DaqifiDevice:
         return popped
 
     def initialize(self, response_timeout_s: Optional[float] = None) -> None:
+        # ⛔ OWNS THE EXCHANGE FOR THE WHOLE SEQUENCE. Its sends must reach
+        # the device before its response deadline starts, and send() parks
+        # behind any other flow holding the device -- so an unowned init
+        # could time out and unregister its handler before SYSInfoPB? had
+        # even been written. Owning the exchange makes every send here
+        # immediate, and makes the whole init atomic against other flows,
+        # which is what the sequence assumed all along. Re-entrant, so an
+        # init from inside an exchange this thread owns still works.
+        return self._run_exclusive(
+            lambda: self._initialize_locked(response_timeout_s), "initialize"
+        )
+
+    def _initialize_locked(
+        self, response_timeout_s: Optional[float] = None
+    ) -> None:
         """Run the standard SCPI init sequence.
 
         Ports the upstream ``InitializeAsync`` (sync here per project
@@ -2211,93 +2285,149 @@ class DaqifiDevice:
                                 ConnectionStatus.Disconnected)
         )
 
-    def _park_send(self, message: Any) -> None:
-        """Queue a send that arrived while another flow held the exchange.
+    def _park_send(
+        self, data: bytes, on_written: Optional[Callable[[], None]] = None
+    ) -> None:
+        """Queue an already-serialized command, to be replayed in order by
+        whichever flow holds the exchange, on its way out.
 
-        Replayed, in order, by that flow on its way out. Parking keeps the
-        backlog ordered against the exchange: a message sent straight out
-        while the backlog drains would overtake messages parked before it,
-        which is why :meth:`_replay_parked_sends` keeps parking until it
-        has finished.
-
-        ⛔ INVARIANT: the backlog is drained by whoever RELEASES the
-        exchange lock, so every acquisition must go through :meth:`send` or
-        :meth:`_exchange_lock`, which both drain. A raw
-        ``_text_exchange_lock.acquire()`` elsewhere would strand the
-        backlog until some later flow happened to release it.
+        ⛔ Callers must hold :attr:`_queue_lock` and must have just failed
+        to take the exchange lock under that same hold. The two have to be
+        one critical section: otherwise this appends in the window after
+        the holder has seen an empty queue, and nothing drains it again.
         """
-        with self._state_lock:
-            self._parked_sends.append(message)
+        self._parked_sends.append((data, on_written))
 
-    def _replay_parked_sends(self) -> None:
-        """Send everything parked while this flow held the exchange.
+    def _drain_and_release_exchange(self) -> None:
+        """Replay the backlog, then release the exchange lock.
 
-        Called by whichever frame releases the lock, BEFORE the release, so
-        the backlog goes out as part of the exchange rather than racing the
-        next one for the stream.
+        The emptiness check and the release happen in ONE
+        :attr:`_queue_lock` critical section, so a send cannot park
+        between them and be stranded.
 
-        A replay that fails is recorded on the device rather than only
-        logged: ``send()`` has already returned to its caller by then, so
-        the exception has nowhere to go, and a command that never reached
-        the device must not read as one that did (#238 residual).
+        Wrapped so that even a BaseException out of a write -- a
+        KeyboardInterrupt lands anywhere -- still releases the lock and
+        clears the owner. Leaving either behind wedges every later
+        exchange on this device.
         """
-        while True:
-            # Re-checked per message, not once: the exchange that queued
-            # these, or an earlier replay, may be what lost the link.
-            if self._link_is_gone():
+        released = False
+        in_flight = False     # a command popped but not yet written
+        try:
+            while True:
+                # Re-checked per message, not once: the exchange that queued
+                # these, or an earlier replay, may be what lost the link.
+                # ⛔ THIS CHECK HAS NOW BEEN LOST TWICE BY REWRITES OF THIS
+                # LOOP. It is also enforced inside _write_bytes, so losing
+                # it here degrades the report (a drop recorded as a write
+                # failure) rather than putting a command on a dead link.
+                if self._link_is_gone():
+                    self._discard_parked_sends(
+                        "the connection was lost before they could be sent"
+                    )
+                    with self._queue_lock:
+                        self._text_exchange_lock_owner = None
+                        self._text_exchange_lock.release()
+                        released = True
+                        return
+                with self._queue_lock:
+                    if not self._parked_sends:
+                        self._text_exchange_lock_owner = None
+                        self._text_exchange_lock.release()
+                        released = True
+                        return
+                    data, on_written = self._parked_sends.pop(0)
+                generation = self._connect_generation
+                in_flight = True
+                try:
+                    self._write_bytes(data)
+                except Exception as exc:
+                    in_flight = False
+                    self._record_delivery_fault(
+                        f"a command queued during an exchange could not be "
+                        f"sent: {exc}",
+                        generation,
+                    )
+                    _log.warning(
+                        "parked send failed after the exchange that queued "
+                        "it: %s", exc,
+                    )
+                else:
+                    in_flight = False
+                    if on_written is not None:
+                        # State paired with this command belongs to the
+                        # moment it reached the wire, not to the moment it
+                        # was queued.
+                        try:
+                            on_written()
+                        except Exception:
+                            _log.exception(
+                                "a parked send's post-write action raised"
+                            )
+        finally:
+            if not released:
+                # A BaseException escaped a write. Release regardless, and
+                # account for the backlog AND the one already popped --
+                # that one is no longer in the queue, so without the flag
+                # it would vanish with no trace at all.
+                if in_flight:
+                    self._record_delivery_fault(
+                        "a command queued during an exchange was lost when "
+                        "the exchange was interrupted",
+                        self._connect_generation,
+                    )
                 self._discard_parked_sends(
-                    "the connection was lost before they could be sent"
+                    "an interruption ended the exchange that queued them"
                 )
-                return
-            with self._state_lock:
-                if not self._parked_sends:
-                    return
-                message = self._parked_sends.pop(0)
-            try:
-                self._write_message(message)
-            except Exception as exc:
-                self._record_delivery_fault(
-                    f"a command queued during an exchange could not be "
-                    f"sent: {exc}"
-                )
-                _log.warning(
-                    "parked send failed after the exchange that queued it: "
-                    "%s", exc,
-                )
+                with self._queue_lock:
+                    self._text_exchange_lock_owner = None
+                    self._text_exchange_lock.release()
 
     def _discard_parked_sends(self, why: str) -> None:
         """Drop the backlog, recording it. Only for a device that can no
-        longer send at all -- the sends can never reach anything, but the
-        callers were told they would."""
-        with self._state_lock:
+        longer send at all -- the commands can never reach anything, but
+        their callers were told they would."""
+        generation = self._connect_generation
+        with self._queue_lock:
             dropped = len(self._parked_sends)
             self._parked_sends = []
         if dropped:
             self._record_delivery_fault(
                 f"{dropped} command(s) queued during an exchange were "
-                f"dropped: {why}"
+                f"dropped: {why}",
+                generation,
             )
-            _log.warning(
-                "dropped %d parked send(s): %s", dropped, why,
-            )
+            _log.warning("dropped %d parked send(s): %s", dropped, why)
 
-    def _record_delivery_fault(self, detail: str) -> None:
+    def _record_delivery_fault(self, detail: str, generation: int) -> None:
         """Remember that something the device was told to do never happened.
 
         The pipeline failing silently is the whole defect here, so a fault
-        is kept on the device where the calls that would otherwise misreport
-        consult it, not just written to a log nobody reads.
+        is kept on the device where the calls that would otherwise
+        misreport consult it, not just written to a log nobody reads.
+
+        Scoped to the connection that failed: a replay that fails on a
+        connection already replaced must not condemn its successor, which
+        is live. Recorded under ``generation``, and
+        :attr:`delivery_fault` ignores a fault from an older one.
         """
-        self._delivery_fault = detail
+        with self._state_lock:
+            self._delivery_fault = detail
+            self._delivery_fault_generation = generation
 
     @property
     def delivery_fault(self) -> Optional[str]:
-        """Why the device can no longer be trusted to have received what it
-        was told, or ``None``. Set when a queued command was dropped or
-        failed after ``send()`` returned, or when the message consumer
-        could not be restarted after an exchange. Cleared by a successful
-        :meth:`connect`."""
-        return self._delivery_fault
+        """Why THIS connection can no longer be trusted to have received
+        what it was told, or ``None``. Set when a queued command was
+        dropped or failed after ``send()`` returned, or when the message
+        consumer could not be restarted. A fault recorded against an
+        earlier connection does not apply here; a successful
+        :meth:`connect` also clears it."""
+        with self._state_lock:
+            if self._delivery_fault is None:
+                return None
+            if self._delivery_fault_generation != self._connect_generation:
+                return None
+            return self._delivery_fault
 
     def _flush_pending_status_events(self) -> None:
         """Deliver status events queued while the exchange lock was held.
@@ -2424,7 +2554,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
         but nothing is reading it or the start never reached the device,
         and answering True there is the misreport the #238 residual is
         about."""
-        return self._is_streaming and self._delivery_fault is None
+        return self._is_streaming and self.delivery_fault is None
 
     @property
     def streaming_frequency(self) -> int:
@@ -2448,12 +2578,24 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 to clear it.
         """
         self._raise_if_delivery_faulted("start_streaming")
-        self.send(scpi_commands.start_streaming(self._streaming_frequency))
-        self._is_streaming = True
-        self._set_state(DeviceState.Streaming)
+
+        def streaming_started() -> None:
+            self._is_streaming = True
+            self._set_state(DeviceState.Streaming)
+
+        # ⛔ State moves when the COMMAND DOES. send() may park this behind
+        # another flow's exchange, and flipping the flag at call time let
+        # the wire and the library disagree: a parked STOP replayed after a
+        # later START left the device stopped while is_streaming read True.
+        self.send(
+            scpi_commands.start_streaming(self._streaming_frequency),
+            on_written=streaming_started,
+        )
 
     def _raise_if_delivery_faulted(self, operation: str) -> None:
-        fault = self._delivery_fault
+        # The property, not the field: a fault recorded against a
+        # connection that has since been replaced does not apply here.
+        fault = self.delivery_fault
         if fault is not None:
             raise DeliveryFaultError(
                 f"{operation} cannot be trusted on this connection: "
@@ -2461,10 +2603,13 @@ class DaqifiStreamingDevice(DaqifiDevice):
             )
 
     def stop_streaming(self) -> None:
-        self.send(scpi_commands.stop_streaming())
-        self._is_streaming = False
-        if self._state == DeviceState.Streaming:
-            self._set_state(DeviceState.Ready)
+        def streaming_stopped() -> None:
+            self._is_streaming = False
+            if self._state == DeviceState.Streaming:
+                self._set_state(DeviceState.Ready)
+
+        # State moves when the command does -- see start_streaming.
+        self.send(scpi_commands.stop_streaming(), on_written=streaming_stopped)
 
     # ---- USB / transport-shape helpers -----------------------------------
 
@@ -2500,8 +2645,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
     def enable_sd_card_logging(self) -> None:
         """Low-level helper — enable the SD storage SCPI module only.
         Use :meth:`start_sd_card_logging` for the full Protocol flow."""
-        self.send(scpi_commands.enable_storage_sd())
-        self._is_logging_to_sd = True
+        # State moves when the command does -- see start_streaming.
+        self.send(
+            scpi_commands.enable_storage_sd(),
+            on_written=lambda: setattr(self, "_is_logging_to_sd", True),
+        )
         self._forget_sd_card_sizes()
 
     def connect(
@@ -2525,10 +2673,15 @@ class DaqifiStreamingDevice(DaqifiDevice):
     def disable_sd_card_logging(self) -> None:
         """Low-level helper — disable the SD storage SCPI module only.
         Use :meth:`stop_sd_card_logging` for the full Protocol flow."""
-        self.send(scpi_commands.disable_storage_sd())
-        if self._is_logging_to_sd:
-            self._forget_sd_card_sizes()
-        self._is_logging_to_sd = False
+        def sd_logging_disabled() -> None:
+            if self._is_logging_to_sd:
+                self._forget_sd_card_sizes()
+            self._is_logging_to_sd = False
+
+        # State moves when the command does -- see start_streaming.
+        self.send(
+            scpi_commands.disable_storage_sd(), on_written=sd_logging_disabled
+        )
 
     def set_sd_logging_file_name(self, file_name: str) -> None:
         self.send(scpi_commands.set_sd_logging_file_name(file_name))
@@ -3692,11 +3845,15 @@ class DaqifiStreamingDevice(DaqifiDevice):
         ``_is_logging_to_sd`` to keep ``is_logging_to_sd_card`` in
         sync with the firmware's actual state.
         """
+        def sd_released() -> None:
+            if self._is_logging_to_sd:
+                self._forget_sd_card_sizes()
+            self._is_logging_to_sd = False
+
         self.send(scpi_commands.disable_storage_sd())
-        self.send(scpi_commands.enable_network_lan())
-        if self._is_logging_to_sd:
-            self._forget_sd_card_sizes()
-        self._is_logging_to_sd = False
+        # The state belongs to the LAST command of the pair reaching the
+        # wire, not to this call returning -- see start_streaming.
+        self.send(scpi_commands.enable_network_lan(), on_written=sd_released)
 
     def prepare_sd_interface(self) -> None:
         """Hand the shared SPI bus to the SD card.

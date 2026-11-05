@@ -185,7 +185,7 @@ class _FirmwareModel(_f._FakeStreamingDevice):
         if self._replies is not None:
             self._replies.append(self._prompt + line)
 
-    def send(self, message):
+    def send(self, message, on_written=None):
         text = getattr(message, "data", None) or str(message)
         if text == self._drop:
             self._drop = None
@@ -323,7 +323,7 @@ def test_a_cancel_between_fwupdate_and_apply_does_not_leave_it_bridged(clock) ->
     device = _FirmwareModel(clock)
     real_send = device.send
 
-    def _send(message):
+    def _send(message, on_written=None):
         real_send(message)
         if (getattr(message, "data", None) or str(message)) == FW_UPDATE:
             cancel.set()
@@ -356,7 +356,7 @@ def test_an_apply_that_never_arrived_is_still_safe(clock) -> None:
 def _cancel_after(device, command, cancel):
     real_send = device.send
 
-    def _send(message):
+    def _send(message, on_written=None):
         real_send(message)
         if (getattr(message, "data", None) or str(message)) == command:
             cancel.set()
@@ -499,7 +499,7 @@ class _QuietUntilApply(_FirmwareModel):
         super().__init__(clock)
         self._swallow_next_error_query = True
 
-    def send(self, message):
+    def send(self, message, on_written=None):
         text = getattr(message, "data", None) or str(message)
         if text == ERR_QUERY and self._swallow_next_error_query:
             self._swallow_next_error_query = False
@@ -560,7 +560,7 @@ def test_recovery_on_a_board_that_dropped_to_standby_is_unconfirmed(clock) -> No
     device = _FirmwareModel(clock)
     real_send = device.send
 
-    def _send(message):
+    def _send(message, on_written=None):
         real_send(message)
         if (getattr(message, "data", None) or str(message)) == FW_UPDATE:
             device.powered = False
@@ -613,7 +613,7 @@ def test_a_second_ctrl_c_during_recovery_says_what_it_leaves(clock, caplog) -> N
     real_send = device.send
     exits = {"n": 0}
 
-    def _send(message):
+    def _send(message, on_written=None):
         if (getattr(message, "data", None) or str(message)) == BRIDGE_EXIT:
             exits["n"] += 1
             if exits["n"] == 1:
@@ -641,7 +641,7 @@ def test_ctrl_c_during_recovery_after_a_failed_tool_still_ends_failed(clock, cap
     device = _FirmwareModel(clock)
     real_send = device.send
 
-    def _send(message):
+    def _send(message, on_written=None):
         if (getattr(message, "data", None) or str(message)) == BRIDGE_EXIT:
             raise KeyboardInterrupt
         real_send(message)

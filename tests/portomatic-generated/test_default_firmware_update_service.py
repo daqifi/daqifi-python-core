@@ -278,7 +278,7 @@ class _FakeStreamingDevice:
         self.disconnect_calls += 1
         self.is_connected = False
 
-    def send(self, message) -> None:
+    def send(self, message, on_written=None) -> None:
         text = getattr(message, "data", None) or str(message)
         self.sent_commands.append(text)
 
