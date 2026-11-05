@@ -30,7 +30,7 @@ import pytest
 from daqifi._internal import scpi_commands
 from daqifi._internal.scpi import DeviceState
 from daqifi.communication import (
-    CompositeMessageParser,
+    ProtobufMessageParser,
     StreamMessageConsumer,
 )
 from daqifi.devices import (
@@ -296,7 +296,7 @@ def test_consumer_is_running_property_tracks_lifecycle(clean_device) -> None:
     """``is_running`` is False before start, True after start, False
     after a clean stop, and survives a restart."""
     serial_obj = clean_device.stream
-    parser = CompositeMessageParser(protobuf_factory=lambda b: bytes(b))
+    parser = ProtobufMessageParser(lambda b: bytes(b))
     consumer = StreamMessageConsumer(stream=serial_obj, message_parser=parser)
     try:
         assert consumer.is_running is False
@@ -329,7 +329,7 @@ class _NoConsumeParser:
 
     Forces ``StreamMessageConsumer._message_buffer`` to accumulate
     every byte that arrives so we can assert ``clear_buffer`` actually
-    drops them. The real ``CompositeMessageParser`` would chew through
+    drops them. The real ``ProtobufMessageParser`` would chew through
     streaming bytes immediately and ``queued_message_count`` would
     rarely be observably non-zero between reads."""
 

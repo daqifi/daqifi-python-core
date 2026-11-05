@@ -48,7 +48,7 @@ from daqifi._internal.serial_identity import (  # noqa: E402
     describe_serial_number,
     serial_number_matches,
 )
-from daqifi.communication import CompositeMessageParser, StreamMessageConsumer  # noqa: E402
+from daqifi.communication import ProtobufMessageParser, StreamMessageConsumer  # noqa: E402
 from daqifi.devices import DaqifiDeviceFactory  # noqa: E402
 
 
@@ -142,7 +142,7 @@ class _StreamHarness:
         def _factory(payload: bytes) -> DaqifiOutMessage:
             return DaqifiOutMessage.FromString(bytes(payload))
 
-        parser = CompositeMessageParser(protobuf_factory=_factory)
+        parser = ProtobufMessageParser(_factory)
         self.consumer = StreamMessageConsumer(
             stream=serial_obj, message_parser=parser, buffer_size=buffer_size,
         )

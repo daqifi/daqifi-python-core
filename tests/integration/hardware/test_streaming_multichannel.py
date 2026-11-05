@@ -29,7 +29,7 @@ import pytest
 from daqifi._internal import scpi_commands
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
 from daqifi.communication import (
-    CompositeMessageParser,
+    ProtobufMessageParser,
     StreamMessageConsumer,
 )
 
@@ -80,7 +80,7 @@ class _MultiChannelHarness:
     """Drives the production framing path at the byte level so the
     decode-failure rate is observable.
 
-    Uses production framing (:class:`CompositeMessageParser` and
+    Uses production framing (:class:`ProtobufMessageParser` and
     :class:`ProtobufMessageParser`) but a raw-bytes ``protobuf_factory``
     that never raises, so every length-prefix-passed payload reaches
     the handler — the handler then attempts the
@@ -93,7 +93,7 @@ class _MultiChannelHarness:
     *content-decode* rate, not the *post-resync framing* rate the
     production stack would expose.
 
-    :class:`CompositeMessageParser` can route a chunk through either
+    :class:`ProtobufMessageParser` can route a chunk through either
     its protobuf parser (payload type ``bytes`` / ``bytearray``) or
     its text parser (payload type ``str`` — SCPI replies, banner
     text, the ``DAQIFI>`` prompt). The handler counts the two
@@ -126,8 +126,7 @@ class _MultiChannelHarness:
         # so we can count decode failures explicitly. Using
         # ``DaqifiOutMessage.FromString`` here would silently drop
         # them inside the parser's try/except and hide the rate.
-        parser = CompositeMessageParser(
-            protobuf_factory=lambda payload: bytes(payload)
+        parser = ProtobufMessageParser(lambda payload: bytes(payload)
         )
         self.consumer: StreamMessageConsumer = StreamMessageConsumer(
             stream=serial_obj, message_parser=parser

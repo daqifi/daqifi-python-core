@@ -612,7 +612,16 @@ class DaqifiDevice:
             # raw-bytes passthrough or a custom proto class.
             consumer = StreamMessageConsumer[Any](
                 stream,
-                ProtobufMessageParser(message_factory=self._message_factory),
+                ProtobufMessageParser(
+                    message_factory=self._message_factory,
+                    # ⛔ WIRED, not merely available. A `**ERROR:` line is
+                    # noise to a FRAME parser but it is the device
+                    # reporting something, and skipping it without a sink
+                    # would drop it silently -- trading one silent failure
+                    # for another. Logged with the device's name so it is
+                    # attributable.
+                    console_error_sink=self._on_console_error,
+                ),
                 health_sink=self._transport_health_sink(session),
             )
             with self._state_lock:
@@ -861,6 +870,13 @@ class DaqifiDevice:
         """:meth:`send`'s body, with the exchange lock already settled."""
         if isinstance(message, ScpiMessage):
             data = message.get_bytes()
+            # The library knows what it just sent, which is the only sound
+            # basis for recognising an echo of it: #204's audit rounds
+            # showed no byte-level rule can tell a command line from the
+            # start of a length-prefixed frame. Tell the frame parser, so
+            # an echoed line at a frame boundary is skipped instead of
+            # being read as a length prefix (#231).
+            self._expect_console_echo(message)
             # Read once, under the lock connect() bumps the generation
             # with: disconnect() on another thread closes the stream under
             # no lock this path takes (upstream baabf0c), and the
@@ -978,6 +994,33 @@ class DaqifiDevice:
         except Exception:
             return True
         return current is not stream
+
+    def _on_console_error(self, line: str) -> None:
+        """A ``**ERROR:`` line the frame parser skipped.
+
+        The firmware's convention is that errors do not travel in the
+        stream and are read back with ``SYSTem:LOG?``; one that arrives
+        here anyway is still the device telling us something, so it is
+        reported rather than discarded.
+        """
+        _log.warning("device %s reported on the console: %s", self.name, line)
+
+    def _expect_console_echo(self, message: Any) -> None:
+        """Tell the active frame parser that ``message`` was just sent.
+
+        Best-effort and silent: a parser that does not take echoes (the
+        text capture's line parser) simply has no such method, and failing
+        to register an echo must never stop a command going out.
+        """
+        consumer = self._consumer
+        parser = getattr(consumer, "_parser", None) if consumer else None
+        expect = getattr(parser, "expect_console_echo", None)
+        if expect is None:
+            return
+        try:
+            expect(str(getattr(message, "data", "")))
+        except Exception:
+            pass
 
     def _on_consumer_thread(self) -> bool:
         """Whether the calling thread is the protobuf consumer's own thread,

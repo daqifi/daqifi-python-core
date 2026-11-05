@@ -27,7 +27,6 @@ __all__ = [
     "ObjectInboundMessage",
     "LineBasedMessageParser",
     "ProtobufMessageParser",
-    "CompositeMessageParser",
     "StreamConsumerTelemetry",
     "StreamMessageConsumer",
 ]
@@ -54,8 +53,8 @@ class ObjectInboundMessage:
     """Parsed inbound message carrying arbitrary object data.
 
     Ports the C# ``ObjectInboundMessage`` (defined alongside
-    :class:`CompositeMessageParser` in
-    ``Daqifi.Core/Communication/Consumers/CompositeMessageParser.cs``).
+    the consumer's parser is chosen by the caller for the mode the device
+    is in; there is no content-guessing router (#231).
     Same ``data`` shape as :class:`InboundMessage[object]` -- kept as its
     own concrete class for documentation clarity and to match upstream
     call sites (mirrors the :data:`TextInboundMessage` aliasing pattern).
@@ -242,8 +241,77 @@ class ProtobufMessageParser:
     once more bytes arrive.
     """
 
-    def __init__(self, message_factory: Callable[[bytes], object]) -> None:
+    #: Console lines that are noise to a frame parser. Matched ONLY as a
+    #: complete line at a frame boundary -- see _skip_console_line.
+    _CONSOLE_PROMPT = b"DAQIFI> "
+    _CONSOLE_ERROR_PREFIX = b"**ERROR: "
+    #: How many unacknowledged sent commands to remember. A reply normally
+    #: follows its echo immediately; the cap stops an unanswered command
+    #: from growing the list without bound.
+    _MAX_EXPECTED_ECHOES = 8
+
+    def __init__(
+        self,
+        message_factory: Callable[[bytes], object],
+        console_error_sink: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self._message_factory = message_factory
+        # Where a ``**ERROR:`` line goes. It is noise to this parser but it
+        # is the device reporting something, so it is handed on rather than
+        # dropped.
+        self._console_error_sink = console_error_sink
+        # Commands the library has sent and may see echoed back. Keyed on
+        # what was ACTUALLY sent: #204's audit rounds showed that no
+        # byte-level "does this look like a command" rule works, because on
+        # a length-prefixed protocol a printable byte is also a valid
+        # length or field tag.
+        self._expected_echoes: List[bytes] = []
+
+    def expect_console_echo(self, command: str) -> None:
+        """Note that ``command`` was just sent, so an exact echo of it at a
+        frame boundary may be skipped.
+
+        One-shot per call: the echo is forgotten once matched, so a payload
+        that later happens to contain the same bytes is not eaten.
+        """
+        line = command.strip().encode("ascii", errors="ignore")
+        if not line:
+            return
+        self._expected_echoes.append(line)
+        if len(self._expected_echoes) > self._MAX_EXPECTED_ECHOES:
+            del self._expected_echoes[0]
+
+    def _skip_console_line(self, remaining: bytes) -> int:
+        """Bytes of console noise at the START of ``remaining``, or 0.
+
+        ⛔ Called only at a frame boundary, and matches only a COMPLETE
+        line. Both limits are what keep this from eating a frame: a
+        partial frame's payload can contain printable runs, CRLF and
+        anything else, so the only safe rule is an exact whole-line match
+        of something known to be console output.
+        """
+        for echo in self._expected_echoes:
+            for ending in (b"\r\n", b"\n"):
+                if remaining.startswith(echo + ending):
+                    self._expected_echoes.remove(echo)
+                    return len(echo) + len(ending)
+        if remaining.startswith(self._CONSOLE_PROMPT):
+            return len(self._CONSOLE_PROMPT)
+        if remaining.startswith(self._CONSOLE_ERROR_PREFIX):
+            end = remaining.find(b"\n")
+            if end == -1:
+                # Still arriving: consuming it would lose what follows.
+                return 0
+            line = remaining[:end].rstrip(b"\r").decode(
+                "ascii", errors="replace"
+            )
+            if self._console_error_sink is not None:
+                try:
+                    self._console_error_sink(line)
+                except Exception:
+                    pass
+            return end + 1
+        return 0
 
     def parse_messages(
         self, data: bytes
@@ -266,6 +334,13 @@ class ProtobufMessageParser:
         # loop — we always advance ≥1 byte on failure.
         while current_index < len(data):
             remaining = data[current_index:]
+            # A frame boundary: the only place console noise can be told
+            # from payload at all.
+            noise = self._skip_console_line(remaining)
+            if noise:
+                current_index += noise
+                consumed_bytes = current_index
+                continue
             message_length, prefix_bytes, is_malformed = _try_read_length_prefix(
                 remaining
             )
@@ -364,159 +439,6 @@ class ProtobufMessageParser:
                 consumed_bytes = current_index
 
         return messages, consumed_bytes
-
-
-class _MessageTypeHint:
-    UNCERTAIN = 0
-    LIKELY_TEXT = 1
-    LIKELY_PROTOBUF = 2
-
-
-def _detect_message_type(data: bytes) -> int:
-    """Heuristic: choose between text and protobuf parsing for ``data``.
-
-    Sample the first 512 bytes rather than scanning the whole buffer.
-    The full-buffer pure-Python loop turns into an O(n²) per-dispatch
-    cost as the buffer grows; a 512-byte prefix is enough to make the
-    text-vs-protobuf decision because a protobuf frame's length-prefix
-    + payload header already lands inside that window (Qodo PR 17 pass
-    48 #1).
-    """
-    if len(data) == 0:
-        return _MessageTypeHint.UNCERTAIN
-
-    sample = data[:512]
-    sample_len = len(sample)
-
-    printable = sum(1 for b in sample if 32 <= b <= 126)
-    if printable / sample_len > 0.8:
-        return _MessageTypeHint.LIKELY_TEXT
-
-    if sample_len > 3 and _is_likely_text_command(sample):
-        return _MessageTypeHint.LIKELY_TEXT
-
-    null_ratio = sum(1 for b in sample if b == 0) / sample_len
-    if null_ratio > 0.1:
-        return _MessageTypeHint.LIKELY_PROTOBUF
-
-    if null_ratio > 0.05 and _is_likely_protobuf_data(sample):
-        return _MessageTypeHint.LIKELY_PROTOBUF
-
-    return _MessageTypeHint.UNCERTAIN
-
-
-def _is_likely_text_command(data: bytes) -> bool:
-    # Decoding only the first 10 bytes (vs the full buffer) is enough
-    # for the prefix tests, and the line-ending check is cheaper as a
-    # raw byte compare. Avoids allocating a full str for every framing
-    # decision in the hot path (Qodo PR 17 pass 29 #2).
-    head = data[:10].decode("ascii", errors="ignore")
-    head_upper = head.upper()
-    # SCPI commands are case-insensitive — match on head_upper for
-    # SYST/CONF/READ. `*` is literal (only standard form), so test
-    # against `head` directly (Qodo PR 17 pass 30 #2).
-    return (
-        head.startswith("*")
-        or head_upper.startswith("SYST")
-        or head_upper.startswith("CONF")
-        or head_upper.startswith("READ")
-        or data.endswith(b"\r\n")
-        or data.endswith(b"\n")
-    )
-
-
-def _is_likely_protobuf_data(data: bytes) -> bool:
-    if len(data) < 2:
-        return False
-    # Look for a plausible varint field tag in the first few bytes:
-    # wire type (low 3 bits) <= 5 and field number (high bits) > 0.
-    for i in range(min(len(data) - 1, 5)):
-        b = data[i]
-        if (b & 0x07) <= 5 and (b >> 3) > 0:
-            return True
-    return False
-
-
-class CompositeMessageParser:
-    """Parser that auto-routes between text (SCPI) and binary (protobuf).
-
-    Ports the C# ``CompositeMessageParser`` from
-    ``Daqifi.Core/Communication/Consumers/CompositeMessageParser.cs``.
-    When neither parser is supplied, defaults are constructed:
-    :class:`LineBasedMessageParser` for text and a
-    :class:`ProtobufMessageParser` whose ``message_factory`` is the
-    caller-supplied ``protobuf_factory`` (defaulting to a no-op factory
-    that returns the raw bytes -- the upstream pre-wires
-    ``ProtobufMessageParser`` to ``DaqifiOutMessage``; we can't, since
-    the project treats ``DaqifiOutMessage`` as duck-typed).
-
-    Output is always wrapped in :class:`ObjectInboundMessage`, matching
-    the upstream's ``IInboundMessage<object>`` shape.
-    """
-
-    def __init__(
-        self,
-        text_parser: Optional[LineBasedMessageParser] = None,
-        protobuf_parser: Optional[ProtobufMessageParser] = None,
-        protobuf_factory: Optional[Callable[[bytes], object]] = None,
-    ) -> None:
-        self._text_parser = text_parser or LineBasedMessageParser()
-        if protobuf_parser is not None:
-            self._protobuf_parser = protobuf_parser
-        else:
-            factory = protobuf_factory or (lambda b: b)
-            self._protobuf_parser = ProtobufMessageParser(factory)
-
-    def parse_messages(
-        self, data: bytes
-    ) -> Tuple[List[ObjectInboundMessage], int]:
-        if len(data) == 0:
-            return [], 0
-
-        hint = _detect_message_type(data)
-
-        # Critical: return whenever EITHER messages OR consumed > 0.
-        # A parser may legitimately advance through ignorable bytes
-        # (blank lines, malformed prefixes) without producing a
-        # message; dropping that progress causes the consumer's
-        # buffer to grow without bound (Qodo PR 17 pass 6 #1).
-        if hint == _MessageTypeHint.LIKELY_PROTOBUF:
-            wrapped, consumed = self._try_protobuf(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        if hint == _MessageTypeHint.LIKELY_TEXT:
-            wrapped, consumed = self._try_text(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        # Heuristics uncertain or first attempt failed -- try the other.
-        if hint != _MessageTypeHint.LIKELY_TEXT:
-            wrapped, consumed = self._try_text(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        if hint != _MessageTypeHint.LIKELY_PROTOBUF:
-            wrapped, consumed = self._try_protobuf(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        return [], 0
-
-    def _try_text(self, data: bytes) -> Tuple[List[ObjectInboundMessage], int]:
-        text_messages, consumed = self._text_parser.parse_messages(data)
-        # Return consumed even when no messages — caller decides whether
-        # to drain the buffer (see parse_messages dispatch above).
-        wrapped = [ObjectInboundMessage(data=m.data) for m in text_messages]
-        return wrapped, consumed
-
-    def _try_protobuf(
-        self, data: bytes
-    ) -> Tuple[List[ObjectInboundMessage], int]:
-        protobuf_messages, consumed = self._protobuf_parser.parse_messages(data)
-        # ProtobufMessageParser already wraps in ObjectInboundMessage.
-        # Return consumed even when no messages (see _try_text above).
-        return list(protobuf_messages), consumed
 
 
 # ---- StreamMessageConsumer ---------------------------------------------------

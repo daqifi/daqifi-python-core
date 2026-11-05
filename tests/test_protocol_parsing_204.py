@@ -18,7 +18,7 @@ from datetime import timedelta
 import pytest
 
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
-from daqifi.communication import CompositeMessageParser, ProtobufMessageParser
+from daqifi.communication import LineBasedMessageParser, ProtobufMessageParser
 from daqifi.timestamp import TimestampProcessor
 
 
@@ -35,12 +35,33 @@ def _frame(message) -> bytes:
     return bytes(out) + body
 
 
-def _composite():
-    return CompositeMessageParser(protobuf_factory=DaqifiOutMessage.FromString)
-
-
 def _protobuf():
+    """The parser a device in PROTOBUF mode uses -- what connect() installs."""
     return ProtobufMessageParser(DaqifiOutMessage.FromString)
+
+
+def _text():
+    """The parser a device in TEXT mode uses -- what execute_text_command
+    swaps in for the duration of a capture."""
+    return LineBasedMessageParser(line_ending="\n", emit_empty_lines=True)
+
+
+# ⭐ THE ACCEPTANCE SET IS CARRIED OVER, NOT WEAKENED -- but four of these
+# assertions used to run against CompositeMessageParser, which GUESSED
+# text-vs-protobuf from the bytes. That class is gone (#231): on a
+# length-prefixed protocol a printable byte is also a valid length or field
+# tag, so the guess could not be made sound, and two audit rounds of
+# attempts each either ate a partial frame or starved complete text.
+#
+# Every behaviour below is still asserted. What changed is that each one is
+# now asserted against the parser for the mode it belongs to, which is the
+# whole point of the ticket: the SAME ambiguous bytes route correctly once
+# the mode is known instead of inferred.
+#
+#   float payload with CRLF ........ protobuf mode -> one frame
+#   partial frame behind a separator  protobuf mode -> waits
+#   short SCPI replies ............. text mode -> returned whole
+#   `0,"No error"` ................. text mode -> one line
 
 
 # ---- the acceptance set for #231: never discard a partial frame, never
@@ -83,7 +104,7 @@ def test_a_float_payload_with_printable_bytes_and_crlf_is_one_protobuf_frame() -
     # A complete 69-byte frame: timestamp 64, eight 2.5006... and eight
     # 3.0195... floats, whose bytes are "\r\n @" and "\x00AA@".
     data = bytes.fromhex("4408401a40") + b"\r\n @" * 8 + b"\x00AA@" * 8
-    messages, consumed = _composite().parse_messages(data)
+    messages, consumed = _protobuf().parse_messages(data)
     assert len(messages) == 1 and isinstance(messages[0].data, DaqifiOutMessage)
     assert messages[0].data.msg_time_stamp == 64
     assert consumed == 69
@@ -100,12 +121,12 @@ def test_a_float_payload_with_printable_bytes_and_crlf_is_one_protobuf_frame() -
     ids=["separator-then-partial", "noise-then-partial"],
 )
 def test_the_line_parser_never_gets_a_frame_protobuf_is_waiting_on(data, waiting_after) -> None:
-    assert _composite().parse_messages(data) == ([], waiting_after)
+    assert _protobuf().parse_messages(data) == ([], waiting_after)
 
 
 @pytest.mark.parametrize("reply, text", [(b"0\r\n", "0"), (b"1\r\n", "1"), (b"42\r\n", "42"), (b"OK\r\n", "OK")])
 def test_a_short_scpi_reply_is_returned_whole(reply, text) -> None:
-    messages, consumed = _composite().parse_messages(reply)
+    messages, consumed = _text().parse_messages(reply)
     assert [m.data for m in messages] == [text]
     assert consumed == len(reply)
 
@@ -123,7 +144,7 @@ def test_a_real_frame_arriving_in_chunks_waits() -> None:
 
 
 def test_scpi_text_is_parsed_as_text() -> None:
-    messages, consumed = _composite().parse_messages(b'0,"No error"\r\n')
+    messages, consumed = _text().parse_messages(b'0,"No error"\r\n')
     assert [m.data for m in messages] == ['0,"No error"']
 
 

@@ -38,7 +38,7 @@ import pytest
 from daqifi._internal import scpi_commands
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
 from daqifi.communication import (
-    CompositeMessageParser,
+    ProtobufMessageParser,
     StreamMessageConsumer,
 )
 
@@ -92,7 +92,7 @@ class _StreamHarness:
         def _factory(payload: bytes) -> DaqifiOutMessage:
             return DaqifiOutMessage.FromString(bytes(payload))
 
-        parser = CompositeMessageParser(protobuf_factory=_factory)
+        parser = ProtobufMessageParser(_factory)
         self.consumer: StreamMessageConsumer = StreamMessageConsumer(
             stream=serial_obj, message_parser=parser
         )
@@ -294,7 +294,7 @@ def test_consumer_start_stop_round_trip_with_no_traffic(
     active, and stop cleanly via ``stop_safely``. After the round-trip
     the buffer is empty (no leaked bytes from a prior session)."""
     serial_obj = clean_device.stream
-    parser = CompositeMessageParser(protobuf_factory=lambda b: bytes(b))
+    parser = ProtobufMessageParser(lambda b: bytes(b))
     consumer = StreamMessageConsumer(stream=serial_obj, message_parser=parser)
     try:
         consumer.start()
@@ -334,8 +334,7 @@ def test_remove_handler_silences_callbacks(clean_device) -> None:
     def handler(_args) -> None:
         received.append(1)
 
-    parser = CompositeMessageParser(
-        protobuf_factory=lambda b: bytes(b)
+    parser = ProtobufMessageParser(lambda b: bytes(b)
     )
     consumer = StreamMessageConsumer(stream=serial_obj, message_parser=parser)
     consumer.add_message_received(handler)
@@ -374,8 +373,7 @@ def test_multiple_handlers_fan_out(clean_device) -> None:
     def handler_b(_args) -> None:
         b.append(1)
 
-    parser = CompositeMessageParser(
-        protobuf_factory=lambda payload: bytes(payload)
+    parser = ProtobufMessageParser(lambda payload: bytes(payload)
     )
     consumer = StreamMessageConsumer(stream=serial_obj, message_parser=parser)
     consumer.add_message_received(handler_a)

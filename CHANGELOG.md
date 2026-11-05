@@ -113,7 +113,26 @@ aims to follow [Semantic Versioning](https://semver.org/).
   attempt, negative delays, a backoff multiplier below 1, a connection
   timeout under 1 ms (#201).
 
+### Removed
+- `CompositeMessageParser`, and the content heuristics it routed on
+  (`_detect_message_type` and friends). On a length-prefixed protocol a
+  printable byte is also a valid length or field tag, so no byte-level rule
+  could tell text from the start of a binary frame: two audit rounds of
+  attempts each either ate a partial frame or starved complete text. No
+  production code used it — the device already picks its parser by the mode
+  it is in — and every caller wanted the protobuf parser it now names
+  directly (#204 item 2, #231).
+
 ### Fixed
+- With echo on, the device's protobuf reply no longer stalls behind the
+  echoed command line. `ProtobufMessageParser` read the echo's first byte
+  as a length prefix and waited for bytes that never came, so a
+  `SYSTem:SYSInfoPB?` reply was never dispatched at all. The parser is now
+  told what the library actually sent and skips an exact echo of it — plus
+  a `DAQIFI> ` prompt, and a `**ERROR: ` line which goes to a sink rather
+  than being dropped — but only at a frame boundary and only as a complete
+  line, so a partial frame whose payload contains printable runs or CRLF is
+  still held (#204 item 1, #231).
 - A WiFi module update canceled while the flash tool was running no longer
   reports `FAILED` when the flash had already succeeded. The tool's success
   line is the authority on whether the module was programmed; what follows it
