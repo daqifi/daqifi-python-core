@@ -14,7 +14,7 @@ Covers:
 - _wait_for_application_ready retries when probe raises a non-cancel exception.
 - _wait_for_application_ready raises TimeoutError after the budget.
 - TimeoutError carries the last probe exception as __cause__.
-- Outer cancellation propagates as _CancelledError, not swallowed.
+- Outer cancellation propagates as FirmwareUpdateCancelledError, not swallowed.
 """
 from __future__ import annotations
 
@@ -26,10 +26,10 @@ import pytest
 
 from daqifi.enums import FirmwareUpdateState
 from daqifi.firmware.update_options import FirmwareUpdateServiceOptions
+from daqifi.firmware.update_events import FirmwareUpdateCancelledError
 from daqifi.firmware.update_service import (
     DefaultFirmwareUpdateService,
     _Cancellation,
-    _CancelledError,
 )
 
 
@@ -271,7 +271,7 @@ class TestWaitForApplicationReady:
             svc._wait_for_application_ready("dev", probe, deadline)
 
     def test_outer_cancellation_propagates_as_cancelled_error(self):
-        # _CancelledError from the outer deadline must NOT be swallowed
+        # FirmwareUpdateCancelledError from the outer deadline must NOT be swallowed
         # as "probe failure, retry" — it indicates the user / outer state
         # timeout asked us to stop, and we honor that immediately.
         opts = self._opts()
@@ -281,7 +281,7 @@ class TestWaitForApplicationReady:
         deadline = _deadline(cancel_event=cancel)
 
         def probe(dev, dl) -> bool:
-            raise _CancelledError()
+            raise FirmwareUpdateCancelledError()
 
-        with pytest.raises(_CancelledError):
+        with pytest.raises(FirmwareUpdateCancelledError):
             svc._wait_for_application_ready("dev", probe, deadline)
