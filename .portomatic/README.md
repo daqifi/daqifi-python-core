@@ -46,9 +46,8 @@ catches up to upstream.
 All commands use the **portomatic CLI** (`pip install -e
 /path/to/portomatic`). The previous in-repo pilot scripts
 (`scripts/portomatic_generate_map.py`, `scripts/portomatic_audit.py`)
-were retired in 2026-04 once `portomatic map suggest` and
-`portomatic map audit` shipped upstream — see [`docs/cli-reference.md`](https://github.com/cptkoolbeenz/portomatic/blob/main/docs/cli-reference.md)
-for the full command tree.
+were retired in 2026-04 once the equivalent features shipped in the
+porting tool itself.
 
 ### 1. Refresh map shards after upstream sync
 
@@ -128,8 +127,7 @@ models. The relation values are:
 | `not_yet_ported` | not present yet but planned |
 | `shared_library` | both sides depend on a vendored 3rd-party |
 
-See [`docs/correspondence-map-schema.md`](https://github.com/cptkoolbeenz/portomatic/blob/main/docs/correspondence-map-schema.md)
-in the portomatic repo for the full schema reference.
+The schema is documented in the porting tool's own repository.
 
 ## History — the in-repo pilot
 
@@ -164,7 +162,5 @@ scripts have been deleted; `portomatic map suggest` and
 
 The lesson — parallel reimplementations of features that already
 exist in portomatic are wasted effort and drift over time. Before
-writing a new helper script in this repo, run `portomatic --help`
-and check
-[`docs/cli-reference.md`](https://github.com/cptkoolbeenz/portomatic/blob/main/docs/cli-reference.md)
-in the portomatic repo first.
+writing a new helper script in this repo, check the porting tool's own
+command reference first.

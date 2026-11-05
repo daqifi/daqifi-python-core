@@ -417,7 +417,7 @@ where the virtual port can change when the board re-attaches. There, a
 board that arrives and enters its bootloader in the seconds between
 `FORceBoot` and enumeration is indistinguishable from the target. Don't
 connect other boards while an update runs; on a shared multi-board host,
-take the bench lock for the duration of an update.
+make sure no one else starts one at the same time.
 
 ### Bootloader that sat idle stops answering
 
@@ -634,45 +634,9 @@ correspondences (full machine-readable map under `.portomatic/map/`):
 | `CsvExporter` / `ChannelDescriptor` / `SampleRow` / `ISampleSource` | same names (`daqifi.export`) |
 | `SdCardOperationException` (+ subclasses) | same names (`daqifi.exceptions`) |
 
-The C#-to-Python port itself is tracked under `.portomatic/` — see
-**[Port maintenance](#port-maintenance-portomatic)** below for the tooling
-that catalogs every C# symbol's Python counterpart and audits the port for
-drift.
-
-## Port maintenance (portomatic)
-
-The port from `daqifi-core` (C#) to this repo is catalogued at the
-**method level** in `.portomatic/map/<Shard>.yaml` and maintained
-via the [portomatic](https://github.com/cptkoolbeenz/portomatic)
-CLI:
-
-```bash
-# Refresh proposed pairings for one shard (interactive review).
-portomatic map suggest --shard Network \
-  --upstream-ir /tmp/up.ir.json --downstream-ir /tmp/dn.ir.json --apply
-
-# Audit every shard for drift across 5 categories.
-portomatic map audit --downstream-ir /tmp/daqifi.ir.json --downstream .
-
-# Strict mode for CI gates — exits 1 if any drift is reported.
-portomatic map audit --downstream-ir /tmp/daqifi.ir.json --strict
-```
-
-See **[`.portomatic/README.md`](./.portomatic/README.md)** for the
-full workflow with extract commands + the categorical drift table.
-
-**Historical note** — earlier in the port, this repo carried two
-pilot scripts (`scripts/portomatic_generate_map.py` /
-`scripts/portomatic_audit.py`) that reimplemented the equivalent
-features.
-Once `portomatic map suggest` and `portomatic map audit` shipped
-upstream (see
-[`portomatic#155`](https://github.com/cptkoolbeenz/portomatic/pull/155)),
-the pilots were retired and the maps were migrated to the official
-schema vocabulary. **Don't write new helper scripts** without first
-checking
-[`portomatic/docs/cli-reference.md`](https://github.com/cptkoolbeenz/portomatic/blob/main/docs/cli-reference.md)
-to confirm the feature isn't already there.
+The C#-to-Python port itself is catalogued at the method level under
+`.portomatic/map/<Shard>.yaml`, which records every C# symbol's Python
+counterpart.
 
 ## Known Issues
 

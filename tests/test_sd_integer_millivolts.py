@@ -7,7 +7,7 @@ which (daqifi-nyquist-firmware#1179), so SdCardParseOptions.integer_units
 says it, and each sample's analog_units records what was applied. The rule
 is the one the JSON parser uses (_FirmwareValueReader).
 
-Fixtures (see fixtures/README.md): a REAL pair from the nq-a bench under
+Fixtures (see fixtures/README.md): a REAL pair from the bench under
 SYSTem:STReam:TEST:PATtern 1 (a counter injected upstream of calibration and
 of the encoder's raw/mV branch), precision 0 in both, CONF:ADC:USECal 2 vs 0
 the only difference. Row i carries code i + 1 + channel in both files, so

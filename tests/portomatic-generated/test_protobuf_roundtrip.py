@@ -25,7 +25,7 @@ def test_serialized_protobuf_round_trip_populates_metadata() -> None:
     """Real protobuf class round-trip exercises every type the bridge handles."""
     src = DaqifiOutMessage()
     src.device_pn = "Nq1"
-    src.device_sn = 9090603604263365351
+    src.device_sn = 1234567890123456789
     src.device_fw_rev = "3.4.6b1"
     src.device_hw_rev = "2.0.0"
     src.host_name = "DAQiFi-A7B4"
@@ -43,7 +43,7 @@ def test_serialized_protobuf_round_trip_populates_metadata() -> None:
     md.update_from_protobuf(decoded)
 
     assert md.part_number == "Nq1"
-    assert md.serial_number == "9090603604263365351"
+    assert md.serial_number == "1234567890123456789"
     assert md.firmware_version == "3.4.6b1"
     assert md.hardware_revision == "2.0.0"
     assert md.host_name == "DAQiFi-A7B4"

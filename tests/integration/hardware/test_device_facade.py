@@ -228,7 +228,7 @@ def test_reset_returns_to_clean_baseline(
         pytest.skip(
             "DAQIFI_EXPECTED_SERIAL_NUMBER not set; refusing to send "
             "*RST without verifying the device identity. Set this "
-            "to your unit's SN (see .claude/hardware-rig.md)."
+            "to your unit's SN."
         )
     # connect() does a best-effort metadata refresh; do an explicit
     # refresh here with a longer timeout so a transient SYSInfoPB?
