@@ -1210,6 +1210,24 @@ class DaqifiDevice:
             self._refuse_if_unusable(operation)
             return fn()
 
+    def _run_owning_exchange(self, fn: Callable[[], Any], operation: str) -> Any:
+        """Run ``fn`` owning the exchange, WITHOUT the capture refusal.
+
+        For the SPI bus handoffs only. They are an SD operation's own
+        sequencing steps -- one is passed as ``pre_capture`` and therefore
+        runs *inside* a capture by construction -- so the refusal that stops
+        an unrelated SD operation starting mid-capture does not apply to
+        them, while the ownership (so their two commands cannot be split by
+        another flow, and their SPI settle delays measure time after
+        delivery) does.
+        """
+        if self._text_exchange_lock_owner == threading.get_ident():
+            self._refuse_if_unusable(operation)
+            return fn()
+        with self._exchange_lock(operation):
+            self._refuse_if_unusable(operation)
+            return fn()
+
     def _refuse_if_unusable(self, operation: str) -> None:
         if self._disposed or self._is_disconnecting:
             raise RuntimeError(
@@ -2315,6 +2333,30 @@ class DaqifiDevice:
         """
         self._parked_sends.append((data, on_written))
 
+    def _discard_and_release_exchange(self, why: str) -> None:
+        """Drop the backlog and release the exchange, as ONE critical
+        section, then record what was dropped.
+
+        Both abandonment paths -- a lost link, and an interruption out of a
+        write -- call this. They had the same gap fixed separately and then
+        one of them regrew it, so they share the code rather than the
+        intent: a send cannot park between the discard and the release,
+        because there is no gap between them to park in.
+        """
+        generation = self._connect_generation
+        with self._queue_lock:
+            dropped = len(self._parked_sends)
+            self._parked_sends = []
+            self._text_exchange_lock_owner = None
+            self._text_exchange_lock.release()
+        if dropped:
+            self._record_delivery_fault(
+                f"{dropped} command(s) queued during an exchange were "
+                f"dropped: {why}",
+                generation,
+            )
+            _log.warning("dropped %d parked send(s): %s", dropped, why)
+
     def _drain_and_release_exchange(self) -> None:
         """Replay the backlog, then release the exchange lock.
 
@@ -2345,24 +2387,10 @@ class DaqifiDevice:
                     # BEFORE the release, and its command would sit queued
                     # until some later flow replayed it -- across a
                     # reconnect, out of order.
-                    generation = self._connect_generation
-                    with self._queue_lock:
-                        dropped = len(self._parked_sends)
-                        self._parked_sends = []
-                        self._text_exchange_lock_owner = None
-                        self._text_exchange_lock.release()
-                        released = True
-                    if dropped:
-                        self._record_delivery_fault(
-                            f"{dropped} command(s) queued during an exchange "
-                            f"were dropped: the connection was lost before "
-                            f"they could be sent",
-                            generation,
-                        )
-                        _log.warning(
-                            "dropped %d parked send(s): the connection was "
-                            "lost before they could be sent", dropped,
-                        )
+                    self._discard_and_release_exchange(
+                        "the connection was lost before they could be sent"
+                    )
+                    released = True
                     return
                 with self._queue_lock:
                     if not self._parked_sends:
@@ -2410,12 +2438,11 @@ class DaqifiDevice:
                         "the exchange was interrupted",
                         self._connect_generation,
                     )
-                self._discard_parked_sends(
+                # Same single critical section as the lost-link path: the
+                # discard and the release cannot be separated by a park.
+                self._discard_and_release_exchange(
                     "an interruption ended the exchange that queued them"
                 )
-                with self._queue_lock:
-                    self._text_exchange_lock_owner = None
-                    self._text_exchange_lock.release()
 
     def _discard_parked_sends(self, why: str) -> None:
         """Drop the backlog, recording it. Only for a device that can no
@@ -2446,6 +2473,19 @@ class DaqifiDevice:
         :attr:`delivery_fault` ignores a fault from an older one.
         """
         with self._state_lock:
+            # ⛔ COMPARE-AND-SET. A stale drain finishing late used to
+            # overwrite the CURRENT generation's fault with its own older
+            # one -- and because the stored generation was then stale,
+            # delivery_fault read None and start_streaming() succeeded over
+            # a dead consumer. A fault may only be replaced by one from the
+            # same connection or a newer one.
+            stored = self._delivery_fault_generation
+            if stored is not None and generation < stored:
+                _log.debug(
+                    "ignoring a delivery fault from generation %s; a newer "
+                    "one (%s) is already recorded", generation, stored,
+                )
+                return
             self._delivery_fault = detail
             self._delivery_fault_generation = generation
 
@@ -3784,46 +3824,20 @@ class DaqifiStreamingDevice(DaqifiDevice):
     def update_network_configuration(
         self, configuration: NetworkConfiguration
     ) -> None:
-        """Apply ``configuration`` to the device end-to-end.
+        # ⛔ OWNS THE EXCHANGE FOR ITS WHOLE BODY. Structural, not a
+        # pattern fix: a public helper that sends more than one command, or
+        # pairs a send with a delay or a state change, cannot let send()
+        # park -- its later steps assume the earlier ones reached the
+        # device. Re-entrant, so a caller already inside an exchange (the
+        # SD operations call these) still works.
+        return self._run_exclusive(
+            lambda: self._update_network_configuration_locked(configuration),
+            "update_network_configuration",
+        )
 
-        Follows the C# ``UpdateNetworkConfigurationAsync`` sequence
-        (``Daqifi.Core/Device/DaqifiStreamingDevice.cs``), except how the
-        settings are saved (step 6):
-
-        1. Stop streaming if active (avoids racing the WiFi module restart)
-        2. Set WiFi mode (SCPI ``...:NETType``)
-        3. Set SSID
-        4. Set security type + password (security FIRST so the
-           password write has a security context)
-        5. ``prepare_lan_interface`` - DisableStorageSd + EnableNetworkLan.
-           SD card and LAN module SHARE THE SPI BUS on Nyquist hardware;
-           this hands the bus to LAN so the WiFi chip can scan + associate.
-           ``LAN:ENAbled`` only sets the runtime enable flag (firmware
-           ``SCPI_LANEnabledSet``), so it is staged here, before the apply
-           (which restarts the module only when it is set, and saves it).
-        6. ``LAN:APPLY 1``, last: the firmware applies the staged settings
-           and, only if the apply is accepted, saves them to NVM, in one
-           handler (``SCPI_LANSettingsApply``; a rejected apply pushes -200
-           and saves nothing). The save runs inside that handler, on the
-           device, so the WiFi module restart that drops a WiFi/TCP control
-           link can't stop it. Nothing is sent after it. A ``LAN:SAVE``
-           sent after a plain apply never arrived over TCP, and the old
-           settings came back at the next reboot. Upstream daqifi-core#391
-           sends ``LAN:SAVE`` before the apply instead; that would persist
-           settings the apply then rejects, so the board would reboot into a
-           configuration that never worked.
-        7. Wait ``_WIFI_MODULE_RESTART_DELAY_S`` for the module restart.
-        8. Update the locally-tracked ``_network_configuration`` snapshot.
-
-        Over a WiFi/TCP control connection, expect the connection to drop:
-        reconnect, typically at a new address on the new network.
-
-        Raises:
-            TypeError: if ``configuration`` is None.
-            ValueError: if ``configuration.mode`` or
-                ``configuration.security_type`` is unsupported.
-            RuntimeError: if the device is not connected.
-        """
+    def _update_network_configuration_locked(
+        self, configuration: NetworkConfiguration
+    ) -> None:
         if configuration is None:
             raise TypeError("configuration must not be None.")
         if not self.is_connected:
@@ -3867,19 +3881,17 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self._network_configuration = configuration.clone()
 
     def prepare_lan_interface(self) -> None:
-        """Hand the shared SPI bus to the LAN module.
+        # ⛔ OWNS THE EXCHANGE FOR ITS WHOLE BODY. Structural, not a
+        # pattern fix: a public helper that sends more than one command, or
+        # pairs a send with a delay or a state change, cannot let send()
+        # park -- its later steps assume the earlier ones reached the
+        # device. Re-entrant, so a caller already inside an exchange (the
+        # SD operations call these) still works.
+        return self._run_owning_exchange(
+            self._prepare_lan_interface_locked, "prepare_lan_interface"
+        )
 
-        SD card and LAN share the same SPI bus on Nyquist hardware
-        and can't both drive it simultaneously. Call this before any
-        network operation that requires the WiFi module to be active
-        (scan, associate, transmit). ``update_network_configuration``
-        calls it before ``APPLY 1``.
-
-        Side effect — the SD card SCPI module is disabled, which also
-        stops any active SD logging on the device. We update
-        ``_is_logging_to_sd`` to keep ``is_logging_to_sd_card`` in
-        sync with the firmware's actual state.
-        """
+    def _prepare_lan_interface_locked(self) -> None:
         def sd_released() -> None:
             if self._is_logging_to_sd:
                 self._forget_sd_card_sizes()
@@ -3891,27 +3903,17 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.enable_network_lan(), on_written=sd_released)
 
     def prepare_sd_interface(self) -> None:
-        """Hand the shared SPI bus to the SD card.
+        # ⛔ OWNS THE EXCHANGE FOR ITS WHOLE BODY. Structural, not a
+        # pattern fix: a public helper that sends more than one command, or
+        # pairs a send with a delay or a state change, cannot let send()
+        # park -- its later steps assume the earlier ones reached the
+        # device. Re-entrant, so a caller already inside an exchange (the
+        # SD operations call these) still works.
+        return self._run_owning_exchange(
+            self._prepare_sd_interface_locked, "prepare_sd_interface"
+        )
 
-        Inverse of :meth:`prepare_lan_interface`. Call before any SD
-        card operation. Note: while the SD card has the bus, WiFi will
-        report ``Disconnected`` until ``prepare_lan_interface`` is
-        called again.
-
-        Sleeps ``_SD_INTERFACE_SETTLE_DELAY_S`` between the LAN-disable
-        and SD-enable commands so the firmware's SPI-bus arbiter has
-        time to release+acquire the bus. Without the gap, the very
-        next SD-card SCPI command can hit firmware error -200
-        (Execution error). Centralizing the sleep here means callers
-        like :meth:`format_sd_card` get the right timing for free.
-
-        Side effect — re-enables the SD card SCPI module. This does
-        NOT automatically resume an SD logging session; callers must
-        explicitly call :meth:`enable_sd_card_logging` to begin
-        logging again. The ``_is_logging_to_sd`` flag is updated on
-        that call, not here, since enabling the SD interface alone
-        doesn't restart logging on the firmware side.
-        """
+    def _prepare_sd_interface_locked(self) -> None:
         if self.is_usb_connection:
             # Over WiFi/TCP (firmware v3.7.0+, #598/#599) LAN must stay
             # up: the firmware arbitrates the shared bus and routes the SD
@@ -3937,12 +3939,17 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.set_network_wifi_mode_existing())
 
     def apply_network_configuration(self) -> None:
-        """Apply pending LAN config; firmware then restarts the WiFi module.
+        # ⛔ OWNS THE EXCHANGE FOR ITS WHOLE BODY. Structural, not a
+        # pattern fix: a public helper that sends more than one command, or
+        # pairs a send with a delay or a state change, cannot let send()
+        # park -- its later steps assume the earlier ones reached the
+        # device. Re-entrant, so a caller already inside an exchange (the
+        # SD operations call these) still works.
+        return self._run_exclusive(
+            self._apply_network_configuration_locked, "apply_network_configuration"
+        )
 
-        Lower-level than :meth:`update_network_configuration` — does not
-        send the SET commands or call :meth:`prepare_lan_interface`.
-        Use :meth:`update_network_configuration` for the full canonical
-        sequence."""
+    def _apply_network_configuration_locked(self) -> None:
         self.send(scpi_commands.apply_network_lan())
         time.sleep(self._WIFI_MODULE_RESTART_DELAY_S)
 

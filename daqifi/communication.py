@@ -747,12 +747,21 @@ class StreamMessageConsumer(Generic[T]):
                 )
             self._thread = None
         with self._lifecycle_lock:
-            # ⛔ RE-CHECK AFTER THE JOIN. close() can run during the grace
-            # wait above, and a reader published after that leaves a
-            # DISPOSED consumer with a live thread -- every later close()
-            # returns early as already-disposed, so nothing ever stops it.
-            # The grace period created this window; this closes it.
+            # ⛔ RE-CHECK EVERYTHING THE PRE-JOIN CHECKS DECIDED. The grace
+            # wait above is not under this lock, so between those checks and
+            # this point another flow can have disposed us OR started its
+            # own reader. Publishing anyway gave two live readers on one
+            # stream -- callbacks saw A, B, A -- and a reader inside a
+            # disposed consumer that no later close() can stop.
             self._raise_if_disposed()
+            if self._is_running:
+                # Another start() won the race and published already.
+                return
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError(
+                    "another consumer thread was started while this call "
+                    "waited for the previous reader to exit"
+                )
             # Reset telemetry so each start/stop cycle reports its own
             # counters (#18 §3).
             self._telemetry = StreamConsumerTelemetry()

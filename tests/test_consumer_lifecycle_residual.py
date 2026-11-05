@@ -521,12 +521,30 @@ def test_a_fault_on_an_old_connection_does_not_condemn_the_new_one() -> None:
         with pytest.raises(DeliveryFaultError):
             device.start_streaming()
 
-        # The same fault, recorded against an OLDER connection, does not.
-        device._record_delivery_fault("induced", device._connect_generation - 1)
-        assert device.delivery_fault is None, (
-            "a fault from a replaced connection condemned the live one"
-        )
-        assert device.is_streaming is False or True   # no raise expected
+        # ⚠ The second half of this test was restated for round 3's
+        # compare-and-set. It used to record an older-generation fault and
+        # assert it was invisible -- which worked because the record
+        # OVERWROTE, leaving a stale generation. Overwriting was itself the
+        # r3 #3 defect: a stale drain could clear a live fault and
+        # start_streaming() then succeeded over a dead consumer. An older
+        # fault is now simply not recorded, which satisfies this test's
+        # intent more strongly, so the intent is asserted directly on a
+        # fresh device instead.
+        other = _fakes._make_device_with_serial_facade()
+        try:
+            other._record_delivery_fault(
+                "a failure on a connection since replaced",
+                other._connect_generation - 1,
+            )
+            assert other.delivery_fault is None, (
+                "a fault from a replaced connection condemned the live one"
+            )
+            other.start_streaming()      # must not raise
+        finally:
+            try:
+                other.disconnect()
+            except Exception:                                     # noqa: BLE001
+                pass
     finally:
         try:
             device.disconnect()
@@ -917,3 +935,231 @@ def test_an_old_consumers_restart_failure_is_not_charged_to_the_new_one() -> Non
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
+
+
+# ---- audit round 3 on d7a862e5: four findings ---------------------------
+
+
+def test_two_concurrent_starts_publish_only_one_reader() -> None:
+    """r3 #1: both start() calls passed the post-join is_alive() check and
+    _is_running was not re-checked under the lifecycle lock, so BOTH
+    published a reader. Two readers on one stream: callbacks saw A, B, A.
+
+    ⚠ AN INTERMITTENT RACE DETECTOR, AND SAID SO DELIBERATELY. It asserts
+    the invariant -- never two live readers on one stream -- which is what
+    matters, and the invariant holds deterministically WITH the fix because
+    the second caller then returns early. On the defective head the
+    violation is only sometimes reachable: measured over three runs it
+    failed once and passed twice, because the second caller often observes
+    the first caller's freshly published reader and raises instead. So a
+    single green run here is NOT proof the defect is absent; the
+    deterministic evidence is the re-check itself.
+    """
+    from daqifi.communication import LineBasedMessageParser, StreamMessageConsumer
+
+    class _SlowStream:
+        def read(self, _n):
+            time.sleep(0.3)
+            return b""
+
+        @property
+        def in_waiting(self):
+            return 0
+
+    # ⚠ Snapshot first: threading.enumerate() is process-GLOBAL, and other
+    # tests in this file leave consumers running. A bare name match counted
+    # theirs and made this test order-dependent -- it passed alone and
+    # failed in the file, which is the test's defect, not the code's.
+    pre_existing = set(threading.enumerate())
+
+    consumer = StreamMessageConsumer[str](_SlowStream(), LineBasedMessageParser())
+    consumer.start()
+    time.sleep(0.05)
+    consumer.stop_safely(timeout_ms=1)       # will not have exited yet
+
+    # Force the interleaving rather than hope for it: both starts must be
+    # past the grace join at the same moment, which is the window.
+    at_join = threading.Event()
+    real_join = consumer._thread.join
+
+    def hooked_join(timeout=None):
+        at_join.set()
+        time.sleep(0.35)          # hold both callers inside the join
+        return real_join(timeout)
+
+    consumer._thread.join = hooked_join      # type: ignore[assignment]
+
+    threads = []
+    errors = []
+
+    # A barrier, so both callers are inside start() together. Without it
+    # the first call can finish before the second begins, and the race the
+    # test exists for never forms.
+    gate = threading.Barrier(2, timeout=10)
+
+    def starter():
+        try:
+            gate.wait()
+            consumer.start()
+        except Exception as exc:                                  # noqa: BLE001
+            errors.append(type(exc).__name__)
+
+    for _ in range(2):
+        t = threading.Thread(target=starter, daemon=True)
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join(10)
+    try:
+        # However the race resolves, exactly one reader may be live.
+        alive = [th for th in threading.enumerate()
+                 if th not in pre_existing
+                 and th.name.startswith("MessageConsumer-") and th.is_alive()]
+        assert len(alive) <= 1, (
+            f"{len(alive)} readers live on one stream: {[t.name for t in alive]}"
+        )
+    finally:
+        consumer.close()
+
+
+def test_a_bus_handoff_owns_the_exchange_for_both_its_commands() -> None:
+    """r3 #2: prepare_sd_interface() sends two commands and sleeps twice for
+    the SPI handoff. Parked, the sleeps ran before delivery and the two
+    commands then replayed microseconds apart -- the firmware -200 risk.
+
+    Owning the exchange makes both immediate. Asserted on the wire: with
+    another flow holding the device, the pair must NOT appear until it can
+    own the exchange, and must then appear together.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    held = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+
+    def holder():
+        with device._exchange_lock("other-flow"):
+            held.set()
+            release.wait(10.0)
+
+    h = threading.Thread(target=holder, name="holder", daemon=True)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "another flow to hold the device")
+        before = len(stream.written)
+
+        threading.Thread(
+            target=lambda: (device.prepare_sd_interface(), done.set()),
+            daemon=True,
+        ).start()
+        time.sleep(0.6)      # longer than both SPI settle delays together
+        # ⭐ THE DISCRIMINATOR IS THAT IT HAS NOT RETURNED. Parking also
+        # leaves the wire empty, so "nothing written yet" is true either
+        # way and proves nothing. What parking does is let the call RUN TO
+        # COMPLETION -- sleeping out both SPI settle delays and returning
+        # -- while its two commands sit queued. Owning the exchange means
+        # it cannot finish until they are actually out.
+        assert not done.is_set(), (
+            "prepare_sd_interface returned while another flow held the "
+            "device: its settle delays ran before delivery, and its two "
+            "commands would then replay microseconds apart"
+        )
+        assert stream.written[before:] == []
+
+        release.set()
+        h.join(10.0)
+        assert done.wait(10.0), "the handoff never completed"
+        written = b"".join(stream.written[before:])
+        assert b"SD:ENAble 1" in written or b"STORage:SD" in written, (
+            f"the handoff's commands never reached the wire: {written!r}"
+        )
+    finally:
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_a_stale_fault_cannot_clear_a_live_one() -> None:
+    """r3 #3: a late drain's fault overwrote the current generation's, and
+    because the stored generation was then stale, delivery_fault read None
+    and start_streaming() succeeded over a dead consumer."""
+    from daqifi.exceptions import DeliveryFaultError
+
+    device = _fakes._make_device_with_serial_facade()
+    try:
+        current = device._connect_generation
+        device._record_delivery_fault("the live connection's fault", current)
+        assert device.delivery_fault is not None
+
+        # A stale drain finishing late, carrying an older generation.
+        device._record_delivery_fault("a stale drain's fault", current - 1)
+
+        assert device.delivery_fault is not None, (
+            "a stale fault cleared the live one: start_streaming() would "
+            "now succeed over a dead consumer"
+        )
+        assert "live connection" in device.delivery_fault
+        with pytest.raises(DeliveryFaultError):
+            device.start_streaming()
+    finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_both_abandonment_paths_discard_and_release_atomically() -> None:
+    """r3 #4: the interrupted-replay path still discarded, then reacquired
+    the queue lock, then released -- round 1's gap, regrown in the other
+    path. Both now call ONE helper, so they cannot drift apart again."""
+    import inspect
+
+    from daqifi.devices import DaqifiDevice
+
+    source = inspect.getsource(DaqifiDevice._drain_and_release_exchange)
+    # The structural claim: neither abandonment path open-codes the
+    # discard-then-release pair any more.
+    assert source.count("_discard_and_release_exchange") == 2, (
+        "the two abandonment paths do not share the single helper; they "
+        "drifted apart once already"
+    )
+    assert "self._parked_sends = []" not in source, (
+        "an abandonment path still open-codes the discard, which is how the "
+        "gap regrew"
+    )
+    # And it works: an interrupted replay leaves the lock free and a trace.
+    device = _fakes._make_device_with_serial_facade()
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with device._exchange_lock("holder"):
+            held.set()
+            release.wait(10.0)
+
+    h = threading.Thread(target=holder, name="holder", daemon=True)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "the lock to be held")
+        device.send(_scpi().stop_streaming())
+        assert device._parked_sends
+
+        def boom(_data):
+            raise KeyboardInterrupt("interrupted mid-replay")
+
+        device._write_bytes = boom           # type: ignore[assignment]
+        release.set()
+        h.join(10.0)
+
+        assert device._text_exchange_lock.acquire(blocking=False), (
+            "the exchange lock was not released"
+        )
+        device._text_exchange_lock.release()
+        assert device._parked_sends == []
+        assert device.delivery_fault is not None
+    finally:
+        release.set()
+        h.join(5)
