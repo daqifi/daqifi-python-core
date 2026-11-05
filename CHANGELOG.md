@@ -7,6 +7,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `update_wifi_module(..., skip_version_check=True)` flashes the WiFi module
+  even when it already reports the latest published version. Mirrors
+  `skipVersionCheck` on the C# `UpdateWifiModuleAsync`. Without it an
+  up-to-date module cannot be reflashed at all, so the WiFi update path cannot
+  be exercised on a bench whose boards are already current. It overrides the
+  version check only — every other refusal on the path still applies (#190).
 - `execute_text_command(..., max_total_ms=...)` caps the whole capture;
   without it a device that keeps sending lines keeps the capture going
   (#190).

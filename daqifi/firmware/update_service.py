@@ -241,11 +241,20 @@ class FirmwareUpdateService(Protocol):
         firmware_path: str,
         progress: _PROGRESS_CALLBACK = None,
         cancel_event: Optional[threading.Event] = None,
+        skip_version_check: bool = False,
     ) -> None:
         """Run a WiFi-module update via the external flashing tool.
 
         **Caller responsibility:** same identity-gating as
         :meth:`update_firmware`.
+
+        Args:
+            skip_version_check: flash even when the module already reports
+                the latest version. Mirrors ``skipVersionCheck`` on the C#
+                ``UpdateWifiModuleAsync``. Without it an up-to-date module
+                cannot be reflashed at all, so there is no way to reinstall
+                the current image — which is what validating the WiFi update
+                path on hardware requires when every board is already current.
 
         Raises:
             FirmwareUpdateException: when any update step fails.
@@ -424,6 +433,7 @@ class DefaultFirmwareUpdateService:
         firmware_path: str,
         progress: _PROGRESS_CALLBACK = None,
         cancel_event: Optional[threading.Event] = None,
+        skip_version_check: bool = False,
     ) -> None:
         if device is None:
             raise TypeError("device must not be None")
@@ -436,7 +446,8 @@ class DefaultFirmwareUpdateService:
 
         self._run_exclusive(
             lambda: self._run_wifi_update(
-                device, firmware_path, progress, cancel_event
+                device, firmware_path, progress, cancel_event,
+                skip_version_check,
             ),
             cancel_event,
         )
@@ -838,6 +849,7 @@ class DefaultFirmwareUpdateService:
         firmware_path: str,
         progress: _PROGRESS_CALLBACK,
         cancel_event: Optional[threading.Event],
+        skip_version_check: bool = False,
     ) -> None:
         # "update_requested" is armed BEFORE the FWUpdate send: a send that
         # raises can still have been delivered. "recovered" is what
@@ -845,7 +857,8 @@ class DefaultFirmwareUpdateService:
         bridge_state = {"update_requested": False, "recovered": None}
         try:
             self._run_wifi_update_steps(
-                device, firmware_path, progress, cancel_event, bridge_state
+                device, firmware_path, progress, cancel_event, bridge_state,
+                skip_version_check,
             )
         finally:
             # Whatever ended the update, and wherever an interrupt landed
@@ -875,6 +888,7 @@ class DefaultFirmwareUpdateService:
         progress: _PROGRESS_CALLBACK,
         cancel_event: Optional[threading.Event],
         bridge_state: dict,
+        skip_version_check: bool = False,
     ) -> None:
         total_bytes = 100
 
@@ -884,7 +898,17 @@ class DefaultFirmwareUpdateService:
             # cancelled run still incurs a network round-trip and only
             # raises once it reaches the first state-transition point.
             _check_cancel(cancel_event)
-            if self._is_wifi_firmware_up_to_date(device, progress, cancel_event):
+            # `skip_version_check` reaches the version check, not the flash:
+            # an up-to-date module is the ONLY thing it overrides, so every
+            # later refusal (disconnected device, non-USB transport, a tool
+            # that reports failure) still applies unchanged.
+            if skip_version_check:
+                self._logger.info(
+                    "Skipping the WiFi firmware version check at the "
+                    "caller's request; the module will be flashed even if it "
+                    "already reports the latest version."
+                )
+            elif self._is_wifi_firmware_up_to_date(device, progress, cancel_event):
                 return
             _check_cancel(cancel_event)
 
