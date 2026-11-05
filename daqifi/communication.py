@@ -658,6 +658,15 @@ class StreamMessageConsumer(Generic[T]):
         self._thread: Optional[threading.Thread] = None
         self._disposed = False
         self.is_wifi_device = is_wifi_device
+        # How many user message-received callbacks are on the stack, which
+        # is only ever this consumer's own reader thread.
+        #
+        # ⭐ SINGLE WRITER, MANY READERS: only the reader thread touches it,
+        # so a plain int needs no lock -- there is no lost update to race
+        # over. It exists so another thread timing out on a reply can say
+        # WHY: a callback in flight means this consumer cannot dispatch
+        # anything, so the silence is ours and not the device's.
+        self._callback_depth = 0
         self._message_handlers: List[Callable[[Any], None]] = []
         self._error_handlers: List[Callable[[Any], None]] = []
         # Lock around the message buffer mutation so ClearBuffer doesn't
@@ -694,6 +703,17 @@ class StreamMessageConsumer(Generic[T]):
         return self._telemetry
 
     # ---- event subscription ------------------------------------------------
+
+    @property
+    def is_in_callback(self) -> bool:
+        """Whether this consumer's reader thread is inside a user
+        message-received callback right now.
+
+        Read by another thread to explain a timeout: while this is true the
+        consumer cannot dispatch anything, so a reply that has not arrived
+        is being held up HERE, not by the device.
+        """
+        return self._callback_depth > 0
 
     def add_message_received(self, handler: Callable[[Any], None]) -> None:
         self._message_handlers.append(handler)
@@ -1065,16 +1085,20 @@ class StreamMessageConsumer(Generic[T]):
             raw_data=raw_data,
             timestamp=datetime.now(timezone.utc),
         )
-        for h in list(self._message_handlers):
-            # Per-handler isolation: a faulty subscriber must not
-            # prevent other subscribers from receiving the same
-            # message. Route exceptions to _on_error so they're
-            # observable instead of silently lost (Qodo PR 17 pass
-            # 10 #4). Mirrors the pattern in _on_error itself.
-            try:
-                h(args)
-            except Exception as exc:
-                self._on_error(exc, raw_data)
+        self._callback_depth += 1
+        try:
+            for h in list(self._message_handlers):
+                # Per-handler isolation: a faulty subscriber must not
+                # prevent other subscribers from receiving the same
+                # message. Route exceptions to _on_error so they're
+                # observable instead of silently lost (Qodo PR 17 pass
+                # 10 #4). Mirrors the pattern in _on_error itself.
+                try:
+                    h(args)
+                except Exception as exc:
+                    self._on_error(exc, raw_data)
+        finally:
+            self._callback_depth -= 1
 
     def _report_health(self, error: Optional[BaseException]) -> None:
         sink = self._health_sink

@@ -150,7 +150,18 @@ def _run_r4_schedule():
            "fixed it, and EI B removed parking. send()'s refusal covers a "
            "DIRECT send from the consumer thread; the library cannot see "
            "through a join(). Asserts the CORRECT behaviour, so it never "
-           "requires the defect and XPASSes if anyone fixes it.",
+           "requires the defect and XPASSes if anyone fixes it. "
+           "⛔ THE SAME CLASS HAS A SECOND SHAPE, found by the blind leg of "
+           "audit round 3: initialize() owns the exchange for its WHOLE "
+           "sequence, so a callback that delegates a send and joins it "
+           "wedges initialize until its own timeout -- the worker waits for "
+           "the exchange initialize holds, the callback waits for the "
+           "worker, and initialize waits for a status only that callback's "
+           "thread can dispatch. No library path does this (no library "
+           "callback delegates and joins); it needs caller code that does. "
+           "It is NOT separately fixed, by the same reasoning, but the "
+           "timeout no longer blames the board: see "
+           "test_a_wedged_consumer_is_not_reported_as_an_unresponsive_device.",
     strict=False,
 )
 def test_the_consumer_survives_a_callback_that_delegates_a_send() -> None:
@@ -1344,6 +1355,155 @@ def test_the_settle_delay_is_inside_the_exchange_it_claims_to_own() -> None:
         assert [w for w in device._transport.stream.written
                 if b"STReam:STOP" in w], "the command never reached the wire"
     finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+# ---- EI B audit round 3 -------------------------------------------------
+
+
+def test_write_only_helpers_still_work_inside_a_capture() -> None:
+    """⛔ A REGRESSION FROM WRAPPING THEM, and the enumeration that fixes it.
+
+    Wrapping a public helper in the refusing form made it reject a caller
+    that was already inside a capture -- before sending anything, where the
+    base had sent the command. ``execute_text_command(dev.apply_network_
+    configuration)`` is the reported shape.
+
+    The rule, stated at ``_run_owning_exchange``: a helper that only WRITES
+    is safe inside a capture and belongs in the owning form, because the
+    refusal there can only ever be a false refusal. A helper that captures,
+    or waits for the protobuf consumer, keeps the refusing form.
+
+    This runs every write-only helper as a ``setup_action`` -- i.e. inside
+    a capture -- and asserts its command actually reaches the wire.
+    """
+    cases = [
+        ("apply_network_configuration",
+         lambda d: d.apply_network_configuration(), b"LAN:APPLY"),
+        ("prepare_lan_interface",
+         lambda d: d.prepare_lan_interface(), b"LAN:ENAbled 1"),
+        ("prepare_sd_interface",
+         lambda d: d.prepare_sd_interface(), b"STORage:SD:ENAble 1"),
+    ]
+    for name, call, expected in cases:
+        device = _fakes._make_device_with_serial_facade()
+        try:
+            device._WIFI_MODULE_RESTART_DELAY_S = 0.0
+            device.execute_text_command(
+                lambda: call(device),
+                response_timeout_ms=60, completion_timeout_ms=30,
+            )
+            written = b"".join(device._transport.stream.written)
+            assert expected in written, (
+                f"{name}() as a setup_action never reached the wire; the "
+                f"capture refusal rejected a write-only helper. Wrote: "
+                f"{written!r}"
+            )
+        finally:
+            try:
+                device.disconnect()
+            except Exception:                                     # noqa: BLE001
+                pass
+
+
+def test_initialize_still_refuses_inside_a_capture() -> None:
+    """GUARD -- passes on ac36f4dc too, and cannot discriminate.
+
+    It protects behaviour this round deliberately did NOT change, so there
+    is no defective head for it to fail on. It is here because the obvious
+    over-application of the fix would move initialize() as well, and
+    nothing else would catch that.
+
+    The other half of the rule, so the fix cannot be over-applied.
+
+    ``initialize`` writes only, so the obvious reading would move it to the
+    owning form too. It must NOT move: it then waits for the status message
+    that sets ``_metadata.serial_number``, and only the consumer thread
+    delivers that -- and the consumer is PAUSED inside a capture. Allowing
+    it there would trade a clear refusal for a timeout that blames the
+    device.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    try:
+        outcome = []
+
+        def setup():
+            try:
+                device.initialize(response_timeout_s=0.1)
+                outcome.append("ran")
+            except RuntimeError as exc:
+                outcome.append(str(exc))
+
+        device.execute_text_command(
+            setup, response_timeout_ms=60, completion_timeout_ms=30
+        )
+        assert outcome and "cannot run inside another exchange" in outcome[0], (
+            f"initialize() inside a capture did not refuse clearly: {outcome}"
+        )
+    finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_a_wedged_consumer_is_not_reported_as_an_unresponsive_device() -> None:
+    """⛔ THE ERROR MUST NAME THE REAL CAUSE.
+
+    ``initialize()`` owns the device for its whole sequence, so a callback
+    that hands a send to a worker and JOINS it cannot return until
+    initialize finishes -- while initialize waits for a reply only that
+    callback's thread can dispatch. That is the accepted cost of the
+    blocking design (ruling EI B): the library cannot see through a
+    ``join()``.
+
+    What it must not do is blame the board. The old message said the DEVICE
+    was unresponsive, which sends whoever reads it to the hardware.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    in_callback = threading.Event()
+    release = threading.Event()
+
+    def wedging_callback(_args):
+        in_callback.set()
+        release.wait(10.0)
+
+    device._consumer.add_message_received(wedging_callback)
+    try:
+        # Park the consumer inside a callback, which is the wedge.
+        device._transport.stream.feed(_frame())
+        _wait_for(in_callback.is_set, 10.0, "the callback to start")
+
+        from daqifi.exceptions import DeviceUnresponsiveError
+
+        # ⛔ THE BEHAVIOURAL ASSERTION FIRST, and it is the stronger one: on
+        # the previous head this did not raise at ALL over serial -- the
+        # timeout only raised on TCP -- so initialize() reported SUCCESS
+        # with no device info at all, having never heard from the board.
+        # Checking is_in_callback first would have failed on that head with
+        # AttributeError, i.e. "this API is new", which is not evidence of
+        # a defect.
+        with pytest.raises(DeviceUnresponsiveError) as caught:
+            device.initialize(response_timeout_s=0.2)
+        assert device._is_initialized is False, (
+            "initialize() reported success without ever receiving the "
+            "device info it waits for"
+        )
+
+        message = str(caught.value)
+        assert "DEVICE IS NOT AT FAULT" in message, (
+            f"the timeout still blames the device: {message}"
+        )
+        assert "message-received callback" in message
+        assert device._consumer.is_in_callback, (
+            "the consumer no longer reports being inside a callback, so "
+            "initialize() has no way to tell this from a silent device"
+        )
+    finally:
+        release.set()
         try:
             device.disconnect()
         except Exception:                                         # noqa: BLE001

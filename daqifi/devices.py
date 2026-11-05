@@ -1196,13 +1196,35 @@ class DaqifiDevice:
     def _run_owning_exchange(self, fn: Callable[[], Any], operation: str) -> Any:
         """Run ``fn`` owning the exchange, WITHOUT the capture refusal.
 
-        For the SPI bus handoffs only. They are an SD operation's own
-        sequencing steps -- one is passed as ``pre_capture`` and therefore
-        runs *inside* a capture by construction -- so the refusal that stops
-        an unrelated SD operation starting mid-capture does not apply to
-        them, while the ownership (so their two commands cannot be split by
-        another flow, and their SPI settle delays measure time after
-        delivery) does.
+        ⛔ WHICH FORM A HELPER NEEDS, because getting this wrong has now
+        caused a regression twice. The refusal in :meth:`_run_exclusive`
+        exists to stop a CAPTURE starting inside a capture. So:
+
+        * a helper that only WRITES (and sleeps) belongs here. It is safe
+          inside a capture, and the refusal can only ever produce a false
+          refusal -- it protects nothing and rejects a legitimate caller
+          before anything is sent.
+        * a helper that CAPTURES, or that WAITS FOR THE PROTOBUF CONSUMER,
+          belongs in :meth:`_run_exclusive`. The consumer is paused during
+          a capture, so such a helper cannot work there -- and a clear
+          refusal is a far better outcome than the timeout it would
+          otherwise hit.
+
+        By that test: the SPI bus handoffs are here (writes only, and one
+        is passed as ``pre_capture`` so it runs inside a capture by
+        construction); ``update_network_configuration`` and
+        ``apply_network_configuration`` are here (writes and a settle
+        delay, and both are legitimately used as a ``setup_action``);
+        ``initialize`` stays in :meth:`_run_exclusive` despite writing
+        only, because it then WAITS for the status message that sets
+        ``_metadata.serial_number``, which only the consumer thread
+        delivers; and ``_exclusive_sd_operation`` and the public
+        :meth:`run_exclusive` stay there because they capture, or run a
+        caller's ``fn`` that may.
+
+        Ownership is wanted in every case: a helper's commands must not be
+        split by another flow, and its settle delays must measure time
+        after delivery.
         """
         if self._text_exchange_lock_owner == threading.get_ident():
             self._refuse_if_unusable(operation)
@@ -1838,6 +1860,33 @@ class DaqifiDevice:
                 if self._metadata.serial_number:
                     break
                 time.sleep(0.05)
+            if not self._metadata.serial_number:
+                # ⛔ DO NOT BLAME THE DEVICE FOR OUR OWN WEDGE. initialize()
+                # owns the exchange for its whole sequence, so a
+                # message-received callback that hands a send to a worker
+                # and JOINS it cannot return until this call finishes --
+                # and this call is waiting for a reply only that callback's
+                # thread can dispatch. The reply never comes, and the
+                # timeout above then reported the DEVICE as unresponsive,
+                # sending whoever reads it to the board.
+                #
+                # This is the accepted cost of the blocking design (ruling
+                # EI B): the library cannot see through a join(). What it
+                # CAN do is say where the silence comes from.
+                consumer = self._consumer
+                if consumer is not None and consumer.is_in_callback:
+                    raise DeviceUnresponsiveError(
+                        "No SYSInfoPB? reply within "
+                        f"{response_timeout_s:.1f} s, and the DEVICE IS NOT "
+                        "AT FAULT: this library's message consumer is "
+                        "inside a message-received callback, so it cannot "
+                        "dispatch the reply this call is waiting for. A "
+                        "callback that hands work to another thread and "
+                        "joins it will do this, because initialize() holds "
+                        "the device while it waits. Return from the "
+                        "callback without blocking on anything that needs "
+                        "this device."
+                    )
             if not self._metadata.serial_number and is_tcp:
                 raise DeviceUnresponsiveError(
                     f"No SYSInfoPB? reply on TCP within "
@@ -3682,7 +3731,14 @@ class DaqifiStreamingDevice(DaqifiDevice):
         # the earlier ones took effect on a device nobody else has touched.
         # Re-entrant, so a caller already inside an exchange (the
         # SD operations call these) still works.
-        return self._run_exclusive(
+        # ⛔ OWNERSHIP WITHOUT THE NESTED-CAPTURE REFUSAL. This helper only
+        # WRITES and sleeps, and it is legitimately called from inside a
+        # capture -- as a setup_action, or via
+        # execute_text_command(device.update_network_configuration). The
+        # refusing form rejected it before it sent anything, which the base
+        # did not: a regression introduced by wrapping it. See
+        # _run_owning_exchange for which form a helper needs.
+        return self._run_owning_exchange(
             lambda: self._update_network_configuration_locked(configuration),
             "update_network_configuration",
         )
@@ -3798,7 +3854,9 @@ class DaqifiStreamingDevice(DaqifiDevice):
         # the earlier ones took effect on a device nobody else has touched.
         # Re-entrant, so a caller already inside an exchange (the
         # SD operations call these) still works.
-        return self._run_exclusive(
+        # Same as update_network_configuration: writes and sleeps only, and
+        # legitimately called inside a capture.
+        return self._run_owning_exchange(
             self._apply_network_configuration_locked, "apply_network_configuration"
         )
 
