@@ -257,8 +257,8 @@ class ProtobufMessageParser:
     #: ``matchPattern`` accepts -- the full node, or the node truncated at
     #: its first lowercase letter. ``ECHO`` has no lowercase, so it has
     #: exactly one spelling.
-    _ECHO_COMMAND = re.compile(rb"^(?:SYSTem|SYST):ECHO[ \t]+(-?\d+)[ \t]*$",
-                               re.IGNORECASE)
+    _ECHO_COMMAND = re.compile(
+        rb"^(?:SYSTem|SYST):ECHO[ \t]+([+-]?\d+)[ \t]*$", re.IGNORECASE)
 
     def __init__(
         self,
@@ -376,6 +376,45 @@ class ProtobufMessageParser:
                         return len(echo) + len(ending)
         return 0
 
+    def _console_is_quiet(self) -> bool:
+        """Whether the device is KNOWN not to emit a prompt or an echo.
+
+        True only once the library has sent ``SYSTem:ECHO -1``. Measured on
+        an NQ1 rather than assumed -- with echo at -1 a reply carries no
+        ``DAQIFI> `` and no echoed command, while with echo at 1 both
+        appear -- so in that state there is nothing for the echo match or
+        the prompt skip to do, and skipping neither keeps their failure
+        modes out of the supported automation path entirely.
+
+        ⛔ ``**ERROR: `` LINES ARE NOT COVERED BY THIS. The same
+        measurement showed the device still emits them with echo off
+        (``NOSUCH?`` answered ``**ERROR: -113, "Undefined header"`` with no
+        prompt around it), so that handling stays on unconditionally.
+        Dropping it would hand those bytes to the frame parser, where
+        ``0x2a`` reads as a 42-byte length prefix: a SCPI error arriving
+        during protobuf traffic would either decode into a fabricated
+        message or swallow the next real reply into its body. Exactly this
+        ticket's defect, on the path the ruling means to make clean.
+
+        ⛔ AND NOT UNTIL THE REGISTERED ECHOES HAVE DRAINED. Turning echo
+        off does not un-send what is already on the wire: the console
+        echoes a line as its characters arrive, so ``SYSTem:ECHO -1`` is
+        itself echoed, and that echo is still in flight when this state
+        flips. Going quiet the instant the state changed handed the
+        disable's own echo to the frame parser and stalled the reply behind
+        it -- caught by this change's own test, and the same mistake as
+        clearing the registry on the transition, which an earlier round
+        also had to undo. Outstanding entries can only shrink once nothing
+        new is registered, so this becomes true by itself a moment later.
+
+        One predicate, read by both the take-path and the hold-path below,
+        so the two cannot drift into disagreeing about what may arrive.
+        """
+        if self._echo_enabled is not False:
+            return False
+        with self._echo_lock:
+            return not self._expected_echoes
+
     def _console_prefix_pending(self, remaining: bytes) -> bool:
         """Whether ``remaining`` is a STRICT PREFIX of console noise, so the
         rest may still be arriving.
@@ -388,13 +427,17 @@ class ProtobufMessageParser:
         """
         if not remaining:
             return True
-        if self._CONSOLE_PROMPT.startswith(remaining):
+        quiet = self._console_is_quiet()
+        if not quiet and self._CONSOLE_PROMPT.startswith(remaining):
             return True
         if self._CONSOLE_ERROR_PREFIX.startswith(remaining):
             return True
         if (remaining.startswith(self._CONSOLE_ERROR_PREFIX)
                 and b"\n" not in remaining):
             return True            # a complete prefix, line still arriving
+        if quiet:
+            # Nothing else can arrive, so holding for it would be a stall.
+            return False
         with self._echo_lock:
             for echo in self._expected_echoes:
                 full = echo + b"\r\n"
@@ -488,6 +531,10 @@ class ProtobufMessageParser:
         derives the emittable tags from the compiled descriptor and fails
         on the day that happens. Do not delete it without reopening #231.
         """
+        if self._console_is_quiet():
+            # Known-off: the device emits neither, so skip neither. An
+            # error line can still arrive and is still handled below.
+            return self._take_console_error(remaining)
         n = self._take_matching_echo(remaining)
         if n:
             return n

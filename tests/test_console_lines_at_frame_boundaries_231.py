@@ -1007,3 +1007,114 @@ def test_no_real_frame_body_can_begin_with_the_prompts_second_byte() -> None:
         "incomplete can now destroy a real frame and emit a fabricated "
         "message. Reopen it."
     )
+
+
+# ---- echo known OFF: the supported automation mode ----------------------
+#
+# Measured on an NQ1, with echo 1 run first as a control: at echo -1 a reply
+# carries no 'DAQIFI> ' and no echoed command, while at echo 1 both appear.
+# So in the known-off state there is nothing for the echo match or the
+# prompt skip to do, and not doing them keeps their failure modes out of the
+# path automation actually uses. initialize() sends the disable first thing.
+#
+# ⛔ '**ERROR: ' lines are NOT covered: the same measurement showed the
+# device still emits them with echo off.
+
+
+def _raw_parser():
+    """A parser whose factory accepts ANY bytes -- the shape that makes the
+    0x41-is-not-an-emittable-tag argument inapplicable, because there is no
+    schema to constrain the body."""
+    return ProtobufMessageParser(lambda b: b)
+
+
+def test_with_echo_known_off_a_prompt_shaped_frame_is_returned_intact() -> None:
+    """The r5 HIGH, closed for the automation path.
+
+    With a raw-bytes factory there is no schema, so a 68-byte frame whose
+    body starts ``AQIFI> `` is perfectly legal and the prompt skip would
+    destroy it -- or worse, decode a fragment of it. Once echo is known
+    off the prompt cannot arrive at all, so the frame wins outright.
+    """
+    parser = _raw_parser()
+    parser.expect_console_echo(b"SYSTem:ECHO -1\r\n")
+    # Drain the disable's own echo: it IS emitted, because echo was still
+    # on when it arrived. Only afterwards is the console provably quiet.
+    parser.parse_messages(b"SYSTem:ECHO -1\r\n")
+
+    body = b"AQIFI> " + bytes(61)
+    frame = bytes([68]) + body
+    assert frame[:8] == b"DAQIFI> ", frame[:8]
+
+    # ⚠ The split has to leave MORE than the prompt buffered. At exactly
+    # 8 bytes the old code held anyway -- `_CONSOLE_PROMPT.startswith()` is
+    # not strict, so a complete prompt counts as its own pending prefix --
+    # and a test cut there passes on the defective head. Past 8 bytes that
+    # rule no longer applies and the prompt skip fires, eating the frame's
+    # first 8 bytes.
+    held, consumed = parser.parse_messages(frame[:40])
+    assert (held, consumed) == ([], 0), (
+        f"{consumed} bytes of a real frame were taken as a console prompt"
+    )
+    messages, consumed = parser.parse_messages(frame)
+    assert len(messages) == 1 and consumed == len(frame), (
+        "a 68-byte frame beginning 'AQIFI> ' did not survive with echo off"
+    )
+    assert messages[0].data == body
+
+
+def test_an_error_line_is_still_handled_with_echo_off() -> None:
+    """GUARD -- passes on 65e564a9 too, and cannot discriminate.
+
+    It protects behaviour this change deliberately did NOT alter, so there
+    is no defective head for it to fail on. It is here because "no console
+    skipping when echo is off" was the instruction, and this is the third
+    of it that the board refuted; without this test the next reader has
+    nothing stopping them from completing the change as originally worded.
+
+    ⛔ The part of "no console skipping" that must NOT happen.
+
+    The device still emits ``**ERROR: `` with echo off -- measured:
+    ``NOSUCH?`` answered ``**ERROR: -113, "Undefined header"`` with no
+    prompt around it. Handed to the frame parser, ``0x2a`` reads as a
+    42-byte length prefix, so the line would either decode into a
+    fabricated message or swallow the next real reply into its body.
+    """
+    seen = []
+    parser = _parser(console_error_sink=seen.append)
+    parser.expect_console_echo(b"SYSTem:ECHO -1\r\n")
+    parser.parse_messages(b"SYSTem:ECHO -1\r\n")       # drain its own echo
+
+    data = b'**ERROR: -113, "Undefined header"\r\n' + _reply()
+    messages, consumed = parser.parse_messages(data)
+    assert len(messages) == 1 and consumed == len(data), (
+        "an error line with echo off was read as a frame, so the reply "
+        "behind it was lost"
+    )
+    assert seen == ['**ERROR: -113, "Undefined header"'], (
+        f"the error line was dropped rather than reported: {seen}"
+    )
+
+
+def test_a_signed_plus_one_turns_echo_back_on() -> None:
+    """``SYSTem:ECHO +1`` is the same command as ``SYSTem:ECHO 1``.
+
+    ⚠ This became load-bearing with the rule above. Before it, an
+    unrecognised enable cost unmatched registrations; now it means the
+    library believes echo is off while the device echoes, so NOTHING is
+    skipped and the echoed line stalls the reply -- the defect this ticket
+    exists to remove.
+    """
+    for spelling in (b"SYSTem:ECHO +1\r\n", b"SYST:ECHO +1\r\n"):
+        parser = _parser()
+        parser.expect_console_echo(b"SYSTem:ECHO -1\r\n")
+        parser.parse_messages(b"SYSTem:ECHO -1\r\n")   # drain, now quiet
+        parser.expect_console_echo(spelling)           # not echoed: echo off
+        command = b"SYSTem:SYSInfoPB?\r\n"
+        parser.expect_console_echo(command)
+
+        messages, consumed = parser.parse_messages(command + _reply())
+        assert len(messages) == 1 and consumed == len(command) + len(_reply()), (
+            f"{spelling!r} was not read as enabling echo, so the echoed "
+            "command was handed to the frame parser and stalled the reply"
+        )
