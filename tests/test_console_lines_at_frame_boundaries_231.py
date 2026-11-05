@@ -25,12 +25,29 @@ The eight #204 acceptance repros live in test_protocol_parsing_204.py and
 pin that none of this skipping can eat a frame.
 """
 
+import importlib.util
+import os
+import sys
 import time
 
 import pytest
 
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
-from daqifi.communication import ProtobufMessageParser
+from daqifi.communication import ProtobufMessageParser, StreamMessageConsumer
+
+_HERE = os.path.dirname(__file__)
+_spec = importlib.util.spec_from_file_location(
+    "sd_fakes_231",
+    os.path.join(_HERE, "portomatic-generated", "test_sd_card_operations_impl.py"),
+)
+_fakes = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_fakes)
+
+
+def _scpi():
+    from daqifi._internal import scpi_commands
+
+    return scpi_commands
 
 
 def _frame(message) -> bytes:
@@ -448,3 +465,305 @@ def test_an_echo_with_trailing_whitespace_still_matches() -> None:
         "behind it stalled"
     )
     assert consumed == len(on_the_wire) + len(_reply())
+
+
+# ---- audit round 2 on a0471915 ------------------------------------------
+
+
+def test_a_prompt_shaped_frame_split_at_eight_bytes_is_held_then_wins() -> None:
+    """r2 #1: THE RESIDUAL IS GONE, and this is the test that says so.
+
+    A 68-byte frame whose body begins ``AQIFI> `` arriving split so only
+    its first 8 bytes are buffered used to be consumed as the prompt and
+    destroyed. Holding until the frame reading could be REFUTED fixed that
+    but introduced a stall (a prompt followed by a short reply never
+    reaches 69 bytes). The prompt is now taken on refutation OR on
+    corroboration -- a valid frame parsing cleanly at offset 8 -- and held
+    when neither holds, which costs nothing and loses nothing.
+    """
+    body = b"AQIFI> " + bytes(range(61))
+    frame = bytes([68]) + body
+    parser = ProtobufMessageParser(lambda b: bytes(b))
+
+    # Only the ambiguous first 8 bytes so far: neither reading is
+    # established, so NOTHING is consumed.
+    assert parser.parse_messages(frame[:8]) == ([], 0), (
+        "the ambiguous prefix was consumed as a prompt before either "
+        "reading was established"
+    )
+    # The rest arrives: the frame decodes, so the frame wins.
+    messages, consumed = parser.parse_messages(frame)
+    assert len(messages) == 1 and messages[0].data == body
+    assert consumed == len(frame)
+
+
+def test_a_prompt_followed_by_a_short_reply_is_not_stalled() -> None:
+    """CONTROL / DESIGN GUARD -- passes on a0471915 too, by design.
+
+    It does not discriminate: the previous revision took the prompt
+    eagerly, so it never stalled. It is here because it is the counter-case
+    that ruled out the pure-hold fix I nearly shipped, and it guards
+    against anyone reintroducing one.
+
+    A reply shorter than 61 bytes after a prompt never accumulates the 69
+    bytes a refutation needs, so holding for refutation alone waited
+    forever. Corroboration -- a valid frame at offset 8 -- resolves it at
+    once.
+    """
+    parser = _parser()
+    data = b"DAQIFI> " + _reply()
+    assert len(data) < 69, "the point of this test is a buffer under 69 bytes"
+    messages, consumed = parser.parse_messages(data)
+    assert len(messages) == 1, (
+        "a short reply behind a prompt was stalled waiting for bytes that "
+        "were never coming"
+    )
+    assert consumed == len(data)
+
+
+def test_every_refutation_path_consults_the_pending_prefix_rule() -> None:
+    """r2 #2: the decode-exception path never called the pending-prefix
+    check, so a long registered echo split mid-line lost bytes and stalled
+    its reply. An 84-byte wifi-password echo is the reported shape."""
+    # ⚠ The cut has to land where the DECODE path sees it, which took a
+    # deliberate construction: the first byte must declare a length SHORTER
+    # than the echo, so the frame reading has enough bytes to try, and
+    # fails. "E" is 0x45 = 69, so an echo longer than 70 bytes reaches the
+    # decode path while still incomplete. Cutting anywhere else is held by
+    # the frame parser's own partial-frame logic, which is why my first
+    # attempt at this test passed on the defective head.
+    long_command = b"ENAble:VOLTage:DC " + b"9" * 60 + b",1\r\n"
+    assert len(long_command) > 70 and long_command[0] == 0x45
+    parser = _parser()
+    parser.expect_console_echo(long_command)
+
+    for cut in (71, 75, len(long_command) - 3):
+        fresh = _parser()
+        fresh.expect_console_echo(long_command)
+        assert fresh.parse_messages(long_command[:cut]) == ([], 0), (
+            f"a registered echo split at {cut} lost bytes on the decode path"
+        )
+    # Whole, it is consumed and the reply behind it survives.
+    messages, consumed = parser.parse_messages(long_command + _reply())
+    assert len(messages) == 1 and consumed == len(long_command) + len(_reply())
+
+
+# ---- audit round 2 finding 3: the echo registry with echo OFF ------------
+#
+# Registration was unconditional, so a client that had turned echo off --
+# which initialize() does, first thing -- registered an echo per send that
+# nothing could ever match. 10k sends left 10k entries and every frame
+# boundary scanned all of them.
+#
+# ⚠ RESIDUAL, stated because it is reachable and this fix does not cover
+# it: echo lives in the per-client microrl console object and is NOT
+# persisted (SCPI_SetEcho writes only that object; no NVM write exists),
+# and it defaults ON at console init (microrl.c:434). So a process that
+# connects WITHOUT calling initialize(), after some earlier process
+# disabled echo on the same console within the same power cycle, sees echo
+# genuinely off while this parser's state is None/unknown, and registers
+# as before. Suppressing registration there would need an inference from
+# "frames parsed, no echo ever matched", and that inference is UNSOUND: a
+# recurrence of the whitespace-mismatch bug this file already fixed once
+# presents identically, and acting on it would convert a logged backlog
+# into a silently stalled reply. The backlog warning (now repeating on
+# each doubling) is the chosen signal for that path instead.
+
+
+def test_registration_follows_the_echo_state_the_library_set() -> None:
+    """Unknown registers, OFF does not, ON registers again.
+
+    Only the OFF leg fails on a0471915 -- registration was unconditional
+    there, so "an echo got registered" is true on both sides and the other
+    two legs are shape guards, not discriminators.
+    """
+    parser = _parser()
+
+    # (1) UNKNOWN: we have not set echo, so we must assume it is on. This
+    # is the power-on default and it is the one direction that stalls.
+    parser.expect_console_echo(b"SYSTem:SYSInfoPB?\r\n")
+    assert len(parser._expected_echoes) == 1
+
+    # (2) The disable itself IS echoed -- the console echoes characters as
+    # they arrive, before the command is dispatched -- so it registers,
+    # and only commands after it do not.
+    parser.expect_console_echo(b"SYSTem:ECHO -1\r\n")
+    assert len(parser._expected_echoes) == 2
+    for i in range(500):
+        parser.expect_console_echo(b"SYSTem:SYSInfoPB?\r\n")
+    assert len(parser._expected_echoes) == 2, (
+        f"500 sends with echo off left {len(parser._expected_echoes)} "
+        "unmatchable entries; the registry grows without bound"
+    )
+
+    # (3) Re-enabling resumes registration. The enable command itself is
+    # NOT echoed (echo was off when it arrived), so the count is unchanged
+    # until the next command.
+    parser.expect_console_echo(b"SYSTem:ECHO 1\r\n")
+    assert len(parser._expected_echoes) == 2
+    parser.expect_console_echo(b"SYSTem:SYSInfoPB?\r\n")
+    assert len(parser._expected_echoes) == 3
+
+
+def test_the_disable_commands_own_echo_is_still_consumed() -> None:
+    """DESIGN GUARD -- passes on a0471915, which registered everything.
+
+    It rules out the "clear the list when echo is turned off" shape: the
+    device echoes `SYSTem:ECHO -1` before acting on it, so clearing on the
+    transition drops an echo that is already in flight, and the parser
+    then reads its first byte as a frame length. That is the very stall
+    being fixed, reintroduced by the fix.
+    """
+    parser = _parser()
+    sent = b"SYSTem:ECHO -1\r\n"
+    parser.expect_console_echo(sent)
+
+    messages, consumed = parser.parse_messages(sent + _reply())
+    assert len(messages) == 1 and consumed == len(sent) + len(_reply()), (
+        "the disable command's own echo was not recognised, so the reply "
+        "behind it was lost"
+    )
+
+
+def test_echo_zero_does_not_disable_echo() -> None:
+    """DESIGN GUARD -- passes on a0471915. Pins a firmware fact.
+
+    `SYSTem:ECHO 0` does NOT turn echo off: the firmware's test is
+    `echoOn > -1` (microrl.c:290 and :624, a DAQiFi modification), so only
+    -1 does. Reading the parameter as a boolean would suppress
+    registration while the device kept echoing -- the stalling direction.
+    """
+    parser = _parser()
+    parser.expect_console_echo(b"SYSTem:ECHO 0\r\n")
+    parser.expect_console_echo(b"SYSTem:SYSInfoPB?\r\n")
+    assert len(parser._expected_echoes) == 2, (
+        "ECHO 0 was read as 'off', but the device goes on echoing"
+    )
+
+    # Out of range: SCPI_SetEcho returns SCPI_RES_ERR and echo is
+    # unchanged, so neither may be read as a disable.
+    for rejected in (b"SYSTem:ECHO 2\r\n", b"SYSTem:ECHO -2\r\n"):
+        fresh = _parser()
+        fresh.expect_console_echo(rejected)
+        fresh.expect_console_echo(b"SYSTem:SYSInfoPB?\r\n")
+        assert len(fresh._expected_echoes) == 2, (
+            f"{rejected!r} is rejected by the device but was read as a "
+            "state change"
+        )
+
+
+def test_the_short_spelling_of_the_disable_is_recognised() -> None:
+    """`SYST:ECHO -1` is the same command. The firmware accepts the full
+    node or the node truncated at its first lowercase letter, so both
+    spellings reach SCPI_SetEcho and both must be read here.
+    """
+    for spelling in (b"SYST:ECHO -1\r\n", b"systEM:echo -1\r\n"):
+        parser = _parser()
+        parser.expect_console_echo(spelling)
+        parser.expect_console_echo(b"SYSTem:SYSInfoPB?\r\n")
+        assert len(parser._expected_echoes) == 1, (
+            f"{spelling!r} was not recognised as the disable, so "
+            "registration continued with echo off"
+        )
+
+
+# ---- audit round 2 finding 4: which parser gets told ---------------------
+
+
+def test_the_echo_is_registered_on_the_parser_that_reads_the_bytes() -> None:
+    """A connect() landing mid-send must not split the echo from the bytes.
+
+    The registration used to read ``self._consumer`` before the lock that
+    captures the stream, so a reconnect in between put the echo on the
+    parser it was about to discard while the command went to the new
+    connection. The new parser had no record of it, read the echoed line's
+    first byte as a frame length, and stalled that reply -- #231 again, via
+    a reconnect.
+
+    The swap is driven from ``_state_lock.__enter__`` and only when
+    ``_send_unserialized`` is the caller, because that is the one window
+    the real race has: connect() installs the consumer and bumps the
+    generation under this same lock, so it cannot interleave INSIDE the
+    hold, only before it.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    try:
+        first = device._consumer
+        # What connect() installs: a fresh parser over the same stream.
+        replacement = StreamMessageConsumer(
+            device._transport.stream,
+            ProtobufMessageParser(DaqifiOutMessage.FromString),
+        )
+        assert replacement is not first
+
+        class _SwapOnSendSnapshot:
+            """``_state_lock`` that performs a reconnect's swap just as
+            ``_send_unserialized`` takes it."""
+
+            def __init__(self, real):
+                self._real = real
+                self.swapped = False
+
+            def __enter__(self):
+                self._real.acquire()
+                caller = sys._getframe(1).f_code.co_name
+                if caller == "_send_unserialized" and not self.swapped:
+                    self.swapped = True
+                    device._consumer = replacement
+                    device._connect_generation += 1
+                return self
+
+            def __exit__(self, *exc_info):
+                self._real.release()
+                return False
+
+            def acquire(self, *a, **kw):
+                return self._real.acquire(*a, **kw)
+
+            def release(self):
+                return self._real.release()
+
+        hooked = _SwapOnSendSnapshot(device._state_lock)
+        device._state_lock = hooked
+
+        device.send(_scpi().get_device_info())
+        assert hooked.swapped, (
+            "the swap never ran, so this did not exercise the race at all"
+        )
+
+        line = _scpi().get_device_info().get_bytes().rstrip(b"\r\n")
+        assert line in replacement._parser._expected_echoes, (
+            "the echo went to the consumer a reconnect discarded, while the "
+            "command went to the stream the new consumer reads; that new "
+            "parser will read the echoed line as a frame length"
+        )
+    finally:
+        try:
+            device.disconnect()
+        except Exception:
+            pass
+
+
+def test_the_state_machine_reads_the_librarys_own_echo_commands() -> None:
+    """The bytes the library actually sends, not hand-written ones.
+
+    ⚠ This is the gap a literal-bytes test cannot cover. `get_bytes()` has
+    changed its whitespace before -- a trailing space it really does put
+    on the wire is what broke echo matching once already -- and the state
+    machine keyed on a hand-written spelling would go silently inert.
+    """
+    scpi = _scpi()
+    parser = _parser()
+
+    parser.expect_console_echo(scpi.disable_device_echo().get_bytes())
+    before = len(parser._expected_echoes)
+    parser.expect_console_echo(scpi.get_device_info().get_bytes())
+    assert len(parser._expected_echoes) == before, (
+        "disable_device_echo()'s real bytes were not read as the disable"
+    )
+
+    parser.expect_console_echo(scpi.enable_device_echo().get_bytes())
+    parser.expect_console_echo(scpi.get_device_info().get_bytes())
+    assert len(parser._expected_echoes) == before + 1, (
+        "enable_device_echo()'s real bytes did not resume registration"
+    )

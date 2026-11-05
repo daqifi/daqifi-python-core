@@ -870,22 +870,28 @@ class DaqifiDevice:
         """:meth:`send`'s body, with the exchange lock already settled."""
         if isinstance(message, ScpiMessage):
             data = message.get_bytes()
-            # ONE get_bytes() call feeds both the wire and the echo
-            # registry, so what is matched is exactly what was sent. The
-            # library knowing what it sent is the only sound basis for
-            # recognising an echo: #204's audit rounds showed no byte-level
-            # rule can tell a command line from the start of a
-            # length-prefixed frame (#231).
-            self._expect_console_echo(data)
             # Read once, under the lock connect() bumps the generation
             # with: disconnect() on another thread closes the stream under
             # no lock this path takes (upstream baabf0c), and the
             # generation tells this connection from a newer one on the
             # same transport object. connect() bumps it before installing
             # the new stream, so the pair read here is consistent.
+            #
+            # ⭐ The CONSUMER is captured here too, with the stream, in the
+            # same hold. It used to be read separately, before this lock,
+            # to register the echo -- and a connect() landing in between
+            # put the echo on the parser it was about to discard while
+            # these bytes went to the new connection's stream. The new
+            # parser then had no record of the command, read the echoed
+            # line's first byte as a frame length, and stalled that
+            # reply: #231 reopened by a reconnect. connect() installs the
+            # consumer and bumps the generation under this same lock
+            # (devices.py _connect_generation / self._consumer), so a
+            # snapshot taken in one hold cannot straddle two connections.
             with self._state_lock:
                 generation = self._connect_generation
                 transport = self._transport
+                consumer = self._consumer
                 try:
                     stream = transport.stream if transport is not None else None
                 except Exception:
@@ -901,6 +907,16 @@ class DaqifiDevice:
                 raise NotImplementedError(
                     "Sending without a transport-backed stream is not supported."
                 )
+            # Still before the first byte goes out, so no echo of it can
+            # arrive ahead of the registration -- and after the checks
+            # above, so a send that never reaches the wire leaves no entry
+            # behind that nothing can ever match. ONE get_bytes() call fed
+            # both this and the wire, so what is matched is exactly what
+            # was sent: the library knowing what it sent is the only sound
+            # basis for recognising an echo, because #204's audit rounds
+            # showed no byte-level rule can tell a command line from the
+            # start of a length-prefixed frame (#231).
+            self._expect_console_echo(data, consumer)
             # Loop on partial writes — unbuffered file-like objects
             # (sock.makefile with buffering=0) may write fewer bytes
             # than requested per call. Without the loop, the tail of
@@ -1005,8 +1021,8 @@ class DaqifiDevice:
         """
         _log.warning("device %s reported on the console: %s", self.name, line)
 
-    def _expect_console_echo(self, data: bytes) -> None:
-        """Tell the active frame parser the EXACT bytes just written.
+    def _expect_console_echo(self, data: bytes, consumer: Any) -> None:
+        """Tell ``consumer``'s frame parser the EXACT bytes just written.
 
         ⛔ Takes the bytes, not the command string. Passing the string and
         letting the parser strip it discarded whitespace that
@@ -1014,11 +1030,16 @@ class DaqifiDevice:
         never matched and the stall came back. These are the same bytes
         handed to the stream, from the same ``get_bytes()`` call.
 
+        ⛔ The consumer is a REQUIRED argument, not read from ``self``
+        here: the caller captured it in the same lock hold as the stream it
+        writes to, and re-reading ``self._consumer`` would reintroduce the
+        split this parameter exists to close. There is deliberately no
+        default -- a fallback to ``self._consumer`` would fail open.
+
         Best-effort and silent: a parser that does not take echoes (the
         text capture's line parser) simply has no such method, and failing
         to register an echo must never stop a command going out.
         """
-        consumer = self._consumer
         parser = getattr(consumer, "_parser", None) if consumer else None
         expect = getattr(parser, "expect_console_echo", None)
         if expect is None:
