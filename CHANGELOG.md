@@ -7,6 +7,12 @@ aims to follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `update_wifi_module(..., skip_version_check=True)` flashes the WiFi module
+  even when it already reports the latest published version. Mirrors
+  `skipVersionCheck` on the C# `UpdateWifiModuleAsync`. Without it an
+  up-to-date module cannot be reflashed at all, so the WiFi update path cannot
+  be exercised on a bench whose boards are already current. It overrides the
+  version check only — every other refusal on the path still applies (#190).
 - `DaqifiDevice.run_exclusive(fn)` runs `fn()` as one exchange, so a
   sequence of commands cannot be interleaved with another thread's `send()`
   or text exchange — including a configure-then-query sequence or an SD
@@ -108,6 +114,17 @@ aims to follow [Semantic Versioning](https://semver.org/).
   timeout under 1 ms (#201).
 
 ### Fixed
+- A WiFi module update canceled while the flash tool was running no longer
+  reports `FAILED` when the flash had already succeeded. The tool's success
+  line is the authority on whether the module was programmed; what follows it
+  leaves the USB-transparent bridge and restores the LAN configuration, so
+  honouring a cancel there both misreported a completed update and left the
+  device bridged with its LAN down. A cancel observed after that line is logged
+  and the update completes; a cancel before it still recovers and reports
+  `FAILED` (#190).
+- A canceled firmware update chains `FirmwareUpdateCancelledError` as the
+  `FirmwareUpdateException`'s `__cause__`. Telling "the user canceled" apart
+  from "the update failed" previously meant naming a private sentinel (#190).
 - A text exchange started from a message-received callback is refused
   outright instead of killing the protobuf consumer. It ran on the
   consumer's own thread, so pausing the consumer stopped the thread it ran

@@ -2,7 +2,7 @@
 
 ## `sd_json_firmware_sample.json`
 
-A real SD-card JSON log, captured 2026-10-27 by the nq-a bench lane: 216 samples, 4 channels, `tick_hz` 42000000.
+A real SD-card JSON log, captured 2026-10-27 on the bench: 216 samples, 4 channels, `tick_hz` 42000000.
 - **Firmware:** 3.8.0, image FB1B909F @ daqifi-nyquist-firmware commit 374510776.
 - **Format equivalence with firmware `main`:** `JSON_Encoder.c`, `JSON_Encoder.h` and `StreamingRuntimeConfig.h` are byte-identical blobs between that commit and origin/main 4bdcfc798, so the format is representative of `main`.
 - **Size:** 22752 bytes, equal to the size `SD:LISt?` reported.
@@ -13,7 +13,7 @@ Used by `tests/test_sd_json_firmware_format.py` (#163).
 
 ## `sd_csv_pattern_raw.csv` and `sd_csv_pattern_mv.csv`
 
-A real discriminating pair of SD-card CSV logs, captured 2026-10-27 by the nq-a bench lane.
+A real discriminating pair of SD-card CSV logs, captured 2026-10-27 on the bench.
 - **Firmware:** 3.8.0, image FB1B909F.
 - **Settings:** `SYSTem:STReam:TEST:PATtern 1` (counter), `SYST:STR:FORmat 2`, precision 0 in both, 4 channels at 200 Hz for 2 s.
 - **The one difference:** `CONF:ADC:USECal` is 2 for the raw file (raw ADC codes, csv_encoder.c:438) and 0 for the mV file (integer millivolts, csv_encoder.c:449).

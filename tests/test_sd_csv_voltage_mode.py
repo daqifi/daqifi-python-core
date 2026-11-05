@@ -8,7 +8,7 @@ every value as a raw count, so 1.2345 V became 1.0.
 
 Fixtures:
 - fixtures/sd_csv_firmware_p4_sample.csv is a REAL log, captured 2026-10-27
-  by the nq-a bench lane: firmware 3.8.0 (image FB1B909F @
+  on the bench: firmware 3.8.0 (image FB1B909F @
   daqifi-nyquist-firmware commit 374510776), SYST:STR:FORmat 2 (standard
   CSV), CONFigure:VOLTage:PRECision 4, 4 channels at 200 Hz for 2 s. 31405
   bytes, equal to the size SD:LISt? reported. One edit: the board serial is

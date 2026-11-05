@@ -115,7 +115,7 @@ def test_device_finder_discover_first_returns_device(
 def test_device_finder_discover_with_variant_filter(
     device_info: DiscoveryDeviceInfo,
 ) -> None:
-    """The ``variant`` filter only includes matching boards. Our COM7
+    """The ``variant`` filter only includes matching boards. Our bench
     unit is a Nyquist1 (verified via memory + the smoke test)."""
     expected_port = device_info.port.strip()
 
@@ -123,7 +123,7 @@ def test_device_finder_discover_with_variant_filter(
     assert isinstance(nq1, list)
     assert len(nq1) >= 1
     assert all(d.variant == BoardVariant.NQ1 for d in nq1)
-    # Our COM7 unit must appear in the NQ1 result.
+    # Our bench unit must appear in the NQ1 result.
     assert any(d.port.strip() == expected_port for d in nq1)
 
     # The NQ3 filter must (a) only contain NQ3 devices, and (b) NOT
@@ -153,7 +153,7 @@ def test_serial_device_finder_discover_finds_real_device(
     device_info: DiscoveryDeviceInfo,
 ) -> None:
     """SerialDeviceFinder probes every available port with the SCPI init
-    sequence; our COM7 unit must be among the discovered candidates."""
+    sequence; our bench unit must be among the discovered candidates."""
     finder = SerialDeviceFinder(baud_rate=115200)
     discovered_events: List[DeviceDiscoveredEventArgs] = []
     completed: List[bool] = []

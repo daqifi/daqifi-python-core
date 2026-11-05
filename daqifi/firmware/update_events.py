@@ -56,6 +56,24 @@ class FirmwareUpdateStateChangedEventArgs:
     )
 
 
+class FirmwareUpdateCancelledError(Exception):
+    """A firmware update stopped because cancellation was requested.
+
+    Public because it is CHAINED: when a cancel ends an update, the
+    :class:`FirmwareUpdateException` raised to the caller carries one of these
+    as its ``__cause__``, so a caller that wants to tell "the user cancelled"
+    apart from "the update failed" can ask::
+
+        except FirmwareUpdateException as exc:
+            if isinstance(exc.__cause__, FirmwareUpdateCancelledError):
+                ...
+
+    Before #190 item 5 the chained cause was a private sentinel, which left no
+    supported way to make that distinction -- the information was there and
+    could only be reached by naming an underscore-prefixed internal.
+    """
+
+
 class FirmwareUpdateException(Exception):
     """Firmware update failure with state + operation context.
 

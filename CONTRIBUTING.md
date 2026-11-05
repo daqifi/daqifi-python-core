@@ -72,7 +72,7 @@ reports a literal `0` in the `*IDN?` serial field.
 ### Local rig file
 
 Keep your own identifiers (device SN, port, LAN IP) in a gitignored file
-such as `.claude/hardware-rig.md` or in your shell environment, never in a
+such as an untracked local note or your shell environment, never in a
 tracked file.
 
 ### Identity-gating destructive operations

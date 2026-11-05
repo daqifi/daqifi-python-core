@@ -273,7 +273,7 @@ def test_update_network_configuration_round_trip(
         pytest.skip(
             "DAQIFI_EXPECTED_SERIAL_NUMBER not set; refusing to run "
             "destructive test on unverified device. Set this to "
-            "your unit's SN (see .claude/hardware-rig.md)"
+            "your unit's SN"
         )
     actual_sn = dev.metadata.serial_number
     if not serial_number_matches(expected_sn, actual_sn):

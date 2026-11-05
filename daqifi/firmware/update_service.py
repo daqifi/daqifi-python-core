@@ -77,6 +77,7 @@ from daqifi.firmware.external_process import (
 )
 from daqifi.firmware.lan_chip_info_provider import LanChipInfoProvider
 from daqifi.firmware.update_events import (
+    FirmwareUpdateCancelledError,
     FirmwareUpdateException,
     FirmwareUpdateProgress,
     FirmwareUpdateStateChangedEventArgs,
@@ -240,11 +241,20 @@ class FirmwareUpdateService(Protocol):
         firmware_path: str,
         progress: _PROGRESS_CALLBACK = None,
         cancel_event: Optional[threading.Event] = None,
+        skip_version_check: bool = False,
     ) -> None:
         """Run a WiFi-module update via the external flashing tool.
 
         **Caller responsibility:** same identity-gating as
         :meth:`update_firmware`.
+
+        Args:
+            skip_version_check: flash even when the module already reports
+                the latest version. Mirrors ``skipVersionCheck`` on the C#
+                ``UpdateWifiModuleAsync``. Without it an up-to-date module
+                cannot be reflashed at all, so there is no way to reinstall
+                the current image — which is what validating the WiFi update
+                path on hardware requires when every board is already current.
 
         Raises:
             FirmwareUpdateException: when any update step fails.
@@ -280,13 +290,9 @@ class _Cancellation:
 
     def check(self) -> None:
         if self.cancel_requested:
-            raise _CancelledError()
+            raise FirmwareUpdateCancelledError()
         if time.monotonic() >= self._end:
             raise TimeoutError(self._timeout_message_builder(self.timeout_seconds))
-
-
-class _CancelledError(Exception):
-    """Internal sentinel for cooperative cancellation."""
 
 
 _BRIDGE_POLL_SECONDS = 1.0
@@ -427,6 +433,7 @@ class DefaultFirmwareUpdateService:
         firmware_path: str,
         progress: _PROGRESS_CALLBACK = None,
         cancel_event: Optional[threading.Event] = None,
+        skip_version_check: bool = False,
     ) -> None:
         if device is None:
             raise TypeError("device must not be None")
@@ -439,7 +446,8 @@ class DefaultFirmwareUpdateService:
 
         self._run_exclusive(
             lambda: self._run_wifi_update(
-                device, firmware_path, progress, cancel_event
+                device, firmware_path, progress, cancel_event,
+                skip_version_check,
             ),
             cancel_event,
         )
@@ -476,7 +484,7 @@ class DefaultFirmwareUpdateService:
     ) -> None:
         # Early-cancel intentionally NOT raised here: the inner flows
         # check `cancel_event.is_set()` at every loop iteration and wrap
-        # `_CancelledError` in `FirmwareUpdateException`. Raising early
+        # `FirmwareUpdateCancelledError` in `FirmwareUpdateException`. Raising early
         # here would leak the internal sentinel and skip the FAILED
         # state transition.
         self._raise_if_closed()
@@ -716,7 +724,7 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
                 total_bytes,
             )
-        except _CancelledError as exc:
+        except FirmwareUpdateCancelledError as exc:
             failed_state = self._current_state
             failed_operation = "PIC32 firmware update canceled."
             self._logger.warning("PIC32 firmware update canceled.")
@@ -841,6 +849,7 @@ class DefaultFirmwareUpdateService:
         firmware_path: str,
         progress: _PROGRESS_CALLBACK,
         cancel_event: Optional[threading.Event],
+        skip_version_check: bool = False,
     ) -> None:
         # "update_requested" is armed BEFORE the FWUpdate send: a send that
         # raises can still have been delivered. "recovered" is what
@@ -848,7 +857,8 @@ class DefaultFirmwareUpdateService:
         bridge_state = {"update_requested": False, "recovered": None}
         try:
             self._run_wifi_update_steps(
-                device, firmware_path, progress, cancel_event, bridge_state
+                device, firmware_path, progress, cancel_event, bridge_state,
+                skip_version_check,
             )
         finally:
             # Whatever ended the update, and wherever an interrupt landed
@@ -878,6 +888,7 @@ class DefaultFirmwareUpdateService:
         progress: _PROGRESS_CALLBACK,
         cancel_event: Optional[threading.Event],
         bridge_state: dict,
+        skip_version_check: bool = False,
     ) -> None:
         total_bytes = 100
 
@@ -887,7 +898,17 @@ class DefaultFirmwareUpdateService:
             # cancelled run still incurs a network round-trip and only
             # raises once it reaches the first state-transition point.
             _check_cancel(cancel_event)
-            if self._is_wifi_firmware_up_to_date(device, progress, cancel_event):
+            # `skip_version_check` reaches the version check, not the flash:
+            # an up-to-date module is the ONLY thing it overrides, so every
+            # later refusal (disconnected device, non-USB transport, a tool
+            # that reports failure) still applies unchanged.
+            if skip_version_check:
+                self._logger.info(
+                    "Skipping the WiFi firmware version check at the "
+                    "caller's request; the module will be flashed even if it "
+                    "already reports the latest version."
+                )
+            elif self._is_wifi_firmware_up_to_date(device, progress, cancel_event):
                 return
             _check_cancel(cancel_event)
 
@@ -1081,6 +1102,31 @@ class DefaultFirmwareUpdateService:
                     + _build_process_log_excerpt(process_result)
                 )
 
+            # ⛔ #190 item 5: PAST THIS POINT A CANCEL IS TOO LATE TO HONOUR.
+            #
+            # The flash has SUCCEEDED -- the tool's own success line said so,
+            # which the check above calls the authority. Honouring a cancel
+            # from here would report FAILED for an update that completed, and
+            # would skip the bridge exit and the LAN restore below, leaving the
+            # device in USB-transparent mode with its LAN configuration down.
+            # So the cancel is recorded as a note and the flow continues.
+            #
+            # A cancel observed BEFORE this point keeps the existing behaviour
+            # exactly: recovery runs via _try_leave_lan_update_mode and the
+            # update reports FAILED.
+            if cancel_event is not None and cancel_event.is_set():
+                self._logger.info(
+                    "Cancellation was requested, but the WiFi module flash "
+                    "had already completed successfully; continuing to "
+                    "reconnect and restore LAN configuration. The cancel was "
+                    "not honoured."
+                )
+            # Dropped for the remainder of the flow, deliberately: _reconnect
+            # is the step that leaves the bridge and restores LAN, and it must
+            # run to completion even with a cancel pending. This is the only
+            # remaining consumer of cancel_event in this method.
+            cancel_event = None
+
             self._transition_to_state(
                 FirmwareUpdateState.VERIFYING,
                 "Reconnecting device and restoring LAN configuration.",
@@ -1149,7 +1195,7 @@ class DefaultFirmwareUpdateService:
                 total_bytes,
                 total_bytes,
             )
-        except _CancelledError as exc:
+        except FirmwareUpdateCancelledError as exc:
             failed_state = self._current_state
             failed_operation = "WiFi module update canceled."
             if not self._try_leave_lan_update_mode(device, bridge_state):
@@ -1534,7 +1580,7 @@ class DefaultFirmwareUpdateService:
                     f"WiFi flash tool {tool_path!r} is on a network or Linux "
                     "filesystem path, which cmd.exe cannot use as its working "
                     "directory. Put the WiFi firmware bundle on a local Windows "
-                    "drive (under WSL, e.g. under /mnt/c/)."
+                    "drive (under WSL, a path on the mounted Windows drive)."
                 )
             executable_arguments = _cmd_exe_arguments(
                 os.path.basename(tool_path),
@@ -2335,7 +2381,7 @@ class DefaultFirmwareUpdateService:
                     "will retry.",
                     probes_executed,
                 )
-            except _CancelledError:
+            except FirmwareUpdateCancelledError:
                 # Outer cancellation propagated through the probe — bail
                 # immediately, do NOT swallow as a probe failure.
                 raise
@@ -2347,8 +2393,8 @@ class DefaultFirmwareUpdateService:
                 # Catching ``Exception`` (not ``BaseException``) lets
                 # ``KeyboardInterrupt`` / ``SystemExit`` / ``GeneratorExit``
                 # propagate normally so the process can terminate.
-                # ``_CancelledError`` is ``Exception``-derived but is
-                # caught above this clause, so the ordering preserves
+                # ``FirmwareUpdateCancelledError`` is ``Exception``-derived
+                # but is caught above this clause, so the ordering preserves
                 # cooperative-cancel semantics. (Qodo /agentic_review on
                 # PR #139 caught the original ``BaseException`` form.)
                 last_probe_exception = exc
@@ -2637,7 +2683,7 @@ def _check_cancel(cancel_event: Optional[threading.Event]) -> None:
     so a pre-cancelled run aborts before incurring side effects.
     """
     if cancel_event is not None and cancel_event.is_set():
-        raise _CancelledError()
+        raise FirmwareUpdateCancelledError()
 
 
 def _clamp_process_timeout(
