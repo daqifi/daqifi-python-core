@@ -699,3 +699,221 @@ def test_initialize_waits_for_the_device_instead_of_parking_into_it() -> None:
 # on the defective head too). A test that passes on both sides is not a
 # control, so it is not here. The evidence for this fix is the audit's own
 # reproduction plus the pre-existing behaviour it restores.
+
+
+# ---- audit round 2 on 018e93a9: four findings ---------------------------
+
+
+def test_a_command_a_delay_depends_on_is_not_parked(tmp_path) -> None:
+    """r2 #1: the firmware updater sent FORceBoot, slept, then disconnected
+    WITHOUT owning the device's exchange. Held by another flow, FORceBoot
+    parked and the disconnect discarded it: the board stayed in application
+    mode and the update timed out waiting for a bootloader nobody asked for.
+
+    The updater's own _operation_lock does not help -- it serialises
+    updates against each other, not against the device's other flows.
+    """
+    from daqifi.firmware.update_service import DefaultFirmwareUpdateService
+
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with device._exchange_lock("other-flow"):
+            held.set()
+            release.wait(10.0)
+
+    h = threading.Thread(target=holder, name="holder", daemon=True)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "another flow to hold the exchange")
+
+        service = DefaultFirmwareUpdateService.__new__(
+            DefaultFirmwareUpdateService
+        )
+        # The helper is the whole fix: it owns the exchange for the send so
+        # the delay that follows measures time AFTER delivery.
+        service._send_and_settle(
+            device, _scpi().force_bootloader(), 0, None
+        )
+
+        assert [w for w in stream.written if b"FORceBoot" in w] != [], (
+            "the command the following delay depends on was parked: a "
+            "disconnect after the delay would discard it entirely"
+        )
+    finally:
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_a_send_is_refused_rather_than_parked_onto_a_lost_link() -> None:
+    """r2 #2: the lost-link release path had round 1's atomicity gap. A send
+    that passed its connected check and then paused could park AFTER the
+    drain discarded the queue and BEFORE the lock was released, leaving its
+    command queued across a reconnect and replayed out of order.
+
+    Closed from both ends: the discard and the release are now one critical
+    section, and parking re-checks the link under the same lock -- a caller
+    is told the command cannot be sent instead of being told "accepted" for
+    something that can only be dropped.
+    """
+    from daqifi._internal.scpi import ConnectionStatus
+
+    device = _fakes._make_device_with_serial_facade()
+    at_the_gap = threading.Event()
+    holder_in = threading.Event()
+    holder_go = threading.Event()
+
+    class _HookedLock:
+        """Delegates to the real lock, pausing after B's FIRST failed
+        non-blocking acquire -- i.e. with B past its connected check and
+        not yet parked, which is the window the race needs. A real lock's
+        methods are read-only, so the hook must be a wrapper."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self._armed = True
+
+        def acquire(self, blocking=True, timeout=-1):
+            got = (self._inner.acquire(blocking, timeout) if blocking
+                   else self._inner.acquire(False))
+            if not got and self._armed:
+                self._armed = False
+                at_the_gap.set()
+                time.sleep(0.4)      # let A lose the link and release
+            return got
+
+        def release(self):
+            return self._inner.release()
+
+    device._text_exchange_lock = _HookedLock(device._text_exchange_lock)
+
+    def holder():
+        with device._exchange_lock("A"):
+            holder_in.set()
+            holder_go.wait(10.0)
+            # A's write fails and the link goes: this is what A's release
+            # path then discards the queue for.
+            device._status = ConnectionStatus.Lost
+
+    h = threading.Thread(target=holder, name="A", daemon=True)
+    try:
+        h.start()
+        _wait_for(holder_in.is_set, 5.0, "A to hold the exchange")
+
+        outcome = []
+
+        def sender():
+            try:
+                device.send(_scpi().stop_streaming())
+                outcome.append("accepted")
+            except BaseException as exc:                          # noqa: BLE001
+                outcome.append(type(exc).__name__)
+
+        threading.Thread(target=sender, name="B", daemon=True).start()
+        _wait_for(at_the_gap.is_set, 5.0, "B's failed acquire")
+        holder_go.set()              # A marks Lost, discards, releases
+        h.join(10.0)
+        _wait_for(lambda: outcome, 10.0, "B to finish")
+
+        assert device._parked_sends == [], (
+            f"a command was left queued across a lost link: "
+            f"{device._parked_sends}"
+        )
+        assert outcome == ["DeviceNotConnectedError"], (
+            f"B was told its command was accepted onto a dead link: {outcome}"
+        )
+    finally:
+        holder_go.set()
+        h.join(5)
+
+
+def test_closing_during_the_grace_wait_does_not_revive_the_reader() -> None:
+    """r2 #3: close() during start()'s new grace-period join published a
+    reader into a DISPOSED consumer. Every later close() then returned
+    early as already-disposed, so nothing ever stopped that reader.
+
+    The grace period introduced this window; the disposal re-check under
+    the publish lock closes it.
+    """
+    from daqifi.communication import LineBasedMessageParser, StreamMessageConsumer
+
+    class _SlowStream:
+        """A read that blocks, so the reader cannot exit promptly."""
+
+        def __init__(self):
+            self.closed = False
+
+        def read(self, _n):
+            time.sleep(0.4)
+            return b""
+
+        @property
+        def in_waiting(self):
+            return 0
+
+    consumer = StreamMessageConsumer[str](
+        _SlowStream(), LineBasedMessageParser()
+    )
+    consumer.start()
+    time.sleep(0.1)                      # the reader is inside a read
+    consumer.stop_safely(timeout_ms=1)   # asked to stop, will not exit yet
+
+    # close() lands while start() is in its grace join.
+    def closer():
+        time.sleep(0.05)
+        consumer.close()
+
+    threading.Thread(target=closer, daemon=True).start()
+    try:
+        consumer.start()
+    except Exception:                                             # noqa: BLE001
+        pass                             # refusing to start is a fine outcome
+
+    _wait_for(lambda: consumer._disposed, 5.0, "the consumer to be disposed")
+    # The invariant: a disposed consumer must not be left with a live reader.
+    thread = getattr(consumer, "_thread", None)
+    assert not (consumer._disposed and thread is not None and thread.is_alive()
+                and consumer.is_running), (
+        "a reader was published into a disposed consumer, so no later "
+        "close() can ever stop it"
+    )
+
+
+def test_an_old_consumers_restart_failure_is_not_charged_to_the_new_one() -> None:
+    """r2 #4: a restart failure was recorded against whatever generation
+    existed when the attempt finished, so a reconnected device inherited a
+    fault from the connection it replaced."""
+    device = _fakes._make_device_with_serial_facade()
+    try:
+        # Force the restart after the consumer swap to fail, and let a
+        # reconnect land while the exchange is still running -- so the
+        # attempt finishes under a NEWER generation than it started under.
+        def refuse_start():
+            raise RuntimeError("induced: restart failed on the old link")
+
+        device._consumer.start = refuse_start        # type: ignore[assignment]
+
+        def reconnect_midway():
+            device._connect_generation += 1
+
+        device.execute_text_command(
+            reconnect_midway, response_timeout_ms=100,
+            completion_timeout_ms=50,
+        )
+
+        assert device.delivery_fault is None, (
+            "a restart failure on the old connection was charged to the "
+            f"replacement: {device.delivery_fault}"
+        )
+    finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass

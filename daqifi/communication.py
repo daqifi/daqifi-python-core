@@ -663,6 +663,11 @@ class StreamMessageConsumer(Generic[T]):
         # Lock around the message buffer mutation so ClearBuffer doesn't
         # race the consumer thread.
         self._buffer_lock = threading.Lock()
+        # ⛔ Serialises the DECISION to publish a reader against the
+        # decision to dispose. Deliberately NOT held across any join: a
+        # close() from a message-received callback would then wait on a
+        # lock whose holder is joining that same callback's thread.
+        self._lifecycle_lock = threading.Lock()
         # Telemetry — closes #18 §3. Mutated only from the consumer
         # thread (read in ``_process_messages``); read from any thread
         # via the ``telemetry`` property. The dataclass holds plain
@@ -741,17 +746,24 @@ class StreamMessageConsumer(Generic[T]):
                     "the underlying stream before restarting"
                 )
             self._thread = None
-        # Reset telemetry so each start/stop cycle reports its own
-        # counters (#18 §3).
-        self._telemetry = StreamConsumerTelemetry()
-        self._is_running = True
-        thread_name = f"MessageConsumer-{type(self).__name__}"
-        self._thread = threading.Thread(
-            target=self._process_messages,
-            name=thread_name,
-            daemon=True,
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            # ⛔ RE-CHECK AFTER THE JOIN. close() can run during the grace
+            # wait above, and a reader published after that leaves a
+            # DISPOSED consumer with a live thread -- every later close()
+            # returns early as already-disposed, so nothing ever stops it.
+            # The grace period created this window; this closes it.
+            self._raise_if_disposed()
+            # Reset telemetry so each start/stop cycle reports its own
+            # counters (#18 §3).
+            self._telemetry = StreamConsumerTelemetry()
+            self._is_running = True
+            thread_name = f"MessageConsumer-{type(self).__name__}"
+            self._thread = threading.Thread(
+                target=self._process_messages,
+                name=thread_name,
+                daemon=True,
+            )
+            self._thread.start()
 
     def stop(self) -> None:
         self._is_running = False
@@ -808,10 +820,15 @@ class StreamMessageConsumer(Generic[T]):
             pass
 
     def close(self) -> None:
-        if self._disposed:
-            return
+        # Disposal is claimed BEFORE the stop, under the lock start() holds
+        # while it publishes, so a reader cannot be published into a
+        # consumer that is closing. Claiming it afterwards left exactly
+        # that window open during start()'s grace wait.
+        with self._lifecycle_lock:
+            if self._disposed:
+                return
+            self._disposed = True
         self.stop_safely()
-        self._disposed = True
 
     # ---- internals ---------------------------------------------------------
 

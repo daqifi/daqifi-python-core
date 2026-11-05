@@ -902,6 +902,18 @@ class DaqifiDevice:
                         "Direct message sending without a string-typed "
                         "ScpiMessage is not yet implemented."
                     )
+                # Re-checked HERE, under the same lock the drain discards
+                # under, so a command cannot be queued onto a connection
+                # that is already gone. Without this the caller is told
+                # "accepted" for something that can only ever be dropped.
+                if self._link_is_gone():
+                    raise DeviceNotConnectedError(
+                        "The message could not be queued: the connection is "
+                        "gone.",
+                        is_shutting_down=bool(
+                            self._disposed or self._is_disconnecting
+                        ),
+                    )
                 self._park_send(data, on_written)
                 return
         # _text_exchange_lock_owner means exactly "this thread holds the
@@ -1418,6 +1430,11 @@ class DaqifiDevice:
                 # is kept exactly: nothing back within it is the answer.
 
         was_running = self._consumer.is_running
+        # Captured BEFORE the exchange, so a restart failure is attributed
+        # to the connection that failed rather than to whatever connection
+        # exists by the time the attempt finishes -- the same scoping the
+        # replay faults already use.
+        exchange_generation = self._connect_generation
         if was_running:
             try:
                 stopped = self._consumer.stop_safely()
@@ -1551,7 +1568,7 @@ class DaqifiDevice:
                         "the message consumer could not be restarted after "
                         f"a text exchange, so nothing is reading the "
                         f"stream: {restart_exc}",
-                        self._connect_generation,
+                        exchange_generation,
                     )
                     _log.warning(
                         "consumer restart failed after a text exchange; "
@@ -2321,14 +2338,32 @@ class DaqifiDevice:
                 # it here degrades the report (a drop recorded as a write
                 # failure) rather than putting a command on a dead link.
                 if self._link_is_gone():
-                    self._discard_parked_sends(
-                        "the connection was lost before they could be sent"
-                    )
+                    # ⛔ DISCARD AND RELEASE IN ONE CRITICAL SECTION. Round
+                    # 1 fixed this for the empty-queue path and left the
+                    # same gap here: a send that passed its connected check
+                    # and then paused could park AFTER the discard and
+                    # BEFORE the release, and its command would sit queued
+                    # until some later flow replayed it -- across a
+                    # reconnect, out of order.
+                    generation = self._connect_generation
                     with self._queue_lock:
+                        dropped = len(self._parked_sends)
+                        self._parked_sends = []
                         self._text_exchange_lock_owner = None
                         self._text_exchange_lock.release()
                         released = True
-                        return
+                    if dropped:
+                        self._record_delivery_fault(
+                            f"{dropped} command(s) queued during an exchange "
+                            f"were dropped: the connection was lost before "
+                            f"they could be sent",
+                            generation,
+                        )
+                        _log.warning(
+                            "dropped %d parked send(s): the connection was "
+                            "lost before they could be sent", dropped,
+                        )
+                    return
                 with self._queue_lock:
                     if not self._parked_sends:
                         self._text_exchange_lock_owner = None
