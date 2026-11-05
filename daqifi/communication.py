@@ -735,17 +735,20 @@ class StreamMessageConsumer(Generic[T]):
         # only until that callback returns, and refusing outright in that
         # window is what left the consumer dead for good (#238 residual).
         # Only a reader that OUTLASTS the grace is a real overlap.
-        if self._thread is not None and self._thread.is_alive():
-            if threading.current_thread() is not self._thread:
-                self._thread.join(timeout=self.STALE_READER_GRACE_MS / 1000.0)
-            if self._thread.is_alive():
+        # ⛔ CAPTURED ONCE, AND EVERY DECISION BELOW IS ABOUT THIS OBJECT.
+        # Re-reading self._thread after the join is what made the race: by
+        # then another starter may have published its own reader there.
+        joined = self._thread
+        if joined is not None and joined.is_alive():
+            if threading.current_thread() is not joined:
+                joined.join(timeout=self.STALE_READER_GRACE_MS / 1000.0)
+            if joined.is_alive():
                 raise RuntimeError(
                     "previous consumer thread is still alive after "
                     f"{self.STALE_READER_GRACE_MS} ms; "
                     "call stop_safely() with a larger timeout or close "
                     "the underlying stream before restarting"
                 )
-            self._thread = None
         with self._lifecycle_lock:
             # ⛔ RE-CHECK EVERYTHING THE PRE-JOIN CHECKS DECIDED. The grace
             # wait above is not under this lock, so between those checks and
@@ -755,8 +758,26 @@ class StreamMessageConsumer(Generic[T]):
             # disposed consumer that no later close() can stop.
             self._raise_if_disposed()
             if self._is_running:
-                # Another start() won the race and published already.
+                # Another start() won the race and published already. Note
+                # we have NOT cleared _thread: it is that winner's reader
+                # now, and nulling it here is exactly the defect below.
                 return
+            # ⛔ NEVER NULL A HANDLE YOU DID NOT JOIN. The clear used to sit
+            # outside this lock, straight after the join, so a starter that
+            # joined the OLD reader could null the handle to a NEW one
+            # another starter had already published -- leaving that reader
+            # alive but untracked, so close() could not stop it and the
+            # next start() saw None and published a SECOND reader on the
+            # same stream. Clearing only the joined object, under the lock,
+            # makes that unrepresentable: the identity test fails precisely
+            # when someone else has published.
+            if joined is not None and self._thread is joined:
+                if joined.is_alive():        # re-check: it may have been restarted
+                    raise RuntimeError(
+                        "the previous consumer thread came back to life "
+                        "while this call waited for it to exit"
+                    )
+                self._thread = None
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError(
                     "another consumer thread was started while this call "

@@ -926,6 +926,21 @@ class DaqifiDevice:
                         self._disposed or self._is_disconnecting
                     ),
                 )
+            # ⛔ THE SAME RULE, APPLIED TO THE FAULT CHECK. The exchange we
+            # just waited for may be the one that failed to restart the
+            # consumer, and it records that fault on its way out -- after
+            # we passed start_streaming()'s check and before we got the
+            # lock. Without this the START went out and the API reported
+            # streaming over a stream nothing was reading.
+            #
+            # It is HERE rather than in each caller because the race is not
+            # start_streaming's: it belongs to the wait, so it is fixed
+            # where the wait is. It is deliberately NOT on the
+            # already-owns-the-exchange fast path above: that path does not
+            # wait, so nothing can have changed under it, and adding it
+            # there would refuse an exchange's own setup_action for a fault
+            # that predates it.
+            self._raise_if_delivery_faulted("send")
             self._write_message(message)
         finally:
             self._text_exchange_lock_owner = None

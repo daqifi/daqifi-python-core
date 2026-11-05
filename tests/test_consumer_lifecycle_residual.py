@@ -1008,3 +1008,152 @@ def test_a_send_that_waits_too_long_is_told_so() -> None:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
+
+
+# ---- EI B audit round 1: two HIGHs ---------------------------------------
+
+
+def test_a_joining_starter_never_nulls_another_starters_reader() -> None:
+    """⛔ A starter must clear only the handle IT joined.
+
+    The clear used to sit outside the lifecycle lock, straight after the
+    join. So a starter that joined the OLD reader could null the handle to
+    a NEW one another starter had already published: that reader stayed
+    alive but untracked, ``close()`` could not stop it, and the next
+    ``start()`` saw ``None`` and published a SECOND reader on one stream.
+
+    Driven by making the join itself slow, which is the window, and
+    publishing a replacement during it.
+    """
+    from daqifi.communication import ProtobufMessageParser, StreamMessageConsumer
+    from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+
+    class _Stream:
+        def read(self, _n=1):
+            time.sleep(0.01)
+            return b""
+
+        @property
+        def in_waiting(self):
+            return 0
+
+    consumer = StreamMessageConsumer[object](
+        _Stream(), ProtobufMessageParser(DaqifiOutMessage.FromString)
+    )
+    try:
+        # An "old reader" that is alive and will exit during the join.
+        exit_old = threading.Event()
+        old = threading.Thread(target=lambda: exit_old.wait(10.0),
+                               name="old-reader", daemon=True)
+        old.start()
+        consumer._thread = old
+
+        # The replacement another starter publishes while we are joining.
+        replacement = threading.Thread(target=lambda: time.sleep(5.0),
+                                       name="replacement", daemon=True)
+
+        joined_old = threading.Event()
+        real_join = old.join
+
+        def slow_join(timeout=None):
+            joined_old.set()
+            real_join(timeout)
+            # ⚠ Another starter wins the race right HERE, in its own
+            # publish-then-start gap: the handle is stored but `.start()`
+            # has not run yet, so `is_alive()` is False. That is the only
+            # window in which the old unconditional clear actually fired --
+            # my first version of this test published an ALREADY-RUNNING
+            # replacement, and the defective code then raised
+            # "previous consumer thread is still alive" instead, which is a
+            # failure for the wrong reason and so is not evidence.
+            consumer._thread = replacement
+            consumer._is_running = True
+
+        old.join = slow_join
+        exit_old.set()
+        consumer.start()
+        assert joined_old.is_set(), "the join never ran, so the race was not exercised"
+        # The winner now starts the reader it published.
+        replacement.start()
+
+        assert consumer._thread is replacement, (
+            "start() nulled a reader it never joined, leaving a live "
+            "consumer thread untracked -- close() cannot stop it and the "
+            "next start() would publish a second reader on the same stream"
+        )
+    finally:
+        exit_old.set()
+        try:
+            consumer.close()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_a_fault_recorded_while_a_send_waits_stops_the_send() -> None:
+    """⛔ The post-acquire check applied to the FAULT, not only the link.
+
+    ``start_streaming()`` checks ``delivery_fault``, then its send waits for
+    whatever holds the device. That holder may be the exchange that fails
+    to restart the consumer, and it records the fault on its way out --
+    after the check passed and before the lock was free. The START then
+    went out and the API reported streaming over a stream nothing was
+    reading.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with device._exchange_lock("A"):
+            held.set()
+            release.wait(10.0)
+            # Exactly what a failed consumer restart does on its way out.
+            device._record_delivery_fault(
+                "the message consumer could not be restarted after a text "
+                "exchange, so nothing is reading the stream: test",
+                device._connect_generation,
+            )
+
+    h = threading.Thread(target=holder, name="A", daemon=True)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "A to hold the exchange")
+
+        outcome = []
+        started = threading.Event()
+
+        def sender():
+            started.set()
+            try:
+                device.streaming_frequency = 100
+                device.start_streaming()
+                outcome.append("started")
+            except BaseException as exc:                          # noqa: BLE001
+                outcome.append(type(exc).__name__)
+
+        threading.Thread(target=sender, name="B", daemon=True).start()
+        assert started.wait(5.0)
+        time.sleep(0.3)                  # B is waiting on the exchange
+        assert outcome == [], f"B did not wait: {outcome}"
+
+        release.set()
+        h.join(10.0)
+        _wait_for(lambda: outcome != [], 10.0, "B's start_streaming to resolve")
+
+        assert outcome == ["DeliveryFaultError"], (
+            f"a fault recorded while the send waited did not stop it: {outcome}"
+        )
+        assert not [w for w in stream.written if b"STReam:START" in w], (
+            "a START reached the wire after the consumer restart had failed"
+        )
+        assert device.is_streaming is False, (
+            "the API reports streaming over a stream nothing is reading"
+        )
+    finally:
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
