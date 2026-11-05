@@ -416,28 +416,7 @@ class ProtobufMessageParser:
                 pass
         return end + 1
 
-    def _frame_parses_at(self, buf: bytes, offset: int) -> bool:
-        """Whether a complete, decodable frame starts at ``offset``.
-
-        Used as positive evidence that the bytes BEFORE ``offset`` were
-        console output rather than the start of a frame. Decoding is the
-        test, not byte-shape: that is what makes it evidence.
-        """
-        tail = buf[offset:]
-        if not tail:
-            return False
-        length, prefix, _malformed = _try_read_length_prefix(tail)
-        if length is None or length <= 0 or length > _MAX_MESSAGE_SIZE_BYTES:
-            return False
-        if len(tail) < prefix + length:
-            return False
-        try:
-            self._message_factory(bytes(tail[prefix : prefix + length]))
-        except Exception:
-            return False
-        return True
-
-    def _boundary_action(self, remaining: bytes, frame_refuted: bool):
+    def _boundary_action(self, remaining: bytes):
         """Decide what a frame boundary should do about console noise.
 
         Returns ``("consume", n)``, ``("hold", 0)`` or ``("none", 0)``.
@@ -451,12 +430,12 @@ class ProtobufMessageParser:
         """
         if self._console_prefix_pending(remaining):
             return ("hold", 0)
-        n = self._take_console_noise(remaining, frame_refuted)
+        n = self._take_console_noise(remaining)
         if n:
             return ("consume", n)
         return ("none", 0)
 
-    def _take_console_noise(self, remaining: bytes, frame_refuted: bool) -> int:
+    def _take_console_noise(self, remaining: bytes) -> int:
         """Complete console noise at the start of ``remaining``, or 0.
 
         ⛔ THE FRAME INTERPRETATION WINS WHEREVER IT CAN BE DECIDED, so
@@ -478,46 +457,47 @@ class ProtobufMessageParser:
         accepting the prompt until more bytes arrive -- reintroduces the
         stall this whole change exists to remove, so the trade is
         deliberate.
+
+        ⛔ AND THE RESIDUAL IS WORSE THAN LOSING EIGHT BYTES: it can emit
+        a message THAT WAS NEVER SENT. Once those eight bytes are taken as
+        a prompt, parsing resumes mid-body, and a length-and-payload lying
+        there decodes into a frame of its own. Constructed and reproduced,
+        not hypothesised -- a real 69-byte frame whose first eight bytes
+        are literally ``DAQIFI> ``, delivered 11 bytes at a time, yields
+        one fabricated message. The accepting-the-prompt-early choice above
+        is therefore a choice to prefer a fabricated message over a stall,
+        which is a judgement for the project and not for this function;
+        the shape of the fix is NOT another byte-level heuristic. Round 2
+        tried corroborating the prompt by decoding at offset 8 and that is
+        unsound for exactly the same reason: a fragment of a real body
+        decodes, so a decode at an offset is not evidence about the bytes
+        before it. See the audit trail on #231.
         """
         n = self._take_matching_echo(remaining)
         if n:
             return n
         if remaining.startswith(self._CONSOLE_PROMPT):
-            # ⭐ CORROBORATION, not just refutation. Holding the prompt
-            # until the 68-byte frame reading could be REFUTED removed the
-            # destruction residual but introduced a stall: a prompt
-            # followed by a reply shorter than 61 bytes never accumulates
-            # 69 bytes, so the pair waited forever. Demonstrated by this
-            # change's own tests.
+            # ⛔ TAKEN WHENEVER WE GET HERE, which is only once the frame
+            # reading has been refuted or found incomplete. Do NOT make
+            # this conditional again.
             #
-            # A valid frame parsing cleanly at offset 8 is POSITIVE
-            # evidence that those eight bytes were a prompt, available
-            # immediately and without waiting for 69 bytes. So the prompt
-            # is taken when the frame reading is refuted OR the prompt
-            # reading is corroborated, and held when neither holds yet --
-            # which leaves no residual: a split 68-byte "AQIFI> " frame is
-            # merely held until its own bytes arrive and it decodes, and
-            # then the frame wins.
-            if self._frame_parses_at(remaining, len(self._CONSOLE_PROMPT)):
-                return len(self._CONSOLE_PROMPT)
-            # ⛔ THE PROMPT IS TAKEN ONLY ONCE THE FRAME READING IS
-            # REFUTED, never while it is merely undecided. The prompt is
-            # eight generic bytes with no terminator, and they are also a
-            # valid 68-byte length prefix plus body start -- so until
-            # enough bytes exist to try that frame and fail, neither
-            # reading is established. HOLDING costs nothing: the firmware
-            # emits the prompt AFTER a reply, so nothing waits behind it,
-            # and the next output refutes the frame reading and releases
-            # it. Taking it early cost a whole frame.
+            # Round 2 held the prompt while the frame reading was merely
+            # undecided, and that STALLS ORDINARY TRAFFIC. A held trailing
+            # prompt sits in front of the next command's echo and its
+            # reply; offset 8 is then the echo, which is text, so no frame
+            # is there to decode, and the outer 68-byte reading can never
+            # be refuted with fewer than 69 bytes. Prompt, echo, short
+            # reply, silence -- the everyday shape with echo on -- waited
+            # forever. That is the exact failure this change exists to
+            # remove, and it is far worse than the documented residual,
+            # which needs three coincidences at once.
             #
-            # ⚠ The one case where holding could delay something real:
-            # a prompt arriving FIRST, followed by a reply shorter than 61
-            # bytes, followed by silence -- then 69 bytes never accumulate
-            # and the pair waits for the next output. Named here rather
-            # than left implicit; a delay is also strictly better than the
-            # destruction it replaces, and the bench run shows the device
-            # does not produce that order.
-            return len(self._CONSOLE_PROMPT) if frame_refuted else 0
+            # My round-2 test for this missed it because it checked
+            # "prompt then short reply" with no echo in between, and
+            # without the echo the reply did sit at offset 8 and decoded.
+            # The constructed counter-case has to carry the echo, because
+            # echo being ON is the premise of the whole ticket.
+            return len(self._CONSOLE_PROMPT)
         # An echo and an error line are terminated AND matched against
         # bytes we know were sent, which is far stronger evidence than
         # eight generic bytes; they do not need refutation first.
@@ -557,7 +537,7 @@ class ProtobufMessageParser:
             if message_length is None:
                 if is_malformed:
                     # Not a frame at all: refuted, so console may decide.
-                    action, noise = self._boundary_action(remaining, True)
+                    action, noise = self._boundary_action(remaining)
                     if action == "consume":
                         current_index += noise
                         consumed_bytes = current_index
@@ -573,7 +553,7 @@ class ProtobufMessageParser:
                     continue
                 # Not enough bytes even for a length prefix: the frame
                 # reading is UNDECIDED, so the prompt is not taken here.
-                action, noise = self._boundary_action(remaining, False)
+                action, noise = self._boundary_action(remaining)
                 if action == "consume":
                     current_index += noise
                     consumed_bytes = current_index
@@ -582,7 +562,7 @@ class ProtobufMessageParser:
 
             if message_length <= 0 or message_length > _MAX_MESSAGE_SIZE_BYTES:
                 # The frame reading is refuted, so console may decide.
-                action, noise = self._boundary_action(remaining, True)
+                action, noise = self._boundary_action(remaining)
                 if action == "consume":
                     current_index += noise
                     consumed_bytes = current_index
@@ -652,7 +632,7 @@ class ProtobufMessageParser:
                 )
 
                 if gap_is_suspicious or first_body_byte_is_garbage:
-                    action, noise = self._boundary_action(remaining, True)
+                    action, noise = self._boundary_action(remaining)
                     if action == "consume":
                         current_index += noise
                         consumed_bytes = current_index
@@ -668,7 +648,7 @@ class ProtobufMessageParser:
                 # an error line) may still decide it, but the PROMPT may
                 # not -- that is what removes the residual this path used
                 # to carry.
-                action, noise = self._boundary_action(remaining, False)
+                action, noise = self._boundary_action(remaining)
                 if action == "consume":
                     current_index += noise
                     consumed_bytes = current_index
@@ -687,7 +667,7 @@ class ProtobufMessageParser:
                 # still not a message. NOW console may decide, which is how
                 # "DAQIFI> " followed by a real frame resolves -- the
                 # 68-byte body starting "AQIFI> " does not decode.
-                action, noise = self._boundary_action(remaining, True)
+                action, noise = self._boundary_action(remaining)
                 if action == "consume":
                     current_index += noise
                     consumed_bytes = current_index

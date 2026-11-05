@@ -380,7 +380,18 @@ class DaqifiDevice:
         self._channels: List[Any] = []
         self._timestamp_frequency: int = 0
 
-        self._consumer: Optional[StreamMessageConsumer[Any]] = None
+        # ⛔ THE STREAM AND ITS CONSUMER ARE ONE PUBLISHED VALUE, in one
+        # attribute, because send() has to pair them and anything that can
+        # be read separately can be read inconsistently. transport.connect()
+        # makes the new stream visible from transport.stream immediately,
+        # while the new consumer is installed later in connect(); a send()
+        # in between paired the NEW stream with the OLD consumer, or with
+        # None, and the echo it registered went to a parser that was not
+        # reading that stream. Two attributes kept in step by careful code
+        # is the same defect waiting for the next edit, so there is only
+        # one: ``_consumer`` is a read-only view of it, and publishing
+        # requires both halves at once (see _publish_link).
+        self._link: Optional[Tuple[Any, StreamMessageConsumer[Any]]] = None
         self._protocol_handler: Optional[ProtobufProtocolHandler] = None
         self._is_initialized = False
         self._is_disconnecting = False
@@ -436,6 +447,17 @@ class DaqifiDevice:
         # Status events raised while the exchange lock was held, delivered
         # by whoever releases it (see _deliver_status_event).
         self._pending_status_events: List[DeviceStatusEventArgs] = []
+        # True while a text capture has paused the protobuf consumer and
+        # is reading the stream with a line parser instead.
+        #
+        # ⛔ DEVICE-WIDE, and deliberately NOT _capture_owner. The two
+        # answer different questions. "May this thread start a capture?"
+        # is per-thread, and a device-wide flag there wrongly refused
+        # other threads (WP1). "Is the protobuf parser the thing reading
+        # the stream right now?" is a property of the STREAM, true for
+        # every thread at once, and a per-thread marker there would miss a
+        # send from any other thread -- so this one is device-wide.
+        self._text_reader_owns_stream = False
 
         if transport is not None:
             transport.add_status_changed(self._on_transport_status_changed)
@@ -631,7 +653,15 @@ class DaqifiDevice:
                     or getattr(self._transport, "session", None) != session
                 )
                 if not superseded:
-                    self._consumer = consumer
+                    # ⭐ The stream and the consumer become visible in ONE
+                    # assignment, so send()'s single snapshot cannot
+                    # straddle two connections. `stream` here is the same
+                    # object this consumer was built on, captured above
+                    # from transport.stream before the consumer existed --
+                    # which is exactly the window that used to leak: the
+                    # stream was reachable through the transport while the
+                    # consumer for it was not yet published.
+                    self._publish_link(stream, consumer)
                     self._transport_session = session
                     # A fresh consumer has no message handlers yet; the
                     # caller's initialize() must register them again.
@@ -877,26 +907,23 @@ class DaqifiDevice:
             # same transport object. connect() bumps it before installing
             # the new stream, so the pair read here is consistent.
             #
-            # ⭐ The CONSUMER is captured here too, with the stream, in the
-            # same hold. It used to be read separately, before this lock,
-            # to register the echo -- and a connect() landing in between
-            # put the echo on the parser it was about to discard while
-            # these bytes went to the new connection's stream. The new
-            # parser then had no record of the command, read the echoed
-            # line's first byte as a frame length, and stalled that
-            # reply: #231 reopened by a reconnect. connect() installs the
-            # consumer and bumps the generation under this same lock
-            # (devices.py _connect_generation / self._consumer), so a
-            # snapshot taken in one hold cannot straddle two connections.
+            # ⭐ THE STREAM COMES FROM THE PUBLISHED LINK, NOT FROM THE
+            # TRANSPORT. Reading transport.stream here was the defect: it
+            # answers with the new session's stream from the moment
+            # transport.connect() returns, which is BEFORE connect()
+            # installs the consumer for it, so this snapshot could pair a
+            # new stream with the old consumer or with None. The echo then
+            # went to a parser that was not reading these bytes, and the
+            # parser that was read the echoed line's first byte as a frame
+            # length and stalled that reply -- #231 reopened by a
+            # reconnect. _link holds both halves in one attribute and
+            # connect() publishes them in one assignment under this lock,
+            # so one read cannot straddle two connections.
             with self._state_lock:
                 generation = self._connect_generation
                 transport = self._transport
-                consumer = self._consumer
-                try:
-                    stream = transport.stream if transport is not None else None
-                except Exception:
-                    # A closed transport's getter raises.
-                    stream = None
+                link = self._link
+                stream, consumer = link if link is not None else (None, None)
             if stream is None:
                 if self._shutting_down_since(transport, generation, None):
                     raise DeviceNotConnectedError(
@@ -1036,10 +1063,19 @@ class DaqifiDevice:
         split this parameter exists to close. There is deliberately no
         default -- a fallback to ``self._consumer`` would fail open.
 
+        ⛔ Registers NOTHING while a capture's reader owns the stream. The
+        protobuf consumer is PAUSED then, so an echo registered on its
+        parser can never be consumed and simply accumulates -- one entry
+        per send, per capture. Nothing is lost by skipping: the capture's
+        own line parser sees the echoed command as a line, which is how
+        every text exchange has always handled it.
+
         Best-effort and silent: a parser that does not take echoes (the
         text capture's line parser) simply has no such method, and failing
         to register an echo must never stop a command going out.
         """
+        if self._text_reader_owns_stream:
+            return
         parser = getattr(consumer, "_parser", None) if consumer else None
         expect = getattr(parser, "expect_console_echo", None)
         if expect is None:
@@ -1048,6 +1084,37 @@ class DaqifiDevice:
             expect(data)
         except Exception:
             pass
+
+    @property
+    def _consumer(self) -> Optional["StreamMessageConsumer[Any]"]:
+        """The published consumer, or None. A READ-ONLY view of
+        :attr:`_link` so it cannot disagree with the stream it reads."""
+        link = self._link
+        return link[1] if link is not None else None
+
+    @_consumer.setter
+    def _consumer(self, value: Optional["StreamMessageConsumer[Any]"]) -> None:
+        """Only ``None`` is assignable: unpublishing the consumer
+        unpublishes its stream with it, as a unit.
+
+        ⛔ Publishing goes through :meth:`_publish_link`, which demands the
+        stream too. That is the whole point -- a setter that accepted a
+        bare consumer would let the pair drift apart again, which is the
+        defect this attribute exists to make unrepresentable.
+        """
+        if value is not None:
+            raise AssertionError(
+                "Publish the consumer with its stream via _publish_link(); "
+                "assigning _consumer alone would let the pair drift."
+            )
+        self._link = None
+
+    def _publish_link(
+        self, stream: Any, consumer: "StreamMessageConsumer[Any]"
+    ) -> None:
+        """Make ``stream`` and ``consumer`` visible together, in one
+        assignment. Callers hold ``_state_lock``."""
+        self._link = (stream, consumer)
 
     def _on_consumer_thread(self) -> bool:
         """Whether the calling thread is the protobuf consumer's own thread,
@@ -1359,6 +1426,10 @@ class DaqifiDevice:
                 # is kept exactly: nothing back within it is the answer.
 
         was_running = self._consumer.is_running
+        # Claimed BEFORE the pause, so no send() can register an echo on
+        # the protobuf parser between the two. A bool needs no counter:
+        # _capture_owner already forbids a capture inside a capture.
+        self._text_reader_owns_stream = True
         if was_running:
             try:
                 stopped = self._consumer.stop_safely()
@@ -1457,6 +1528,9 @@ class DaqifiDevice:
                 except Exception:
                     pass
         finally:
+            # Released before the restart: from here the protobuf parser
+            # is the stream's reader again, so echoes belong to it.
+            self._text_reader_owns_stream = False
             # Restart the protobuf consumer so streaming resumes — even if
             # setup_action raised — unless the connection was lost.
             if was_running and self._consumer_can_restart_on(stream):
@@ -3132,6 +3206,11 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         consumer = self._consumer
         was_running = consumer is not None and consumer.is_running
+        # Same reason as the text capture: while this raw reader owns the
+        # stream, the protobuf parser cannot consume an echo registered on
+        # it. The audit named only the text path; this is the same root
+        # cause and it would leak the same way.
+        self._text_reader_owns_stream = True
         if consumer is not None and was_running:
             stopped = consumer.stop_safely()
             if stopped is False:
@@ -3157,6 +3236,7 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 pre_capture()
             return capture_action(raw_stream)
         finally:
+            self._text_reader_owns_stream = False
             if consumer is not None and was_running:
                 try:
                     consumer.clear_buffer()

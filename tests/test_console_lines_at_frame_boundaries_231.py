@@ -670,73 +670,71 @@ def test_the_short_spelling_of_the_disable_is_recognised() -> None:
 # ---- audit round 2 finding 4: which parser gets told ---------------------
 
 
-def test_the_echo_is_registered_on_the_parser_that_reads_the_bytes() -> None:
-    """A connect() landing mid-send must not split the echo from the bytes.
+def test_the_echo_and_the_bytes_go_to_the_same_connection() -> None:
+    """A reconnect must not let send() pair a new stream with an old parser.
 
-    The registration used to read ``self._consumer`` before the lock that
-    captures the stream, so a reconnect in between put the echo on the
-    parser it was about to discard while the command went to the new
-    connection. The new parser had no record of it, read the echoed line's
-    first byte as a frame length, and stalled that reply -- #231 again, via
-    a reconnect.
+    ⚠ REWRITTEN in round 3. Round 2's version hooked ``_state_lock`` to
+    swap the consumer between two reads inside ``send()``. That window no
+    longer exists -- the stream and the consumer are now ONE published
+    value, read once -- so the old test was simulating an impossible
+    interleaving. The real window is the one it missed: ``transport.connect()``
+    makes the new session's stream reachable through ``transport.stream``
+    BEFORE ``connect()`` installs the consumer for it, and ``send()`` used
+    to read the stream from the transport. This reproduces that state
+    directly.
 
-    The swap is driven from ``_state_lock.__enter__`` and only when
-    ``_send_unserialized`` is the caller, because that is the one window
-    the real race has: connect() installs the consumer and bumps the
-    generation under this same lock, so it cannot interleave INSIDE the
-    hold, only before it.
+    The invariant asserted is the one that matters, rather than any
+    particular outcome: the stream that received the bytes and the parser
+    that was told about them belong to the SAME connection.
     """
     device = _fakes._make_device_with_serial_facade()
     try:
-        first = device._consumer
-        # What connect() installs: a fresh parser over the same stream.
-        replacement = StreamMessageConsumer(
-            device._transport.stream,
-            ProtobufMessageParser(DaqifiOutMessage.FromString),
-        )
-        assert replacement is not first
+        # ⛔ Read through API that exists on BOTH revisions. An earlier
+        # draft read device._link, which simply does not exist on the
+        # defective head, so it failed with AttributeError -- "this API is
+        # new" is not evidence of a defect.
+        consumer = device._consumer
+        published_stream = device._transport.stream
+        assert published_stream is not None and consumer is not None
 
-        class _SwapOnSendSnapshot:
-            """``_state_lock`` that performs a reconnect's swap just as
-            ``_send_unserialized`` takes it."""
+        # Exactly the mid-connect state: a new session's stream is
+        # reachable through the transport while the published pair is
+        # still the old one.
+        class _NewSessionStream:
+            def __init__(self):
+                self.written = bytearray()
 
-            def __init__(self, real):
-                self._real = real
-                self.swapped = False
+            def write(self, b):
+                self.written.extend(bytes(b))
+                return len(bytes(b))
 
-            def __enter__(self):
-                self._real.acquire()
-                caller = sys._getframe(1).f_code.co_name
-                if caller == "_send_unserialized" and not self.swapped:
-                    self.swapped = True
-                    device._consumer = replacement
-                    device._connect_generation += 1
-                return self
+            def flush(self):
+                pass
 
-            def __exit__(self, *exc_info):
-                self._real.release()
-                return False
-
-            def acquire(self, *a, **kw):
-                return self._real.acquire(*a, **kw)
-
-            def release(self):
-                return self._real.release()
-
-        hooked = _SwapOnSendSnapshot(device._state_lock)
-        device._state_lock = hooked
-
-        device.send(_scpi().get_device_info())
-        assert hooked.swapped, (
-            "the swap never ran, so this did not exercise the race at all"
-        )
+        new_stream = _NewSessionStream()
+        device._transport.stream = new_stream
 
         line = _scpi().get_device_info().get_bytes().rstrip(b"\r\n")
-        assert line in replacement._parser._expected_echoes, (
-            "the echo went to the consumer a reconnect discarded, while the "
-            "command went to the stream the new consumer reads; that new "
-            "parser will read the echoed line as a frame length"
-        )
+        try:
+            device.send(_scpi().get_device_info())
+        except Exception:
+            # Refusing the send outright is a correct outcome too -- what
+            # must not happen is a split pair.
+            pass
+
+        told = line in consumer._parser._expected_echoes
+        if new_stream.written:
+            assert told is False, (
+                "the bytes went to the NEW session's stream while the echo "
+                "was registered on the OLD connection's parser; that parser "
+                "is not reading those bytes, and the one that is has no "
+                "record of the command"
+            )
+        else:
+            assert told, (
+                "the bytes went to the published stream, so its own parser "
+                "must have been told about them"
+            )
     finally:
         try:
             device.disconnect()
@@ -767,3 +765,126 @@ def test_the_state_machine_reads_the_librarys_own_echo_commands() -> None:
     assert len(parser._expected_echoes) == before + 1, (
         "enable_device_echo()'s real bytes did not resume registration"
     )
+
+
+# ---- audit round 3 -------------------------------------------------------
+#
+# Round 2 held the prompt while the frame reading was undecided. That is
+# reverted here. These tests are why.
+
+
+def test_a_trailing_prompt_before_an_echo_and_reply_does_not_stall() -> None:
+    """ORDINARY traffic with echo on, and round 2 stalled it forever.
+
+    ⛔ This is the shape round 2's own test missed. It checked "prompt then
+    a short reply" with NO echo in between, and without the echo the reply
+    sat at offset 8 and decoded, which satisfied the corroboration rule.
+    Put the echo back -- and echo being ON is the premise of this entire
+    ticket -- and offset 8 is text, so nothing decodes there, while the
+    outer 68-byte reading of "DAQIFI> ..." can never be refuted with fewer
+    than 69 bytes. Held, with the reply stuck behind it.
+    """
+    command = b"SYSTem:SYSInfoPB?\r\n"
+    parser = _parser()
+    parser.expect_console_echo(command)
+
+    data = b"DAQIFI> " + command + _reply()
+    assert len(data) < 69, (
+        "the point of this test is that 69 bytes never accumulate, so the "
+        "outer frame reading cannot be refuted"
+    )
+
+    messages, consumed = parser.parse_messages(data)
+    assert len(messages) == 1, (
+        "a trailing prompt in front of the next command's echo and reply "
+        "stalled the reply: this is the failure the ticket exists to remove"
+    )
+    assert consumed == len(data)
+
+
+def test_a_prompt_then_a_short_reply_is_still_not_stalled() -> None:
+    """The round-2 case, kept: it must hold under the reverted rule too."""
+    parser = _parser()
+    data = b"DAQIFI> " + _reply()
+    assert len(data) < 69
+    messages, consumed = parser.parse_messages(data)
+    assert len(messages) == 1 and consumed == len(data)
+
+
+@pytest.mark.xfail(
+    reason="ACCEPTED RESIDUAL on #231, not a fix in flight: taking the "
+           "prompt while the frame reading is merely incomplete can emit a "
+           "message that was never sent. Asserting the CORRECT behaviour "
+           "and marking it expected-to-fail, so this test never REQUIRES "
+           "the defect and turns into an XPASS the moment it is fixed.",
+    strict=False,
+)
+def test_the_accepted_residual_can_fabricate_a_message() -> None:
+    """⛔ A real frame can begin with the literal bytes ``DAQIFI> ``.
+
+    Constructed, not hypothesised. 0x41 (``A``) is field 8 wire type 1, a
+    fixed64, so it consumes body[1:9] and the outer body's parse resumes
+    at body[9] -- inside what a sub-frame placed at body offset 7 used as
+    its own content. Both readings are then individually valid, so a split
+    delivery takes the eight bytes as a prompt and decodes the sub-frame,
+    emitting a message the device never sent.
+
+    This also shows why round 2's "corroborate by decoding at offset 8"
+    was unsound: a fragment of a real body decodes, so a decode at an
+    offset is not evidence about the bytes before it.
+    """
+    body = bytearray(b"AQIFI> ")       # body[0:7]
+    body += b"\x02"                    # body[7]    sub-frame length 2
+    body += b"\x08\x08"                # body[8:10] sub-frame body
+    body += b"\x81\x01"                # body[10:12] value for body[9]'s tag
+    body += b"\x08\x01" * 28           # pad to exactly 68, field-aligned
+    body = bytes(body)
+    assert len(body) == 68
+    DaqifiOutMessage.FromString(body)          # the OUTER frame is real
+    DaqifiOutMessage.FromString(body[8:10])    # so is the sub-frame
+
+    full = bytes([68]) + body
+    assert full[:8] == b"DAQIFI> ", full[:8]
+
+    messages, _consumed = _parser().parse_messages(full[:11])
+    assert messages == [], (
+        "a message was fabricated from inside a real frame's body"
+    )
+
+
+def test_no_echo_is_registered_while_a_capture_owns_the_stream() -> None:
+    """A text exchange PAUSES the protobuf consumer, so an echo registered
+    on its parser can never be consumed -- it just accumulates, one per
+    send, per capture.
+
+    Driven through the real ``execute_text_command`` rather than by
+    setting a flag: the thing under test is that the registration and the
+    pause cannot disagree, and only the real path puts them in the same
+    order.
+    """
+    device = _fakes._make_device_with_serial_facade(
+        {b"SYSTem:SYSInfoPB?": b'0,"No error"\r\n'}
+    )
+    try:
+        parser = device._consumer._parser
+        before = len(parser._expected_echoes)
+
+        scpi = _scpi()
+        for _ in range(5):
+            device.execute_text_command(
+                lambda: device.send(scpi.get_device_info()),
+                response_timeout_ms=60,
+                completion_timeout_ms=30,
+            )
+
+        after = len(parser._expected_echoes)
+        assert after == before, (
+            f"{after - before} echoes were registered on the PAUSED protobuf "
+            "parser during 5 text captures; nothing can ever consume them, "
+            "so the registry grows once per send per capture"
+        )
+    finally:
+        try:
+            device.disconnect()
+        except Exception:
+            pass
