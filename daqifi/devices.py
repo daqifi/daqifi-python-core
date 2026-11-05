@@ -870,13 +870,13 @@ class DaqifiDevice:
         """:meth:`send`'s body, with the exchange lock already settled."""
         if isinstance(message, ScpiMessage):
             data = message.get_bytes()
-            # The library knows what it just sent, which is the only sound
-            # basis for recognising an echo of it: #204's audit rounds
-            # showed no byte-level rule can tell a command line from the
-            # start of a length-prefixed frame. Tell the frame parser, so
-            # an echoed line at a frame boundary is skipped instead of
-            # being read as a length prefix (#231).
-            self._expect_console_echo(message)
+            # ONE get_bytes() call feeds both the wire and the echo
+            # registry, so what is matched is exactly what was sent. The
+            # library knowing what it sent is the only sound basis for
+            # recognising an echo: #204's audit rounds showed no byte-level
+            # rule can tell a command line from the start of a
+            # length-prefixed frame (#231).
+            self._expect_console_echo(data)
             # Read once, under the lock connect() bumps the generation
             # with: disconnect() on another thread closes the stream under
             # no lock this path takes (upstream baabf0c), and the
@@ -1005,8 +1005,14 @@ class DaqifiDevice:
         """
         _log.warning("device %s reported on the console: %s", self.name, line)
 
-    def _expect_console_echo(self, message: Any) -> None:
-        """Tell the active frame parser that ``message`` was just sent.
+    def _expect_console_echo(self, data: bytes) -> None:
+        """Tell the active frame parser the EXACT bytes just written.
+
+        ⛔ Takes the bytes, not the command string. Passing the string and
+        letting the parser strip it discarded whitespace that
+        ``get_bytes()`` really does send -- a trailing space -- so the echo
+        never matched and the stall came back. These are the same bytes
+        handed to the stream, from the same ``get_bytes()`` call.
 
         Best-effort and silent: a parser that does not take echoes (the
         text capture's line parser) simply has no such method, and failing
@@ -1018,7 +1024,7 @@ class DaqifiDevice:
         if expect is None:
             return
         try:
-            expect(str(getattr(message, "data", "")))
+            expect(data)
         except Exception:
             pass
 

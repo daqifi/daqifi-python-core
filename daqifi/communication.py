@@ -14,6 +14,7 @@ element since Python doesn't have out-params.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -34,6 +35,8 @@ __all__ = [
 
 T = TypeVar("T")
 
+
+_log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class InboundMessage(Generic[T]):
@@ -242,13 +245,12 @@ class ProtobufMessageParser:
     """
 
     #: Console lines that are noise to a frame parser. Matched ONLY as a
-    #: complete line at a frame boundary -- see _skip_console_line.
+    #: complete line at a frame boundary -- see _take_console_noise.
     _CONSOLE_PROMPT = b"DAQIFI> "
     _CONSOLE_ERROR_PREFIX = b"**ERROR: "
-    #: How many unacknowledged sent commands to remember. A reply normally
-    #: follows its echo immediately; the cap stops an unanswered command
-    #: from growing the list without bound.
-    _MAX_EXPECTED_ECHOES = 8
+    #: Unmatched echoes past which something is wrong and a log says so.
+    #: NOT a cap: evicting an unconsumed echo stalls its reply.
+    _ECHO_BACKLOG_WARN_AT = 16
 
     def __init__(
         self,
@@ -266,52 +268,126 @@ class ProtobufMessageParser:
         # a length-prefixed protocol a printable byte is also a valid
         # length or field tag.
         self._expected_echoes: List[bytes] = []
+        # Guards _expected_echoes. send() appends from the caller's thread
+        # while the consumer matches and removes from its own.
+        self._echo_lock = threading.Lock()
 
-    def expect_console_echo(self, command: str) -> None:
-        """Note that ``command`` was just sent, so an exact echo of it at a
-        frame boundary may be skipped.
+    def expect_console_echo(self, sent: bytes) -> None:
+        """Note the EXACT bytes just written, so an echo of them at a frame
+        boundary can be recognised.
 
-        One-shot per call: the echo is forgotten once matched, so a payload
-        that later happens to contain the same bytes is not eaten.
+        Takes the bytes as sent, not a command string: an earlier version
+        took a string and ``strip()``ed it, which discarded whitespace that
+        ``get_bytes()`` really does put on the wire (a trailing space), so
+        the echo never matched and the stall it exists to prevent came
+        back. Only the trailing line ending is removed, because that is
+        matched separately -- the device may echo CRLF or bare LF.
         """
-        line = command.strip().encode("ascii", errors="ignore")
+        if isinstance(sent, str):            # tolerated, but discouraged
+            sent = sent.encode("ascii", errors="ignore")
+        line = bytes(sent).rstrip(b"\r\n")
         if not line:
             return
-        self._expected_echoes.append(line)
-        if len(self._expected_echoes) > self._MAX_EXPECTED_ECHOES:
-            del self._expected_echoes[0]
+        with self._echo_lock:
+            self._expected_echoes.append(line)
+            # ⛔ NO SILENT EVICTION. Dropping the oldest unconsumed echo
+            # stalled the reply it belonged to -- nine sends before the
+            # consumer ran left the ninth reply waiting forever. The list
+            # is unbounded and entries leave only when matched; a log says
+            # so if it grows past what a healthy exchange needs.
+            if len(self._expected_echoes) == self._ECHO_BACKLOG_WARN_AT:
+                _log.warning(
+                    "%d command echoes are still unmatched; the device may "
+                    "not be echoing, or replies are not being read",
+                    len(self._expected_echoes),
+                )
 
-    def _skip_console_line(self, remaining: bytes) -> int:
-        """Bytes of console noise at the START of ``remaining``, or 0.
+    def _take_matching_echo(self, remaining: bytes) -> int:
+        """Length of a complete expected echo at the start of ``remaining``,
+        removing it; 0 if none.
 
-        ⛔ Called only at a frame boundary, and matches only a COMPLETE
-        line. Both limits are what keep this from eating a frame: a
-        partial frame's payload can contain printable runs, CRLF and
-        anything else, so the only safe rule is an exact whole-line match
-        of something known to be console output.
+        Match and removal happen under ONE lock hold. Separately they
+        raced: ``send()`` could evict between the consumer's match and its
+        remove, ``remove()`` raised ValueError, and the consumer then
+        discarded a byte of real data.
         """
-        for echo in self._expected_echoes:
-            for ending in (b"\r\n", b"\n"):
-                if remaining.startswith(echo + ending):
-                    self._expected_echoes.remove(echo)
-                    return len(echo) + len(ending)
+        with self._echo_lock:
+            for echo in self._expected_echoes:
+                for ending in (b"\r\n", b"\n"):
+                    if remaining.startswith(echo + ending):
+                        self._expected_echoes.remove(echo)
+                        return len(echo) + len(ending)
+        return 0
+
+    def _console_prefix_pending(self, remaining: bytes) -> bool:
+        """Whether ``remaining`` is a STRICT PREFIX of console noise, so the
+        rest may still be arriving.
+
+        ⛔ Without this a split console line was handed to the frame
+        parser, which discarded a byte of it: an echo arriving as
+        ``b'EN' | b'NAble...'`` lost the ``E`` and then stalled the next
+        reply forever. Holding a partial is the same rule the frame parser
+        already applies to a partial frame.
+        """
+        if not remaining:
+            return True
+        if self._CONSOLE_PROMPT.startswith(remaining):
+            return True
+        if self._CONSOLE_ERROR_PREFIX.startswith(remaining):
+            return True
+        if (remaining.startswith(self._CONSOLE_ERROR_PREFIX)
+                and b"\n" not in remaining):
+            return True            # a complete prefix, line still arriving
+        with self._echo_lock:
+            for echo in self._expected_echoes:
+                full = echo + b"\r\n"
+                if full.startswith(remaining) and len(remaining) < len(full):
+                    return True
+        return False
+
+    def _take_console_error(self, remaining: bytes) -> int:
+        if not remaining.startswith(self._CONSOLE_ERROR_PREFIX):
+            return 0
+        end = remaining.find(b"\n")
+        if end == -1:
+            return 0                          # handled by the prefix rule
+        line = remaining[:end].rstrip(b"\r").decode("ascii", errors="replace")
+        if self._console_error_sink is not None:
+            try:
+                self._console_error_sink(line)
+            except Exception:
+                pass
+        return end + 1
+
+    def _take_console_noise(self, remaining: bytes) -> int:
+        """Complete console noise at the start of ``remaining``, or 0.
+
+        ⛔ THE FRAME INTERPRETATION WINS WHEREVER IT CAN BE DECIDED, so
+        this is consulted only after the frame reading has been REFUTED or
+        found incomplete -- never before. On a length-prefixed stream the
+        two readings genuinely overlap: ``44 41 51 49 46 49 3E 20`` is both
+        the prompt ``"DAQIFI> "`` and a 68-byte frame whose body starts
+        ``AQIFI> ``. Something has to win, and the frame does, because a
+        frame that DECODES is positive evidence while "these bytes spell a
+        prompt" is a coincidence that a 69-byte payload can always produce.
+
+        ⚠ RESIDUAL, stated rather than hidden: a frame is preferred only
+        once enough bytes are present to decode it. A real frame whose
+        length is exactly 68 and whose body begins ``AQIFI> ``, arriving
+        split so that only those first 8 bytes are buffered at a boundary,
+        is read as the prompt and loses 8 bytes. That needs the length byte
+        to be exactly 0x44 AND the next seven payload bytes to be exactly
+        ``AQIFI> `` AND the read to split there. The alternative -- never
+        accepting the prompt until more bytes arrive -- reintroduces the
+        stall this whole change exists to remove, so the trade is
+        deliberate.
+        """
+        n = self._take_matching_echo(remaining)
+        if n:
+            return n
         if remaining.startswith(self._CONSOLE_PROMPT):
             return len(self._CONSOLE_PROMPT)
-        if remaining.startswith(self._CONSOLE_ERROR_PREFIX):
-            end = remaining.find(b"\n")
-            if end == -1:
-                # Still arriving: consuming it would lose what follows.
-                return 0
-            line = remaining[:end].rstrip(b"\r").decode(
-                "ascii", errors="replace"
-            )
-            if self._console_error_sink is not None:
-                try:
-                    self._console_error_sink(line)
-                except Exception:
-                    pass
-            return end + 1
-        return 0
+        return self._take_console_error(remaining)
 
     def parse_messages(
         self, data: bytes
@@ -334,19 +410,26 @@ class ProtobufMessageParser:
         # loop — we always advance ≥1 byte on failure.
         while current_index < len(data):
             remaining = data[current_index:]
-            # A frame boundary: the only place console noise can be told
-            # from payload at all.
-            noise = self._skip_console_line(remaining)
-            if noise:
-                current_index += noise
-                consumed_bytes = current_index
-                continue
+            # ⛔ FRAME FIRST. The console check used to run here, before the
+            # length prefix was even read, and it could therefore eat a
+            # real frame whose first bytes happen to spell console text.
+            # It now runs only where the frame reading has been REFUTED or
+            # found incomplete -- see _take_console_noise for why the frame
+            # wins and what residual that leaves.
             message_length, prefix_bytes, is_malformed = _try_read_length_prefix(
                 remaining
             )
 
             if message_length is None:
                 if is_malformed:
+                    # Not a frame at all: now console may be considered.
+                    noise = self._take_console_noise(remaining)
+                    if noise:
+                        current_index += noise
+                        consumed_bytes = current_index
+                        continue
+                    if self._console_prefix_pending(remaining):
+                        break
                     # Advance by 1 (not by prefix_bytes) — the malformed
                     # run may overlap a valid frame that starts mid-way
                     # through it. Skipping the whole malformed varint
@@ -354,9 +437,24 @@ class ProtobufMessageParser:
                     current_index += 1
                     consumed_bytes = current_index
                     continue
+                # Not enough bytes even for a length prefix. A complete
+                # console token decides it; a partial one waits.
+                noise = self._take_console_noise(remaining)
+                if noise:
+                    current_index += noise
+                    consumed_bytes = current_index
+                    continue
                 break  # need more data for length prefix
 
             if message_length <= 0 or message_length > _MAX_MESSAGE_SIZE_BYTES:
+                # The frame reading is refuted, so console may decide.
+                noise = self._take_console_noise(remaining)
+                if noise:
+                    current_index += noise
+                    consumed_bytes = current_index
+                    continue
+                if self._console_prefix_pending(remaining):
+                    break
                 # Same single-byte advance: the bytes that decoded to
                 # this implausible length may include the start of a
                 # valid frame.
@@ -420,10 +518,26 @@ class ProtobufMessageParser:
                 )
 
                 if gap_is_suspicious or first_body_byte_is_garbage:
+                    noise = self._take_console_noise(remaining)
+                    if noise:
+                        current_index += noise
+                        consumed_bytes = current_index
+                        continue
+                    if self._console_prefix_pending(remaining):
+                        break
                     current_index += 1
                     consumed_bytes = current_index
                     continue
 
+                # A plausible partial frame. A COMPLETE console token still
+                # wins here -- this is the residual documented on
+                # _take_console_noise -- because refusing it is what made
+                # the prompt stall the stream.
+                noise = self._take_console_noise(remaining)
+                if noise:
+                    current_index += noise
+                    consumed_bytes = current_index
+                    continue
                 break  # legitimate partial frame — wait for more data
 
             try:
@@ -433,6 +547,16 @@ class ProtobufMessageParser:
                 consumed_bytes = current_index
                 messages.append(ObjectInboundMessage(data=parsed))
             except Exception:
+                # The frame reading is refuted by the decode itself: these
+                # bytes had a plausible prefix and enough of them, and are
+                # still not a message. NOW console may decide, which is how
+                # "DAQIFI> " followed by a real frame resolves -- the
+                # 68-byte body starting "AQIFI> " does not decode.
+                noise = self._take_console_noise(remaining)
+                if noise:
+                    current_index += noise
+                    consumed_bytes = current_index
+                    continue
                 # Bad payload: advance one byte and try again at the
                 # next offset (mirrors upstream resilience pattern).
                 current_index += 1

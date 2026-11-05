@@ -25,6 +25,8 @@ The eight #204 acceptance repros live in test_protocol_parsing_204.py and
 pin that none of this skipping can eat a frame.
 """
 
+import time
+
 import pytest
 
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
@@ -300,3 +302,149 @@ def test_the_device_wires_the_error_sink_so_a_console_error_is_reported(caplog) 
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
+
+
+# ---- audit round 1 on 5c724724: five findings ---------------------------
+
+
+def test_a_frame_that_decodes_wins_over_the_prompt_reading() -> None:
+    """r1 #1: the prompt match could destroy a real frame.
+
+    ``44 41 51 49 46 49 3E 20`` is BOTH the prompt ``"DAQIFI> "`` and a
+    68-byte frame whose body starts ``AQIFI> ``. On a length-prefixed
+    stream that overlap is irreducible, so something has to win, and the
+    frame does: a frame that DECODES is positive evidence, while "these
+    bytes spell a prompt" is a coincidence any 69-byte payload can produce.
+
+    The factory here accepts any bytes, which is the point -- the rule
+    under test is the ORDERING, and decodability is the factory's business.
+    """
+    body = b"AQIFI> " + bytes(range(61))          # 68 bytes total
+    assert len(body) == 68
+    data = bytes([68]) + body
+    parser = ProtobufMessageParser(lambda b: bytes(b))
+
+    messages, consumed = parser.parse_messages(data)
+    assert len(messages) == 1, (
+        "a decodable frame was consumed as the console prompt and destroyed"
+    )
+    assert messages[0].data == body
+    assert consumed == len(data)
+
+
+def test_the_prompt_is_still_skipped_when_it_is_not_a_frame() -> None:
+    """The other side of that rule: the prompt must still work. Followed by
+    a real frame, the 68-byte reading does not decode, which refutes it and
+    lets the console reading through."""
+    parser = _parser()
+    data = b"DAQIFI> " + _reply()
+    messages, consumed = parser.parse_messages(data)
+    assert len(messages) == 1 and consumed == len(data)
+
+
+@pytest.mark.parametrize(
+    "first, rest",
+    [
+        (b"EN", b"Able:VOLTage:DC 1,1\r\n"),
+        (b"**ERROR: -1", b"13 Undefined header\r\n"),
+        (b"DAQ", b"IFI> "),
+    ],
+    ids=["split-echo", "split-error-line", "split-prompt"],
+)
+def test_a_split_console_line_is_held_not_eaten(first, rest) -> None:
+    """r1 #2: an INCOMPLETE console line fell through to binary parsing,
+    which discarded a byte of it. An echo arriving as ``b'EN' |
+    b'NAble...'`` lost the ``E`` and then stalled the next reply forever.
+
+    A strict prefix of console noise must be HELD -- the same rule the
+    frame parser already applies to a partial frame.
+    """
+    parser = _parser(console_error_sink=lambda line: None)
+    parser.expect_console_echo(b"ENAble:VOLTage:DC 1,1\r\n")
+
+    assert parser.parse_messages(first) == ([], 0), (
+        f"a partial console line was consumed: {first!r}"
+    )
+    # Once whole, it is consumed and whatever follows still parses.
+    messages, consumed = parser.parse_messages(first + rest + _reply())
+    assert consumed > 0
+    assert len(messages) == 1, "the reply behind the console line was lost"
+
+
+def test_matching_an_echo_races_safely_against_new_sends() -> None:
+    """r1 #3: send() mutated the echo list while the consumer was between
+    its startswith() and its remove(), so remove() raised ValueError and
+    the consumer discarded a byte. Match and removal are now one lock hold.
+
+    ⚠ AN INTERMITTENT DETECTOR, labelled so a green run is not mistaken
+    for proof: it did NOT trigger on 5c724724 within its one-second window,
+    because the interleaving needs the eviction to land between the
+    consumer's startswith() and its remove(). The deterministic evidence is
+    structural and checkable by reading: on 5c724724 the ``remove()`` sat
+    outside any lock, and there was no lock to be outside of; it is now
+    inside the one hold that also does the matching.
+    """
+    import threading as _t
+
+    parser = _parser()
+    stop = _t.Event()
+    errors = []
+
+    def register():
+        i = 0
+        while not stop.is_set():
+            parser.expect_console_echo(f"SYSTem:CMD{i}?\r\n".encode())
+            i += 1
+
+    def match():
+        try:
+            while not stop.is_set():
+                parser.parse_messages(b"SYSTem:CMD0?\r\n" + _reply())
+        except BaseException as exc:                              # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [_t.Thread(target=register, daemon=True),
+               _t.Thread(target=match, daemon=True)]
+    for t in threads:
+        t.start()
+    time.sleep(1.0)
+    stop.set()
+    for t in threads:
+        t.join(5)
+    assert errors == [], f"the echo list raced: {errors}"
+
+
+def test_no_unconsumed_echo_is_silently_evicted() -> None:
+    """r1 #4: the eight-entry cap evicted echoes still awaiting their
+    replies, so nine sends before the consumer ran left the ninth reply
+    stalled forever. A stall is not an acceptable cost for a bound."""
+    parser = _parser()
+    sent = [f"SYSTem:CMD{i}?".encode() for i in range(9)]
+    for cmd in sent:
+        parser.expect_console_echo(cmd + b"\r\n")
+
+    # The FIRST command's echo must still be recognised -- it is the one an
+    # eviction policy would have dropped.
+    messages, consumed = parser.parse_messages(sent[0] + b"\r\n" + _reply())
+    assert len(messages) == 1 and consumed > 0, (
+        "the oldest unconsumed echo was evicted, so its reply stalled"
+    )
+    # ... and so must the ninth's.
+    messages, consumed = parser.parse_messages(sent[8] + b"\r\n" + _reply())
+    assert len(messages) == 1 and consumed > 0
+
+
+def test_an_echo_with_trailing_whitespace_still_matches() -> None:
+    """r1 #5: expect_console_echo() took a string and stripped it, so
+    whitespace that get_bytes() really sends -- a trailing space -- was
+    discarded and the echo never matched."""
+    parser = _parser()
+    on_the_wire = b"SYSTem:STReam:START 1000 \r\n"   # note the trailing space
+    parser.expect_console_echo(on_the_wire)
+
+    messages, consumed = parser.parse_messages(on_the_wire + _reply())
+    assert len(messages) == 1, (
+        "the echo did not match what was actually sent, so the reply "
+        "behind it stalled"
+    )
+    assert consumed == len(on_the_wire) + len(_reply())
