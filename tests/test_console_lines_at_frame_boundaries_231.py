@@ -852,42 +852,61 @@ def test_the_accepted_residual_can_fabricate_a_message() -> None:
     )
 
 
-def test_no_echo_is_registered_while_a_capture_owns_the_stream() -> None:
-    """A text exchange PAUSES the protobuf consumer, so an echo registered
-    on its parser can never be consumed -- it just accumulates, one per
-    send, per capture.
+def test_the_capture_residual_is_bounded_by_the_echo_state() -> None:
+    """⚠ PINS AN ACCEPTED RESIDUAL AND THE THING THAT BOUNDS IT.
 
-    Driven through the real ``execute_text_command`` rather than by
-    setting a flag: the thing under test is that the registration and the
-    pause cannot disagree, and only the real path puts them in the same
-    order.
+    A capture pauses the protobuf consumer, so an echo registered on its
+    parser during one can never be consumed. Round 3 added a device-wide
+    flag to suppress that registration; the flag caused two HIGH defects
+    (it also froze the echo-state transition, and it leaked stuck-True on
+    a raise) and was REVERTED, because the echo-state tracking already
+    closes the case on every path that calls ``initialize()``.
+
+    So the residual is: **no initialize(), with echo on or unknown**. That
+    single precondition has two symptoms -- the registry grows, and
+    captures leave unmatchable entries. Measured here rather than
+    asserted: 5 of 5 leak with the state unknown, 0 of 5 once the library
+    has sent the disable.
+
+    This is not a control and not a defect repro; it is the boundary of an
+    accepted residual. It fails if someone makes the leak unconditional --
+    which is the only change that would turn a documented limitation back
+    into a bug.
     """
-    device = _fakes._make_device_with_serial_facade(
-        {b"SYSTem:SYSInfoPB?": b'0,"No error"\r\n'}
-    )
-    try:
-        parser = device._consumer._parser
-        before = len(parser._expected_echoes)
+    scpi = _scpi()
 
-        scpi = _scpi()
-        for _ in range(5):
-            device.execute_text_command(
-                lambda: device.send(scpi.get_device_info()),
-                response_timeout_ms=60,
-                completion_timeout_ms=30,
-            )
-
-        after = len(parser._expected_echoes)
-        assert after == before, (
-            f"{after - before} echoes were registered on the PAUSED protobuf "
-            "parser during 5 text captures; nothing can ever consume them, "
-            "so the registry grows once per send per capture"
+    def _leak(disable_echo_first: bool) -> int:
+        device = _fakes._make_device_with_serial_facade(
+            {b"SYSTem:SYSInfoPB?": b'0,"No error"\r\n',
+             b"SYSTem:ECHO": b'0,"No error"\r\n'}
         )
-    finally:
         try:
-            device.disconnect()
-        except Exception:
-            pass
+            parser = device._consumer._parser
+            if disable_echo_first:
+                device.send(scpi.disable_device_echo())   # initialize() does this
+            before = len(parser._expected_echoes)
+            for _ in range(5):
+                device.execute_text_command(
+                    lambda: device.send(scpi.get_device_info()),
+                    response_timeout_ms=60,
+                    completion_timeout_ms=30,
+                )
+            return len(parser._expected_echoes) - before
+        finally:
+            try:
+                device.disconnect()
+            except Exception:
+                pass
+
+    assert _leak(disable_echo_first=True) == 0, (
+        "a capture leaked an unmatchable echo even though the library had "
+        "turned echo OFF; the echo-state check is what bounds this residual, "
+        "so the residual is no longer bounded"
+    )
+    assert _leak(disable_echo_first=False) == 5, (
+        "the documented exposure changed shape: captures with the echo state "
+        "unknown should leave exactly one unmatchable entry per send"
+    )
 
 
 def _tag_bytes_the_encoder_can_emit() -> dict:

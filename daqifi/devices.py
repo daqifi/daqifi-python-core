@@ -447,17 +447,6 @@ class DaqifiDevice:
         # Status events raised while the exchange lock was held, delivered
         # by whoever releases it (see _deliver_status_event).
         self._pending_status_events: List[DeviceStatusEventArgs] = []
-        # True while a text capture has paused the protobuf consumer and
-        # is reading the stream with a line parser instead.
-        #
-        # ⛔ DEVICE-WIDE, and deliberately NOT _capture_owner. The two
-        # answer different questions. "May this thread start a capture?"
-        # is per-thread, and a device-wide flag there wrongly refused
-        # other threads (WP1). "Is the protobuf parser the thing reading
-        # the stream right now?" is a property of the STREAM, true for
-        # every thread at once, and a per-thread marker there would miss a
-        # send from any other thread -- so this one is device-wide.
-        self._text_reader_owns_stream = False
 
         if transport is not None:
             transport.add_status_changed(self._on_transport_status_changed)
@@ -1063,19 +1052,10 @@ class DaqifiDevice:
         split this parameter exists to close. There is deliberately no
         default -- a fallback to ``self._consumer`` would fail open.
 
-        ⛔ Registers NOTHING while a capture's reader owns the stream. The
-        protobuf consumer is PAUSED then, so an echo registered on its
-        parser can never be consumed and simply accumulates -- one entry
-        per send, per capture. Nothing is lost by skipping: the capture's
-        own line parser sees the echoed command as a line, which is how
-        every text exchange has always handled it.
-
         Best-effort and silent: a parser that does not take echoes (the
         text capture's line parser) simply has no such method, and failing
         to register an echo must never stop a command going out.
         """
-        if self._text_reader_owns_stream:
-            return
         parser = getattr(consumer, "_parser", None) if consumer else None
         expect = getattr(parser, "expect_console_echo", None)
         if expect is None:
@@ -1426,10 +1406,6 @@ class DaqifiDevice:
                 # is kept exactly: nothing back within it is the answer.
 
         was_running = self._consumer.is_running
-        # Claimed BEFORE the pause, so no send() can register an echo on
-        # the protobuf parser between the two. A bool needs no counter:
-        # _capture_owner already forbids a capture inside a capture.
-        self._text_reader_owns_stream = True
         if was_running:
             try:
                 stopped = self._consumer.stop_safely()
@@ -1528,9 +1504,6 @@ class DaqifiDevice:
                 except Exception:
                     pass
         finally:
-            # Released before the restart: from here the protobuf parser
-            # is the stream's reader again, so echoes belong to it.
-            self._text_reader_owns_stream = False
             # Restart the protobuf consumer so streaming resumes — even if
             # setup_action raised — unless the connection was lost.
             if was_running and self._consumer_can_restart_on(stream):
@@ -3206,11 +3179,6 @@ class DaqifiStreamingDevice(DaqifiDevice):
 
         consumer = self._consumer
         was_running = consumer is not None and consumer.is_running
-        # Same reason as the text capture: while this raw reader owns the
-        # stream, the protobuf parser cannot consume an echo registered on
-        # it. The audit named only the text path; this is the same root
-        # cause and it would leak the same way.
-        self._text_reader_owns_stream = True
         if consumer is not None and was_running:
             stopped = consumer.stop_safely()
             if stopped is False:
@@ -3236,7 +3204,6 @@ class DaqifiStreamingDevice(DaqifiDevice):
                 pre_capture()
             return capture_action(raw_stream)
         finally:
-            self._text_reader_owns_stream = False
             if consumer is not None and was_running:
                 try:
                     consumer.clear_buffer()
