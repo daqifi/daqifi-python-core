@@ -2351,6 +2351,29 @@ class DaqifiDevice:
                 return None
             return self._delivery_fault
 
+    def _raise_if_delivery_faulted(self, operation: str) -> None:
+        """⛔ ON THIS CLASS, beside the fault it reads, because
+        :meth:`send` -- which is also on this class -- calls it after
+        acquiring the exchange.
+
+        It lived on ``DaqifiStreamingDevice`` while only that subclass's
+        ``start_streaming`` consulted it. Calling it from ``send`` without
+        moving it made every send on a plain ``DaqifiDevice`` raise
+        AttributeError. That is the SECOND time in two commits a member was
+        left on the wrong side of this class boundary for ``send`` to
+        reach, and both times the same generated test
+        (``test_send_writes_scpi_to_stream``, which exercises a bare
+        ``DaqifiDevice``) is what caught it rather than review.
+        """
+        # The property, not the field: a fault recorded against a
+        # connection that has since been replaced does not apply here.
+        fault = self.delivery_fault
+        if fault is not None:
+            raise DeliveryFaultError(
+                f"{operation} cannot be trusted on this connection: "
+                f"{fault}. Reconnect before continuing."
+            )
+
     def _flush_pending_status_events(self) -> None:
         """Deliver status events queued while the exchange lock was held.
 
@@ -2512,16 +2535,6 @@ class DaqifiStreamingDevice(DaqifiDevice):
         self.send(scpi_commands.start_streaming(self._streaming_frequency))
         self._is_streaming = True
         self._set_state(DeviceState.Streaming)
-
-    def _raise_if_delivery_faulted(self, operation: str) -> None:
-        # The property, not the field: a fault recorded against a
-        # connection that has since been replaced does not apply here.
-        fault = self.delivery_fault
-        if fault is not None:
-            raise DeliveryFaultError(
-                f"{operation} cannot be trusted on this connection: "
-                f"{fault}. Reconnect before continuing."
-            )
 
     def stop_streaming(self) -> None:
         # State moves after the command is out -- see start_streaming.

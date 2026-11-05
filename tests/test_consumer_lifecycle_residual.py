@@ -1157,3 +1157,38 @@ def test_a_fault_recorded_while_a_send_waits_stops_the_send() -> None:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
+
+
+def test_everything_send_touches_exists_on_the_class_that_defines_it() -> None:
+    """⛔ THE GUARD FOR A MISTAKE MADE TWICE IN TWO COMMITS.
+
+    ``send`` is defined on ``DaqifiDevice``. Twice I added something it
+    calls and left that something on the ``DaqifiStreamingDevice``
+    subclass, so every send on a plain ``DaqifiDevice`` raised
+    AttributeError at runtime: first ``_SEND_EXCHANGE_WAIT_S``, then
+    ``_raise_if_delivery_faulted``. Both times a 10-minute full suite is
+    what caught it, via one generated test that happens to exercise a bare
+    device -- and a generated file can be regenerated away.
+
+    This runs in milliseconds and names the offender, so the next instance
+    is caught while it is still being typed rather than ten minutes later.
+    It reads the attributes out of ``send``'s own source, so it needs no
+    maintenance as that method changes.
+    """
+    import inspect
+    import re
+
+    from daqifi.devices import DaqifiDevice
+
+    bare = DaqifiDevice(name="reachability-probe")
+    touched = sorted(set(re.findall(
+        r"self\.(_?[A-Za-z]\w*)", inspect.getsource(DaqifiDevice.send)
+    )))
+    assert touched, "no attributes parsed out of send(); the probe is broken"
+
+    missing = [a for a in touched if not hasattr(bare, a)]
+    assert not missing, (
+        f"send() is defined on DaqifiDevice but reaches for {missing}, which "
+        "a bare DaqifiDevice does not have -- so every send on one raises "
+        "AttributeError. Move those onto DaqifiDevice, beside send()."
+    )
