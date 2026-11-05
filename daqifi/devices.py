@@ -873,34 +873,14 @@ class DaqifiDevice:
             # Ours already: the exchange's own setup_action is what sends.
             self._write_message(message)
             return
-        if self._on_consumer_thread():
-            if not self._text_exchange_lock.acquire(blocking=False):
-                raise ExchangeTimeoutError(
-                    "send() cannot run on the protobuf consumer thread -- "
-                    "that is, from a message-received callback -- while "
-                    "another flow holds this device: waiting there can "
-                    "deadlock, because that flow may be waiting for this "
-                    "very thread to stop the consumer. The command was NOT "
-                    "sent. Send it from another thread, or group it with "
-                    "the other flow inside run_exclusive()."
-                )
-        elif not self._text_exchange_lock.acquire(
-            timeout=self._SEND_EXCHANGE_WAIT_S
-        ):
-            raise ExchangeTimeoutError(
-                "The message could not be sent: another flow has held this "
-                f"device for more than {self._SEND_EXCHANGE_WAIT_S:g} s, "
-                "which is longer than any legitimate exchange takes, so it "
-                "is stuck rather than busy. The command was NOT sent."
-            )
-        # _text_exchange_lock_owner means exactly "this thread holds the
-        # exchange lock", and two rules read it: who may nest an exchange,
-        # and who must defer status events instead of delivering them (see
-        # _deliver_status_event). A send holds the lock, so it must be
-        # recorded here or a failing send would deliver Lost under the lock
-        # again -- which is the deadlock, by a different route.
-        self._text_exchange_lock_owner = tid
-        try:
+        # ⭐ ONE acquisition rule for every write-only exchange, shared
+        # with _run_owning_exchange so the two cannot drift: the consumer
+        # thread try-acquires and is refused only when the exchange is
+        # HELD; any other thread waits, bounded. The helper also records
+        # the owner -- two rules read that (who may nest an exchange, and
+        # who must defer status events) -- and releases and flushes on the
+        # way out.
+        with self._write_exchange_lock("send"):
             # ⛔ RE-CHECK AFTER ACQUIRING, not only on the way in. Waiting
             # here can take as long as the exchange ahead of us, and that
             # exchange may be what loses the connection: a send that
@@ -942,12 +922,6 @@ class DaqifiDevice:
             # that predates it.
             self._raise_if_delivery_faulted("send")
             self._write_message(message)
-        finally:
-            self._text_exchange_lock_owner = None
-            self._text_exchange_lock.release()
-            # Outside the lock, always: a queued status event runs user
-            # callbacks. See _flush_pending_status_events.
-            self._flush_pending_status_events()
 
     def _write_message(self, message: Any) -> None:
         """Put ``message`` on the wire. :meth:`send`'s body, once the
@@ -1102,6 +1076,60 @@ class DaqifiDevice:
             return False
         return threading.current_thread() is getattr(consumer, "_thread", None)
 
+    @contextlib.contextmanager
+    def _write_exchange_lock(self, operation: str) -> Iterator[None]:
+        """Hold the exchange for a WRITE-ONLY operation.
+
+        ⛔ NOT :meth:`_exchange_lock`. That one refuses the consumer thread
+        OUTRIGHT, which is right for a text exchange -- it pauses and
+        restarts that very thread (#238) -- and wrong for an operation that
+        only writes: such an operation is perfectly safe there, so refusing
+        it when the exchange is IDLE rejects a caller the base served, and
+        the audit found exactly that.
+
+        The rule here is the one :meth:`send` uses, and both now come
+        through this helper so they cannot drift:
+
+        * the consumer thread never WAITS. It try-acquires, and is refused
+          only when someone else holds the exchange -- because that holder
+          may be waiting for this very thread to stop the consumer.
+        * any other thread waits, bounded by
+          :attr:`_SEND_EXCHANGE_WAIT_S`.
+
+        The refusal for TEXT EXCHANGES stays unconditional and is untouched
+        by this: see :meth:`_acquire_text_exchange_lock`.
+        """
+        if self._on_consumer_thread():
+            if not self._text_exchange_lock.acquire(blocking=False):
+                raise ExchangeTimeoutError(
+                    f"{operation} cannot run on the protobuf consumer "
+                    "thread -- that is, from a message-received callback -- "
+                    "while another flow holds this device: waiting there "
+                    "can deadlock, because that flow may be waiting for "
+                    "this very thread to stop the consumer. Nothing was "
+                    "sent. Use another thread, or group it with the other "
+                    "flow inside run_exclusive()."
+                )
+        elif not self._text_exchange_lock.acquire(
+            timeout=self._SEND_EXCHANGE_WAIT_S
+        ):
+            raise ExchangeTimeoutError(
+                f"{operation} could not run: another flow has held this "
+                f"device for more than {self._SEND_EXCHANGE_WAIT_S:g} s, "
+                "which is longer than any legitimate exchange takes, so it "
+                "is stuck rather than busy. Nothing was sent."
+            )
+        self._text_exchange_lock_owner = threading.get_ident()
+        try:
+            self._refuse_if_unusable(operation)
+            yield
+        finally:
+            self._text_exchange_lock_owner = None
+            self._text_exchange_lock.release()
+            # Outside the lock, always: a queued status event runs user
+            # callbacks. See _flush_pending_status_events.
+            self._flush_pending_status_events()
+
     def _acquire_text_exchange_lock(self, operation: str) -> None:
         """Take the text-exchange lock, refusing outright on the consumer
         thread.
@@ -1229,8 +1257,7 @@ class DaqifiDevice:
         if self._text_exchange_lock_owner == threading.get_ident():
             self._refuse_if_unusable(operation)
             return fn()
-        with self._exchange_lock(operation):
-            self._refuse_if_unusable(operation)
+        with self._write_exchange_lock(operation):
             return fn()
 
     def _refuse_if_unusable(self, operation: str) -> None:
@@ -1747,16 +1774,48 @@ class DaqifiDevice:
 
     def initialize(self, response_timeout_s: Optional[float] = None) -> None:
         # ⛔ OWNS THE EXCHANGE FOR THE WHOLE SEQUENCE, and still does now
-        # that send() blocks rather than parking. Blocking fixes the first
-        # reason this was needed -- a send reaches the device before the
-        # response deadline starts -- but not the second: the init is a
-        # SEQUENCE, and another flow's command landing between its steps
-        # breaks what the later steps assume. Owning the exchange is what
-        # makes the whole init atomic against other flows. Re-entrant, so
-        # an init from inside an exchange this thread owns still works.
-        return self._run_exclusive(
-            lambda: self._initialize_locked(response_timeout_s), "initialize"
-        )
+        # ⛔ OWNERSHIP IS NARROWED TO THE SENDS, and released before the
+        # status wait. It used to span the whole call, which was a
+        # parking-era need -- the deadline had to start only after the
+        # commands were delivered -- and blocking send() guarantees that
+        # already: returning means written.
+        #
+        # Holding it across the WAIT was actively harmful. The consumer
+        # dispatches the status this call is waiting for, and that dispatch
+        # runs the library's own channels_populated handlers; a send from
+        # one of those was refused because initialize held the exchange,
+        # the handler loop swallowed the refusal, and initialize reported
+        # success with the command never sent. It also wedged initialize
+        # for any callback that delegated a send and joined it.
+        #
+        # ⚠ WHAT NARROWING COSTS, stated rather than discovered later:
+        # during the wait another flow may start a text capture, which
+        # pauses the consumer, so the status is never dispatched and this
+        # call times out. Ownership used to prevent that. The trade is a
+        # LOUD failure under concurrent use in place of a SILENT wrong
+        # success, which is the right direction -- and the timeout now says
+        # the device is not at fault when the consumer is the thing held up.
+        #
+        # ⚠ A caller that wrapped initialize() in its own run_exclusive
+        # still holds across the wait, by its own request: this releases
+        # only the ownership it took itself.
+        tid = threading.get_ident()
+        if self._capture_owner == tid:
+            raise RuntimeError(
+                "initialize cannot run inside another exchange on the same "
+                "device (for example from a setup_action callback): the "
+                "protobuf consumer is paused there, so the status reply it "
+                "waits for can never arrive."
+            )
+        if self._on_consumer_thread():
+            raise RuntimeError(
+                "initialize cannot run on the protobuf consumer thread, "
+                "that is, from a message-received callback: it waits for a "
+                "status reply that only that thread can dispatch. Call it "
+                "from another thread."
+            )
+        self._refuse_if_unusable("initialize")
+        return self._initialize_locked(response_timeout_s)
 
     def _initialize_locked(
         self, response_timeout_s: Optional[float] = None
@@ -1826,26 +1885,6 @@ class DaqifiDevice:
             if self._consumer is not None:
                 self._consumer.add_message_received(self._on_inbound_message)
 
-            # Standard SCPI init sequence (mirrors upstream).
-            self.send(scpi_commands.disable_device_echo())
-            time.sleep(0.1)
-            self.send(scpi_commands.stop_streaming())
-            time.sleep(0.1)
-            self.send(scpi_commands.turn_device_on())
-            time.sleep(0.1)
-            self.send(scpi_commands.set_protobuf_stream_format())
-            time.sleep(0.1)
-            # Pin the stream output to the same transport we connected
-            # over. Without this, streaming bytes can be routed to the
-            # last-configured interface (e.g. WiFi) and the consumer on
-            # this transport sees nothing.
-            interface = self._stream_interface_for_transport()
-            if interface is not None:
-                self.send(scpi_commands.set_stream_interface(interface))
-                time.sleep(0.1)
-
-            # Query device info -- the protobuf consumer dispatches the
-            # response to OnStatusMessageReceived which fills metadata.
             # Polled (was a fixed 1.0 s sleep) so a healthy device
             # returns early — needed roughly 500 ms over USB CDC on
             # the 2026-04-23 NQ1 hardware run. TCP gets a longer
@@ -1854,25 +1893,32 @@ class DaqifiDevice:
             is_tcp = isinstance(self._transport, TcpStreamTransport)
             if response_timeout_s is None:
                 response_timeout_s = 5.0 if is_tcp else 1.0
-            self.send(scpi_commands.get_device_info())
+
+            # ⭐ THE SENDS OWN THE EXCHANGE AS ONE SEQUENCE; THE WAIT BELOW
+            # DOES NOT. Another flow's command between these steps would
+            # break what the later ones assume, so the grouping is still
+            # wanted -- it is only the WAIT that must not hold, because the
+            # consumer dispatches the reply it waits for.
+            self._run_owning_exchange(
+                self._initialize_send_sequence, "initialize"
+            )
+
+            # From here the exchange is FREE, so the consumer can dispatch
+            # the status and the handlers it runs can send.
             deadline = time.monotonic() + response_timeout_s
             while time.monotonic() < deadline:
                 if self._metadata.serial_number:
                     break
                 time.sleep(0.05)
             if not self._metadata.serial_number:
-                # ⛔ DO NOT BLAME THE DEVICE FOR OUR OWN WEDGE. initialize()
-                # owns the exchange for its whole sequence, so a
-                # message-received callback that hands a send to a worker
-                # and JOINS it cannot return until this call finishes --
-                # and this call is waiting for a reply only that callback's
-                # thread can dispatch. The reply never comes, and the
-                # timeout above then reported the DEVICE as unresponsive,
-                # sending whoever reads it to the board.
-                #
-                # This is the accepted cost of the blocking design (ruling
-                # EI B): the library cannot see through a join(). What it
-                # CAN do is say where the silence comes from.
+                # ⛔ DO NOT BLAME THE DEVICE FOR OUR OWN WEDGE. The
+                # consumer dispatches the reply this call waits for, so a
+                # consumer stuck inside a message-received callback means
+                # the silence is OURS. The exchange is free during this
+                # wait now, so a callback's own send is no longer what
+                # wedges it -- but a callback that blocks on anything else
+                # still can, and the library cannot see through that.
+                # What it CAN do is say where the silence comes from.
                 consumer = self._consumer
                 if consumer is not None and consumer.is_in_callback:
                     raise DeviceUnresponsiveError(
@@ -2003,7 +2049,17 @@ class DaqifiDevice:
             try:
                 h(args)
             except Exception:
-                pass
+                # ⛔ ISOLATED BUT NOT SILENT. One subscriber must not stop
+                # the others, so the exception is still swallowed here --
+                # but it used to vanish entirely, and a send refused inside
+                # a handler then left initialize() reporting success with
+                # the command never sent. Two signals, two channels: the
+                # other handlers still run, AND the failure is reported.
+                _log.warning(
+                    "device %s: a channels_populated handler raised; its "
+                    "work did not complete",
+                    self.name, exc_info=True,
+                )
 
     def _populate_analog_channels(self, message: Any) -> int:
         # Same int-cast hardening as the metadata path (Qodo PR 17
@@ -2168,11 +2224,17 @@ class DaqifiDevice:
         try:
             self._metadata.update_from_protobuf(message)
         except Exception:
-            pass
+            _log.warning(
+                "device %s: status message did not update metadata",
+                self.name, exc_info=True,
+            )
         try:
             self.populate_channels_from_status(message)
         except Exception:
-            pass
+            _log.warning(
+                "device %s: status message did not populate channels",
+                self.name, exc_info=True,
+            )
         self._fire_message(message)
 
     def _on_stream_message_received(self, message: Any) -> None:
@@ -2441,6 +2503,37 @@ class DaqifiDevice:
 
     def _set_state(self, value: DeviceState) -> None:
         self._state = value
+
+    def _initialize_send_sequence(self) -> None:
+        """The init sequence's commands, run owning the exchange.
+
+        Extracted so the ownership covers exactly the sends: every later
+        step assumes the earlier ones took effect on a device nobody else
+        has touched, which is what the grouping buys. The STATUS WAIT is
+        deliberately outside it -- see :meth:`initialize`.
+        """
+        # Standard SCPI init sequence (mirrors upstream).
+        self.send(scpi_commands.disable_device_echo())
+        time.sleep(0.1)
+        self.send(scpi_commands.stop_streaming())
+        time.sleep(0.1)
+        self.send(scpi_commands.turn_device_on())
+        time.sleep(0.1)
+        self.send(scpi_commands.set_protobuf_stream_format())
+        time.sleep(0.1)
+        # Pin the stream output to the same transport we connected over.
+        # Without this, streaming bytes can be routed to the
+        # last-configured interface (e.g. WiFi) and the consumer on this
+        # transport sees nothing.
+        interface = self._stream_interface_for_transport()
+        if interface is not None:
+            self.send(scpi_commands.set_stream_interface(interface))
+            time.sleep(0.1)
+        # Query device info -- the protobuf consumer dispatches the
+        # response to OnStatusMessageReceived, which fills metadata. The
+        # query goes out INSIDE the ownership; waiting for its reply does
+        # not.
+        self.send(scpi_commands.get_device_info())
 
     def _stream_interface_for_transport(self) -> Optional[StreamInterface]:
         """Pick the SCPI stream-interface enum that matches the

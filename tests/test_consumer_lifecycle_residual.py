@@ -151,17 +151,13 @@ def _run_r4_schedule():
            "DIRECT send from the consumer thread; the library cannot see "
            "through a join(). Asserts the CORRECT behaviour, so it never "
            "requires the defect and XPASSes if anyone fixes it. "
-           "⛔ THE SAME CLASS HAS A SECOND SHAPE, found by the blind leg of "
-           "audit round 3: initialize() owns the exchange for its WHOLE "
-           "sequence, so a callback that delegates a send and joins it "
-           "wedges initialize until its own timeout -- the worker waits for "
-           "the exchange initialize holds, the callback waits for the "
-           "worker, and initialize waits for a status only that callback's "
-           "thread can dispatch. No library path does this (no library "
-           "callback delegates and joins); it needs caller code that does. "
-           "It is NOT separately fixed, by the same reasoning, but the "
-           "timeout no longer blames the board: see "
-           "test_a_wedged_consumer_is_not_reported_as_an_unresponsive_device.",
+           "⚠ The initialize() variant of this, reported by a later audit "
+           "round, IS now fixed and is no longer part of this xfail: "
+           "initialize no longer owns the exchange while it waits, so a "
+           "callback that delegates a send and joins it completes -- pinned "
+           "by test_initialize_does_not_hold_the_device_while_it_waits. "
+           "What remains xfailed is the TEXT-EXCHANGE shape above, where "
+           "the exchange is held across a capture by design.",
     strict=False,
 )
 def test_the_consumer_survives_a_callback_that_delegates_a_send() -> None:
@@ -997,8 +993,13 @@ def test_a_send_that_waits_too_long_is_told_so() -> None:
         assert 0.15 <= waited < 5.0, (
             f"the send did not honour its own bound: waited {waited:.2f}s"
         )
-        assert "NOT sent" in str(caught.value), (
-            "the error does not tell the caller the command never went out"
+        # The REQUIREMENT is that the message says the command did not go
+        # out; the exact phrasing is not the contract. Both the send path
+        # and the shared write-exchange helper must satisfy it.
+        message = str(caught.value).lower()
+        assert "nothing was sent" in message or "not sent" in message, (
+            "the error does not tell the caller the command never went "
+            f"out: {caught.value}"
         )
         assert [w for w in stream.written if b"STReam:STOP" in w] == [], (
             "a send that reported a timeout reached the wire anyway"
@@ -1504,6 +1505,109 @@ def test_a_wedged_consumer_is_not_reported_as_an_unresponsive_device() -> None:
         )
     finally:
         release.set()
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+# ---- EI B audit round 4 -------------------------------------------------
+
+
+def test_initialize_does_not_hold_the_device_while_it_waits() -> None:
+    """⛔ THE WAIT MUST NOT OWN THE EXCHANGE.
+
+    ``initialize`` used to own it for the whole call. The consumer
+    dispatches the very status it waits for, and that dispatch runs
+    callbacks -- so a callback that sends was refused, and one that
+    delegated a send and JOINED it wedged initialize until its timeout.
+
+    Ownership across the wait was a parking-era need (the deadline had to
+    start only after delivery) and blocking ``send()`` guarantees that
+    already. Narrowed to the sends, this schedule completes.
+
+    Measured on 85f42d24: the worker never finished and initialize raised
+    DeviceUnresponsiveError. Both assertions below fail there.
+    """
+    device = _fakes._make_device_with_serial_facade(
+        {b"SYSInfoPB?": _frame()}
+    )
+    worker_outcome = []
+    ran = threading.Event()
+
+    def delegating_callback(_args):
+        if ran.is_set():
+            return
+        ran.set()
+
+        def worker():
+            try:
+                device.send(_scpi().stop_streaming())
+                worker_outcome.append("sent")
+            except BaseException as exc:                          # noqa: BLE001
+                worker_outcome.append(type(exc).__name__)
+
+        w = threading.Thread(target=worker, name="delegated", daemon=True)
+        w.start()
+        w.join(10.0)
+
+    device._consumer.add_message_received(delegating_callback)
+    try:
+        device.initialize(response_timeout_s=2.0)
+        assert ran.is_set(), "the callback never ran; the schedule did not form"
+        assert worker_outcome == ["sent"], (
+            "a send delegated from a callback and joined did not complete, "
+            "so initialize() still holds the device while it waits: "
+            f"{worker_outcome}"
+        )
+    finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_the_consumer_may_take_an_idle_exchange_for_a_write() -> None:
+    """A write-only helper on the consumer thread, exchange IDLE.
+
+    Refusing there rejected a caller the base served: the refusal only
+    makes sense when someone ELSE holds the device, because then they may
+    be waiting for this thread. Idle, there is nobody to deadlock against.
+    This is the same rule plain ``send()`` uses, and both now come through
+    one helper.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    outcome = []
+    ran = threading.Event()
+
+    def on_message(_args):
+        if ran.is_set():
+            return
+        ran.set()
+        try:
+            device.prepare_lan_interface()        # write-only helper
+            outcome.append("ran")
+        except BaseException as exc:                              # noqa: BLE001
+            outcome.append(type(exc).__name__)
+
+    device._consumer.add_message_received(on_message)
+    try:
+        assert device._text_exchange_lock.acquire(blocking=False), (
+            "the exchange must be idle for this test to mean anything"
+        )
+        device._text_exchange_lock.release()
+
+        device._transport.stream.feed(_frame())
+        _wait_for(ran.is_set, 10.0, "the callback to run")
+        _wait_for(lambda: outcome != [], 10.0, "the helper to resolve")
+
+        assert outcome == ["ran"], (
+            "a write-only helper was refused on the consumer thread with "
+            f"the exchange idle: {outcome}"
+        )
+        assert [w for w in device._transport.stream.written
+                if b"LAN:ENAbled 1" in w], "nothing reached the wire"
+    finally:
         try:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
