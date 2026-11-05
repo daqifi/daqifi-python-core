@@ -492,9 +492,18 @@ class DefaultFirmwareUpdateService:
         The service's own ``_operation_lock`` does NOT help: it serialises
         updates against each other, not against the device's other flows.
         """
-        device.run_exclusive(lambda: device.send(message))
-        if delay:
-            self._sleep_with_cancel(delay, deadline)
+        def _send_then_settle() -> None:
+            device.send(message)
+            if delay:
+                # ⛔ INSIDE the ownership, not after it. The sleep used to
+                # run once run_exclusive had RETURNED, so the docstring
+                # above claimed a window the code did not hold: another
+                # thread's POWer:STATe 0 landed mid-settle and the update
+                # aborted. The settling time is this command's, so it is
+                # part of the exchange.
+                self._sleep_with_cancel(delay, deadline)
+
+        device.run_exclusive(_send_then_settle)
 
     # -- exclusive-access wrapper ---------------------------------------
 

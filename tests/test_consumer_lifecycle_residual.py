@@ -1192,3 +1192,159 @@ def test_everything_send_touches_exists_on_the_class_that_defines_it() -> None:
         "a bare DaqifiDevice does not have -- so every send on one raises "
         "AttributeError. Move those onto DaqifiDevice, beside send()."
     )
+
+
+# ---- EI B audit round 2 -------------------------------------------------
+
+
+def test_only_one_place_may_null_the_consumer_thread_handle() -> None:
+    """⛔ THE STRUCTURAL PIN, because fixing one writer let the same defect
+    back in at the next one.
+
+    Round 1 fixed ``start()``. ``stop()`` and ``stop_safely()`` still nulled
+    the handle unconditionally, so a stop resuming after a concurrent
+    ``start()`` had published its reader erased that reader's handle and
+    left two readers on one stream. Three writers, one root cause, and the
+    only durable fix is that there is exactly ONE place able to do it.
+
+    This asserts the shape rather than the behaviour, deliberately: a
+    behavioural test can only cover the writers someone thought to drive,
+    and the whole failure was not thinking of one.
+    """
+    import inspect
+    import re
+
+    from daqifi import communication as comm
+
+    src = inspect.getsource(comm)
+    bare = re.findall(r"^\s*self\._thread = None\s*$", src, re.MULTILINE)
+    assert len(bare) == 1, (
+        f"{len(bare)} places null self._thread; there must be exactly one, "
+        "inside _release_thread_locked, or the identity check can be "
+        "bypassed by whichever site forgot it"
+    )
+
+    helper = inspect.getsource(comm.StreamMessageConsumer._release_thread_locked)
+    # ⭐ Pin the GUARD, not just the presence of the assignment: a helper
+    # that cleared unconditionally would satisfy the count above while
+    # reintroducing the whole defect.
+    assert re.search(
+        r"if\s+joined\s+is\s+not\s+None\s+and\s+self\._thread\s+is\s+joined\s*:"
+        r"\s*\n\s*self\._thread\s*=\s*None",
+        helper,
+    ), (
+        "the one clear is no longer guarded by `self._thread is joined`, so "
+        "it can again erase a reader this caller never joined:\n" + helper
+    )
+
+    # Every other writer must go through the helper.
+    for name in ("stop", "stop_safely"):
+        body = inspect.getsource(getattr(comm.StreamMessageConsumer, name))
+        assert "_release_thread" in body, (
+            f"{name}() does not release the handle through the helper, so it "
+            "can null one it never joined"
+        )
+
+
+def test_stop_safely_never_nulls_another_starters_reader() -> None:
+    """The behavioural half, at the writer round 1 missed.
+
+    Same shape as the start() case: a replacement is published during the
+    join, in its publisher's publish-then-start gap, and the stopping
+    thread must not erase it.
+    """
+    from daqifi.communication import ProtobufMessageParser, StreamMessageConsumer
+    from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
+
+    class _Stream:
+        def read(self, _n=1):
+            time.sleep(0.01)
+            return b""
+
+        @property
+        def in_waiting(self):
+            return 0
+
+    consumer = StreamMessageConsumer[object](
+        _Stream(), ProtobufMessageParser(DaqifiOutMessage.FromString)
+    )
+    exit_old = threading.Event()
+    try:
+        old = threading.Thread(target=lambda: exit_old.wait(10.0),
+                               name="old-reader", daemon=True)
+        old.start()
+        consumer._thread = old
+        consumer._is_running = True
+
+        replacement = threading.Thread(target=lambda: time.sleep(5.0),
+                                       name="replacement", daemon=True)
+        joined = threading.Event()
+        real_join = old.join
+
+        def slow_join(timeout=None):
+            joined.set()
+            real_join(timeout)
+            # A concurrent start() publishes its reader, not yet started.
+            consumer._thread = replacement
+            consumer._is_running = True
+
+        old.join = slow_join
+        exit_old.set()
+        consumer.stop_safely(timeout_ms=2000)
+        assert joined.is_set(), "the join never ran; the race was not exercised"
+        replacement.start()
+
+        assert consumer._thread is replacement, (
+            "stop_safely() nulled a reader it never joined, so that reader "
+            "is alive and untracked and the next start() would publish a "
+            "second one on the same stream"
+        )
+    finally:
+        exit_old.set()
+        try:
+            consumer.close()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_the_settle_delay_is_inside_the_exchange_it_claims_to_own() -> None:
+    """⛔ A DOCSTRING CLAIMED A WINDOW THE CODE DID NOT HOLD.
+
+    ``_send_and_settle`` exists so the delay after a command -- a reboot, a
+    mode change -- is not disturbed by another flow. Its own docstring said
+    ownership covers "both the send and the wait". It did not: the sleep ran
+    after ``run_exclusive`` had RETURNED, so another thread's command landed
+    mid-settle and the update aborted.
+
+    Driven through the real helper on a real device, with the ownership
+    sampled from inside the sleep, because the claim is about what is true
+    *while* the delay runs.
+    """
+    from daqifi.firmware.update_service import DefaultFirmwareUpdateService
+
+    device = _fakes._make_device_with_serial_facade()
+    service = DefaultFirmwareUpdateService.__new__(DefaultFirmwareUpdateService)
+    owned_during_sleep = []
+
+    def fake_sleep(delay, deadline):
+        # The exchange is owned iff this thread is recorded as its owner.
+        owned_during_sleep.append(
+            device._text_exchange_lock_owner == threading.get_ident()
+        )
+
+    service._sleep_with_cancel = fake_sleep
+    try:
+        service._send_and_settle(device, _scpi().stop_streaming(), 0.05, None)
+        assert owned_during_sleep == [True], (
+            "the settle delay ran OUTSIDE the exchange, so another flow's "
+            "command can land in the window this helper exists to protect: "
+            f"{owned_during_sleep}"
+        )
+        # And the command really did go out.
+        assert [w for w in device._transport.stream.written
+                if b"STReam:STOP" in w], "the command never reached the wire"
+    finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass

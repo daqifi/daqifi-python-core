@@ -724,6 +724,35 @@ class StreamMessageConsumer(Generic[T]):
     #: Mirrors daqifi-core's StaleReaderGraceMs (daqifi/daqifi-core#383).
     STALE_READER_GRACE_MS = 1000
 
+    def _release_thread_locked(
+        self, joined: Optional[threading.Thread]
+    ) -> None:
+        """Clear :attr:`_thread`, but ONLY if it is still ``joined``.
+
+        ⛔ THE SINGLE PLACE IN THIS CLASS THAT MAY NULL THAT HANDLE, and
+        the identity test is the whole point: nulling a handle you did not
+        join erases a reader another flow has already published, leaving it
+        alive but untracked -- ``close()`` cannot stop it, and the next
+        ``start()`` sees ``None`` and publishes a SECOND reader on the same
+        stream.
+
+        It was fixed at ``start()`` first and the other two writers were
+        left behind, which is how the same defect came back in the next
+        audit round. Enumerate the writers, then fix the class: ``start``,
+        ``stop`` and ``stop_safely`` all route through here, and a test
+        asserts no other bare ``self._thread = None`` exists.
+
+        Callers hold :attr:`_lifecycle_lock`; :meth:`_release_thread` is
+        the variant that takes it.
+        """
+        if joined is not None and self._thread is joined:
+            self._thread = None
+
+    def _release_thread(self, joined: Optional[threading.Thread]) -> None:
+        """:meth:`_release_thread_locked` for callers not holding the lock."""
+        with self._lifecycle_lock:
+            self._release_thread_locked(joined)
+
     def start(self) -> None:
         self._raise_if_disposed()
         if self._is_running:
@@ -771,13 +800,12 @@ class StreamMessageConsumer(Generic[T]):
             # same stream. Clearing only the joined object, under the lock,
             # makes that unrepresentable: the identity test fails precisely
             # when someone else has published.
-            if joined is not None and self._thread is joined:
-                if joined.is_alive():        # re-check: it may have been restarted
-                    raise RuntimeError(
-                        "the previous consumer thread came back to life "
-                        "while this call waited for it to exit"
-                    )
-                self._thread = None
+            if joined is not None and self._thread is joined and joined.is_alive():
+                raise RuntimeError(
+                    "the previous consumer thread came back to life "
+                    "while this call waited for it to exit"
+                )
+            self._release_thread_locked(joined)
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError(
                     "another consumer thread was started while this call "
@@ -797,18 +825,21 @@ class StreamMessageConsumer(Generic[T]):
 
     def stop(self) -> None:
         self._is_running = False
-        if self._thread is not None:
+        # Captured once: re-reading it after the join is what let this
+        # erase a reader a concurrent start() had published.
+        joined = self._thread
+        if joined is not None:
             # Don't self-join — `thread.join()` from inside the
             # thread it would join raises RuntimeError. This can
             # happen if a user callback ends up calling stop() (Qodo
             # PR 17 pass 10 #2).
-            if threading.current_thread() is not self._thread:
-                self._thread.join(timeout=1.0)
+            if threading.current_thread() is not joined:
+                joined.join(timeout=1.0)
             # Qodo PR 17 finding 5: only drop the thread reference if
             # it actually stopped. Keeping it lets a caller retry
             # join / inspect is_alive instead of leaking the handle.
-            if not self._thread.is_alive():
-                self._thread = None
+            if not joined.is_alive():
+                self._release_thread(joined)
         with self._buffer_lock:
             self._message_buffer.clear()
 
@@ -828,9 +859,11 @@ class StreamMessageConsumer(Generic[T]):
                 thread.join(timeout=timeout_ms / 1000.0)
                 stopped = not thread.is_alive()
         # Qodo PR 17 finding 5: don't drop the handle if the thread
-        # is still alive — caller may need to retry.
+        # is still alive — caller may need to retry. And drop only the
+        # handle we joined: a start() that published its own reader during
+        # that join must keep it (see _release_thread_locked).
         if stopped:
-            self._thread = None
+            self._release_thread(thread)
         with self._buffer_lock:
             self._message_buffer.clear()
         return stopped
