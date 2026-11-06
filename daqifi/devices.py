@@ -1037,6 +1037,80 @@ class DaqifiDevice:
         """
         _log.warning("device %s reported on the console: %s", self.name, line)
 
+    def _sync_echo_state_from_device(self) -> None:
+        """Read ``SYSTem:ECHO?`` and tell the frame parser the answer.
+
+        ⛔ VIA A TEXT CAPTURE, deliberately. The reply is a plain line
+        (``-1``, ``0`` or ``1``), so letting it reach the FRAME parser is
+        the very defect this ticket is about -- ``-`` and the digits are
+        also a length prefix and a body. A capture swaps a line parser onto
+        the stream for the exchange, so the reply is read as what it is,
+        and the echoed query line (if echo is on) is consumed as a line
+        too, needing no registration.
+
+        Best effort: a device that does not answer leaves the state
+        unknown, which behaves like echo ON -- the safe direction, since a
+        spurious registration wastes a list entry while a missing one
+        stalls a reply forever.
+        """
+        try:
+            lines = self.execute_text_command(
+                lambda: self.send(scpi_commands.get_device_echo()),
+                # ⚠ DELIBERATELY SHORT. initialize() has a sub-second
+                # budget (an earlier quiet-window check added 1.25 s to
+                # every connect and was removed for it), and a device that
+                # does not answer this costs the full response timeout. A
+                # slow or silent link therefore leaves the state UNKNOWN,
+                # which behaves like echo ON -- the safe direction, and a
+                # graceful degradation rather than a failure.
+                response_timeout_ms=250,
+                completion_timeout_ms=100,
+            )
+        except Exception:
+            _log.warning(
+                "device %s: could not read SYSTem:ECHO?; leaving the echo "
+                "state unknown, which is treated as echo ON",
+                self.name, exc_info=True,
+            )
+            return
+
+        state: Optional[bool] = None
+        for line in lines or ():
+            text = str(line).strip()
+            # The echoed query itself may be in the capture when echo is
+            # on, so take the first line that is just a number.
+            try:
+                value = int(text)
+            except (TypeError, ValueError):
+                continue
+            if -1 <= value <= 1:
+                # ⚠ Only -1 is OFF: the firmware's test is `echoOn > -1`
+                # (microrl.c:290), so 0 leaves echo ON.
+                state = value > -1
+                break
+
+        if state is None:
+            _log.warning(
+                "device %s: SYSTem:ECHO? gave no usable answer (%r); "
+                "leaving the echo state unknown, treated as echo ON",
+                self.name, lines,
+            )
+            return
+        self._set_parser_echo_state(state)
+
+    def _set_parser_echo_state(self, enabled: bool) -> None:
+        """Tell the published connection's frame parser the echo state."""
+        link = self._link
+        consumer = link[1] if link is not None else None
+        parser = getattr(consumer, "_parser", None) if consumer else None
+        setter = getattr(parser, "set_echo_state", None)
+        if setter is None:
+            return
+        try:
+            setter(enabled)
+        except Exception:
+            pass
+
     def _expect_console_echo(self, data: bytes, consumer: Any) -> None:
         """Tell ``consumer``'s frame parser the EXACT bytes just written.
 
@@ -1723,6 +1797,15 @@ class DaqifiDevice:
             )
             if self._consumer is not None:
                 self._consumer.add_message_received(self._on_inbound_message)
+
+            # ⭐ ASK THE DEVICE FIRST, so the parser never has to GUESS.
+            # Everything else about the echo state is inferred from our own
+            # SYSTem:ECHO sends, and each audit round found another
+            # spelling that inference missed. The firmware answers
+            # SYSTem:ECHO?, so after this the state is never "unknown" and
+            # the library knows whether its own disable below will be
+            # echoed back.
+            self._sync_echo_state_from_device()
 
             # Standard SCPI init sequence (mirrors upstream).
             self.send(scpi_commands.disable_device_echo())

@@ -173,16 +173,36 @@ _SETUP = ["SYSTem:ECHO", "SYSTem:STReam:STOP", "SYSTem:POWer:STATe 1",
           "SYSTem:STReam:FORmat", "SYSTem:STReam:INTerface", "SYSTem:SYSInfoPB?"]
 
 
-def test_the_setup_commands_go_out_as_on_main_with_no_query_of_their_own() -> None:
-    # Ruling CE: B. No SYSTem:ERRor? and no retry: a check needs a firmware
-    # way to tag replies (#241).
+def test_the_setup_commands_are_not_error_checked_or_retried() -> None:
+    """Ruling CE: B -- no ``SYSTem:ERRor?`` and no retry, because a check
+    needs a firmware way to tag replies (#241).
+
+    ⚠ RENAMED AND NARROWED to what that ruling actually says. It used to
+    assert the exact command COUNT, which is broader than CE: B and made
+    any added command a violation -- including the ``SYSTem:ECHO?`` query
+    that ruling EN: A later required, for an unrelated purpose (learning
+    the echo state so the frame parser never has to guess it). The
+    substance of CE: B is preserved exactly: no error query, and each
+    setup command sent once.
+    """
     stream = _Stream()
     device = _device(stream)
     try:
         device.initialize(response_timeout_s=2.0)
         commands = stream.commands()
-        assert len(commands) == len(_SETUP)
-        assert all(c.startswith(want) for c, want in zip(commands, _SETUP)), commands
+        assert not [c for c in commands if "ERRor?" in c or "ERR?" in c], (
+            f"initialize error-checked its setup commands: {commands}"
+        )
+        setup = [c for c in commands if not c.startswith("SYSTem:ECHO?")]
+        assert len(setup) == len(_SETUP), (
+            f"the setup sequence changed shape: {setup}"
+        )
+        assert all(c.startswith(want) for c, want in zip(setup, _SETUP)), setup
+        # No retry: each setup command appears exactly once.
+        for want in _SETUP:
+            assert sum(1 for c in setup if c.startswith(want)) == 1, (
+                f"{want} was sent more than once: {setup}"
+            )
         assert device.state == DeviceState.Ready
     finally:
         device.disconnect()

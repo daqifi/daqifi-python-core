@@ -257,8 +257,14 @@ class ProtobufMessageParser:
     #: ``matchPattern`` accepts -- the full node, or the node truncated at
     #: its first lowercase letter. ``ECHO`` has no lowercase, so it has
     #: exactly one spelling.
+    #: Every spelling the firmware accepts, each verified on an NQ1 to
+    #: take effect with a clean error queue: an optional leading colon
+    #: (SCPI absolute path), ``SYST`` or ``SYSTem``, any case, and a
+    #: signed value. A spelling missed here leaves the library believing
+    #: echo is off while the device echoes, which under the known-off rule
+    #: means nothing is skipped and the echoed line stalls the reply.
     _ECHO_COMMAND = re.compile(
-        rb"^(?:SYSTem|SYST):ECHO[ \t]+([+-]?\d+)[ \t]*$", re.IGNORECASE)
+        rb"^:?(?:SYSTem|SYST):ECHO[ \t]+([+-]?\d+)[ \t]*$", re.IGNORECASE)
 
     def __init__(
         self,
@@ -330,6 +336,24 @@ class ProtobufMessageParser:
             # echo was off when it arrived, which is why the append above
             # is skipped for it.
             self._echo_enabled = self._echo_state_after(line, self._echo_enabled)
+
+    def set_echo_state(self, enabled: Optional[bool]) -> None:
+        """Record the echo state as the DEVICE reports it.
+
+        ⭐ ASKING BEATS MODELLING. Everything else here infers the state
+        from the library's own ``SYSTem:ECHO`` sends, which needs a model
+        of someone else's state kept in step with every spelling of our
+        own commands -- and each audit round found another spelling. The
+        firmware answers ``SYSTem:ECHO?``, so ``initialize()`` asks and
+        calls this, and after that the state is never *unknown*: the
+        library knows whether its own disable will be echoed.
+
+        Still three-valued: ``None`` means "we do not know", which behaves
+        like ON, because registering a spurious echo wastes a list entry
+        while missing a real one stalls a reply forever.
+        """
+        with self._echo_lock:
+            self._echo_enabled = enabled
 
     @classmethod
     def _echo_state_after(

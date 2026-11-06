@@ -1118,3 +1118,82 @@ def test_a_signed_plus_one_turns_echo_back_on() -> None:
             f"{spelling!r} was not read as enabling echo, so the echoed "
             "command was handed to the frame parser and stalled the reply"
         )
+
+
+# ---- ruling EN A: ask the device, and accept every spelling -------------
+
+
+def test_every_spelling_the_firmware_accepts_is_recognised() -> None:
+    """⛔ A MISSED SPELLING IS A STALLED REPLY.
+
+    Under the known-off rule, an enable the library fails to recognise
+    leaves it believing echo is off, so it skips nothing while the device
+    echoes -- the stall this whole ticket exists to remove.
+
+    Each spelling below was verified ON AN NQ1 to take effect with a clean
+    error queue, not assumed from the SCPI grammar: a leading colon
+    (absolute path), ``SYST`` or ``SYSTem``, any case, and a signed value.
+    """
+    cases = [
+        (b":SYST:ECHO 1\r\n", True),
+        (b":SYSTem:ECHO -1\r\n", False),
+        (b"SYSTem:ECHO +1\r\n", True),
+        (b"syst:echo -1\r\n", False),
+        (b"SYST:ECHO 1\r\n", True),
+        # ⚠ 0 is NOT off: the firmware's test is `echoOn > -1`
+        # (microrl.c:290), confirmed on the wire -- after ECHO 0 the next
+        # reply still comes back echoed.
+        (b"SYSTem:ECHO 0\r\n", True),
+    ]
+    for spelling, expected_on in cases:
+        parser = _parser()
+        parser.expect_console_echo(spelling)
+        got = parser._echo_enabled
+        assert got is expected_on, (
+            f"{spelling!r} was read as echo={got}, expected {expected_on}; "
+            "a spelling the device accepts but we do not leaves the "
+            "library out of step with the console"
+        )
+
+
+def test_initialize_asks_the_device_for_the_echo_state() -> None:
+    """⭐ ASKING BEATS MODELLING, and it closes the unknown state.
+
+    Every other route to the echo state infers it from the library's own
+    sends, which needs a model of the device's state kept in step with
+    every spelling of our commands -- and each audit round found another
+    spelling that inference missed. The firmware answers SYSTem:ECHO?.
+
+    After initialize the state must be KNOWN, so the console-quiet rule
+    can engage even on a connection that found echo already off (the case
+    that otherwise never engages, because the disable is then never echoed
+    and its registration is immortal).
+    """
+    scpi = _scpi()
+    device = _fakes._make_device_with_serial_facade(
+        {b"SYSTem:ECHO?": b"-1\r\n"}
+    )
+    try:
+        parser = device._consumer._parser
+        assert parser._echo_enabled is None, "precondition: state unknown"
+
+        device.initialize(response_timeout_s=0.3)
+
+        assert parser._echo_enabled is False, (
+            "initialize did not learn the echo state from the device, so "
+            "the parser is still guessing"
+        )
+        written = b"".join(device._transport.stream.written)
+        assert b"SYSTem:ECHO?" in written, (
+            f"initialize never asked: {written!r}"
+        )
+        # And it asked BEFORE disabling, so it knows whether its own
+        # disable will be echoed.
+        assert written.index(b"SYSTem:ECHO?") < written.index(b"SYSTem:ECHO -1"), (
+            "initialize disabled echo before asking what it was"
+        )
+    finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass

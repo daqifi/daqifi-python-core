@@ -82,6 +82,16 @@ def enable_device_echo() -> ScpiMessage:
     return ScpiMessage("SYSTem:ECHO 1")
 
 
+def get_device_echo() -> ScpiMessage:
+    """Query the console echo state. Answers ``-1`` (off), ``0`` or ``1``.
+
+    ⚠ ``0`` is NOT off: the firmware's test is ``echoOn > -1``
+    (microrl.c:290), so only ``-1`` disables echo. Verified on an NQ1 --
+    after ``ECHO 0`` the reply to this query comes back echoed.
+    """
+    return ScpiMessage("SYSTem:ECHO?")
+
+
 # ---- SD card storage ----
 
 def enable_storage_sd() -> ScpiMessage:
