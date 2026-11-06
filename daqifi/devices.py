@@ -1095,11 +1095,26 @@ class DaqifiDevice:
 
     @staticmethod
     def _describe_for_log(operation: str, message: Any = None) -> str:
-        """``operation`` plus the command bytes, when there are any.
+        """``operation`` plus the command's SCPI HEADER -- never its
+        arguments.
 
-        The source log is the only place that knows WHICH command was
-        dropped, so it says -- a bare "a send was refused" sends the reader
-        looking for it.
+        ⛔ THE HEADER ONLY, FOR EVERY COMMAND. An earlier revision logged
+        the whole command so a reader could see which one was dropped, and
+        that put secrets in the log: a refused
+        ``SYSTem:COMMunicate:LAN:PASs "..."`` wrote the WiFi password in
+        plaintext at WARNING.
+
+        ⛔ AND NOT BY A REDACTION LIST. A list of sensitive commands is an
+        enumeration that goes stale the moment one is added, and it fails
+        OPEN -- the command nobody remembered to list is the one that
+        leaks. Taking only the header cannot fail that way, because SCPI
+        requires whitespace before an argument: everything after the first
+        space is dropped without having to know what it means. A compound
+        command (``A 1;B 2``) therefore reduces to ``A``, so later
+        segments' arguments cannot ride along either.
+
+        The header is still enough to identify the command, which is why
+        it is logged at all.
         """
         if message is None:
             return operation
@@ -1107,7 +1122,10 @@ class DaqifiDevice:
             text = message.get_bytes().decode("ascii", errors="replace")
         except Exception:
             return operation
-        return f"{operation} ({text.strip()!r})"
+        header = text.strip().split(None, 1)[0] if text.strip() else ""
+        if not header:
+            return operation
+        return f"{operation} ({header})"
 
     @contextlib.contextmanager
     def _write_exchange_lock(
@@ -2705,12 +2723,18 @@ class DaqifiStreamingDevice(DaqifiDevice):
         transport: Optional[Any] = None,
         ip_address: Optional[str] = None,
         message_factory: Optional[Callable[[bytes], Any]] = None,
+        send_exchange_wait_s: Optional[float] = None,
     ) -> None:
+        # ⛔ FORWARDED, or the documented constructor argument raises
+        # TypeError on the class callers actually instantiate. The README
+        # example was written against the base class's signature and never
+        # run against this one; its test now IS the README snippet.
         super().__init__(
             name=name,
             transport=transport,
             ip_address=ip_address,
             message_factory=message_factory,
+            send_exchange_wait_s=send_exchange_wait_s,
         )
         self._is_streaming = False
         self._is_logging_to_sd = False

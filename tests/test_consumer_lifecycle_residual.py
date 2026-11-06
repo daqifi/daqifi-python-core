@@ -2017,3 +2017,118 @@ def test_a_refused_send_from_a_public_callback_is_reported() -> None:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
+
+
+# ---- b8: the refusal log must not leak, and the setting must reach the
+# ----     class callers instantiate
+
+
+def test_a_refused_password_set_does_not_log_the_secret() -> None:
+    """⛔ THE REFUSAL LOG PUT A WIFI PASSWORD IN PLAINTEXT AT WARNING.
+
+    Logging the whole command so a reader could see which one was dropped
+    leaked its arguments. The fix is the HEADER only, for every command --
+    not a redaction list, which is an enumeration that goes stale the
+    moment a command is added and fails OPEN on the one nobody listed.
+
+    SCPI requires whitespace before an argument, so dropping everything
+    after the first space needs no knowledge of which commands are
+    sensitive.
+    """
+    import logging
+
+    secret = "correct-horse-battery-staple"
+    device = _fakes._make_device_with_serial_facade()
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with device._exchange_lock("A"):
+            held.set()
+            release.wait(10.0)
+
+    # ⚠ FROM A CALLBACK, because that is the only path that LOGS. An
+    # ordinary thread's timeout raises to a real caller who sees it; the
+    # consumer-thread refusal is the one a dispatch loop swallows, which
+    # is why it is logged -- and therefore the only one that can leak.
+    # My first version sent from the main thread and captured no records
+    # at all, which would have "passed" the no-secret assertion while
+    # exercising nothing.
+    from daqifi._internal.scpi_commands import set_network_wifi_password
+
+    refused = []
+
+    def on_message(_args):
+        if refused:
+            return
+        try:
+            device.send(set_network_wifi_password(secret))
+            refused.append("sent")
+        except BaseException as exc:                              # noqa: BLE001
+            refused.append(type(exc).__name__)
+
+    device._consumer.add_message_received(on_message)
+
+    h = threading.Thread(target=holder, name="A", daemon=True)
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logger = logging.getLogger("daqifi.devices")
+    logger.addHandler(handler)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "A to hold the exchange")
+        device._transport.stream.feed(_frame())
+        _wait_for(lambda: refused != [], 10.0, "the callback's send to resolve")
+        assert refused == ["ExchangeTimeoutError"], (
+            f"the callback's send was not refused: {refused}"
+        )
+
+        rendered = " ".join(
+            str(getattr(r, "msg", "")) % getattr(r, "args", ())
+            if getattr(r, "args", None) else str(getattr(r, "msg", ""))
+            for r in records
+        )
+        assert secret not in rendered, (
+            "the refusal log contains the WiFi password in plaintext"
+        )
+        # It must still identify the command, or the log is useless.
+        assert "LAN:PASs" in rendered or "PASs" in rendered, (
+            f"the log no longer says which command was refused: {rendered}"
+        )
+    finally:
+        logger.removeHandler(handler)
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_the_readme_send_wait_example_runs_as_written() -> None:
+    """⛔ THE DOCUMENTED CONSTRUCTOR ARGUMENT RAISED TypeError.
+
+    ``send_exchange_wait_s`` was added to ``DaqifiDevice.__init__`` and the
+    README example written against it -- but callers instantiate
+    ``DaqifiStreamingDevice``, which overrides ``__init__`` and did not
+    forward it. The example was never run.
+
+    So this test IS the README snippet, lifted verbatim rather than
+    paraphrased: a paraphrase can pass while the documented line does not.
+    """
+    from daqifi.devices import DaqifiStreamingDevice
+
+    transport = _fakes._ScriptedTransport(None)
+
+    # --- exactly as documented ---
+    device = DaqifiStreamingDevice(name="nq", transport=transport,
+                                   send_exchange_wait_s=45 * 60)
+    # or, per instance, at any time:
+    device.send_exchange_wait_s = 45 * 60
+    # --- end ---
+
+    assert device.send_exchange_wait_s == 45 * 60
+    assert DaqifiStreamingDevice(name="nq").send_exchange_wait_s == 60.0, (
+        "the default changed without the README changing with it"
+    )
