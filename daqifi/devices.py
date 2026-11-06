@@ -350,25 +350,27 @@ def _exclusive_sd_operation(method):
 
 
 class DaqifiDevice:
-    #: How long :meth:`send` waits for another flow's exchange.
+    #: Seconds :meth:`send` waits for another flow to release the device
+    #: before raising :class:`ExchangeTimeoutError`. Settable per instance
+    #: or via the ``send_exchange_wait_s`` constructor argument.
     #:
-    #: ⛔ DERIVED FROM THE LONGEST LEGITIMATE HOLDER, not chosen for a
-    #: caller's patience. An SD download may hold the device for
-    #: ``DaqifiStreamingDevice._SD_DOWNLOAD_TIMEOUT_S``, so any shorter
-    #: bound would turn a perfectly ordinary wait behind one into an error
-    #: -- a regression dressed as a safety limit. Reaching this bound
-    #: therefore means the holder is STUCK, not busy, which is the only
-    #: thing a timeout here can usefully distinguish. Its job is to turn an
-    #: unbounded hang into a clear error, not to cap a caller's patience.
+    #: ⚠ 60 s IS A CALLER'S-PATIENCE BOUND, NOT A STUCK-HOLDER DETECTOR,
+    #: and the difference is a documented consequence rather than a
+    #: nicety. Some legitimate exchanges hold the device for much longer --
+    #: an SD download may hold it for
+    #: ``DaqifiStreamingDevice._SD_DOWNLOAD_TIMEOUT_S`` (30 minutes), and a
+    #: card format is comparable -- so a send issued from another thread
+    #: during one of those FAILS after this bound unless the caller raises
+    #: it. An earlier revision derived the default from that longest holder
+    #: precisely so it could not false-fire; the project chose the short
+    #: default instead, so the failure is real and must be documented
+    #: rather than discovered.
     #:
     #: ⛔ IT LIVES HERE, on the class that defines :meth:`send`, not beside
-    #: the download timeout it is derived from. It was first written next
-    #: to that constant on the SUBCLASS, so every blocking send on a plain
-    #: ``DaqifiDevice`` raised AttributeError -- found by the tests, not by
-    #: reading. The two cannot be derived from one expression across a
-    #: class boundary, so the relationship is asserted instead: see
-    #: test_the_send_wait_covers_the_longest_exchange.
-    _SEND_EXCHANGE_WAIT_S = 30 * 60 + 60
+    #: the download timeout. It was first written next to that constant on
+    #: the SUBCLASS, so every blocking send on a plain ``DaqifiDevice``
+    #: raised AttributeError -- found by the tests, not by reading.
+    send_exchange_wait_s: float = 60.0
 
     """Base device implementation.
 
@@ -391,7 +393,10 @@ class DaqifiDevice:
         transport: Optional[Any] = None,
         ip_address: Optional[str] = None,
         message_factory: Optional[Callable[[bytes], Any]] = None,
+        send_exchange_wait_s: Optional[float] = None,
     ) -> None:
+        if send_exchange_wait_s is not None:
+            self.send_exchange_wait_s = send_exchange_wait_s
         self._name = name
         self._ip_address = ip_address
         self._transport = transport
@@ -846,10 +851,15 @@ class DaqifiDevice:
         Two bounds make the wait safe rather than open-ended:
 
         * **From any ordinary thread** it waits at most
-          :attr:`_SEND_EXCHANGE_WAIT_S` and then raises
-          :class:`ExchangeTimeoutError`. The bound is derived from the
-          longest exchange that may legitimately hold the device, so
-          reaching it means the holder is stuck rather than busy.
+          :attr:`send_exchange_wait_s` (60 s by default) and then raises
+          :class:`ExchangeTimeoutError`.
+
+          ⚠ That is a caller's-patience bound, NOT a stuck-holder
+          detector: an SD download may hold the device for half an hour,
+          and a format is comparable, so a send issued during one FAILS
+          after the bound unless the caller raises the setting. The
+          failure is intended and documented rather than a sign anything
+          is wrong.
         * **From the message-received (consumer) thread** it does not wait
           at all: if the exchange is held it raises immediately. A send
           there could otherwise be waiting on a flow that is itself waiting
@@ -1119,7 +1129,7 @@ class DaqifiDevice:
           only when someone else holds the exchange -- because that holder
           may be waiting for this very thread to stop the consumer.
         * any other thread waits, bounded by
-          :attr:`_SEND_EXCHANGE_WAIT_S`.
+          :attr:`send_exchange_wait_s`.
 
         The refusal for TEXT EXCHANGES stays unconditional and is untouched
         by this: see :meth:`_acquire_text_exchange_lock`.
@@ -1160,11 +1170,11 @@ class DaqifiDevice:
                 refusal._daqifi_reported = True       # type: ignore[attr-defined]
                 raise refusal
         elif not self._text_exchange_lock.acquire(
-            timeout=self._SEND_EXCHANGE_WAIT_S
+            timeout=self.send_exchange_wait_s
         ):
             raise ExchangeTimeoutError(
                 f"{operation} could not run: another flow has held this "
-                f"device for more than {self._SEND_EXCHANGE_WAIT_S:g} s, "
+                f"device for more than {self.send_exchange_wait_s:g} s, "
                 "which is longer than any legitimate exchange takes, so it "
                 "is stuck rather than busy. Nothing was sent."
             )

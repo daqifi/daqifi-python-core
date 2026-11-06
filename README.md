@@ -69,6 +69,31 @@ device.digital_io[0].state = True
 device.disconnect()
 ```
 
+### Sending while another operation holds the device
+
+`send()` serialises against text exchanges, so a command issued from one
+thread waits while another flow holds the device. That wait is bounded by
+`send_exchange_wait_s`, **60 seconds by default**, after which it raises
+`ExchangeTimeoutError` and the command is **not** sent.
+
+⚠ Some legitimate operations hold the device for much longer than that — an SD
+card download can take up to 30 minutes, and a format is comparable. A send
+issued from another thread during one of those will fail after 60 s unless you
+raise the setting:
+
+```python
+device = DaqifiStreamingDevice(name="nq", transport=transport,
+                               send_exchange_wait_s=45 * 60)
+# or, per instance, at any time:
+device.send_exchange_wait_s = 45 * 60
+```
+
+A send from a message-received callback never waits at all: if another flow
+holds the device it is refused immediately, because that flow may be waiting
+for the callback's own thread. The refusal is raised and logged with the
+command name — on a callback path the log is what reaches you, since the
+dispatch loop isolates handler exceptions.
+
 ## Usage Examples
 
 ### Device Discovery

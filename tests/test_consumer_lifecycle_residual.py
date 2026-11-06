@@ -936,36 +936,131 @@ def test_a_stale_fault_cannot_clear_a_live_one() -> None:
 # ---- ruling EI B: the bounded wait itself -------------------------------
 
 
-def test_the_send_wait_covers_the_longest_exchange() -> None:
-    """⛔ THE BOUND MUST NOT BE SHORTER THAN A LEGITIMATE HOLDER.
+def test_a_send_behind_a_long_holder_fails_after_the_setting() -> None:
+    """⚠ THE DOCUMENTED CONSEQUENCE of a 60 s default (ruling EO B).
 
-    ``_SEND_EXCHANGE_WAIT_S`` exists to turn a STUCK exchange into a clear
-    error, not to cap a caller's patience. An SD download may legitimately
-    hold the device for ``_SD_DOWNLOAD_TIMEOUT_S``, so a shorter bound
-    would turn an ordinary wait behind one into a failure -- a regression
-    dressed as a safety limit.
+    This replaces a test that asserted the bound COVERS the longest
+    legitimate holder -- derived from the SD download timeout so it could
+    not false-fire. The project chose a caller's-patience default instead,
+    so the failure this pins is real and intended: a send from another
+    thread during a long exchange (an SD download, a card format) raises
+    once the setting elapses, and the command does not go out.
 
-    The two live on different classes (``send`` is on ``DaqifiDevice``, the
-    download timeout on ``DaqifiStreamingDevice``), so they cannot be
-    derived from one expression; the relationship is asserted instead. If
-    someone raises the download timeout, this fails and tells them.
+    The setting is lowered here rather than waiting 60 s; that it is
+    settable at all is the other half of the ruling.
     """
-    from daqifi.devices import DaqifiDevice, DaqifiStreamingDevice
+    from daqifi.exceptions import ExchangeTimeoutError
 
-    assert DaqifiDevice._SEND_EXCHANGE_WAIT_S >= (
-        DaqifiStreamingDevice._SD_DOWNLOAD_TIMEOUT_S
-    ), (
-        "the send wait is now shorter than an SD download may hold the "
-        "device, so a send issued during a download would fail instead of "
-        "waiting; raise _SEND_EXCHANGE_WAIT_S to cover it"
-    )
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    held = threading.Event()
+    release = threading.Event()
 
+    def long_holder():
+        with device._exchange_lock("a long SD download"):
+            held.set()
+            release.wait(10.0)
+
+    h = threading.Thread(target=long_holder, name="holder", daemon=True)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "the long exchange to start")
+        device.send_exchange_wait_s = 0.2
+
+        began = time.monotonic()
+        with pytest.raises(ExchangeTimeoutError) as caught:
+            device.send(_scpi().stop_streaming())
+        waited = time.monotonic() - began
+
+        assert 0.15 <= waited < 5.0, (
+            f"the send did not honour its own setting: waited {waited:.2f}s"
+        )
+        assert "nothing was sent" in str(caught.value).lower()
+        assert [w for w in stream.written if b"STReam:STOP" in w] == [], (
+            "a send that reported a timeout reached the wire anyway"
+        )
+    finally:
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_raising_the_setting_lets_the_same_send_wait_it_out() -> None:
+    """The other half: the failure above is the caller's choice, not fate.
+
+    Same schedule, a setting generous enough to outlast the holder, and
+    the send completes -- which is what a caller does when they know an SD
+    download may hold the device for half an hour.
+
+    ⚠ CANNOT DISCRIMINATE, and says so: on the previous head the bound was
+    1860 s, so this send waited and succeeded there too. It pins the
+    POSITIVE half of the contract -- that the setting is honoured upwards
+    as well as downwards -- which nothing else covers.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    held = threading.Event()
+    release = threading.Event()
+
+    def long_holder():
+        with device._exchange_lock("a long SD download"):
+            held.set()
+            release.wait(10.0)
+
+    h = threading.Thread(target=long_holder, name="holder", daemon=True)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "the long exchange to start")
+        device.send_exchange_wait_s = 10.0
+
+        done = threading.Event()
+        outcome = []
+
+        def sender():
+            try:
+                device.send(_scpi().stop_streaming())
+                outcome.append("sent")
+            except BaseException as exc:                          # noqa: BLE001
+                outcome.append(type(exc).__name__)
+            finally:
+                done.set()
+
+        threading.Thread(target=sender, name="B", daemon=True).start()
+        time.sleep(0.4)
+        assert outcome == [], f"it did not wait at all: {outcome}"
+
+        release.set()
+        h.join(5)
+        assert done.wait(10.0), "the send never resolved"
+        assert outcome == ["sent"], (
+            f"raising the setting did not let the send wait it out: {outcome}"
+        )
+        assert [w for w in stream.written if b"STReam:STOP" in w], (
+            "the send reported success without reaching the wire"
+        )
+    finally:
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
 
 def test_a_send_that_waits_too_long_is_told_so() -> None:
     """The expiry path: a clear error, and the command did NOT go out.
 
-    The real bound is half an hour, so it is overridden per instance here.
-    That is the point of reading it through ``self``.
+    The bound is overridden per instance here, which is the point of its
+    being a setting.
+
+    ⚠ This fails on the previous head for an API reason, not a behavioural
+    one: the setting was then a private class constant under a different
+    name, so the override did nothing and the send waited out the 1860 s
+    bound. "This API is new" is not evidence of a defect -- the
+    discriminator for ruling EO is
+    test_a_send_behind_a_long_holder_fails_after_the_setting.
     """
     device = _fakes._make_device_with_serial_facade()
     stream = device._transport.stream
@@ -981,7 +1076,7 @@ def test_a_send_that_waits_too_long_is_told_so() -> None:
     try:
         h.start()
         _wait_for(held.is_set, 5.0, "the exchange to be held")
-        device._SEND_EXCHANGE_WAIT_S = 0.2
+        device.send_exchange_wait_s = 0.2
 
         from daqifi.exceptions import ExchangeTimeoutError
 
@@ -1177,7 +1272,7 @@ def test_everything_send_touches_exists_on_the_class_that_defines_it() -> None:
     ``send`` is defined on ``DaqifiDevice``. Twice I added something it
     calls and left that something on the ``DaqifiStreamingDevice``
     subclass, so every send on a plain ``DaqifiDevice`` raised
-    AttributeError at runtime: first ``_SEND_EXCHANGE_WAIT_S``, then
+    AttributeError at runtime: first ``send_exchange_wait_s``, then
     ``_raise_if_delivery_faulted``. Both times a 10-minute full suite is
     what caught it, via one generated test that happens to exercise a bare
     device -- and a generated file can be regenerated away.
