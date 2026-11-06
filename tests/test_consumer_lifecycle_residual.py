@@ -1612,3 +1612,133 @@ def test_the_consumer_may_take_an_idle_exchange_for_a_write() -> None:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
+
+
+# ---- ruling EP A --------------------------------------------------------
+
+
+def test_a_send_waiting_across_a_close_gets_the_typed_error() -> None:
+    """⛔ ROUTING send() THROUGH A SHARED HELPER CHANGED ITS EXCEPTION TYPE.
+
+    `_refuse_if_unusable` raised a plain RuntimeError, which was right
+    while only the exchange wrappers used it. Putting send() through the
+    shared write-acquire helper made it fire on the send path, where the
+    two conditions it tests are exactly the ones `_link_is_gone` reports as
+    DeviceNotConnectedError(is_shutting_down=True) -- and it runs FIRST, so
+    a send waiting across a close() lost the type its callers catch.
+    """
+    from daqifi.exceptions import DeviceNotConnectedError
+
+    device = _fakes._make_device_with_serial_facade()
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with device._exchange_lock("A"):
+            held.set()
+            release.wait(10.0)
+            # The device goes away while B is already waiting behind us.
+            device._is_disconnecting = True
+
+    h = threading.Thread(target=holder, name="A", daemon=True)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "A to hold the exchange")
+
+        caught = []
+
+        def sender():
+            try:
+                device.send(_scpi().stop_streaming())
+                caught.append(None)
+            except BaseException as exc:                          # noqa: BLE001
+                caught.append(exc)
+
+        threading.Thread(target=sender, name="B", daemon=True).start()
+        time.sleep(0.3)
+        release.set()
+        h.join(10.0)
+        _wait_for(lambda: caught != [], 10.0, "B's send to resolve")
+
+        exc = caught[0]
+        assert isinstance(exc, DeviceNotConnectedError), (
+            "a send waiting across a close() raised "
+            f"{type(exc).__name__}; callers catch DeviceNotConnectedError"
+        )
+        assert getattr(exc, "is_shutting_down", False) is True, (
+            "the error does not say the device was shutting down, so a "
+            "caller cannot tell an expected teardown from a real loss"
+        )
+    finally:
+        device._is_disconnecting = False
+        release.set()
+        h.join(5)
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_the_status_query_goes_out_with_the_exchange_free() -> None:
+    """⛔ A REPLY MUST NOT BE ABLE TO ARRIVE WHILE OWNERSHIP IS HELD.
+
+    The query was the last command of initialize's owned sequence, and
+    nothing in that sequence depends on it being grouped -- but a reply
+    arriving before write/flush returned was dispatched while ownership
+    was still held, so a send from a handler it ran was refused and
+    swallowed. Sending it after the release removes the window entirely:
+    nothing can arrive while the exchange is held if the command that
+    provokes it has not gone out yet.
+
+    ⚠ The observable is NOT "the owner is None at the write": a send always
+    owns the exchange while writing its own bytes, so that assertion fails
+    on correct code too (it did, on my first attempt). What distinguishes
+    the two designs is whether the query shares a SURROUNDING ownership
+    with the setup sequence -- so the lock's acquisitions are counted, and
+    the query must land in one of its own.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    generation = [0]
+    per_command = []
+
+    class _CountingLock:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def acquire(self, blocking=True, timeout=-1):
+            got = (self._inner.acquire(blocking, timeout) if blocking
+                   else self._inner.acquire(False))
+            if got:
+                generation[0] += 1
+            return got
+
+        def release(self):
+            return self._inner.release()
+
+    device._text_exchange_lock = _CountingLock(device._text_exchange_lock)
+    real_write = stream.write
+
+    def watching_write(data):
+        per_command.append((bytes(data), generation[0]))
+        return real_write(data)
+
+    stream.write = watching_write
+    try:
+        device.initialize(response_timeout_s=0.2)
+        query = [g for cmd, g in per_command if b"SYSInfoPB?" in cmd]
+        others = [g for cmd, g in per_command if b"SYSInfoPB?" not in cmd]
+        assert query, "the status query never reached the stream"
+        assert others, "the setup sequence never reached the stream"
+        assert not set(query) & set(others), (
+            "the status query was written under the SAME exchange "
+            "acquisition as the setup sequence, so ownership outlives its "
+            "write and a reply can be dispatched while it is held: "
+            f"query={query} setup={sorted(set(others))}"
+        )
+    finally:
+        stream.write = real_write
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass

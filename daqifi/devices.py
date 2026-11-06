@@ -1261,10 +1261,26 @@ class DaqifiDevice:
             return fn()
 
     def _refuse_if_unusable(self, operation: str) -> None:
+        """Refuse an operation on a device that is going away.
+
+        ⛔ TYPED, because ``send()`` now comes through here. This raised a
+        plain ``RuntimeError``, which was right while only the exchange
+        wrappers used it -- and then routing ``send()`` through the shared
+        write-acquire helper made it fire on the send path, where the two
+        conditions it tests (``_disposed``, ``_is_disconnecting``) are
+        exactly the ones ``_link_is_gone`` covers and reports as
+        ``DeviceNotConnectedError(is_shutting_down=True)``. It ran FIRST,
+        so a send waiting across a ``close()`` lost the type its callers
+        catch.
+
+        ``DeviceNotConnectedError`` subclasses ``RuntimeError``, so the
+        exchange wrappers' existing callers are unaffected.
+        """
         if self._disposed or self._is_disconnecting:
-            raise RuntimeError(
+            raise DeviceNotConnectedError(
                 f"{operation} cannot run while the device is "
-                "disconnecting or disposed."
+                "disconnecting or disposed.",
+                is_shutting_down=True,
             )
 
     @contextlib.contextmanager
@@ -1903,6 +1919,15 @@ class DaqifiDevice:
                 self._initialize_send_sequence, "initialize"
             )
 
+            # ⛔ THE STATUS QUERY GOES OUT WITH THE EXCHANGE FREE. It was
+            # the last command of the owned sequence, and nothing in that
+            # sequence depends on it being grouped -- but a reply arriving
+            # before write/flush returned was dispatched while ownership
+            # was still held, so a send from a handler it ran was refused.
+            # Nothing can arrive while the exchange is held if the command
+            # that provokes the reply is not sent until after the release.
+            self.send(scpi_commands.get_device_info())
+
             # From here the exchange is FREE, so the consumer can dispatch
             # the status and the handlers it runs can send.
             deadline = time.monotonic() + response_timeout_s
@@ -2529,11 +2554,6 @@ class DaqifiDevice:
         if interface is not None:
             self.send(scpi_commands.set_stream_interface(interface))
             time.sleep(0.1)
-        # Query device info -- the protobuf consumer dispatches the
-        # response to OnStatusMessageReceived, which fills metadata. The
-        # query goes out INSIDE the ownership; waiting for its reply does
-        # not.
-        self.send(scpi_commands.get_device_info())
 
     def _stream_interface_for_transport(self) -> Optional[StreamInterface]:
         """Pick the SCPI stream-interface enum that matches the
