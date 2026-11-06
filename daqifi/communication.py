@@ -257,12 +257,21 @@ class ProtobufMessageParser:
     #: ``matchPattern`` accepts -- the full node, or the node truncated at
     #: its first lowercase letter. ``ECHO`` has no lowercase, so it has
     #: exactly one spelling.
-    #: Every spelling the firmware accepts, each verified on an NQ1 to
-    #: take effect with a clean error queue: an optional leading colon
-    #: (SCPI absolute path), ``SYST`` or ``SYSTem``, any case, and a
-    #: signed value. A spelling missed here leaves the library believing
-    #: echo is off while the device echoes, which under the known-off rule
-    #: means nothing is skipped and the echoed line stalls the reply.
+    #: ⛔ DECIMAL SPELLINGS ONLY. What this recognises, each verified on an
+    #: NQ1 to take effect with a clean error queue: an optional leading
+    #: colon (SCPI absolute path), ``SYST`` or ``SYSTem``, any case, and a
+    #: DECIMAL value with an optional sign.
+    #:
+    #: ⛔ NOT every spelling the firmware accepts, which an earlier version
+    #: of this comment claimed on the strength of the three I had tested.
+    #: SCPI also accepts numeric literals in other radices -- ``#H1``
+    #: (hex), ``#Q`` (octal), ``#B`` (binary) -- and compound commands
+    #: joined by ``;``, and none of those is matched here. Echo enabled by
+    #: one of them leaves the library believing echo is off while the
+    #: device echoes, so nothing is skipped and the echoed line stalls the
+    #: reply: echo-on behaviour is BEST-EFFORT, per the known-limitations
+    #: table in the PR, and that is where these belong rather than in a
+    #: wider regex that would need the same claim re-proved.
     _ECHO_COMMAND = re.compile(
         rb"^:?(?:SYSTem|SYST):ECHO[ \t]+([+-]?\d+)[ \t]*$", re.IGNORECASE)
 

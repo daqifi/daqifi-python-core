@@ -562,7 +562,13 @@ def test_every_refutation_path_consults_the_pending_prefix_rule() -> None:
 # connects WITHOUT calling initialize(), after some earlier process
 # disabled echo on the same console within the same power cycle, sees echo
 # genuinely off while this parser's state is None/unknown, and registers
-# as before. Suppressing registration there would need an inference from
+# as before.
+#
+# ⚠ AND SKIPPING initialize() IS NOT THE ONLY WAY IN, which an earlier
+# version of this comment implied. A caller that runs initialize() and
+# THEN sends enable_device_echo() is back in the registering state, so a
+# capture's registrations accumulate there too. Both routes are listed in
+# the PR's known-limitations table. Suppressing registration there would need an inference from
 # "frames parsed, no echo ever matched", and that inference is UNSOUND: a
 # recurrence of the whitespace-mismatch bug this file already fixed once
 # presents identically, and acting on it would convert a logged backlog
