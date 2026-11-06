@@ -19,7 +19,6 @@ import pytest
 
 from daqifi._internal.proto.DaqifiOutMessage_pb2 import DaqifiOutMessage
 from daqifi.communication import (
-    CompositeMessageParser,
     ProtobufMessageParser,
 )
 from daqifi.enums import ProtobufMessageType
@@ -103,13 +102,12 @@ class TestSingleChannel100HzFw346b1:
         assert len(messages) == 200
         assert consumed == len(stream)
 
-    def test_composite_parser_routes_to_protobuf(self):
+    def test_the_protobuf_parser_reads_the_captured_frame(self):
         # Composite is what the StreamMessageConsumer actually uses —
         # if the heuristic mis-classifies a 1ch stream as text, the
         # frames go to LineBasedMessageParser and silently get lost.
         stream = _FW_3_4_6B1_1CH_100HZ_FRAME * 50
-        parser = CompositeMessageParser(
-            protobuf_factory=DaqifiOutMessage.FromString
+        parser = ProtobufMessageParser(DaqifiOutMessage.FromString
         )
         messages, consumed = parser.parse_messages(stream)
         assert len(messages) == 50
@@ -121,8 +119,7 @@ class TestSingleChannel100HzFw346b1:
         # is zero), not UNKNOWN (msg_time_stamp + analog_in_data are
         # both populated).
         stream = _FW_3_4_6B1_1CH_100HZ_FRAME * 200
-        parser = CompositeMessageParser(
-            protobuf_factory=DaqifiOutMessage.FromString
+        parser = ProtobufMessageParser(DaqifiOutMessage.FromString
         )
         messages, _ = parser.parse_messages(stream)
 
@@ -174,8 +171,7 @@ class TestSingleChannel100HzFw346b1:
         # one full frame + partial next).
         stream = _FW_3_4_6B1_1CH_100HZ_FRAME * 2
         head, tail = stream[:split_at], stream[split_at:]
-        parser = CompositeMessageParser(
-            protobuf_factory=DaqifiOutMessage.FromString
+        parser = ProtobufMessageParser(DaqifiOutMessage.FromString
         )
         m1, c1 = parser.parse_messages(head)
         # After consuming what we can from the head, the rest must be

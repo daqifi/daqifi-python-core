@@ -156,9 +156,19 @@ class TestRequestSdCardFileList:
         # finally block must still re-enable LAN so the device isn't
         # left with the SD interface latched.
         sd = _make_device()
+        # ⚠ `_consumer = None` now unpublishes the STREAM with it: the two
+        # are one value, so "a consumer is gone but its stream is still
+        # live" is no longer representable (#231 round 3). The failure
+        # therefore surfaces one step earlier, as a send with no stream,
+        # rather than as the active-consumer guard. Both assertions this
+        # test actually makes are unchanged -- it raises, and LAN is never
+        # disabled -- so only the message is widened, not an assertion
+        # weakened. NotImplementedError is itself a RuntimeError.
         sd._consumer = None  # force execute_text_command to raise
         try:
-            with pytest.raises(RuntimeError, match="active consumer"):
+            with pytest.raises(
+                RuntimeError, match="active consumer|transport-backed stream"
+            ):
                 sd.request_sd_card_file_list()
             # No way to assert LAN re-enable here because the failure
             # is inside execute_text_command BEFORE prepare_sd_interface

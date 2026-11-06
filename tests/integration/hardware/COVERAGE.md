@@ -44,7 +44,7 @@ public API forces a test or a documented skip).
 - [x] `StreamMessageConsumer.clear_buffer` — drops in-flight bytes (B6)
 - [~] `LineBasedMessageParser.parse_messages` — pure parser; unit tests
 - [~] `ProtobufMessageParser.parse_messages` — pure parser; unit tests
-- [~] `CompositeMessageParser.parse_messages` — pure parser; unit tests
+- [~] `ProtobufMessageParser.parse_messages` — pure parser; unit tests
 
 ## daqifi.device (NyquistDevice — high-level facade)
 

@@ -14,6 +14,8 @@ element since Python doesn't have out-params.
 """
 from __future__ import annotations
 
+import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -27,7 +29,6 @@ __all__ = [
     "ObjectInboundMessage",
     "LineBasedMessageParser",
     "ProtobufMessageParser",
-    "CompositeMessageParser",
     "StreamConsumerTelemetry",
     "StreamMessageConsumer",
 ]
@@ -35,6 +36,8 @@ __all__ = [
 
 T = TypeVar("T")
 
+
+_log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class InboundMessage(Generic[T]):
@@ -54,8 +57,8 @@ class ObjectInboundMessage:
     """Parsed inbound message carrying arbitrary object data.
 
     Ports the C# ``ObjectInboundMessage`` (defined alongside
-    :class:`CompositeMessageParser` in
-    ``Daqifi.Core/Communication/Consumers/CompositeMessageParser.cs``).
+    the consumer's parser is chosen by the caller for the mode the device
+    is in; there is no content-guessing router (#231).
     Same ``data`` shape as :class:`InboundMessage[object]` -- kept as its
     own concrete class for documentation clarity and to match upstream
     call sites (mirrors the :data:`TextInboundMessage` aliasing pattern).
@@ -242,8 +245,340 @@ class ProtobufMessageParser:
     once more bytes arrive.
     """
 
-    def __init__(self, message_factory: Callable[[bytes], object]) -> None:
+    #: Console lines that are noise to a frame parser. Matched ONLY as a
+    #: complete line at a frame boundary -- see _take_console_noise.
+    _CONSOLE_PROMPT = b"DAQIFI> "
+    _CONSOLE_ERROR_PREFIX = b"**ERROR: "
+    #: Unmatched echoes past which something is wrong and a log says so.
+    #: NOT a cap: evicting an unconsumed echo stalls its reply.
+    _ECHO_BACKLOG_WARN_AT = 16
+
+    #: ``SYSTem:ECHO <n>``, in either of the two spellings the firmware's
+    #: ``matchPattern`` accepts -- the full node, or the node truncated at
+    #: its first lowercase letter. ``ECHO`` has no lowercase, so it has
+    #: exactly one spelling.
+    #: ⛔ DECIMAL SPELLINGS ONLY. What this recognises, each verified on an
+    #: NQ1 to take effect with a clean error queue: an optional leading
+    #: colon (SCPI absolute path), ``SYST`` or ``SYSTem``, any case, and a
+    #: DECIMAL value with an optional sign.
+    #:
+    #: ⛔ NOT every spelling the firmware accepts, which an earlier version
+    #: of this comment claimed on the strength of the three I had tested.
+    #: SCPI also accepts numeric literals in other radices -- ``#H1``
+    #: (hex), ``#Q`` (octal), ``#B`` (binary) -- and compound commands
+    #: joined by ``;``, and none of those is matched here. Echo enabled by
+    #: one of them leaves the library believing echo is off while the
+    #: device echoes, so nothing is skipped and the echoed line stalls the
+    #: reply: echo-on behaviour is BEST-EFFORT, per the known-limitations
+    #: table in the PR, and that is where these belong rather than in a
+    #: wider regex that would need the same claim re-proved.
+    _ECHO_COMMAND = re.compile(
+        rb"^:?(?:SYSTem|SYST):ECHO[ \t]+([+-]?\d+)[ \t]*$", re.IGNORECASE)
+
+    def __init__(
+        self,
+        message_factory: Callable[[bytes], object],
+        console_error_sink: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self._message_factory = message_factory
+        # Where a ``**ERROR:`` line goes. It is noise to this parser but it
+        # is the device reporting something, so it is handed on rather than
+        # dropped.
+        self._console_error_sink = console_error_sink
+        # Commands the library has sent and may see echoed back. Keyed on
+        # what was ACTUALLY sent: #204's audit rounds showed that no
+        # byte-level "does this look like a command" rule works, because on
+        # a length-prefixed protocol a printable byte is also a valid
+        # length or field tag.
+        self._expected_echoes: List[bytes] = []
+        # Guards _expected_echoes and _echo_enabled. send() appends from
+        # the caller's thread while the consumer matches and removes from
+        # its own.
+        self._echo_lock = threading.Lock()
+        # THREE-VALUED, and the difference matters: True = we turned echo
+        # on, False = we turned it off, None = we have not set it and do
+        # not know. Only False suppresses registration, so the check is
+        # `is False` and never `not self._echo_enabled` -- the unknown
+        # state must behave like ON, because the costs are not symmetric.
+        # Registering an echo the device will not send wastes a list
+        # entry; failing to register one it does send feeds the echoed
+        # line to the frame parser, which reads its first byte as a length
+        # and stalls that reply forever. That stall is #231.
+        self._echo_enabled: Optional[bool] = None
+
+    def expect_console_echo(self, sent: bytes) -> None:
+        """Note the EXACT bytes just written, so an echo of them at a frame
+        boundary can be recognised.
+
+        Takes the bytes as sent, not a command string: an earlier version
+        took a string and ``strip()``ed it, which discarded whitespace that
+        ``get_bytes()`` really does put on the wire (a trailing space), so
+        the echo never matched and the stall it exists to prevent came
+        back. Only the trailing line ending is removed, because that is
+        matched separately -- the device may echo CRLF or bare LF.
+        """
+        if isinstance(sent, str):            # tolerated, but discouraged
+            sent = sent.encode("ascii", errors="ignore")
+        line = bytes(sent).rstrip(b"\r\n")
+        if not line:
+            return
+        with self._echo_lock:
+            if self._echo_enabled is not False:
+                self._expected_echoes.append(line)
+                # ⛔ NO SILENT EVICTION. Dropping the oldest unconsumed
+                # echo stalled the reply it belonged to -- nine sends
+                # before the consumer ran left the ninth reply waiting
+                # forever. Entries leave only when matched; the warning
+                # repeats on each doubling so growth stays visible instead
+                # of being announced once and then forgotten.
+                n = len(self._expected_echoes)
+                if n >= self._ECHO_BACKLOG_WARN_AT and n & (n - 1) == 0:
+                    _log.warning(
+                        "%d command echoes are still unmatched; the device "
+                        "may not be echoing, or replies are not being read",
+                        n,
+                    )
+            # AFTER the append, deliberately. The console echoes a line as
+            # its characters arrive, before the command is dispatched, so
+            # `SYSTem:ECHO -1` is itself echoed and its own echo still has
+            # to be recognised. Conversely `SYSTem:ECHO 1` is NOT echoed:
+            # echo was off when it arrived, which is why the append above
+            # is skipped for it.
+            self._echo_enabled = self._echo_state_after(line, self._echo_enabled)
+
+    @classmethod
+    def _echo_state_after(
+        cls, line: bytes, current: Optional[bool]
+    ) -> Optional[bool]:
+        """``_echo_enabled`` after the device receives ``line``.
+
+        ⚠ Only ``-1`` turns echo off. The firmware's test is
+        ``echoOn > -1`` (microrl.c:290 and :624, a DAQiFi modification),
+        so ``SYSTem:ECHO 0`` leaves echo ON -- reading the command as a
+        boolean would suppress registration while the device kept echoing,
+        which is the one direction that stalls a reply.
+        """
+        match = cls._ECHO_COMMAND.match(line.strip())
+        if match is None:
+            return current
+        try:
+            value = int(match.group(1))
+        except ValueError:
+            # Not unreachable despite the \d+: since 3.11 int() refuses a
+            # string of more than sys.int_info.default_max_str_digits
+            # digits. Such a line is not a command the device accepted, so
+            # the state is unchanged.
+            return current
+        if value < -1 or value > 1:
+            # Out of range: SCPI_SetEcho rejects it and echo is unchanged.
+            return current
+        return value > -1
+
+    def _take_matching_echo(self, remaining: bytes) -> int:
+        """Length of a complete expected echo at the start of ``remaining``,
+        removing it; 0 if none.
+
+        Match and removal happen under ONE lock hold. Separately they
+        raced: ``send()`` could evict between the consumer's match and its
+        remove, ``remove()`` raised ValueError, and the consumer then
+        discarded a byte of real data.
+        """
+        with self._echo_lock:
+            for echo in self._expected_echoes:
+                for ending in (b"\r\n", b"\n"):
+                    if remaining.startswith(echo + ending):
+                        self._expected_echoes.remove(echo)
+                        return len(echo) + len(ending)
+        return 0
+
+    def _console_is_quiet(self) -> bool:
+        """Whether the device is KNOWN not to emit a prompt or an echo.
+
+        True only once the library has sent ``SYSTem:ECHO -1``. Measured on
+        an NQ1 rather than assumed -- with echo at -1 a reply carries no
+        ``DAQIFI> `` and no echoed command, while with echo at 1 both
+        appear -- so in that state there is nothing for the echo match or
+        the prompt skip to do, and skipping neither keeps their failure
+        modes out of the supported automation path entirely.
+
+        ⛔ ``**ERROR: `` LINES ARE NOT COVERED BY THIS. The same
+        measurement showed the device still emits them with echo off
+        (``NOSUCH?`` answered ``**ERROR: -113, "Undefined header"`` with no
+        prompt around it), so that handling stays on unconditionally.
+        Dropping it would hand those bytes to the frame parser, where
+        ``0x2a`` reads as a 42-byte length prefix: a SCPI error arriving
+        during protobuf traffic would either decode into a fabricated
+        message or swallow the next real reply into its body. Exactly this
+        ticket's defect, on the path the ruling means to make clean.
+
+        ⛔ AND NOT UNTIL THE REGISTERED ECHOES HAVE DRAINED. Turning echo
+        off does not un-send what is already on the wire: the console
+        echoes a line as its characters arrive, so ``SYSTem:ECHO -1`` is
+        itself echoed, and that echo is still in flight when this state
+        flips. Going quiet the instant the state changed handed the
+        disable's own echo to the frame parser and stalled the reply behind
+        it -- caught by this change's own test, and the same mistake as
+        clearing the registry on the transition, which an earlier round
+        also had to undo. Outstanding entries can only shrink once nothing
+        new is registered, so this becomes true by itself a moment later.
+
+        One predicate, read by both the take-path and the hold-path below,
+        so the two cannot drift into disagreeing about what may arrive.
+        """
+        if self._echo_enabled is not False:
+            return False
+        with self._echo_lock:
+            return not self._expected_echoes
+
+    def _console_prefix_pending(self, remaining: bytes) -> bool:
+        """Whether ``remaining`` is a STRICT PREFIX of console noise, so the
+        rest may still be arriving.
+
+        ⛔ Without this a split console line was handed to the frame
+        parser, which discarded a byte of it: an echo arriving as
+        ``b'EN' | b'NAble...'`` lost the ``E`` and then stalled the next
+        reply forever. Holding a partial is the same rule the frame parser
+        already applies to a partial frame.
+        """
+        if not remaining:
+            return True
+        quiet = self._console_is_quiet()
+        if not quiet and self._CONSOLE_PROMPT.startswith(remaining):
+            return True
+        if self._CONSOLE_ERROR_PREFIX.startswith(remaining):
+            return True
+        if (remaining.startswith(self._CONSOLE_ERROR_PREFIX)
+                and b"\n" not in remaining):
+            return True            # a complete prefix, line still arriving
+        if quiet:
+            # Nothing else can arrive, so holding for it would be a stall.
+            return False
+        with self._echo_lock:
+            for echo in self._expected_echoes:
+                full = echo + b"\r\n"
+                if full.startswith(remaining) and len(remaining) < len(full):
+                    return True
+        return False
+
+    def _take_console_error(self, remaining: bytes) -> int:
+        if not remaining.startswith(self._CONSOLE_ERROR_PREFIX):
+            return 0
+        end = remaining.find(b"\n")
+        if end == -1:
+            return 0                          # handled by the prefix rule
+        line = remaining[:end].rstrip(b"\r").decode("ascii", errors="replace")
+        if self._console_error_sink is not None:
+            try:
+                self._console_error_sink(line)
+            except Exception:
+                pass
+        return end + 1
+
+    def _boundary_action(self, remaining: bytes):
+        """Decide what a frame boundary should do about console noise.
+
+        Returns ``("consume", n)``, ``("hold", 0)`` or ``("none", 0)``.
+
+        ⛔ EVERY refutation point in the framing loop goes through here.
+        They used to call the pieces individually and one of them -- the
+        decode-exception path -- never consulted the pending-prefix check,
+        so a long registered echo split mid-line (an 84-byte wifi-password
+        echo) lost bytes and stalled its reply. One helper means the five
+        points cannot diverge again.
+        """
+        if self._console_prefix_pending(remaining):
+            return ("hold", 0)
+        n = self._take_console_noise(remaining)
+        if n:
+            return ("consume", n)
+        return ("none", 0)
+
+    def _take_console_noise(self, remaining: bytes) -> int:
+        """Complete console noise at the start of ``remaining``, or 0.
+
+        ⛔ THE FRAME INTERPRETATION WINS WHEREVER IT CAN BE DECIDED, so
+        this is consulted only after the frame reading has been REFUTED or
+        found incomplete -- never before. On a length-prefixed stream the
+        two readings genuinely overlap: ``44 41 51 49 46 49 3E 20`` is both
+        the prompt ``"DAQIFI> "`` and a 68-byte frame whose body starts
+        ``AQIFI> ``. Something has to win, and the frame does, because a
+        frame that DECODES is positive evidence while "these bytes spell a
+        prompt" is a coincidence that a 69-byte payload can always produce.
+
+        ⚠ RESIDUAL, stated rather than hidden: a frame is preferred only
+        once enough bytes are present to decode it. A real frame whose
+        length is exactly 68 and whose body begins ``AQIFI> ``, arriving
+        split so that only those first 8 bytes are buffered at a boundary,
+        is read as the prompt and loses 8 bytes. That needs the length byte
+        to be exactly 0x44 AND the next seven payload bytes to be exactly
+        ``AQIFI> `` AND the read to split there. The alternative -- never
+        accepting the prompt until more bytes arrive -- reintroduces the
+        stall this whole change exists to remove, so the trade is
+        deliberate.
+
+        ⛔ AND THE RESIDUAL IS WORSE THAN LOSING EIGHT BYTES: it can emit
+        a message THAT WAS NEVER SENT. Once those eight bytes are taken as
+        a prompt, parsing resumes mid-body, and a length-and-payload lying
+        there decodes into a frame of its own. Constructed and reproduced,
+        not hypothesised -- a real 69-byte frame whose first eight bytes
+        are literally ``DAQIFI> ``, delivered 11 bytes at a time, yields
+        one fabricated message. The accepting-the-prompt-early choice above
+        is therefore a choice to prefer a fabricated message over a stall,
+        which is a judgement for the project and not for this function;
+        the shape of the fix is NOT another byte-level heuristic. Round 2
+        tried corroborating the prompt by decoding at offset 8 and that is
+        unsound for exactly the same reason: a fragment of a real body
+        decodes, so a decode at an offset is not evidence about the bytes
+        before it. See the audit trail on #231.
+
+        ⭐ AND YET THE RESIDUAL IS UNREACHABLE FOR OUTPUT THIS DEVICE CAN
+        PRODUCE, which is why it is left alone rather than fixed. The
+        overlap needs a body beginning ``AQIFI> ``, and a protobuf body
+        begins with a TAG byte: ``0x41`` means field 8 with wire type 1,
+        while field 8 is ``device_status``, a uint32, so the encoder emits
+        ``0x40``. No field in this schema yields ``0x41``, so no real frame
+        starts with these bytes.
+
+        ⛔ That is a property of the SCHEMA, not a structural one. Add a
+        double, fixed64 or sfixed64 numbered 8 and ``0x41`` becomes
+        emittable and all of the above goes live.
+        ``test_no_real_frame_body_can_begin_with_the_prompts_second_byte``
+        derives the emittable tags from the compiled descriptor and fails
+        on the day that happens. Do not delete it without reopening #231.
+        """
+        if self._console_is_quiet():
+            # Known-off: the device emits neither, so skip neither. An
+            # error line can still arrive and is still handled below.
+            return self._take_console_error(remaining)
+        n = self._take_matching_echo(remaining)
+        if n:
+            return n
+        if remaining.startswith(self._CONSOLE_PROMPT):
+            # ⛔ TAKEN WHENEVER WE GET HERE, which is only once the frame
+            # reading has been refuted or found incomplete. Do NOT make
+            # this conditional again.
+            #
+            # Round 2 held the prompt while the frame reading was merely
+            # undecided, and that STALLS ORDINARY TRAFFIC. A held trailing
+            # prompt sits in front of the next command's echo and its
+            # reply; offset 8 is then the echo, which is text, so no frame
+            # is there to decode, and the outer 68-byte reading can never
+            # be refuted with fewer than 69 bytes. Prompt, echo, short
+            # reply, silence -- the everyday shape with echo on -- waited
+            # forever. That is the exact failure this change exists to
+            # remove, and it is far worse than the documented residual,
+            # which needs three coincidences at once.
+            #
+            # My round-2 test for this missed it because it checked
+            # "prompt then short reply" with no echo in between, and
+            # without the echo the reply did sit at offset 8 and decoded.
+            # The constructed counter-case has to carry the echo, because
+            # echo being ON is the premise of the whole ticket.
+            return len(self._CONSOLE_PROMPT)
+        # An echo and an error line are terminated AND matched against
+        # bytes we know were sent, which is far stronger evidence than
+        # eight generic bytes; they do not need refutation first.
+        return self._take_console_error(remaining)
 
     def parse_messages(
         self, data: bytes
@@ -266,12 +601,26 @@ class ProtobufMessageParser:
         # loop — we always advance ≥1 byte on failure.
         while current_index < len(data):
             remaining = data[current_index:]
+            # ⛔ FRAME FIRST. The console check used to run here, before the
+            # length prefix was even read, and it could therefore eat a
+            # real frame whose first bytes happen to spell console text.
+            # It now runs only where the frame reading has been REFUTED or
+            # found incomplete -- see _take_console_noise for why the frame
+            # wins and what residual that leaves.
             message_length, prefix_bytes, is_malformed = _try_read_length_prefix(
                 remaining
             )
 
             if message_length is None:
                 if is_malformed:
+                    # Not a frame at all: refuted, so console may decide.
+                    action, noise = self._boundary_action(remaining)
+                    if action == "consume":
+                        current_index += noise
+                        consumed_bytes = current_index
+                        continue
+                    if action == "hold":
+                        break
                     # Advance by 1 (not by prefix_bytes) — the malformed
                     # run may overlap a valid frame that starts mid-way
                     # through it. Skipping the whole malformed varint
@@ -279,9 +628,24 @@ class ProtobufMessageParser:
                     current_index += 1
                     consumed_bytes = current_index
                     continue
+                # Not enough bytes even for a length prefix: the frame
+                # reading is UNDECIDED, so the prompt is not taken here.
+                action, noise = self._boundary_action(remaining)
+                if action == "consume":
+                    current_index += noise
+                    consumed_bytes = current_index
+                    continue
                 break  # need more data for length prefix
 
             if message_length <= 0 or message_length > _MAX_MESSAGE_SIZE_BYTES:
+                # The frame reading is refuted, so console may decide.
+                action, noise = self._boundary_action(remaining)
+                if action == "consume":
+                    current_index += noise
+                    consumed_bytes = current_index
+                    continue
+                if action == "hold":
+                    break
                 # Same single-byte advance: the bytes that decoded to
                 # this implausible length may include the start of a
                 # valid frame.
@@ -345,10 +709,27 @@ class ProtobufMessageParser:
                 )
 
                 if gap_is_suspicious or first_body_byte_is_garbage:
+                    action, noise = self._boundary_action(remaining)
+                    if action == "consume":
+                        current_index += noise
+                        consumed_bytes = current_index
+                        continue
+                    if action == "hold":
+                        break
                     current_index += 1
                     consumed_bytes = current_index
                     continue
 
+                # A plausible partial frame: the frame reading is
+                # UNDECIDED. A terminated console token (an echo we sent,
+                # an error line) may still decide it, but the PROMPT may
+                # not -- that is what removes the residual this path used
+                # to carry.
+                action, noise = self._boundary_action(remaining)
+                if action == "consume":
+                    current_index += noise
+                    consumed_bytes = current_index
+                    continue
                 break  # legitimate partial frame — wait for more data
 
             try:
@@ -358,165 +739,26 @@ class ProtobufMessageParser:
                 consumed_bytes = current_index
                 messages.append(ObjectInboundMessage(data=parsed))
             except Exception:
+                # The frame reading is refuted by the decode itself: these
+                # bytes had a plausible prefix and enough of them, and are
+                # still not a message. NOW console may decide, which is how
+                # "DAQIFI> " followed by a real frame resolves -- the
+                # 68-byte body starting "AQIFI> " does not decode.
+                action, noise = self._boundary_action(remaining)
+                if action == "consume":
+                    current_index += noise
+                    consumed_bytes = current_index
+                    continue
+                if action == "hold":
+                    # ⛔ This path never consulted the pending-prefix rule,
+                    # so a long echo split mid-line lost bytes here.
+                    break
                 # Bad payload: advance one byte and try again at the
                 # next offset (mirrors upstream resilience pattern).
                 current_index += 1
                 consumed_bytes = current_index
 
         return messages, consumed_bytes
-
-
-class _MessageTypeHint:
-    UNCERTAIN = 0
-    LIKELY_TEXT = 1
-    LIKELY_PROTOBUF = 2
-
-
-def _detect_message_type(data: bytes) -> int:
-    """Heuristic: choose between text and protobuf parsing for ``data``.
-
-    Sample the first 512 bytes rather than scanning the whole buffer.
-    The full-buffer pure-Python loop turns into an O(n²) per-dispatch
-    cost as the buffer grows; a 512-byte prefix is enough to make the
-    text-vs-protobuf decision because a protobuf frame's length-prefix
-    + payload header already lands inside that window (Qodo PR 17 pass
-    48 #1).
-    """
-    if len(data) == 0:
-        return _MessageTypeHint.UNCERTAIN
-
-    sample = data[:512]
-    sample_len = len(sample)
-
-    printable = sum(1 for b in sample if 32 <= b <= 126)
-    if printable / sample_len > 0.8:
-        return _MessageTypeHint.LIKELY_TEXT
-
-    if sample_len > 3 and _is_likely_text_command(sample):
-        return _MessageTypeHint.LIKELY_TEXT
-
-    null_ratio = sum(1 for b in sample if b == 0) / sample_len
-    if null_ratio > 0.1:
-        return _MessageTypeHint.LIKELY_PROTOBUF
-
-    if null_ratio > 0.05 and _is_likely_protobuf_data(sample):
-        return _MessageTypeHint.LIKELY_PROTOBUF
-
-    return _MessageTypeHint.UNCERTAIN
-
-
-def _is_likely_text_command(data: bytes) -> bool:
-    # Decoding only the first 10 bytes (vs the full buffer) is enough
-    # for the prefix tests, and the line-ending check is cheaper as a
-    # raw byte compare. Avoids allocating a full str for every framing
-    # decision in the hot path (Qodo PR 17 pass 29 #2).
-    head = data[:10].decode("ascii", errors="ignore")
-    head_upper = head.upper()
-    # SCPI commands are case-insensitive — match on head_upper for
-    # SYST/CONF/READ. `*` is literal (only standard form), so test
-    # against `head` directly (Qodo PR 17 pass 30 #2).
-    return (
-        head.startswith("*")
-        or head_upper.startswith("SYST")
-        or head_upper.startswith("CONF")
-        or head_upper.startswith("READ")
-        or data.endswith(b"\r\n")
-        or data.endswith(b"\n")
-    )
-
-
-def _is_likely_protobuf_data(data: bytes) -> bool:
-    if len(data) < 2:
-        return False
-    # Look for a plausible varint field tag in the first few bytes:
-    # wire type (low 3 bits) <= 5 and field number (high bits) > 0.
-    for i in range(min(len(data) - 1, 5)):
-        b = data[i]
-        if (b & 0x07) <= 5 and (b >> 3) > 0:
-            return True
-    return False
-
-
-class CompositeMessageParser:
-    """Parser that auto-routes between text (SCPI) and binary (protobuf).
-
-    Ports the C# ``CompositeMessageParser`` from
-    ``Daqifi.Core/Communication/Consumers/CompositeMessageParser.cs``.
-    When neither parser is supplied, defaults are constructed:
-    :class:`LineBasedMessageParser` for text and a
-    :class:`ProtobufMessageParser` whose ``message_factory`` is the
-    caller-supplied ``protobuf_factory`` (defaulting to a no-op factory
-    that returns the raw bytes -- the upstream pre-wires
-    ``ProtobufMessageParser`` to ``DaqifiOutMessage``; we can't, since
-    the project treats ``DaqifiOutMessage`` as duck-typed).
-
-    Output is always wrapped in :class:`ObjectInboundMessage`, matching
-    the upstream's ``IInboundMessage<object>`` shape.
-    """
-
-    def __init__(
-        self,
-        text_parser: Optional[LineBasedMessageParser] = None,
-        protobuf_parser: Optional[ProtobufMessageParser] = None,
-        protobuf_factory: Optional[Callable[[bytes], object]] = None,
-    ) -> None:
-        self._text_parser = text_parser or LineBasedMessageParser()
-        if protobuf_parser is not None:
-            self._protobuf_parser = protobuf_parser
-        else:
-            factory = protobuf_factory or (lambda b: b)
-            self._protobuf_parser = ProtobufMessageParser(factory)
-
-    def parse_messages(
-        self, data: bytes
-    ) -> Tuple[List[ObjectInboundMessage], int]:
-        if len(data) == 0:
-            return [], 0
-
-        hint = _detect_message_type(data)
-
-        # Critical: return whenever EITHER messages OR consumed > 0.
-        # A parser may legitimately advance through ignorable bytes
-        # (blank lines, malformed prefixes) without producing a
-        # message; dropping that progress causes the consumer's
-        # buffer to grow without bound (Qodo PR 17 pass 6 #1).
-        if hint == _MessageTypeHint.LIKELY_PROTOBUF:
-            wrapped, consumed = self._try_protobuf(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        if hint == _MessageTypeHint.LIKELY_TEXT:
-            wrapped, consumed = self._try_text(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        # Heuristics uncertain or first attempt failed -- try the other.
-        if hint != _MessageTypeHint.LIKELY_TEXT:
-            wrapped, consumed = self._try_text(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        if hint != _MessageTypeHint.LIKELY_PROTOBUF:
-            wrapped, consumed = self._try_protobuf(data)
-            if wrapped or consumed:
-                return wrapped, consumed
-
-        return [], 0
-
-    def _try_text(self, data: bytes) -> Tuple[List[ObjectInboundMessage], int]:
-        text_messages, consumed = self._text_parser.parse_messages(data)
-        # Return consumed even when no messages — caller decides whether
-        # to drain the buffer (see parse_messages dispatch above).
-        wrapped = [ObjectInboundMessage(data=m.data) for m in text_messages]
-        return wrapped, consumed
-
-    def _try_protobuf(
-        self, data: bytes
-    ) -> Tuple[List[ObjectInboundMessage], int]:
-        protobuf_messages, consumed = self._protobuf_parser.parse_messages(data)
-        # ProtobufMessageParser already wraps in ObjectInboundMessage.
-        # Return consumed even when no messages (see _try_text above).
-        return list(protobuf_messages), consumed
 
 
 # ---- StreamMessageConsumer ---------------------------------------------------

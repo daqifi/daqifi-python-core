@@ -82,6 +82,7 @@ def enable_device_echo() -> ScpiMessage:
     return ScpiMessage("SYSTem:ECHO 1")
 
 
+
 # ---- SD card storage ----
 
 def enable_storage_sd() -> ScpiMessage:
