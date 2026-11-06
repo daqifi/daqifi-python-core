@@ -1812,15 +1812,112 @@ def test_a_reply_during_the_querys_own_write_refuses_the_handler_loudly() -> Non
             # ⛔ The refusal must be REPORTED, not swallowed silently: that
             # silence is what let initialize claim success with a command
             # never sent.
+            # ⚠ The warning moved to the refusal's SOURCE, so it now
+            # names the COMMAND rather than the dispatcher -- which is the
+            # better signal, and covers every callback path rather than
+            # this one. Assert the substance, not the old wording.
             assert any(
-                "channels_populated" in str(getattr(r, "msg", ""))
-                for r in records
+                "refused" in str(getattr(r, "msg", "")) for r in records
             ), (
                 "the refused handler send was swallowed with no warning, "
                 f"so nothing records that it never went out: {records}"
             )
+            assert not any(
+                "channels_populated handler raised" in str(getattr(r, "msg", ""))
+                for r in records
+            ), (
+                "the same refusal was reported twice -- once at its source "
+                f"and once by the dispatcher: {records}"
+            )
     finally:
         stream.write = real_write
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
+
+
+def test_a_refused_send_from_a_public_callback_is_reported() -> None:
+    """⛔ THE PATH THE PER-DISPATCHER LOG MISSED.
+
+    Every callback dispatcher here isolates handlers with
+    ``except Exception`` -- correct, since one subscriber must not stop the
+    others -- so a refusal raised inside one is destroyed by whichever loop
+    is running. Logging it in the ``channels_populated`` dispatcher covered
+    exactly that loop; a refused send from a PUBLIC
+    ``add_message_received`` handler still vanished, with
+    ``_fire_message``'s bare ``pass``. The visible result was
+    ``is_streaming`` left True, the STOP never sent, nothing logged, and
+    ``delivery_fault`` None.
+
+    The refusal is now logged where it HAPPENS, which covers every path at
+    once -- including dispatchers added later -- and is the only place that
+    knows which command was dropped.
+    """
+    import logging
+
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    outcome = []
+    ran = threading.Event()
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with device._exchange_lock("A"):
+            held.set()
+            release.wait(10.0)
+
+    def on_message(_args):
+        if ran.is_set():
+            return
+        ran.set()
+        try:
+            device.send(_scpi().stop_streaming())
+            outcome.append("sent")
+        except BaseException as exc:                              # noqa: BLE001
+            outcome.append(type(exc).__name__)
+            raise            # let the dispatcher swallow it, as it does
+
+    # ⚠ initialize() FIRST. `add_message_received` is the DEVICE-level
+    # subscription, dispatched through the protocol handler that initialize
+    # wires -- without it the frame below reaches the consumer and goes
+    # nowhere, and the callback never runs. (My first version of this test
+    # skipped it and timed out waiting for a handler that could not fire.)
+    device.initialize(response_timeout_s=0.2)
+    device.add_message_received(on_message)
+
+    h = threading.Thread(target=holder, name="A", daemon=True)
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logger = logging.getLogger("daqifi.devices")
+    logger.addHandler(handler)
+    try:
+        h.start()
+        _wait_for(held.is_set, 5.0, "A to hold the exchange")
+        stream.feed(_frame())
+        _wait_for(ran.is_set, 10.0, "the callback to run")
+        _wait_for(lambda: outcome != [], 10.0, "the send to resolve")
+
+        assert outcome == ["ExchangeTimeoutError"], (
+            f"the callback's send was not refused: {outcome}"
+        )
+        assert any(
+            "refused" in str(getattr(r, "msg", "")) for r in records
+        ), (
+            "a send refused inside a PUBLIC add_message_received handler "
+            "was swallowed with nothing logged anywhere -- the command did "
+            f"not go out and no record says so: {records}"
+        )
+        # The record must name the command, or the reader has to guess.
+        assert any(
+            "STReam:STOP" in str(getattr(r, "args", ())) for r in records
+        ), f"the warning does not say which command was dropped: {records}"
+    finally:
+        logger.removeHandler(handler)
+        release.set()
+        h.join(5)
         try:
             device.disconnect()
         except Exception:                                         # noqa: BLE001

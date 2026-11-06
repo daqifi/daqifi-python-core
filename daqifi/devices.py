@@ -855,8 +855,15 @@ class DaqifiDevice:
           there could otherwise be waiting on a flow that is itself waiting
           for this very thread to stop the consumer, which is how the
           consumer ended up dead for good (#238). Refusing is the honest
-          answer -- the command did not go out, and the caller is told so
-          rather than being blocked or silently deferred.
+          answer -- the command did not go out, and it is raised rather
+          than blocked or silently deferred.
+
+          ⚠ "The caller is told" is too strong FROM A CALLBACK, which is
+          where this applies: the immediate caller is a dispatch loop that
+          isolates handlers with ``except Exception``, so the exception is
+          swallowed unless the handler catches it itself. That is why the
+          refusal is also LOGGED at WARNING here, naming the command --
+          the log is what reaches a human on that path, not the raise.
 
         ⛔ THE CONSUMER THREAD IS NOT EXEMPT FROM SERIALIZATION, only from
         waiting. It used to send straight out from here, which let a
@@ -880,7 +887,7 @@ class DaqifiDevice:
         # the owner -- two rules read that (who may nest an exchange, and
         # who must defer status events) -- and releases and flushes on the
         # way out.
-        with self._write_exchange_lock("send"):
+        with self._write_exchange_lock("send", message):
             # ⛔ RE-CHECK AFTER ACQUIRING, not only on the way in. Waiting
             # here can take as long as the exchange ahead of us, and that
             # exchange may be what loses the connection: a send that
@@ -1076,8 +1083,26 @@ class DaqifiDevice:
             return False
         return threading.current_thread() is getattr(consumer, "_thread", None)
 
+    @staticmethod
+    def _describe_for_log(operation: str, message: Any = None) -> str:
+        """``operation`` plus the command bytes, when there are any.
+
+        The source log is the only place that knows WHICH command was
+        dropped, so it says -- a bare "a send was refused" sends the reader
+        looking for it.
+        """
+        if message is None:
+            return operation
+        try:
+            text = message.get_bytes().decode("ascii", errors="replace")
+        except Exception:
+            return operation
+        return f"{operation} ({text.strip()!r})"
+
     @contextlib.contextmanager
-    def _write_exchange_lock(self, operation: str) -> Iterator[None]:
+    def _write_exchange_lock(
+        self, operation: str, message: Any = None
+    ) -> Iterator[None]:
         """Hold the exchange for a WRITE-ONLY operation.
 
         ⛔ NOT :meth:`_exchange_lock`. That one refuses the consumer thread
@@ -1101,7 +1126,21 @@ class DaqifiDevice:
         """
         if self._on_consumer_thread():
             if not self._text_exchange_lock.acquire(blocking=False):
-                raise ExchangeTimeoutError(
+                # ⛔ LOGGED AT THE SOURCE, not at whoever swallows it. Every
+                # callback dispatcher in this class isolates handlers with
+                # `except Exception`, which is right -- one subscriber must
+                # not stop the others -- but it means a refusal raised here
+                # is destroyed by whichever loop happens to be running. An
+                # earlier revision logged it in the channels_populated
+                # dispatcher, which covered exactly one of those loops:
+                # a refused send from a PUBLIC add_message_received handler
+                # still vanished, leaving is_streaming true with the STOP
+                # never sent and nothing recorded anywhere.
+                #
+                # Logging where the refusal HAPPENS covers every path at
+                # once, including dispatchers added later, and is the only
+                # place that knows WHICH command was dropped.
+                refusal = ExchangeTimeoutError(
                     f"{operation} cannot run on the protobuf consumer "
                     "thread -- that is, from a message-received callback -- "
                     "while another flow holds this device: waiting there "
@@ -1110,6 +1149,16 @@ class DaqifiDevice:
                     "sent. Use another thread, or group it with the other "
                     "flow inside run_exclusive()."
                 )
+                _log.warning(
+                    "device %s: %s was refused on the message-received "
+                    "(consumer) thread because another flow holds the "
+                    "device; it was NOT sent",
+                    self.name, self._describe_for_log(operation, message),
+                )
+                # Marked so a dispatcher that catches it does not report
+                # the same event a second time.
+                refusal._daqifi_reported = True       # type: ignore[attr-defined]
+                raise refusal
         elif not self._text_exchange_lock.acquire(
             timeout=self._SEND_EXCHANGE_WAIT_S
         ):
@@ -2086,18 +2135,21 @@ class DaqifiDevice:
         for h in list(self._channels_populated_handlers):
             try:
                 h(args)
-            except Exception:
+            except Exception as exc:
                 # ⛔ ISOLATED BUT NOT SILENT. One subscriber must not stop
                 # the others, so the exception is still swallowed here --
                 # but it used to vanish entirely, and a send refused inside
                 # a handler then left initialize() reporting success with
-                # the command never sent. Two signals, two channels: the
-                # other handlers still run, AND the failure is reported.
-                _log.warning(
-                    "device %s: a channels_populated handler raised; its "
-                    "work did not complete",
-                    self.name, exc_info=True,
-                )
+                # the command never sent.
+                #
+                # A refusal already reported at its source is not reported
+                # again: one event, one warning.
+                if not getattr(exc, "_daqifi_reported", False):
+                    _log.warning(
+                        "device %s: a channels_populated handler raised; "
+                        "its work did not complete",
+                        self.name, exc_info=True,
+                    )
 
     def _populate_analog_channels(self, message: Any) -> int:
         # Same int-cast hardening as the metadata path (Qodo PR 17
