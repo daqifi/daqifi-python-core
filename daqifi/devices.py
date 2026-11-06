@@ -1919,17 +1919,30 @@ class DaqifiDevice:
                 self._initialize_send_sequence, "initialize"
             )
 
-            # ⛔ THE STATUS QUERY GOES OUT WITH THE EXCHANGE FREE. It was
-            # the last command of the owned sequence, and nothing in that
-            # sequence depends on it being grouped -- but a reply arriving
-            # before write/flush returned was dispatched while ownership
-            # was still held, so a send from a handler it ran was refused.
-            # Nothing can arrive while the exchange is held if the command
-            # that provokes the reply is not sent until after the release.
+            # THE STATUS QUERY IS NOT PART OF THE OWNED SEQUENCE. It was
+            # its last command, and nothing in the sequence depends on it
+            # being grouped, so moving it out means a reply can no longer
+            # be dispatched while the SEQUENCE's ownership is held.
+            #
+            # ⛔ THAT NARROWS THE WINDOW, IT DOES NOT REMOVE IT, and an
+            # earlier version of this comment claimed otherwise. A send
+            # OWNS the exchange while it writes its own bytes, so a reply
+            # fast enough to be dispatched during this query's own
+            # write/flush still arrives under ownership -- and a
+            # channels_populated handler's send is then refused, logged,
+            # and initialize still succeeds. Reproduced by a reviewer with
+            # a frame fed during write() and a delayed flush().
+            #
+            # That residue is the accepted cost of the blocking design
+            # (ruling EI B): a callback's send is refused whenever ANY flow
+            # owns the exchange, and a send's own write IS ownership. It is
+            # not fixable by moving this line; it would need the consumer
+            # thread to be allowed to write under someone else's
+            # ownership, which is the deadlock EI B exists to avoid.
             self.send(scpi_commands.get_device_info())
 
-            # From here the exchange is FREE, so the consumer can dispatch
-            # the status and the handlers it runs can send.
+            # From here the exchange is free again, so the consumer can
+            # dispatch the status and the handlers it runs can send.
             deadline = time.monotonic() + response_timeout_s
             while time.monotonic() < deadline:
                 if self._metadata.serial_number:

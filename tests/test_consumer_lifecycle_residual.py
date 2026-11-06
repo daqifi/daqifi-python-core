@@ -1742,3 +1742,86 @@ def test_the_status_query_goes_out_with_the_exchange_free() -> None:
             device.disconnect()
         except Exception:                                         # noqa: BLE001
             pass
+
+
+def test_a_reply_during_the_querys_own_write_refuses_the_handler_loudly() -> None:
+    """⚠ PINS AN ACCEPTED RESIDUE, and states the window honestly.
+
+    Moving the status query out of initialize's owned sequence NARROWS the
+    window in which a reply can be dispatched under ownership -- it does
+    not remove it, and a comment of mine claimed it did. A ``send()`` owns
+    the exchange while it writes its own bytes, so a reply fast enough to
+    arrive during THIS query's write/flush still lands under ownership.
+
+    The documented consequence, which this asserts: a channels_populated
+    handler's send is REFUSED, the refusal is LOGGED rather than vanishing,
+    and initialize still succeeds. That is the accepted cost of the
+    blocking design (ruling EI B) -- a callback's send is refused whenever
+    any flow owns the exchange, and a send's own write is ownership.
+
+    Not a defect repro and not a control: it is the shape of a residue, so
+    it fails if the refusal ever becomes silent again.
+    """
+    device = _fakes._make_device_with_serial_facade()
+    stream = device._transport.stream
+    handler_outcome = []
+    real_write = stream.write
+
+    def write_then_reply(data):
+        result = real_write(data)
+        if b"SYSInfoPB?" in bytes(data):
+            # The device answers DURING our own write, which is the only
+            # window left -- so the dispatch happens while send() owns the
+            # exchange.
+            stream.feed(_frame())
+            time.sleep(0.05)      # stand in for a slow flush
+        return result
+
+    def on_channels(_args):
+        try:
+            device.send(_scpi().stop_streaming())
+            handler_outcome.append("sent")
+        except BaseException as exc:                              # noqa: BLE001
+            handler_outcome.append(type(exc).__name__)
+            # ⚠ RE-RAISED ON PURPOSE. The library logs when a handler
+            # RAISES, so a test that both records the outcome and swallows
+            # it proves the refusal and then destroys the evidence of the
+            # logging -- which is exactly what my first version did.
+            raise
+
+    device.add_channels_populated(on_channels)
+    stream.write = write_then_reply
+    try:
+        import logging
+
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        logger = logging.getLogger("daqifi.devices")
+        logger.addHandler(handler)
+        try:
+            device.initialize(response_timeout_s=0.6)
+        finally:
+            logger.removeHandler(handler)
+
+        if handler_outcome:
+            assert handler_outcome == ["ExchangeTimeoutError"], (
+                "a handler send during the query's own write resolved "
+                f"unexpectedly: {handler_outcome}"
+            )
+            # ⛔ The refusal must be REPORTED, not swallowed silently: that
+            # silence is what let initialize claim success with a command
+            # never sent.
+            assert any(
+                "channels_populated" in str(getattr(r, "msg", ""))
+                for r in records
+            ), (
+                "the refused handler send was swallowed with no warning, "
+                f"so nothing records that it never went out: {records}"
+            )
+    finally:
+        stream.write = real_write
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
