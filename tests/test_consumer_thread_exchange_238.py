@@ -295,15 +295,14 @@ def test_a_send_from_another_thread_lands_after_an_exchange() -> None:
         device.disconnect()
 
 
-def test_a_send_from_a_callback_does_not_wait_on_the_exchange_lock() -> None:
-    """CONTROL -- passes on main too, where send() takes no lock at all.
+def test_a_send_from_a_callback_is_refused_rather_than_waiting() -> None:
+    """A send from a message-received callback must never WAIT.
 
-    stop_streaming() from a message-received callback must not deadlock. A
-    bare send neither pauses nor replaces the consumer, so unlike a text
-    exchange it is allowed on that thread -- and it must not wait for a lock
-    whose holder may be waiting for this very thread to stop the consumer.
-    This guards the exemption that makes the new serialization safe, which
-    is why it is here even though it cannot discriminate.
+    The holder of the exchange may be waiting for this very thread to stop
+    the consumer, so waiting here is the #238 deadlock. Under ruling EI B
+    the answer is an immediate refusal: the command does not go out, and
+    the caller is told, which is the honest outcome -- it is neither
+    blocked nor silently deferred.
     """
     device = _fakes._make_device_with_serial_facade()
     stream = device._transport.stream
@@ -314,10 +313,11 @@ def test_a_send_from_a_callback_does_not_wait_on_the_exchange_lock() -> None:
         release = threading.Event()
 
         def holder():
-            device._text_exchange_lock.acquire()
-            held.set()
-            release.wait(10.0)
-            device._text_exchange_lock.release()
+            # Hold it the way production does, through _exchange_lock, so
+            # the owner bookkeeping matches a real exchange.
+            with device._exchange_lock("test-holder"):
+                held.set()
+                release.wait(10.0)
 
         h = threading.Thread(target=holder, name="lock-holder")
         h.start()
@@ -330,10 +330,34 @@ def test_a_send_from_a_callback_does_not_wait_on_the_exchange_lock() -> None:
         assert callback.fired.wait(5.0), (
             "a send from a callback blocked on the exchange lock"
         )
-        kind, _payload = callback.outcome
-        assert kind == "returned", f"stop_streaming from a callback {callback.outcome!r}"
-        assert [w for w in stream.written if b"STReam:STOP" in w] != []
+        kind, payload = callback.outcome
+        # ⚠ CONTRACT: REFUSED, by name, and promptly. It used to go straight
+        # out from here, because send() exempted the consumer thread from
+        # the lock -- and that exemption let a callback's command land
+        # INSIDE a run_exclusive group. Ruling EI B replaced the exemption
+        # with a refusal: still never blocking (asserted above, which is
+        # the #238 property), and no longer able to interleave.
+        assert kind == "raised", (
+            f"a send from a callback was not refused while the exchange was "
+            f"held: {callback.outcome!r}"
+        )
+        assert type(payload).__name__ == "ExchangeTimeoutError", (
+            f"refused with the wrong error: {payload!r}"
+        )
+        assert [w for w in stream.written if b"STReam:STOP" in w] == [], (
+            "the callback's send reached the wire while the lock was held"
+        )
         assert device._consumer.is_running
+        release.set()
+        h.join(5)
+        # ⛔ And it STAYS un-sent: a refusal is not a deferral, so nothing
+        # is replayed when the lock frees. That is the cost of EI B over
+        # parking, and it is asserted rather than left to be discovered.
+        time.sleep(0.4)
+        assert [w for w in stream.written if b"STReam:STOP" in w] == [], (
+            "a refused command went out later anyway, which would make the "
+            "refusal a silent deferral"
+        )
     finally:
         release.set()
         h.join(5)
@@ -673,8 +697,11 @@ def test_a_send_queued_behind_the_lock_rechecks_the_connection() -> None:
         assert a_done.wait(10.0)
         b.join(10.0)
 
+        # B waited on the lock, so it CAN be told by an exception -- and
+        # that is the better outcome than parking's "accepted, then
+        # recorded as dropped". The HARM assertion is unchanged.
         assert b_outcome == ["DeviceNotConnectedError"], (
-            f"B sent after the connection was lost: {b_outcome}"
+            f"B was not told the link died while it waited: {b_outcome}"
         )
         assert not [c for c in calls if b"STReam:START" in c], (
             "a START reached the wire after the device went Lost"

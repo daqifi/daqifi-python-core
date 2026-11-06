@@ -475,6 +475,49 @@ class DefaultFirmwareUpdateService:
                     exc_info=True,
                 )
 
+    # -- device-exclusive send ------------------------------------------
+
+    def _send_and_settle(
+        self, device, message, delay: float, deadline: _Cancellation
+    ) -> None:
+        """Send a command the following delay depends on, then wait.
+
+        ⛔ A BARE send IS NOT ENOUGH HERE, and the reason outlived the
+        one it was written for. ``send()`` now blocks until the bytes are
+        out, so the delay no longer risks starting before the command
+        reaches the board. What remains is the DELAY itself: it is this
+        command's settling time -- a reboot, a mode change -- and another
+        flow's command landing inside it disturbs exactly the thing being
+        waited for. Owning the exchange across both the send and the wait
+        is what keeps the window clean.
+
+        The service's own ``_operation_lock`` does NOT help: it serialises
+        updates against each other, not against the device's other flows.
+        """
+        def _send_then_settle() -> None:
+            device.send(message)
+            # ⛔ UNCONDITIONALLY, EVEN AT delay == 0. `_sleep_with_cancel`
+            # is not only a sleep: at `seconds <= 0` it checks
+            # cancellation and returns, so it is also THE cancel check on
+            # this path. An `if delay:` guard around it therefore skipped
+            # the check whenever a settle delay was configured as 0 --
+            # which validate() allows -- and a cancel set during power-on
+            # was ignored: LAN:FWUpdate went out anyway and forced bridge
+            # recovery.
+            #
+            # The helper was already written to do the right thing at 0.
+            # The guard was an optimisation that defeated it.
+            #
+            # ⛔ INSIDE the ownership, not after it. The sleep used to run
+            # once run_exclusive had RETURNED, so the docstring above
+            # claimed a window the code did not hold: another thread's
+            # POWer:STATe 0 landed mid-settle and the update aborted. The
+            # settling time is this command's, so it is part of the
+            # exchange.
+            self._sleep_with_cancel(delay, deadline)
+
+        device.run_exclusive(_send_then_settle)
+
     # -- exclusive-access wrapper ---------------------------------------
 
     def _run_exclusive(
@@ -563,9 +606,9 @@ class DefaultFirmwareUpdateService:
                 )
                 self._target_port_seen_gone = False
                 self._selected_bootloader_location = None
-                device.send(scpi_commands.force_bootloader())
-                self._sleep_with_cancel(
-                    self._options.post_force_boot_delay, deadline
+                self._send_and_settle(
+                    device, scpi_commands.force_bootloader(),
+                    self._options.post_force_boot_delay, deadline,
                 )
                 device.disconnect()
 
@@ -961,9 +1004,10 @@ class DefaultFirmwareUpdateService:
                 # reflash, and LAN commands are refused then, so FWUpdate
                 # would not take effect.
                 if self._options.power_on_wifi_module_before_lan_update_mode:
-                    device.send(scpi_commands.turn_device_on())
-                    self._sleep_with_cancel(
-                        self._options.power_on_wifi_module_settle_delay, deadline
+                    self._send_and_settle(
+                        device, scpi_commands.turn_device_on(),
+                        self._options.power_on_wifi_module_settle_delay,
+                        deadline,
                     )
 
                 # In standby LAN:APPLY doesn't restart WiFi, so the bridge
@@ -982,9 +1026,9 @@ class DefaultFirmwareUpdateService:
                 # the firmware's documented sequence (firmware/utilities:
                 # POWer:STATe 1, FWUpdate, APPLY, then the flash tool).
                 bridge_state["update_requested"] = True
-                device.send(scpi_commands.set_lan_firmware_update_mode())
-                self._sleep_with_cancel(
-                    self._options.post_lan_firmware_mode_delay, deadline
+                self._send_and_settle(
+                    device, scpi_commands.set_lan_firmware_update_mode(),
+                    self._options.post_lan_firmware_mode_delay, deadline,
                 )
 
             self._execute_with_state_timeout(
@@ -1150,9 +1194,9 @@ class DefaultFirmwareUpdateService:
                 # Leave the bridge first: while it is on, the firmware
                 # forwards everything but this exact command to the WINC,
                 # so the LAN restore below would never reach the console.
-                device.send(scpi_commands.set_usb_transparency_mode(0))
-                self._sleep_with_cancel(
-                    self._options.post_usb_transparent_mode_exit_delay, deadline
+                self._send_and_settle(
+                    device, scpi_commands.set_usb_transparency_mode(0),
+                    self._options.post_usb_transparent_mode_exit_delay, deadline,
                 )
                 device.send(scpi_commands.enable_network_lan())
                 # APPLY 1, not APPLY then SAVE: the firmware's apply gate
@@ -1417,8 +1461,10 @@ class DefaultFirmwareUpdateService:
             # behind a fresh exit; the budget running out (the deadline
             # raises) is what makes it unconfirmed.
             while True:
-                device.send(scpi_commands.set_usb_transparency_mode(0))
-                self._sleep_with_cancel(exit_delay, deadline)
+                self._send_and_settle(
+                    device, scpi_commands.set_usb_transparency_mode(0),
+                    exit_delay, deadline,
+                )
                 powered = self._wifi_module_powered(device)
                 if powered is True:
                     break
@@ -1433,8 +1479,10 @@ class DefaultFirmwareUpdateService:
                 # The bridge can come up between attempts, so every APPLY
                 # is preceded by the exit that gets it to the console.
                 while True:
-                    device.send(scpi_commands.set_usb_transparency_mode(0))
-                    self._sleep_with_cancel(exit_delay, deadline)
+                    self._send_and_settle(
+                        device, scpi_commands.set_usb_transparency_mode(0),
+                        exit_delay, deadline,
+                    )
                     if self._send_apply(device) == 0:
                         break
                     self._sleep_with_cancel(_BRIDGE_POLL_SECONDS, deadline)

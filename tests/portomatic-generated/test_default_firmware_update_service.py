@@ -258,6 +258,16 @@ class _FakeFirmwareDownloadService:
 
 
 class _FakeStreamingDevice:
+    def run_exclusive(self, fn):
+        """Stands in for DaqifiDevice.run_exclusive.
+
+        Present because the production code now OWNS the exchange for a
+        command whose following delay depends on delivery. A fake without
+        this method would make that ownership untestable -- and silently
+        un-exercised -- which is the defect it exists to prevent.
+        """
+        return fn()
+
     def __init__(self, name: str = "fake-port-3") -> None:
         self.name = name
         self.is_connected = True

@@ -90,6 +90,37 @@ class SerialPortConnectFailure(enum.Enum):
     UNKNOWN = "unknown"
 
 
+class DeliveryFaultError(DAQiFiError, RuntimeError):
+    """Something the device was told to do provably did not happen.
+
+    Raised by operations that would otherwise report success over a
+    pipeline known to be broken -- today that means a message consumer
+    that could not be restarted after a text exchange, leaving nothing
+    reading the stream. A ``RuntimeError``, like the other not-usable
+    guards here. The condition is sticky by design -- it describes a
+    connection that can no longer be trusted -- and a successful
+    ``connect()`` clears it.
+    """
+
+
+class ExchangeTimeoutError(DAQiFiError, TimeoutError):
+    """A send could not get exclusive use of the device in time.
+
+    ``send()`` serialises against text exchanges, so it waits while
+    another flow holds the device. This is raised when that wait cannot
+    end well, and in both cases **the command was not sent**:
+
+    * from an ordinary thread, the holder has held the device for longer
+      than any legitimate exchange takes, so it is stuck rather than busy;
+    * from the message-received (consumer) thread, the device is held
+      right now -- and that thread never waits, because the holder may be
+      waiting for it to stop the consumer, which would deadlock.
+
+    A ``TimeoutError``, like :class:`DeviceUnresponsiveError`, so callers
+    that already treat timeouts as retryable need no new except clause.
+    """
+
+
 class SerialPortConnectError(ConnectionError, _SerialException):
     """A serial port couldn't be opened; ``reason`` says why
     (:class:`SerialPortConnectFailure`) and the message names the port and
