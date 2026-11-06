@@ -24,6 +24,16 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+# ⛔ THE CI SKIP GATE DEPENDS ON THIS. The gate in .github/workflows/tests.yml
+# allows no skips, and exempts `<skipped type="pytest.xfail">` on the grounds
+# that an xfail is a pinned known-defect assertion that DID run. That holds
+# only while an unexpected pass is loud: a non-strict xfail whose defect gets
+# fixed becomes a silent XPASS, stops asserting anything, and the exemption
+# then hides it indefinitely. Setting it here rather than per-marker makes the
+# gate's assumption true for every xfail, including ones not written yet --
+# which a per-marker `strict=True` cannot do.
+xfail_strict = true
+
 # Registered so an unknown-marker warning cannot hide a typo'd marker. Measured
 # before registering: `pytest.mark.integration` raised PytestUnknownMarkWarning,
 # which means a misspelled marker would have been equally silent -- and a

@@ -91,10 +91,20 @@ jobs:
           import xml.etree.ElementTree as ET
 
           ALLOWED = ()
+          # ⛔ AN xfail IS NOT A SKIP, though JUnit records both as
+          # <skipped>. A skip means "this did not run, and nobody is sure
+          # why" -- the thing this gate exists to catch. An xfail is a
+          # pinned known-defect assertion that DID run, and `xfail_strict`
+          # in pyproject.toml makes every xfail strict, so a defect that
+          # gets fixed fails the job instead of slipping through as a
+          # silent XPASS -- which is what makes this exemption safe rather
+          # than a hole. Distinguished by type, not by an ALLOWED prefix:
+          # a prefix would exempt whole files from the skip ban.
           unexpected = [
               f"{case.get('classname')}::{case.get('name')}: {skip.get('message')}"
               for case in ET.parse("pytest-results.xml").iter("testcase")
               for skip in case.findall("skipped")
+              if skip.get("type") != "pytest.xfail"
               if not case.get("classname", "").startswith(ALLOWED)
           ]
           if unexpected:

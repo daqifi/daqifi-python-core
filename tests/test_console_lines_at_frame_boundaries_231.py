@@ -822,8 +822,12 @@ def test_a_prompt_then_a_short_reply_is_still_not_stalled() -> None:
            "prompt while the frame reading is merely incomplete can emit a "
            "message that was never sent. Asserting the CORRECT behaviour "
            "and marking it expected-to-fail, so this test never REQUIRES "
-           "the defect and turns into an XPASS the moment it is fixed.",
-    strict=False,
+           "the defect and fails the job the moment it is fixed.",
+    # Strict, from `xfail_strict` in pyproject.toml -- set there, not here,
+    # so the CI skip gate's exemption for xfails holds for every xfail
+    # rather than for the ones someone remembered to mark. The reason it
+    # must hold is in that comment. Deterministic test over constructed
+    # bytes, so strictness costs nothing in flakiness.
 )
 def test_the_accepted_residual_can_fabricate_a_message() -> None:
     """⛔ A real frame can begin with the literal bytes ``DAQIFI> ``.
