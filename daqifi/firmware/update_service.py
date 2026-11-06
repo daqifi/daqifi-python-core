@@ -494,14 +494,25 @@ class DefaultFirmwareUpdateService:
         """
         def _send_then_settle() -> None:
             device.send(message)
-            if delay:
-                # ⛔ INSIDE the ownership, not after it. The sleep used to
-                # run once run_exclusive had RETURNED, so the docstring
-                # above claimed a window the code did not hold: another
-                # thread's POWer:STATe 0 landed mid-settle and the update
-                # aborted. The settling time is this command's, so it is
-                # part of the exchange.
-                self._sleep_with_cancel(delay, deadline)
+            # ⛔ UNCONDITIONALLY, EVEN AT delay == 0. `_sleep_with_cancel`
+            # is not only a sleep: at `seconds <= 0` it checks
+            # cancellation and returns, so it is also THE cancel check on
+            # this path. An `if delay:` guard around it therefore skipped
+            # the check whenever a settle delay was configured as 0 --
+            # which validate() allows -- and a cancel set during power-on
+            # was ignored: LAN:FWUpdate went out anyway and forced bridge
+            # recovery.
+            #
+            # The helper was already written to do the right thing at 0.
+            # The guard was an optimisation that defeated it.
+            #
+            # ⛔ INSIDE the ownership, not after it. The sleep used to run
+            # once run_exclusive had RETURNED, so the docstring above
+            # claimed a window the code did not hold: another thread's
+            # POWer:STATe 0 landed mid-settle and the update aborted. The
+            # settling time is this command's, so it is part of the
+            # exchange.
+            self._sleep_with_cancel(delay, deadline)
 
         device.run_exclusive(_send_then_settle)
 

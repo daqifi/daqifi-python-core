@@ -2132,3 +2132,56 @@ def test_the_readme_send_wait_example_runs_as_written() -> None:
     assert DaqifiStreamingDevice(name="nq").send_exchange_wait_s == 60.0, (
         "the default changed without the README changing with it"
     )
+
+
+def test_a_cancel_is_honoured_even_with_a_zero_settle_delay() -> None:
+    """⛔ AN `if delay:` GUARD SKIPPED THE CANCEL CHECK.
+
+    ``_sleep_with_cancel`` is not only a sleep: at ``seconds <= 0`` it
+    checks cancellation and returns, so on this path it is also THE cancel
+    check. Guarding the call with ``if delay:`` therefore skipped the
+    check whenever a settle delay was configured as 0 -- which
+    ``validate()`` allows, since it rejects only negative values -- and a
+    cancel set during power-on was ignored: the update went on to send
+    ``LAN:FWUpdate`` and forced bridge recovery.
+
+    The helper already did the right thing at 0. The guard was an
+    optimisation that defeated it, so it is gone rather than duplicated.
+    """
+    import threading as _threading
+
+    from daqifi.firmware.update_service import (
+        DefaultFirmwareUpdateService,
+        _Cancellation,
+    )
+    from daqifi.firmware.update_options import FirmwareUpdateState
+
+    device = _fakes._make_device_with_serial_facade()
+    service = DefaultFirmwareUpdateService.__new__(DefaultFirmwareUpdateService)
+
+    cancel = _threading.Event()
+    cancel.set()                      # cancelled BEFORE the call
+    deadline = _Cancellation(
+        state=list(FirmwareUpdateState)[0],
+        operation="power on the wifi module",
+        timeout_seconds=30.0,
+        cancel_event=cancel,
+        timeout_message_builder=lambda s: f"timed out after {s}s",
+    )
+    try:
+        # delay == 0, exactly as validate() permits.
+        with pytest.raises(BaseException) as caught:
+            service._send_and_settle(
+                device, _scpi().stop_streaming(), 0, deadline
+            )
+        assert "cancel" in type(caught.value).__name__.lower() or "cancel" in str(
+            caught.value
+        ).lower(), (
+            "a cancelled update was not stopped at a zero settle delay, so "
+            f"the caller would go on to the next command: {caught.value!r}"
+        )
+    finally:
+        try:
+            device.disconnect()
+        except Exception:                                         # noqa: BLE001
+            pass
