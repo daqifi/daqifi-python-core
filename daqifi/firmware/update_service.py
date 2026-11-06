@@ -477,7 +477,9 @@ class DefaultFirmwareUpdateService:
 
     # -- device-exclusive send ------------------------------------------
 
-    def _send_and_settle(self, device, message, delay, deadline) -> None:
+    def _send_and_settle(
+        self, device, message, delay: float, deadline: _Cancellation
+    ) -> None:
         """Send a command the following delay depends on, then wait.
 
         ⛔ A BARE send IS NOT ENOUGH HERE, and the reason outlived the

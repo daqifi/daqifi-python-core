@@ -54,6 +54,27 @@ def _scpi():
     return scpi_commands
 
 
+def _deadline(operation, cancel_event=None, timeout_seconds=30.0):
+    """A real ``_Cancellation`` for the firmware updater's helpers.
+
+    ``None`` is not a stand-in for one. ``_send_and_settle`` checks the
+    deadline unconditionally -- including at a zero settle delay, where
+    that check is the helper's only cancel check -- so a test that passes
+    ``None`` for a deadline it does not care about raises
+    ``AttributeError`` instead of exercising what it meant to.
+    """
+    from daqifi.firmware.update_options import FirmwareUpdateState
+    from daqifi.firmware.update_service import _Cancellation
+
+    return _Cancellation(
+        state=list(FirmwareUpdateState)[0],
+        operation=operation,
+        timeout_seconds=timeout_seconds,
+        cancel_event=cancel_event,
+        timeout_message_builder=lambda s: f"timed out after {s}s",
+    )
+
+
 def _wait_for(predicate, timeout, what):
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -576,6 +597,7 @@ def test_a_command_a_delay_depends_on_owns_the_exchange(tmp_path) -> None:
     stream = device._transport.stream
     held = threading.Event()
     release = threading.Event()
+    deadline = _deadline("force the bootloader")
 
     def holder():
         with device._exchange_lock("other-flow"):
@@ -593,7 +615,7 @@ def test_a_command_a_delay_depends_on_owns_the_exchange(tmp_path) -> None:
         # The helper is the whole fix: it owns the exchange for the send so
         # the delay that follows measures time AFTER delivery.
         service._send_and_settle(
-            device, _scpi().force_bootloader(), 0, None
+            device, _scpi().force_bootloader(), 0, deadline
         )
 
         assert [w for w in stream.written if b"FORceBoot" in w] != [], (
@@ -1441,7 +1463,10 @@ def test_the_settle_delay_is_inside_the_exchange_it_claims_to_own() -> None:
 
     service._sleep_with_cancel = fake_sleep
     try:
-        service._send_and_settle(device, _scpi().stop_streaming(), 0.05, None)
+        service._send_and_settle(
+            device, _scpi().stop_streaming(), 0.05,
+            _deadline("stop streaming"),
+        )
         assert owned_during_sleep == [True], (
             "the settle delay ran OUTSIDE the exchange, so another flow's "
             "command can land in the window this helper exists to protect: "
@@ -2148,26 +2173,14 @@ def test_a_cancel_is_honoured_even_with_a_zero_settle_delay() -> None:
     The helper already did the right thing at 0. The guard was an
     optimisation that defeated it, so it is gone rather than duplicated.
     """
-    import threading as _threading
-
-    from daqifi.firmware.update_service import (
-        DefaultFirmwareUpdateService,
-        _Cancellation,
-    )
-    from daqifi.firmware.update_options import FirmwareUpdateState
+    from daqifi.firmware.update_service import DefaultFirmwareUpdateService
 
     device = _fakes._make_device_with_serial_facade()
     service = DefaultFirmwareUpdateService.__new__(DefaultFirmwareUpdateService)
 
-    cancel = _threading.Event()
+    cancel = threading.Event()
     cancel.set()                      # cancelled BEFORE the call
-    deadline = _Cancellation(
-        state=list(FirmwareUpdateState)[0],
-        operation="power on the wifi module",
-        timeout_seconds=30.0,
-        cancel_event=cancel,
-        timeout_message_builder=lambda s: f"timed out after {s}s",
-    )
+    deadline = _deadline("power on the wifi module", cancel_event=cancel)
     try:
         # delay == 0, exactly as validate() permits.
         with pytest.raises(BaseException) as caught:
