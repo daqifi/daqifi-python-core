@@ -407,7 +407,18 @@ class DaqifiDevice:
         self._channels: List[Any] = []
         self._timestamp_frequency: int = 0
 
-        self._consumer: Optional[StreamMessageConsumer[Any]] = None
+        # ⛔ THE STREAM AND ITS CONSUMER ARE ONE PUBLISHED VALUE, in one
+        # attribute, because send() has to pair them and anything that can
+        # be read separately can be read inconsistently. transport.connect()
+        # makes the new stream visible from transport.stream immediately,
+        # while the new consumer is installed later in connect(); a send()
+        # in between paired the NEW stream with the OLD consumer, or with
+        # None, and the echo it registered went to a parser that was not
+        # reading that stream. Two attributes kept in step by careful code
+        # is the same defect waiting for the next edit, so there is only
+        # one: ``_consumer`` is a read-only view of it, and publishing
+        # requires both halves at once (see _publish_link).
+        self._link: Optional[Tuple[Any, StreamMessageConsumer[Any]]] = None
         self._protocol_handler: Optional[ProtobufProtocolHandler] = None
         self._is_initialized = False
         self._is_disconnecting = False
@@ -648,7 +659,16 @@ class DaqifiDevice:
             # raw-bytes passthrough or a custom proto class.
             consumer = StreamMessageConsumer[Any](
                 stream,
-                ProtobufMessageParser(message_factory=self._message_factory),
+                ProtobufMessageParser(
+                    message_factory=self._message_factory,
+                    # ⛔ WIRED, not merely available. A `**ERROR:` line is
+                    # noise to a FRAME parser but it is the device
+                    # reporting something, and skipping it without a sink
+                    # would drop it silently -- trading one silent failure
+                    # for another. Logged with the device's name so it is
+                    # attributable.
+                    console_error_sink=self._on_console_error,
+                ),
                 health_sink=self._transport_health_sink(session),
             )
             with self._state_lock:
@@ -658,7 +678,15 @@ class DaqifiDevice:
                     or getattr(self._transport, "session", None) != session
                 )
                 if not superseded:
-                    self._consumer = consumer
+                    # ⭐ The stream and the consumer become visible in ONE
+                    # assignment, so send()'s single snapshot cannot
+                    # straddle two connections. `stream` here is the same
+                    # object this consumer was built on, captured above
+                    # from transport.stream before the consumer existed --
+                    # which is exactly the window that used to leak: the
+                    # stream was reachable through the transport while the
+                    # consumer for it was not yet published.
+                    self._publish_link(stream, consumer)
                     self._transport_session = session
                     # A fresh consumer has no message handlers yet; the
                     # caller's initialize() must register them again.
@@ -962,8 +990,9 @@ class DaqifiDevice:
                 "Direct message sending without a string-typed ScpiMessage "
                 "is not yet implemented."
             )
-        # ONE get_bytes() call feeds the wire and nothing else now, but it
-        # is still read exactly once: it is not guaranteed to be pure.
+        # ONE get_bytes() call feeds both the wire and the echo
+        # registration, and it is read exactly once: it is not guaranteed
+        # to be pure, and what is matched has to be exactly what was sent.
         data = message.get_bytes()
         if self._link_is_gone():
             raise DeviceNotConnectedError(
@@ -978,14 +1007,24 @@ class DaqifiDevice:
         # generation tells this connection from a newer one on the
         # same transport object. connect() bumps it before installing
         # the new stream, so the pair read here is consistent.
+        #
+        # ⭐ THE STREAM COMES FROM THE PUBLISHED LINK, NOT FROM THE
+        # TRANSPORT. Reading transport.stream here was the defect: it
+        # answers with the new session's stream from the moment
+        # transport.connect() returns, which is BEFORE connect()
+        # installs the consumer for it, so this snapshot could pair a
+        # new stream with the old consumer or with None. The echo then
+        # went to a parser that was not reading these bytes, and the
+        # parser that was read the echoed line's first byte as a frame
+        # length and stalled that reply -- #231 reopened by a
+        # reconnect. _link holds both halves in one attribute and
+        # connect() publishes them in one assignment under this lock,
+        # so one read cannot straddle two connections.
         with self._state_lock:
             generation = self._connect_generation
             transport = self._transport
-            try:
-                stream = transport.stream if transport is not None else None
-            except Exception:
-                # A closed transport's getter raises.
-                stream = None
+            link = self._link
+            stream, consumer = link if link is not None else (None, None)
         if stream is None:
             if self._shutting_down_since(transport, generation, None):
                 raise DeviceNotConnectedError(
@@ -996,6 +1035,16 @@ class DaqifiDevice:
             raise NotImplementedError(
                 "Sending without a transport-backed stream is not supported."
             )
+        # Still before the first byte goes out, so no echo of it can
+        # arrive ahead of the registration -- and after the checks
+        # above, INCLUDING the _link_is_gone() refusal, so a send that
+        # never reaches the wire leaves no entry behind that nothing can
+        # ever match. An immortal entry is not inert: the console-quiet
+        # rule needs the registry empty, and #204's audit rounds showed
+        # no byte-level rule can tell a command line from the start of a
+        # length-prefixed frame (#231), so the library knowing what it
+        # sent is the only sound basis for recognising an echo.
+        self._expect_console_echo(data, consumer)
         # Loop on partial writes — unbuffered file-like objects
         # (sock.makefile with buffering=0) may write fewer bytes
         # than requested per call. Without the loop, the tail of
@@ -1084,6 +1133,75 @@ class DaqifiDevice:
         except Exception:
             return True
         return current is not stream
+
+    def _on_console_error(self, line: str) -> None:
+        """A ``**ERROR:`` line the frame parser skipped.
+
+        The firmware's convention is that errors do not travel in the
+        stream and are read back with ``SYSTem:LOG?``; one that arrives
+        here anyway is still the device telling us something, so it is
+        reported rather than discarded.
+        """
+        _log.warning("device %s reported on the console: %s", self.name, line)
+
+    def _expect_console_echo(self, data: bytes, consumer: Any) -> None:
+        """Tell ``consumer``'s frame parser the EXACT bytes just written.
+
+        ⛔ Takes the bytes, not the command string. Passing the string and
+        letting the parser strip it discarded whitespace that
+        ``get_bytes()`` really does send -- a trailing space -- so the echo
+        never matched and the stall came back. These are the same bytes
+        handed to the stream, from the same ``get_bytes()`` call.
+
+        ⛔ The consumer is a REQUIRED argument, not read from ``self``
+        here: the caller captured it in the same lock hold as the stream it
+        writes to, and re-reading ``self._consumer`` would reintroduce the
+        split this parameter exists to close. There is deliberately no
+        default -- a fallback to ``self._consumer`` would fail open.
+
+        Best-effort and silent: a parser that does not take echoes (the
+        text capture's line parser) simply has no such method, and failing
+        to register an echo must never stop a command going out.
+        """
+        parser = getattr(consumer, "_parser", None) if consumer else None
+        expect = getattr(parser, "expect_console_echo", None)
+        if expect is None:
+            return
+        try:
+            expect(data)
+        except Exception:
+            pass
+
+    @property
+    def _consumer(self) -> Optional["StreamMessageConsumer[Any]"]:
+        """The published consumer, or None. A READ-ONLY view of
+        :attr:`_link` so it cannot disagree with the stream it reads."""
+        link = self._link
+        return link[1] if link is not None else None
+
+    @_consumer.setter
+    def _consumer(self, value: Optional["StreamMessageConsumer[Any]"]) -> None:
+        """Only ``None`` is assignable: unpublishing the consumer
+        unpublishes its stream with it, as a unit.
+
+        ⛔ Publishing goes through :meth:`_publish_link`, which demands the
+        stream too. That is the whole point -- a setter that accepted a
+        bare consumer would let the pair drift apart again, which is the
+        defect this attribute exists to make unrepresentable.
+        """
+        if value is not None:
+            raise AssertionError(
+                "Publish the consumer with its stream via _publish_link(); "
+                "assigning _consumer alone would let the pair drift."
+            )
+        self._link = None
+
+    def _publish_link(
+        self, stream: Any, consumer: "StreamMessageConsumer[Any]"
+    ) -> None:
+        """Make ``stream`` and ``consumer`` visible together, in one
+        assignment. Callers hold ``_state_lock``."""
+        self._link = (stream, consumer)
 
     def _on_consumer_thread(self) -> bool:
         """Whether the calling thread is the protobuf consumer's own thread,
