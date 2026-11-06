@@ -178,12 +178,10 @@ def test_the_setup_commands_are_not_error_checked_or_retried() -> None:
     needs a firmware way to tag replies (#241).
 
     ⚠ RENAMED AND NARROWED to what that ruling actually says. It used to
-    assert the exact command COUNT, which is broader than CE: B and made
-    any added command a violation -- including the ``SYSTem:ECHO?`` query
-    that ruling EN: A later required, for an unrelated purpose (learning
-    the echo state so the frame parser never has to guess it). The
-    substance of CE: B is preserved exactly: no error query, and each
-    setup command sent once.
+    assert the exact command COUNT, which is broader than CE: B: the
+    ruling is about not error-checking and not retrying, so that is what
+    is asserted -- no error query, the sequence unchanged in shape and
+    order, and each setup command sent exactly once.
     """
     stream = _Stream()
     device = _device(stream)
@@ -193,7 +191,7 @@ def test_the_setup_commands_are_not_error_checked_or_retried() -> None:
         assert not [c for c in commands if "ERRor?" in c or "ERR?" in c], (
             f"initialize error-checked its setup commands: {commands}"
         )
-        setup = [c for c in commands if not c.startswith("SYSTem:ECHO?")]
+        setup = list(commands)
         assert len(setup) == len(_SETUP), (
             f"the setup sequence changed shape: {setup}"
         )

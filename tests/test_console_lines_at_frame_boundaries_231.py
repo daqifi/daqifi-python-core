@@ -1120,7 +1120,13 @@ def test_a_signed_plus_one_turns_echo_back_on() -> None:
         )
 
 
-# ---- ruling EN A: ask the device, and accept every spelling -------------
+# ---- every spelling the firmware accepts -------------------------------
+#
+# ⚠ An EN A revision also had initialize() QUERY SYSTem:ECHO? so the echo
+# state was never unknown. Ruling ET B removed it: a plain-text reply on a
+# stream a frame parser reads can arrive after any bounded window, and a
+# late one was read as a 45-byte length that swallowed the next real reply.
+# The regex below is the part that survived -- it adds no wire traffic.
 
 
 def test_every_spelling_the_firmware_accepts_is_recognised() -> None:
@@ -1156,109 +1162,3 @@ def test_every_spelling_the_firmware_accepts_is_recognised() -> None:
         )
 
 
-def test_initialize_asks_the_device_for_the_echo_state() -> None:
-    """⭐ ASKING BEATS MODELLING, and it closes the unknown state.
-
-    Every other route to the echo state infers it from the library's own
-    sends, which needs a model of the device's state kept in step with
-    every spelling of our commands -- and each audit round found another
-    spelling that inference missed. The firmware answers SYSTem:ECHO?.
-
-    After initialize the state must be KNOWN, so the console-quiet rule
-    can engage even on a connection that found echo already off (the case
-    that otherwise never engages, because the disable is then never echoed
-    and its registration is immortal).
-    """
-    scpi = _scpi()
-    device = _fakes._make_device_with_serial_facade(
-        {b"SYSTem:ECHO?": b"-1\r\n"}
-    )
-    try:
-        parser = device._consumer._parser
-        assert parser._echo_enabled is None, "precondition: state unknown"
-
-        device.initialize(response_timeout_s=0.3)
-
-        assert parser._echo_enabled is False, (
-            "initialize did not learn the echo state from the device, so "
-            "the parser is still guessing"
-        )
-        written = b"".join(device._transport.stream.written)
-        assert b"SYSTem:ECHO?" in written, (
-            f"initialize never asked: {written!r}"
-        )
-        # And it asked BEFORE disabling, so it knows whether its own
-        # disable will be echoed.
-        assert written.index(b"SYSTem:ECHO?") < written.index(b"SYSTem:ECHO -1"), (
-            "initialize disabled echo before asking what it was"
-        )
-    finally:
-        try:
-            device.disconnect()
-        except Exception:                                         # noqa: BLE001
-            pass
-
-
-def test_the_console_goes_quiet_after_initialize_on_any_connection() -> None:
-    """⛔ THE CONSEQUENCE, not just the state. This is what hardware caught
-    and the state-only test missed.
-
-    Learning the echo state is only useful if the console then actually
-    goes QUIET. It did not: the ``SYSTem:ECHO?`` query runs inside a text
-    capture, so ``send()`` registered its echo on the FRAME parser while
-    the capture's line parser consumed the real one -- one entry that can
-    never drain, which pins the quiet state off for the whole connection.
-    A "known off" answer now clears the registry, which is sound precisely
-    because the device has said nothing is being echoed.
-
-    Asserted for BOTH connection shapes, since the second is the one the
-    whole ruling exists for.
-    """
-    scpi = _scpi()
-
-    # ---- the case the ruling exists for: echo ALREADY OFF ----
-    # Nothing is echoed, so nothing can be outstanding and the console is
-    # quiet the moment initialize ends. Before this change the query's own
-    # registration sat here forever and the rule never engaged.
-    device = _fakes._make_device_with_serial_facade({b"SYSTem:ECHO?": b"-1\r\n"})
-    try:
-        device.initialize(response_timeout_s=0.3)
-        parser = device._consumer._parser
-        assert parser._echo_enabled is False
-        assert parser._console_is_quiet(), (
-            "echo already off: the quiet rule did not engage -- "
-            f"{parser._expected_echoes} outstanding, which can never drain"
-        )
-    finally:
-        try:
-            device.disconnect()
-        except Exception:                                         # noqa: BLE001
-            pass
-
-    # ---- echo was ON: the disable IS echoed, so one entry is in flight ----
-    # ⚠ The fake does not echo, so that entry legitimately remains. What
-    # must be true is that it is the ONLY one -- the query's registration
-    # is gone -- and that feeding the echo the device really would send
-    # drains it and the console goes quiet.
-    device = _fakes._make_device_with_serial_facade({b"SYSTem:ECHO?": b"1\r\n"})
-    try:
-        device.initialize(response_timeout_s=0.3)
-        parser = device._consumer._parser
-        assert parser._echo_enabled is False
-        disable = scpi.disable_device_echo().get_bytes().rstrip(b"\r\n")
-        assert parser._expected_echoes == [disable], (
-            "with echo on, the only outstanding echo after initialize must "
-            "be the disable's own -- anything else cannot drain: "
-            f"{parser._expected_echoes}"
-        )
-        # What the device actually sends next.
-        parser.parse_messages(disable + b"\r\n")
-        assert parser._console_is_quiet(), (
-            "the disable's echo arrived and the console still did not go "
-            f"quiet: {parser._expected_echoes}"
-        )
-    finally:
-        try:
-            device.disconnect()
-        except Exception:                                         # noqa: BLE001
-            pass
