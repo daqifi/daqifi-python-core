@@ -351,9 +351,56 @@ class ProtobufMessageParser:
         Still three-valued: ``None`` means "we do not know", which behaves
         like ON, because registering a spurious echo wastes a list entry
         while missing a real one stalls a reply forever.
+
+        ⛔ A "KNOWN OFF" ANSWER ALSO CLEARS THE REGISTRY, and this is the
+        one place where clearing is sound. The device telling us echo is
+        OFF means nothing is being echoed, so every outstanding entry is
+        for a command whose echo either already arrived or never will --
+        there is nothing in flight to lose. Without this the fix defeated
+        itself: the ``SYSTem:ECHO?`` query is issued inside a text
+        capture, so ``send()`` registers its echo on the FRAME parser
+        while the capture's line parser consumes the real one, leaving
+        exactly one entry that can never drain and pinning the console out
+        of the quiet state for the connection's life. Found on hardware --
+        the unit test checked the STATE and not the consequence.
+
+        ⚠ This is NOT the clearing an earlier round rejected. That one
+        cleared when WE SENT a disable, where the disable's own echo is
+        still on the wire and dropping it stalls the reply behind it.
+        Here the device has told us echo is already off, which is a
+        stronger fact and arrives with nothing in flight.
         """
         with self._echo_lock:
             self._echo_enabled = enabled
+            if enabled is False:
+                self._expected_echoes = []
+
+    def forget_console_echo(self, sent: bytes) -> None:
+        """Drop a registration whose echo this parser will never see.
+
+        ⛔ FOR A COMMAND SENT INSIDE A TEXT CAPTURE, and only the caller
+        knows that. A capture swaps a LINE parser onto the stream, so it
+        consumes the echoed command line itself -- while ``send()`` has
+        already registered that echo HERE, on the frame parser, which can
+        now never match it. One such entry pins the console out of the
+        quiet state for the life of the connection, because the quiet rule
+        needs the registry empty and an entry nothing can match never
+        leaves.
+
+        Found on hardware: the fix for the unknown echo state defeated
+        itself, because the ``SYSTem:ECHO?`` query it added is issued
+        inside a capture.
+        """
+        if isinstance(sent, str):
+            sent = sent.encode("ascii", errors="ignore")
+        line = bytes(sent).rstrip(b"\r\n")
+        if not line:
+            return
+        with self._echo_lock:
+            try:
+                self._expected_echoes.remove(line)
+            except ValueError:
+                pass            # already matched, or never registered
 
     @classmethod
     def _echo_state_after(

@@ -1053,9 +1053,10 @@ class DaqifiDevice:
         spurious registration wastes a list entry while a missing one
         stalls a reply forever.
         """
+        query = scpi_commands.get_device_echo()
         try:
             lines = self.execute_text_command(
-                lambda: self.send(scpi_commands.get_device_echo()),
+                lambda: self.send(query),
                 # ⚠ DELIBERATELY SHORT. initialize() has a sub-second
                 # budget (an earlier quiet-window check added 1.25 s to
                 # every connect and was removed for it), and a device that
@@ -1072,7 +1073,15 @@ class DaqifiDevice:
                 "state unknown, which is treated as echo ON",
                 self.name, exc_info=True,
             )
+            self._forget_parser_echo(query)
             return
+
+        # ⛔ THE QUERY WAS SENT INSIDE A CAPTURE, so its own echo went to
+        # the capture's line parser and send()'s registration on the FRAME
+        # parser can never match. Left behind, that single entry keeps the
+        # console out of the quiet state for the whole connection -- which
+        # is exactly how this fix defeated itself until hardware showed it.
+        self._forget_parser_echo(query)
 
         state: Optional[bool] = None
         for line in lines or ():
@@ -1098,12 +1107,26 @@ class DaqifiDevice:
             return
         self._set_parser_echo_state(state)
 
-    def _set_parser_echo_state(self, enabled: bool) -> None:
-        """Tell the published connection's frame parser the echo state."""
+    def _forget_parser_echo(self, message: Any) -> None:
+        """Drop ``message``'s echo registration from the frame parser."""
+        parser = self._published_parser()
+        forget = getattr(parser, "forget_console_echo", None)
+        if forget is None:
+            return
+        try:
+            forget(message.get_bytes())
+        except Exception:
+            pass
+
+    def _published_parser(self) -> Any:
+        """The frame parser of the published connection, or None."""
         link = self._link
         consumer = link[1] if link is not None else None
-        parser = getattr(consumer, "_parser", None) if consumer else None
-        setter = getattr(parser, "set_echo_state", None)
+        return getattr(consumer, "_parser", None) if consumer else None
+
+    def _set_parser_echo_state(self, enabled: bool) -> None:
+        """Tell the published connection's frame parser the echo state."""
+        setter = getattr(self._published_parser(), "set_echo_state", None)
         if setter is None:
             return
         try:
