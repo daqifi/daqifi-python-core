@@ -255,6 +255,10 @@ class NyquistDevice:
 
     def disconnect(self):
         """Disconnect from device"""
+        # A listing from this session is not a safe download length for
+        # the next one: the card may change while disconnected. Same
+        # reasoning as DaqifiStreamingDevice.disconnect.
+        self._forget_sd_file_sizes()
         if self._connected:
             self._comm.close()
             self._connected = False
@@ -673,6 +677,9 @@ class NyquistDevice:
         Example:
             device.sd_enable(True)
         """
+        # Can change what is on the card, so a listed size is no
+        # longer a safe download boundary (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         msg = scpi_commands.enable_storage_sd() if enable else scpi_commands.disable_storage_sd()
         success, error_response = self._comm.send_command_with_error(msg.data)
         check_setter_response(success, error_response, f"set SD enabled={enable}")
@@ -735,8 +742,68 @@ class NyquistDevice:
 
     def sd_get_file_size(self, filename: str) -> int:
         """Get cached file size from last LIST command (0 if the file wasn't
-        in it, or no listing has run yet)."""
-        return self._file_sizes.get(filename, 0)
+        in it, or no listing has run yet).
+
+        ⚠ Also 0 after anything that can change the card — see
+        :meth:`_forget_sd_file_sizes`. A size from before a recording is not
+        a size.
+        """
+        return self._listed_size_for(filename) or 0
+
+    def _listed_size_for(self, filename: str) -> Optional[int]:
+        """The last listing's size for ``filename``, or ``None`` when it is
+        not known UNAMBIGUOUSLY.
+
+        ⛔ THE KEYS AND THE CALLERS DISAGREE, and silently. A listing stores
+        what the device printed -- ``DAQiFi/log.bin`` -- while a download is
+        asked for by the name the caller holds, usually the bare
+        ``log.bin``. An exact dict lookup therefore MISSES for every
+        path-prefixed listing, which is the normal case, and a miss means no
+        size, and no size means the terminal-marker scan falls back to "the
+        first marker ends the file". That failure is **silent**: the
+        discrimination this is here to provide just never engages. Matching
+        on the final path segment is what makes the sized path reachable at
+        all.
+
+        ⚠ Ambiguity resolves to ``None``, never to a guess: two listed files
+        sharing a basename cannot say which one is being fetched, and an
+        enforced boundary from the wrong file rejects a good download. The
+        unsized path is the safe direction.
+
+        ⚠ A 0 is "unknown", not "empty": the old listing format records 0
+        for a file whose size it did not print, and enforcing a zero-byte
+        boundary would reject every download of it.
+        """
+        exact = self._file_sizes.get(filename)
+        if exact:
+            return exact
+        wanted = filename.rsplit("/", 1)[-1]
+        sizes = [
+            size for path, size in self._file_sizes.items()
+            if path.rsplit("/", 1)[-1] == wanted and size
+        ]
+        return sizes[0] if len(sizes) == 1 else None
+
+    def _forget_sd_file_sizes(self) -> None:
+        """Drop the cached listing sizes.
+
+        ⛔ CALLED FROM EVERY OPERATION THAT CAN CHANGE THE CARD, because a
+        cached size became load-bearing the moment the download started
+        enforcing it: a listing taken before more data was logged rejects a
+        perfectly good transfer with ``OSError``. The base ignored these
+        numbers entirely, so staleness cost nothing there.
+
+        ⭐ THE COSTS ARE ASYMMETRIC, which is why this forgets everything
+        rather than tracking what changed. Over-forgetting loses only the
+        marker-in-content discrimination and degrades to the unsized path
+        the base always used; under-forgetting raises on valid data. When in
+        doubt, forget.
+
+        Mirrors ``DaqifiStreamingDevice._forget_sd_card_sizes``, which does
+        the same for the modern path -- including on disconnect, since a
+        listing from an earlier session is not a safe length either.
+        """
+        self._file_sizes = {}
 
     def sd_get_file(self, filename: str, timeout: float = 30.0) -> str:
         """
@@ -851,7 +918,10 @@ class NyquistDevice:
             destination,
             filename,
             timeout_s=timeout,
-            expected_size=self._file_sizes.get(filename) or None,
+            # Resolved by name, not by an exact dict hit: listings are
+            # path-prefixed and callers pass bare names, so a plain lookup
+            # misses in the normal case and the size silently goes unused.
+            expected_size=self._listed_size_for(filename),
             # The command as sent, because the console may echo it back
             # ahead of the payload. Removed as a prefix, and before any
             # marker classification -- the echo of a GET for a file named
@@ -872,6 +942,9 @@ class NyquistDevice:
         Example:
             device.sd_delete_file("old_data.csv")
         """
+        # Can change what is on the card, so a listed size is no
+        # longer a safe download boundary (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         success, error_response = self._comm.send_command_with_error(
             scpi_commands.delete_sd_file(filename).data
         )
@@ -886,6 +959,9 @@ class NyquistDevice:
         Example:
             device.sd_format()  # Careful!
         """
+        # Can change what is on the card, so a listed size is no
+        # longer a safe download boundary (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         success, error_response = self._comm.send_command_with_error(
             scpi_commands.format_sd_card().data
         )
@@ -903,6 +979,11 @@ class NyquistDevice:
             device.sd_set_logging("data.csv")
             # Now streaming will log to SD card
         """
+        # Names the file a following recording appends to, and the legacy
+        # API has no separate "start logging" step that would invalidate
+        # later. Forgetting costs a listing; keeping costs a rejected
+        # download (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         success, error_response = self._comm.send_command_with_error(
             scpi_commands.set_sd_logging_file_name(filename).data
         )
@@ -922,6 +1003,9 @@ class NyquistDevice:
             results = device.sd_benchmark(1024)
             print(f"Speed: {results['speed_mbps']:.2f} MB/s")
         """
+        # Can change what is on the card, so a listed size is no
+        # longer a safe download boundary (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         # Run benchmark
         self._comm.send_command(scpi_commands.run_sd_benchmark(size_kb).data)
 
