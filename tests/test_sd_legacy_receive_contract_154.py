@@ -136,38 +136,49 @@ def test_a_text_payload_keeps_its_own_leading_and_trailing_whitespace() -> None:
 # -- instance 2: the EOF marker is found by SEARCH, so content truncates ----
 
 
-def test_a_binary_payload_containing_the_eof_marker_is_not_truncated() -> None:
-    """``if end_marker in response: break`` ends the transfer at the first
-    occurrence ANYWHERE, so a file containing those bytes cuts itself
-    short. The size from the listing is what tells content from terminator.
+def test_a_binary_payload_containing_the_eof_marker_truncates_there() -> None:
+    """⚠ WITHDRAWN BY RULING FO A2, and this test is inverted rather than
+    deleted so the limitation is pinned.
+
+    The listed size used to let the receiver read past an
+    ``__END_OF_FILE__`` occurring inside file content. That machinery
+    produced every HIGH from r2 to r4 and delivered a capability neither
+    #154 nor #206 asked for, so it is gone: the first terminal marker ends
+    the file, which is exactly what the base did.
     """
     payload = b"head" + END_OF_FILE_MARKER + b"tail"
     device = _device(
         payload + END_OF_FILE_MARKER,
-        sizes={"log_a.bin": len(payload)},
+        sizes={"log_a.bin": len(payload)},   # present, and not consulted
     )
-    assert device.sd_get_file_binary("log_a.bin", timeout=2.0) == payload
+    assert device.sd_get_file_binary("log_a.bin", timeout=2.0) == b"head"
 
 
-# -- instance 3: a failed transfer is indistinguishable from a short file --
 
+def test_a_transfer_error_times_out_rather_than_raising() -> None:
+    """⚠ WITHDRAWN BY RULING FO A2 on this path only. ``__TRANSFER_ERROR__``
+    detection is gone from the legacy download because a file may
+    legitimately contain those bytes, and the overlap at a join -- content
+    ending ``...__TRANSFER_ERROR`` plus the real ``__END_OF_FILE__`` --
+    completes the marker by accident and raised on a VALID transfer (r4 #2).
 
-def test_a_transfer_error_raises_instead_of_waiting_out_the_timeout() -> None:
-    """``__TRANSFER_ERROR__`` is unknown to the legacy path, which waits for
-    an EOF marker that will never come and then reports a timeout -- or, on
-    the text path, returns the partial content as if it were the file."""
+    Fixing that in the shared scan would have reached the two
+    already-correct callers, so the legacy path simply stopped asking. A
+    failed transfer times out, as it did before this PR. The reason becomes
+    available in #253, from the error queue.
+    """
     device = _device(b"partial" + TRANSFER_ERROR_MARKER)
-    with pytest.raises(SdCardTransferErrorException):
-        device.sd_get_file_binary("log_a.bin", timeout=2.0)
+    with pytest.raises(TimeoutError):
+        device.sd_get_file_binary("log_a.bin", timeout=0.4)
 
 
-def test_the_text_path_also_raises_on_a_transfer_error() -> None:
+
+def test_the_text_path_also_times_out_on_a_transfer_error() -> None:
+    """The text sibling, same withdrawal."""
     device = _device(b"partial" + TRANSFER_ERROR_MARKER)
-    with pytest.raises(SdCardTransferErrorException):
-        device.sd_get_file("log_a.csv", timeout=2.0)
+    with pytest.raises(TimeoutError):
+        device.sd_get_file("log_a.csv", timeout=0.4)
 
-
-# -- the head strip is a PREFIX test, and must stay one ---------------------
 
 
 def test_the_echoed_command_and_prompt_are_still_stripped() -> None:

@@ -1,6 +1,14 @@
-"""r2's five defects, each introduced by this PR, each pinned two-sided.
+"""r2's defects that SURVIVE ruling FO A2, each introduced by this PR.
 
-Numbered as the audit numbered them.
+⚠ Four tests were removed from this file when FO A2 withdrew the legacy
+path's size logic: the two that pinned the hint fallback in both stale
+directions, the one that pinned the agreeing-size discrimination, and the one
+asserting the fallback did not swallow a device error. All four described a
+mechanism that no longer exists. What the removal left behind is pinned in
+test_sd_legacy_path_is_unsized_154.py instead.
+
+What remains here are the fixes FO A2 keeps: the eighth SD writer's
+invalidation hook, the preamble flush, and the per-path timeout semantics.
 """
 
 import io
@@ -185,64 +193,6 @@ def test_the_binary_paths_timeout_stays_absolute() -> None:
 
 
 # -- the hint: a disagreeing size must not reject a valid download ---------
-
-
-def test_a_stale_SMALLER_size_falls_back_instead_of_raising() -> None:
-    """(a) The marker is not at the promised boundary. The base ignored the
-    size entirely, so this has never been an error on this path."""
-    device = _device(b"DAQiFi/log.bin 3\r\n__END_OF_LIST__ OK\r\n",
-                     b"abcdef" + END_OF_FILE_MARKER)
-    device.sd_list_files()
-    assert device._listed_size_for("DAQiFi/log.bin") == 3
-    assert device.sd_get_file_binary("DAQiFi/log.bin", timeout=2.0) == b"abcdef"
-
-
-def test_a_stale_LARGER_size_returns_the_right_bytes() -> None:
-    """(b) The marker arrives EARLY and the promised bytes never come.
-
-    ⚠ SUPERSEDED IN r4, and deliberately: this asserted the fallback was
-    PROMPT (a 0.3 s grace). Fixing r3's HIGH B showed that "marker present,
-    payload below the listed size, line quiet" is the same observation as
-    content that merely contains a marker, so stopping early returns a
-    silently short file. The capture now waits for the caller's timeout and
-    the promptness claim is withdrawn -- see
-    test_a_stale_larger_size_now_costs_the_TIMEOUT_not_the_grace.
-
-    What still holds, and is what matters: the stale size does not reject
-    the download.
-    """
-    device = _device(b"DAQiFi/log.bin 9999\r\n__END_OF_LIST__ OK\r\n",
-                     b"abcdef" + END_OF_FILE_MARKER)
-    device.sd_list_files()
-    assert device._listed_size_for("DAQiFi/log.bin") == 9999
-    assert device.sd_get_file_binary("DAQiFi/log.bin", timeout=1.0) == b"abcdef"
-
-
-def test_an_agreeing_size_still_discriminates_a_marker_in_content() -> None:
-    """The hint is not a no-op: when the listed size and the wire agree, the
-    size still tells content from terminator, which is the whole reason the
-    sized path exists."""
-    body = b"head" + END_OF_FILE_MARKER + b"tail"
-    device = _device(
-        f"DAQiFi/log.bin {len(body)}\r\n__END_OF_LIST__ OK\r\n".encode(),
-        body + END_OF_FILE_MARKER,
-    )
-    device.sd_list_files()
-    assert device.sd_get_file_binary("DAQiFi/log.bin", timeout=2.0) == body
-
-
-def test_a_device_reported_transfer_error_is_not_swallowed_by_the_fallback() -> None:
-    """⚠ The fallback catches a DISAGREEMENT ABOUT LENGTH, not a device
-    fault. SdCardTransferErrorException is not an OSError and must still
-    reach the caller."""
-    from daqifi.exceptions import SdCardTransferErrorException
-    from daqifi.sdcard import TRANSFER_ERROR_MARKER
-
-    device = _device(b"DAQiFi/log.bin 3\r\n__END_OF_LIST__ OK\r\n",
-                     b"partial" + TRANSFER_ERROR_MARKER)
-    device.sd_list_files()
-    with pytest.raises(SdCardTransferErrorException):
-        device.sd_get_file_binary("DAQiFi/log.bin", timeout=2.0)
 
 
 def test_a_file_NAMED_for_a_marker_is_downloaded_whole_with_echo_on() -> None:

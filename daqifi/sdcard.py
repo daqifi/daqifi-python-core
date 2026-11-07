@@ -188,12 +188,12 @@ class _PreambleSkip:
         that is still undecidable.
 
         ⛔ ONE DEFINITION OF "WHERE THE HEAD ENDS", shared with the capture
-        loop in ``device.py``. It had two of its own instead -- one for
-        measuring progress against a listed size, one for deciding where to
-        scan for a terminal marker -- and both were wrong in the same way:
-        they counted or scanned the ECHO AND PROMPT as if they were payload.
-        A payload-only target was then satisfied by 41 bytes of framing, and
-        the capture stopped inside the content.
+        loop in ``device.py``, which had two approximations of its own and
+        both scanned or counted the ECHO AND PROMPT as if they were payload.
+        The size machinery that made the counting matter is gone (ruling FO
+        A2), but the scanning still does: a GET names a file, so an echoed
+        command can contain a terminal marker's own bytes, and a capture
+        that scans the head stops before the payload.
 
         0 means "no framing here" (echo off). ``None`` means the buffer is
         still a proper prefix of a longer candidate, so nothing can be
@@ -932,6 +932,7 @@ class SdCardFileReceiver:
         timeout_s: Optional[float] = None,
         expected_size: Optional[int] = None,
         preamble: Optional[bytes] = None,
+        eof_only: bool = False,
     ) -> int:
         """Read until the EOF marker, write everything before it to
         ``destination_stream``, and return the total bytes written.
@@ -954,6 +955,14 @@ class SdCardFileReceiver:
                 upstream). ``None`` uses the default; pass an
                 explicit value to override.
             expected_size: the file's size, if known.
+            eof_only: treat ONLY ``__END_OF_FILE__`` as terminal, so
+                ``__TRANSFER_ERROR__`` is ordinary content and is never
+                raised. Omitted (the default) both markers terminate, which
+                is what the streaming-device and download-to-temp callers
+                rely on. The legacy ``NyquistDevice`` download passes it
+                because its error-marker detection was withdrawn: a file may
+                legitimately contain those bytes, and on that path a false
+                device-error is worse than the base's silence.
             preamble: the GET command's bytes as sent, when the caller
                 shares the console with the download and so may see that
                 command echoed back, followed by a prompt. Given it, that
@@ -1042,15 +1051,28 @@ class SdCardFileReceiver:
             if outcome is not None:
                 raise SdCardTransferErrorException(file_name, outcome[1])
 
+        # Bytes released by the preamble skip at the end of the stream, fed
+        # back through the SAME classification path as a read chunk. An
+        # earlier revision flushed only on the EOF branch and tried to
+        # `continue` on the deadline branch, where re-entering past an
+        # expired deadline discarded them -- so a serial-shaped source
+        # (in_waiting) that never reports EOF raised a timeout for a whole
+        # payload the skip was holding.
+        injected: Optional[bytes] = None
+
         while True:
-            if time.monotonic() >= deadline:
-                # ⚠ A held head is NOT flushed here, unlike the EOF branch
-                # below. `continue` would re-enter past an already-expired
-                # deadline and the next read would overwrite the flushed
-                # bytes, so a flush on this path is theatre. The only caller
-                # that passes a preamble reads from an in-memory stream,
-                # where EOF -- not the clock -- is the terminal condition,
-                # and that branch does flush.
+            if injected is not None:
+                chunk = injected
+                injected = None
+            elif time.monotonic() >= deadline:
+                if skip is not None:
+                    tail = skip.flush()
+                    skip = None
+                    if tail:
+                        # One more pass to classify what was held; the
+                        # deadline is already expired, so this cannot loop.
+                        injected = tail
+                        continue
                 _transfer_error_if_open()
                 raise TimeoutError(
                     f"SD card file download timed out after "
@@ -1058,7 +1080,7 @@ class SdCardFileReceiver:
                     f"{total_bytes} bytes before timeout."
                 )
 
-            if has_in_waiting:
+            elif has_in_waiting:
                 pending = self._source.in_waiting
                 if not pending:
                     time.sleep(self._IDLE_SLEEP_S)
@@ -1083,29 +1105,25 @@ class SdCardFileReceiver:
                     continue
                 if not chunk:
                     # ⛔ FLUSH THE PREAMBLE SKIP FIRST. It holds bytes while a
-                    # longer head candidate could still complete, so at EOF a
-                    # payload that is a proper prefix of one is sitting in it;
-                    # raising here reported a timeout for bytes we had. One
-                    # more pass classifies them, then this branch raises.
+                    # longer head candidate could still complete, so at the
+                    # end of the stream a payload that is a proper prefix of
+                    # one is sitting in it; raising here reported a timeout
+                    # for bytes we had. Released through `injected`, the same
+                    # way the deadline branch does it, so there is ONE path
+                    # from "held" to "classified" rather than two.
                     if skip is not None:
                         tail = skip.flush()
                         skip = None
                         if tail:
-                            chunk = tail
-                        else:
-                            _transfer_error_if_open()
-                            raise TimeoutError(
-                                f"Transport stream closed before receiving the "
-                                f"EOF marker. Received {total_bytes} bytes."
-                            )
-                    else:
-                        # Closed: nothing can follow, so an open
-                        # transfer-error candidate is the device's marker.
-                        _transfer_error_if_open()
-                        raise TimeoutError(
-                            f"Transport stream closed before receiving the EOF "
-                            f"marker. Received {total_bytes} bytes."
-                        )
+                            injected = tail
+                            continue
+                    # Closed: nothing can follow, so an open transfer-error
+                    # candidate is the device's marker.
+                    _transfer_error_if_open()
+                    raise TimeoutError(
+                        f"Transport stream closed before receiving the EOF "
+                        f"marker. Received {total_bytes} bytes."
+                    )
             chunk_bytes = bytes(chunk)
             if skip is not None:
                 # BEFORE either classification path below, deliberately: the
@@ -1136,7 +1154,9 @@ class SdCardFileReceiver:
                         "file is longer than listed or the transfer is corrupt."
                     )
                 continue
-            found, position, found_marker = _find_terminal_marker(trailing, chunk_bytes)
+            scan = _find_eof_terminal_marker if eof_only \
+                else _find_terminal_marker
+            found, position, found_marker = scan(trailing, chunk_bytes)
             if found:
                 # ``position`` is in the virtual [trailing + chunk] view.
                 # Write everything before it; preserve everything after
@@ -1215,6 +1235,28 @@ def _find_terminal_marker(
         if position >= 0 and (not best[0] or position < best[1]):
             best = (True, position, marker)
     return best
+
+
+def _find_eof_terminal_marker(
+    trailing: bytes, chunk: bytes
+) -> Tuple[bool, int, bytes]:
+    """``_find_terminal_marker`` restricted to the END-OF-FILE marker.
+
+    ⛔ A TWIN RATHER THAN A PARAMETER, because ``_find_terminal_marker`` is
+    shared with the two already-correct download callers and the ruling
+    leaves it untouched. Identical scan and identical return shape, so the
+    read loop's index arithmetic is unchanged -- only the marker set
+    differs.
+
+    ⚠ Not ``_find_eof_marker`` (right above), which is dead upstream-mirror
+    code with DIFFERENT scan bounds: it starts at
+    ``max(0, len(trailing) - len(marker) + 1)`` on the assumption that
+    ``trailing`` was already scanned. Reusing it would have changed the
+    loop's semantics subtly, which is the last thing this path needs.
+    """
+    combined = bytes(trailing) + bytes(chunk)
+    position = combined.find(END_OF_FILE_MARKER)
+    return (position >= 0, position, END_OF_FILE_MARKER)
 
 
 def _find_eof_marker(
