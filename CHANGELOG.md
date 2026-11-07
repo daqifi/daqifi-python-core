@@ -6,7 +6,26 @@ aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - TBD
+
+The first tagged release. Everything since the 0.1.0 development version,
+which was never tagged.
+
+### Behaviour changes
+- `NyquistDevice.sd_get_file_size()` returns 0 (unknown) instead of a stale
+  cached size after `sd_enable`, `sd_set_logging`, `sd_delete_file`,
+  `sd_format`, `sd_benchmark` or `disconnect`. Each of those can change or
+  invalidate what is on the card, so a size cached before it no longer
+  describes the file (#257).
+- `send()` now WAITS while another flow holds the device (see Changed), and
+  can raise `ExchangeTimeoutError` instead of returning (#238, #251).
+
 ### Added
+- `ExchangeTimeoutError`: a `send()` could not get exclusive use of the
+  device, and the command was NOT sent -- from an ordinary thread after
+  `send_exchange_wait_s` (60 s by default, settable per device), or at once
+  from the message-received callback thread while another flow holds the
+  device (#238, #251).
 - `update_wifi_module(..., skip_version_check=True)` flashes the WiFi module
   even when it already reports the latest published version. Mirrors
   `skipVersionCheck` on the C# `UpdateWifiModuleAsync`. Without it an
@@ -14,11 +33,10 @@ aims to follow [Semantic Versioning](https://semver.org/).
   be exercised on a bench whose boards are already current. It overrides the
   version check only — every other refusal on the path still applies (#190).
 - `DaqifiDevice.delivery_fault` and `DeliveryFaultError`: why this
-  connection can no longer be trusted to have received what it was told —
-  a command queued during an exchange that was dropped or failed after
-  `send()` returned, or a message consumer that could not be restarted so
-  nothing is reading the stream. `start_streaming()` raises it instead of
-  reporting success, `is_streaming` reads False, and a successful
+  connection can no longer be trusted to have received what it was told --
+  today, a message consumer that could not be restarted after a text
+  exchange, so nothing is reading the stream. `start_streaming()` raises it
+  instead of reporting success, `is_streaming` reads False, and a successful
   `connect()` clears it (#238).
 - `DaqifiDevice.run_exclusive(fn)` runs `fn()` as one exchange, so a
   sequence of commands cannot be interleaved with another thread's `send()`
@@ -72,17 +90,20 @@ aims to follow [Semantic Versioning](https://semver.org/).
   `start_sd_card_logging` returns the log file name (#200).
 
 ### Changed
-- `send()` is serialized against text exchanges: a command issued while
-  another thread runs one (`execute_text_command`, `drain_errors`, an SD
-  listing or download) goes out after that exchange rather than in the
-  middle of it, where the exchange could read its reply as its own. It is
-  PARKED rather than blocked — the holder replays the backlog, in order, on
-  its way out — so a send can never wait on a lock whose holder is waiting
-  for the sender's own caller. The thread that owns the exchange is exempt
-  (its `setup_action` is what sends), as is the message-received callback
-  thread. A send that took the lock re-checks the connection after
-  acquiring, so it no longer puts its command on a link the exchange ahead
-  of it lost (which left the device `Lost` and `Streaming` at once) (#225).
+- `send()` is serialized against text exchanges: while another flow runs
+  one (`execute_text_command`, `drain_errors`, `run_exclusive`, an SD
+  listing or download) it WAITS, so the command lands after that exchange
+  rather than in the middle of it, where the exchange could read its reply
+  as its own. Returning means the bytes are on the wire. The wait is
+  bounded: from an ordinary thread by `send_exchange_wait_s` (60 s by
+  default -- a caller's-patience bound, so a send during a long SD download
+  or format raises unless it is raised), and from the message-received
+  callback thread it does not wait at all, raising `ExchangeTimeoutError` if
+  the device is held. The thread that owns the exchange is exempt (its
+  `setup_action` is what sends). A send that took the lock re-checks the
+  connection after acquiring, so it no longer puts its command on a link
+  the exchange ahead of it lost (which left the device `Lost` and
+  `Streaming` at once) (#225, #238, #251).
 - `StreamMessageConsumer.start()` waits up to
   `STALE_READER_GRACE_MS` (1 s) for a stopped-but-not-yet-exited reader
   instead of refusing at once. A reader asked to stop while it is inside a
@@ -139,6 +160,20 @@ aims to follow [Semantic Versioning](https://semver.org/).
   directly (#204 item 2, #231).
 
 ### Fixed
+- `update_firmware()` called from a message-received callback is refused at
+  its entry, before anything reaches the device. It used to stop streaming
+  first and only then refuse, so the caller got an exception AND a device
+  whose stream had been stopped (#254, #255).
+- `update_wifi_module()` likewise refuses a callback-thread call at its
+  entry. There the earlier refusal was also swallowed: the version check
+  catches the consumer-thread refusal of `get_lan_chip_info()` and answers
+  "not up to date", so the update stopped streaming (two
+  `SYSTem:STReam:STOP`s) before failing (#256).
+- The protobuf schema decodes fields 70-72 as the firmware's streaming
+  timebase (`stream_timer_freq`, `timestamp_ticks_per_sample`,
+  `actual_rate_millihz`). They were declared as client-side `cap_*` fields,
+  so a real SYSInfoPB frame reported its timer frequency as `cap_version`;
+  the `cap_*` fields move to 80-85 (#157).
 - With echo on, the device's protobuf reply no longer stalls behind the
   echoed command line. `ProtobufMessageParser` read the echo's first byte
   as a length prefix and waited for bytes that never came, so a
@@ -165,9 +200,9 @@ aims to follow [Semantic Versioning](https://semver.org/).
   callback, which made the exchange's consumer-stop time out; the capture
   went ahead anyway and the restart's failure was swallowed, so the consumer
   exited for good and a later `start_streaming()` reported success with
-  nothing reading. Parking the send removes the stall, the grace period lets
-  the restart succeed, and a restart that still fails is recorded on the
-  device instead of discarded (#238).
+  nothing reading. The grace period lets the restart succeed, and a restart
+  that still fails is recorded on the device (`delivery_fault`) instead of
+  discarded (#238, #251).
 - A text exchange started from a message-received callback is refused
   outright instead of killing the protobuf consumer. It ran on the
   consumer's own thread, so pausing the consumer stopped the thread it ran
@@ -554,4 +589,4 @@ aims to follow [Semantic Versioning](https://semver.org/).
 Initial development version: a port of the C# daqifi-core library covering
 transport (USB CDC, TCP, USB HID), device and channel control, protobuf
 streaming, Wi-Fi discovery, SD card operations, CSV export and the firmware
-update service. No release has been tagged yet.
+update service. Never tagged; 0.2.0 is the first tagged release.
