@@ -752,9 +752,15 @@ class NyquistDevice:
         Example:
             data = device.sd_get_file("test.csv")
             print(data)
-        """
-        import time
 
+        Raises:
+            SdCardTransferErrorException: the device reported a read error
+                part-way through, ending the transfer with
+                ``__TRANSFER_ERROR__``. Previously this path returned the
+                partial content as if it were the whole file.
+            TimeoutError: no terminal marker arrived within ``timeout``.
+            RuntimeError: the serial port is not open.
+        """
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
@@ -797,6 +803,9 @@ class NyquistDevice:
             File contents as raw bytes
 
         Raises:
+            SdCardTransferErrorException: the device reported a read error
+                part-way through, ending the transfer with
+                ``__TRANSFER_ERROR__`` rather than ``__END_OF_FILE__``.
             TimeoutError: If __END_OF_FILE__ marker not received within timeout
             RuntimeError: If serial port not open
 
@@ -804,8 +813,6 @@ class NyquistDevice:
             data = device.sd_get_file_binary("benchmark.dat")
             assert len(data) == expected_size
         """
-        import time
-
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
