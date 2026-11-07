@@ -764,43 +764,23 @@ class NyquistDevice:
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
 
-        # Read until we see __END_OF_FILE__ marker (simplified, no CRLF)
-        response = b""
-        start_time = time.time()
-        end_marker = b"__END_OF_FILE__"
-
-        while (time.time() - start_time) < timeout:
-            if self._comm._serial.in_waiting > 0:
-                chunk = self._comm._serial.read(self._comm._serial.in_waiting)
-                response += chunk
-
-                # Check if we've received the end marker
-                if end_marker in response:
-                    break
-
-                # Reset start time when receiving data (prevents timeout during large transfers)
-                start_time = time.time()
-            else:
-                # No data available, wait a bit
-                time.sleep(0.01)
-
-        # Decode response
-        response_str = response.decode('ascii', errors='ignore')
-
-        # Remove echoed command
-        if cmd in response_str:
-            response_str = response_str.replace(cmd, "")
-
-        # Remove DAQIFI> prompt
-        response_str = response_str.replace("DAQIFI>", "")
-
-        # Remove end marker
-        response_str = response_str.replace("__END_OF_FILE__", "")
-
-        # Clean up
-        response_str = response_str.strip()
-
-        return response_str
+        # ⛔ SAME RECEIVE AS THE BINARY SIBLING, and the sweeps that used to
+        # be here are gone with it. This path removed the command text, the
+        # prompt and the marker with `.replace()`, which deletes EVERY
+        # occurrence at ANY offset -- so a payload legitimately containing
+        # any of the three was corrupted throughout, not merely at the head
+        # -- and then `.strip()`ed the result, which is no part of the
+        # transfer contract and ate the file's own leading and trailing
+        # whitespace.
+        #
+        # ⚠ The decode is deliberately unchanged, including
+        # `errors="ignore"`. Making it strict would raise on logs this
+        # accepts today, and choosing another encoding would change what
+        # this returns; both are a separate decision from the receive
+        # contract, so they are not bundled in here.
+        return self._receive_sd_file(filename, cmd, timeout).decode(
+            "ascii", errors="ignore"
+        )
 
     def sd_get_file_binary(self, filename: str, timeout: float = 30.0) -> bytes:
         """
@@ -835,43 +815,45 @@ class NyquistDevice:
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
 
-        # Read until we see __END_OF_FILE__ marker
-        # Use bytearray for O(n) accumulation instead of O(n^2) bytes concat
-        response = bytearray()
-        end_marker = b"__END_OF_FILE__"
-        deadline = time.monotonic() + timeout
+        return self._receive_sd_file(filename, cmd, timeout)
 
-        while time.monotonic() < deadline:
-            if self._comm._serial.in_waiting > 0:
-                chunk = self._comm._serial.read(self._comm._serial.in_waiting)
-                response.extend(chunk)
+    def _receive_sd_file(self, filename: str, cmd: str, timeout: float) -> bytes:
+        """The SD receive contract, applied by the one implementation of it.
 
-                if end_marker in response:
-                    break
-            else:
-                time.sleep(0.01)
-        else:
-            raise TimeoutError(
-                f"SD file download timed out after {timeout}s "
-                f"({len(response)} bytes received, no EOF marker)")
+        ⛔ THIS USED TO BE A SECOND COPY OF THAT CONTRACT, and the copy is
+        what #154 and #206 item 5 are: it knew only ``__END_OF_FILE__``, so
+        a failed transfer waited out the whole timeout and could not be told
+        from an empty file; it ended the read at the first marker ANYWHERE,
+        so a file containing those bytes truncated itself; and it found the
+        prompt by searching the first 200 bytes, so a file containing
+        ``DAQIFI>`` lost its head. ``SdCardFileReceiver`` already decided all
+        three, including the hard one -- telling the device's
+        ``__TRANSFER_ERROR__`` from file content that happens to contain it,
+        by what starts AT the size boundary.
 
-        # Strip leading echo and prompt from raw bytes
-        # Echo format: <cmd>\r\nDAQIFI> <file data>__END_OF_FILE__...
-        # Only search the first 200 bytes to avoid truncating binary data
-        # that might coincidentally contain the prompt string
-        header = bytes(response[:200])
-        for marker in (b"DAQIFI> ", b"DAQIFI>"):
-            echo_end = header.find(marker)
-            if echo_end >= 0:
-                response = response[echo_end + len(marker):]
-                break
+        The size comes from the last listing when there was one. Without it
+        the first marker still ends the file, which is the documented
+        limitation of an unsized transfer rather than anything this adds.
+        """
+        import io
 
-        # Strip EOF marker
-        eof_idx = response.find(end_marker)
-        if eof_idx >= 0:
-            response = response[:eof_idx]
+        from .sdcard import SdCardFileReceiver
 
-        return bytes(response)
+        destination = io.BytesIO()
+        SdCardFileReceiver(self._comm._serial).receive(
+            destination,
+            filename,
+            timeout_s=timeout,
+            expected_size=self._file_sizes.get(filename) or None,
+            # The command as sent, because the console may echo it back
+            # ahead of the payload. Removed as a prefix, and before any
+            # marker classification -- the echo of a GET for a file named
+            # "__TRANSFER_ERROR__.bin" carries that marker's own bytes, and
+            # classifying first reports a working transfer as a device read
+            # error.
+            preamble=cmd.encode("ascii"),
+        )
+        return destination.getvalue()
 
     def sd_delete_file(self, filename: str):
         """

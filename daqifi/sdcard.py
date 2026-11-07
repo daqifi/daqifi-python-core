@@ -126,6 +126,86 @@ def _is_marker_trailer(trailer: bytes) -> bool:
     return False
 
 
+class _PreambleSkip:
+    """The echoed GET command, and the prompt that may follow it, removed
+    from the HEAD of a download as a PREFIX -- never by searching.
+
+    ⛔ WHY A PREFIX. The legacy code this replaces located ``DAQIFI>``
+    anywhere in the first 200 bytes and discarded everything before it, so a
+    file whose own bytes contain the prompt lost its head (#206 item 5). A
+    prefix test cannot do that: it only consumes bytes it has matched from
+    position 0.
+
+    ⛔ WHY BEFORE MARKER CLASSIFICATION. The echoed command line can itself
+    carry a terminal marker's bytes -- a GET for a file named
+    ``__TRANSFER_ERROR__.bin`` is the measured case, and on the previous head
+    the receiver raised ``SdCardTransferErrorException`` for it, reporting a
+    transfer that worked as a device read error. So the head has to go before
+    anything looks for a marker, which is why this lives inside the receiver
+    rather than in the caller.
+
+    ⛔ EVERY CANDIDATE MUST END IN A PROMPT, and that is the whole
+    discriminator. With echo **off** there is no framing at all, so an echo
+    or a line ending at position 0 is just the file's first bytes -- and a
+    file whose first line happens to be the GET command's own text is a real
+    case, pinned by ``test_carried_items_206``'s
+    ``test_a_command_shaped_payload_is_kept_with_echo_off``. The prompt is
+    the one token the device emits that a payload is not expected to open
+    with, so an echo is removed only when a prompt follows it and proves it
+    was framing. A leading ``\\r\\n`` goes the same way: only ahead of a
+    prompt.
+
+    ⚠ RESIDUAL, stated because it cannot be decided rather than hidden: a
+    payload whose own first bytes are exactly ``DAQIFI> `` is
+    indistinguishable from framing and loses them. That is strictly narrower
+    than what it replaces -- the search lost everything before a ``DAQIFI>``
+    occurring anywhere in the first 200 bytes -- but it is not nothing.
+    """
+
+    _ENDINGS = (b"", b"\r\n", b"\n", b"\r")
+    _PROMPTS = (b"DAQIFI> ", b"DAQIFI>")
+
+    def __init__(self, expected_echo: bytes) -> None:
+        echo = bytes(expected_echo)
+        candidates = set()
+        for lead in self._ENDINGS:
+            for body in (b"", echo):
+                for after in self._ENDINGS:
+                    if not body and after:
+                        # No echo means nothing for a second ending to
+                        # follow; two endings in a row are not framing.
+                        continue
+                    for prompt in self._PROMPTS:
+                        candidates.add(lead + body + after + prompt)
+        # Longest first: `DAQIFI> ` must win over `DAQIFI>`.
+        self._candidates = sorted(candidates, key=len, reverse=True)
+        self._longest = len(self._candidates[0]) if self._candidates else 0
+        self._buf = bytearray()
+        self.done = False
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Bytes to pass downstream; may be empty while still deciding.
+
+        Holds at most the longest candidate's length, so the wait is bounded
+        by the head's own size and cannot stall a transfer.
+        """
+        if self.done:
+            return chunk
+        self._buf.extend(chunk)
+        buf = bytes(self._buf)
+        matched = next((c for c in self._candidates if buf.startswith(c)), None)
+        # A longer candidate may still complete, so do not commit yet: with
+        # the buffer at exactly `DAQIFI>` the next byte decides whether 7 or
+        # 8 bytes are framing.
+        if len(buf) < self._longest and any(
+            c.startswith(buf) and len(c) > len(buf) for c in self._candidates
+        ):
+            return b""
+        self.done = True
+        self._buf = bytearray()
+        return buf[len(matched):] if matched is not None else buf
+
+
 class _SizedTransfer:
     """The body of a download whose size is known, telling the device's
     ``__TRANSFER_ERROR__`` from file content that happens to contain it.
@@ -810,6 +890,7 @@ class SdCardFileReceiver:
         progress: Optional[Callable[[SdCardTransferProgress], None]] = None,
         timeout_s: Optional[float] = None,
         expected_size: Optional[int] = None,
+        preamble: Optional[bytes] = None,
     ) -> int:
         """Read until the EOF marker, write everything before it to
         ``destination_stream``, and return the total bytes written.
@@ -832,6 +913,14 @@ class SdCardFileReceiver:
                 upstream). ``None`` uses the default; pass an
                 explicit value to override.
             expected_size: the file's size, if known.
+            preamble: the GET command's bytes as sent, when the caller
+                shares the console with the download and so may see that
+                command echoed back, followed by a prompt. Given it, that
+                head is removed as a **prefix** before anything is
+                classified; omitted (the default) nothing is stripped and
+                this method behaves exactly as it did before the parameter
+                existed, which is what the streaming-device and
+                download-to-temp callers rely on.
 
         Returns:
             Total bytes written to ``destination_stream`` (the EOF
@@ -903,6 +992,9 @@ class SdCardFileReceiver:
         total_bytes = 0
         # Known size: tells the device's __TRANSFER_ERROR__ from content.
         sized = _SizedTransfer(expected_size) if expected_size is not None else None
+        # Opt-in, so the two callers that do not share the console with the
+        # download see no change at all.
+        skip = _PreambleSkip(preamble) if preamble else None
 
         def _transfer_error_if_open() -> None:
             outcome = sized.finish() if sized is not None else None
@@ -950,6 +1042,16 @@ class SdCardFileReceiver:
                         f"marker. Received {total_bytes} bytes."
                     )
             chunk_bytes = bytes(chunk)
+            if skip is not None:
+                # BEFORE either classification path below, deliberately: the
+                # echoed command can carry a marker's own bytes. The skip
+                # holds at most the head's length, so an empty result here
+                # is a bounded wait for the rest of the head, not a stall.
+                chunk_bytes = skip.feed(chunk_bytes)
+                if skip.done:
+                    skip = None
+                if not chunk_bytes:
+                    continue
             if sized is not None:
                 body, outcome = sized.feed(chunk_bytes)
                 if body:

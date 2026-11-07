@@ -316,10 +316,30 @@ class ProtobufMessageParser:
         the echo never matched and the stall it exists to prevent came
         back. Only the trailing line ending is removed, because that is
         matched separately -- the device may echo CRLF or bare LF.
+
+        ⛔ LEADING whitespace is dropped, TRAILING whitespace is kept, and
+        the asymmetry is measured rather than assumed. On an NQ1 with echo
+        on, ``b" *IDN?\\r"``, ``b"  *IDN?\\r"``, ``b"\\t*IDN?\\r"`` and
+        ``b" \\t *IDN?\\r"`` all echo back as ``*IDN?`` -- the console
+        discards leading whitespace wholesale and the echo starts at the
+        first non-whitespace byte -- while ``b"*IDN? \\r"`` and
+        ``b"*IDN?  \\r"`` echo back with their spaces intact. So registering
+        the bytes as sent made a leading-whitespace command's entry
+        **unmatchable**, and an entry that can never match never drains:
+        the registry grows and the console-quiet rule, which needs it
+        empty, stops engaging.
+
+        ⚠ ``lstrip(b" \\t")`` and not a bare ``lstrip()``: space and tab are
+        what was measured. ``\\v`` and ``\\f`` are not, and over-stripping
+        fails exactly like under-stripping here -- either way the
+        registered bytes stop equalling the wire bytes -- so the set is
+        kept to the evidence. Never ``strip()``: that would discard the
+        trailing space ``get_bytes()`` really sends, which is the defect
+        the paragraph above records.
         """
         if isinstance(sent, str):            # tolerated, but discouraged
             sent = sent.encode("ascii", errors="ignore")
-        line = bytes(sent).rstrip(b"\r\n")
+        line = bytes(sent).lstrip(b" \t").rstrip(b"\r\n")
         if not line:
             return
         with self._echo_lock:
