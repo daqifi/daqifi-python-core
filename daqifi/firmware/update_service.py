@@ -405,6 +405,29 @@ class DefaultFirmwareUpdateService:
     ) -> None:
         if device is None:
             raise TypeError("device must not be None")
+        # ⛔ BEFORE ANYTHING ELSE TOUCHES THE DEVICE (#254). This refusal
+        # used to be incidental: PREPARING_DEVICE stopped streaming first --
+        # a send the consumer thread try-acquires and wins when the exchange
+        # is idle -- and only the next step's run_exclusive refused. The
+        # caller got an exception AND a device whose stream had been
+        # stopped. A refused update must leave the device untouched, so the
+        # rule is asserted here, before the first byte.
+        #
+        # The refusal itself is right, not the defect: two steps later the
+        # flow captures the console, which pauses and restarts the very
+        # consumer thread a message-received callback runs on (#238). Do
+        # not "fix" #254 by switching _send_and_settle to the owning
+        # exchange form -- that deletes the refusal and walks the update
+        # into the capture.
+        on_consumer_thread = getattr(device, "_on_consumer_thread", None)
+        if on_consumer_thread is not None and on_consumer_thread():
+            raise RuntimeError(
+                "update_firmware cannot run on the protobuf consumer thread, "
+                "that is, from a message-received callback: the update "
+                "captures the device's console, which pauses and restarts "
+                "that very thread. Nothing was sent. Start the update from "
+                "your own thread."
+            )
         if hex_file_path is None or not str(hex_file_path).strip():
             raise ValueError("HEX file path cannot be empty.")
         if not os.path.isfile(hex_file_path):
