@@ -197,24 +197,25 @@ def test_a_stale_SMALLER_size_falls_back_instead_of_raising() -> None:
     assert device.sd_get_file_binary("DAQiFi/log.bin", timeout=2.0) == b"abcdef"
 
 
-def test_a_stale_LARGER_size_falls_back_promptly() -> None:
-    """(b) The marker arrives EARLY and the promised bytes never come. This
-    must not hang: the capture stops a grace period after the line goes
-    quiet with a marker in hand, so it costs a fraction of a second rather
-    than the whole timeout.
+def test_a_stale_LARGER_size_returns_the_right_bytes() -> None:
+    """(b) The marker arrives EARLY and the promised bytes never come.
+
+    ⚠ SUPERSEDED IN r4, and deliberately: this asserted the fallback was
+    PROMPT (a 0.3 s grace). Fixing r3's HIGH B showed that "marker present,
+    payload below the listed size, line quiet" is the same observation as
+    content that merely contains a marker, so stopping early returns a
+    silently short file. The capture now waits for the caller's timeout and
+    the promptness claim is withdrawn -- see
+    test_a_stale_larger_size_now_costs_the_TIMEOUT_not_the_grace.
+
+    What still holds, and is what matters: the stale size does not reject
+    the download.
     """
     device = _device(b"DAQiFi/log.bin 9999\r\n__END_OF_LIST__ OK\r\n",
                      b"abcdef" + END_OF_FILE_MARKER)
     device.sd_list_files()
     assert device._listed_size_for("DAQiFi/log.bin") == 9999
-    started = time.monotonic()
-    got = device.sd_get_file_binary("DAQiFi/log.bin", timeout=10.0)
-    elapsed = time.monotonic() - started
-    assert got == b"abcdef"
-    assert elapsed < 2.0, (
-        f"a stale larger size cost {elapsed:.2f}s; it should cost about the "
-        f"{NyquistDevice._SD_MARKER_GRACE_S}s grace, not the timeout"
-    )
+    assert device.sd_get_file_binary("DAQiFi/log.bin", timeout=1.0) == b"abcdef"
 
 
 def test_an_agreeing_size_still_discriminates_a_marker_in_content() -> None:

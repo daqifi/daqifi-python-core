@@ -183,6 +183,27 @@ class _PreambleSkip:
         self._buf = bytearray()
         self.done = False
 
+    def head_span(self, buf: bytes) -> Optional[int]:
+        """Length of the framing at the start of ``buf``, or ``None`` while
+        that is still undecidable.
+
+        ⛔ ONE DEFINITION OF "WHERE THE HEAD ENDS", shared with the capture
+        loop in ``device.py``. It had two of its own instead -- one for
+        measuring progress against a listed size, one for deciding where to
+        scan for a terminal marker -- and both were wrong in the same way:
+        they counted or scanned the ECHO AND PROMPT as if they were payload.
+        A payload-only target was then satisfied by 41 bytes of framing, and
+        the capture stopped inside the content.
+
+        0 means "no framing here" (echo off). ``None`` means the buffer is
+        still a proper prefix of a longer candidate, so nothing can be
+        measured from it yet.
+        """
+        if any(c.startswith(buf) and len(c) > len(buf) for c in self._candidates):
+            return None
+        matched = next((c for c in self._candidates if buf.startswith(c)), None)
+        return len(matched) if matched is not None else 0
+
     def feed(self, chunk: bytes) -> bytes:
         """Bytes to pass downstream; may be empty while still deciding.
 

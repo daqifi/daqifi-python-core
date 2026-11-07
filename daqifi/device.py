@@ -942,10 +942,15 @@ class NyquistDevice:
         but progressing download is not cut off. The binary path's timeout
         was absolute and stays that way.
         """
+        from .sdcard import _PreambleSkip
+
         serial = self._comm._serial
         out = bytearray()
         deadline = time.monotonic() + timeout
         quiet_since: Optional[float] = None
+        # Same candidate set the receiver strips with, so "where the head
+        # ends" is decided once rather than approximated here.
+        skip = _PreambleSkip(echo)
         while time.monotonic() < deadline:
             pending = serial.in_waiting
             if pending:
@@ -953,36 +958,39 @@ class NyquistDevice:
                 quiet_since = None
                 if idle_reset:
                     deadline = time.monotonic() + timeout
-            # ⛔ NEVER SCAN THE ECHO FOR A TERMINAL MARKER. A GET names a
-            # file, and a file can be named `__TRANSFER_ERROR__.bin` or
-            # `__END_OF_FILE__`, so the echoed command can contain EITHER
-            # marker's bytes -- stopping on that ends the capture on the
-            # echo and loses the payload. (An earlier revision of this loop
-            # scanned the whole buffer and broke an existing pin for the
-            # first of those names; a comment then claimed the second could
-            # not happen, which the audit's own defect-4 input disproves.)
-            #
-            # So the scan starts after the echo when the echo is complete,
-            # and waits when the echo is still arriving. With echo off there
-            # is no echo and the payload starts at 0, which this also gets
-            # right.
+            # ⛔ MEASURE AND SCAN THE PAYLOAD, NEVER THE FRAMING. A GET names
+            # a file, and a file can be named `__TRANSFER_ERROR__.bin` or
+            # `__END_OF_FILE__`, so the echoed command can contain either
+            # marker -- and the framing is ~41 bytes that are not payload.
+            # Counting them toward a payload-sized target satisfied it early
+            # and stopped the capture inside the content. `head_span` is the
+            # ONE definition of where the head ends, shared with the
+            # receiver that strips it; None means it is still arriving, so
+            # nothing is measurable yet.
             buf = bytes(out)
-            if buf.startswith(echo):
-                region = buf[len(echo):]
-            elif echo.startswith(buf):
-                region = b""            # the echo is still coming in
+            head = skip.head_span(buf)
+            if head is None:
+                region, payload_len = b"", 0
             else:
-                region = buf            # echo is off, or something else
+                region, payload_len = buf[head:], len(buf) - head
             eof_present = END_OF_FILE_MARKER in region
             err_present = TRANSFER_ERROR_MARKER in region
-            if eof_present and (target is None or len(out) >= target):
+            # A listed size that has not been reached means the payload is
+            # still arriving, whatever the bytes look like. Content can
+            # contain either marker, so while below the target NOTHING ends
+            # the capture but the caller's own timeout -- after which the
+            # hint fallback reinterprets whatever arrived.
+            target_met = target is None or payload_len >= target
+            if target_met and eof_present:
                 break
-            if (eof_present or err_present) and quiet_since is not None:
-                # A terminal marker in hand and the line gone quiet. Either
-                # the transfer ended with an error marker, or a stale LARGER
-                # listed size promised bytes that are not coming. Both are
-                # the receiver's to interpret; waiting out the full timeout
-                # for them would turn a stale cache into a 30-second stall.
+            if target_met and (eof_present or err_present) \
+                    and quiet_since is not None:
+                # A terminal marker in hand, the target met or unknown, and
+                # the line gone quiet: either the transfer ended on an error
+                # marker, or a stale LARGER listed size promised bytes that
+                # are not coming. Both are the receiver's to interpret, and
+                # waiting out the full timeout would turn a stale cache into
+                # a 30-second stall.
                 if time.monotonic() - quiet_since >= self._SD_MARKER_GRACE_S:
                     break
             if not pending:
