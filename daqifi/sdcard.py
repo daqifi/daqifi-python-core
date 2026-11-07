@@ -205,6 +205,26 @@ class _PreambleSkip:
         self._buf = bytearray()
         return buf[len(matched):] if matched is not None else buf
 
+    def flush(self) -> bytes:
+        """Whatever is still held, head removed if the head is decidable.
+
+        ⛔ CALLED WHEN NO MORE BYTES ARE COMING, and without it those bytes
+        are LOST. :meth:`feed` holds while a longer candidate could still
+        complete, which is correct mid-stream and wrong at the end: a whole
+        payload that is a proper prefix of a candidate -- the measured case
+        is a GET for a file named ``__END_OF_FILE__`` -- stayed buffered,
+        the receiver saw nothing, and it reported a TIMEOUT for a transfer
+        whose bytes it was holding. Deciding with what has arrived is the
+        only honest answer at EOF.
+        """
+        if self.done:
+            return b""
+        buf = bytes(self._buf)
+        self._buf = bytearray()
+        self.done = True
+        matched = next((c for c in self._candidates if buf.startswith(c)), None)
+        return buf[len(matched):] if matched is not None else buf
+
 
 class _SizedTransfer:
     """The body of a download whose size is known, telling the device's
@@ -1003,6 +1023,13 @@ class SdCardFileReceiver:
 
         while True:
             if time.monotonic() >= deadline:
+                # ⚠ A held head is NOT flushed here, unlike the EOF branch
+                # below. `continue` would re-enter past an already-expired
+                # deadline and the next read would overwrite the flushed
+                # bytes, so a flush on this path is theatre. The only caller
+                # that passes a preamble reads from an in-memory stream,
+                # where EOF -- not the clock -- is the terminal condition,
+                # and that branch does flush.
                 _transfer_error_if_open()
                 raise TimeoutError(
                     f"SD card file download timed out after "
@@ -1034,13 +1061,30 @@ class SdCardFileReceiver:
                     # deadline above decides when to give up.
                     continue
                 if not chunk:
-                    # Closed: nothing can follow, so an open transfer-error
-                    # candidate is the device's marker.
-                    _transfer_error_if_open()
-                    raise TimeoutError(
-                        f"Transport stream closed before receiving the EOF "
-                        f"marker. Received {total_bytes} bytes."
-                    )
+                    # ⛔ FLUSH THE PREAMBLE SKIP FIRST. It holds bytes while a
+                    # longer head candidate could still complete, so at EOF a
+                    # payload that is a proper prefix of one is sitting in it;
+                    # raising here reported a timeout for bytes we had. One
+                    # more pass classifies them, then this branch raises.
+                    if skip is not None:
+                        tail = skip.flush()
+                        skip = None
+                        if tail:
+                            chunk = tail
+                        else:
+                            _transfer_error_if_open()
+                            raise TimeoutError(
+                                f"Transport stream closed before receiving the "
+                                f"EOF marker. Received {total_bytes} bytes."
+                            )
+                    else:
+                        # Closed: nothing can follow, so an open
+                        # transfer-error candidate is the device's marker.
+                        _transfer_error_if_open()
+                        raise TimeoutError(
+                            f"Transport stream closed before receiving the EOF "
+                            f"marker. Received {total_bytes} bytes."
+                        )
             chunk_bytes = bytes(chunk)
             if skip is not None:
                 # BEFORE either classification path below, deliberately: the

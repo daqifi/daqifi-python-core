@@ -6,6 +6,8 @@ Provides high-level API for device interaction.
 
 from typing import Dict, Any, Optional, Union, List
 from ._internal.comm import DataSample, SerialInterface, PowerState, DeviceMetadata
+import time
+
 from ._internal import scpi, scpi_commands
 from ._internal.scpi import check_setter_response
 from .channels import (
@@ -18,6 +20,7 @@ from .channels import (
 )
 from .streaming import StreamManager, AsyncStreamManager
 from .discovery import DeviceInfo, BoardVariant
+from .sdcard import END_OF_FILE_MARKER, TRANSFER_ERROR_MARKER
 from .exceptions import (
     ConnectionError as DAQiFiConnectionError,
     CommandError,
@@ -99,8 +102,13 @@ class NyquistDevice:
         self._variant = BoardVariant.UNKNOWN
         self._device_info: Dict[str, Any] = {}
         self._connected = False
-        # File sizes from the last sd_list_files(); empty until one runs.
-        self._file_sizes: Dict[str, int] = {}
+        # Sizes from the last sd_list_files(); empty until one runs.
+        # ⛔ Optional[int]: None means "that listing did not state a
+        # size" (the old listing format), which is NOT the same fact as
+        # a listed 0, an empty file. A size is an enforced transfer
+        # boundary now, so conflating them rejects every download of an
+        # unsized entry.
+        self._file_sizes: Dict[str, Optional[int]] = {}
         # Protobuf-populated metadata (real SN, MAC, IP, SSID, ...).
         # Best-effort populated during `_connect()`; callers can re-
         # fetch on demand via :meth:`refresh_metadata` (e.g. after a
@@ -735,9 +743,15 @@ class NyquistDevice:
                     files.append(path)
                     self._file_sizes[path] = size
                 else:
-                    # Old format: just path
+                    # Old format: just path, no size. ⛔ STORED AS None, NOT
+                    # 0. These are two different facts -- "this file is
+                    # empty" and "this listing did not say" -- and a size is
+                    # now an enforced transfer boundary, so conflating them
+                    # makes every download of an unsized entry fail against
+                    # a zero-byte boundary. 0 meant "unknown" here only
+                    # because nothing read it.
                     files.append(line)
-                    self._file_sizes[line] = 0  # Unknown size
+                    self._file_sizes[line] = None
         return files
 
     def sd_get_file_size(self, filename: str) -> int:
@@ -754,35 +768,36 @@ class NyquistDevice:
         """The last listing's size for ``filename``, or ``None`` when it is
         not known UNAMBIGUOUSLY.
 
-        ⛔ THE KEYS AND THE CALLERS DISAGREE, and silently. A listing stores
-        what the device printed -- ``DAQiFi/log.bin`` -- while a download is
-        asked for by the name the caller holds, usually the bare
-        ``log.bin``. An exact dict lookup therefore MISSES for every
-        path-prefixed listing, which is the normal case, and a miss means no
-        size, and no size means the terminal-marker scan falls back to "the
-        first marker ends the file". That failure is **silent**: the
-        discrimination this is here to provide just never engages. Matching
-        on the final path segment is what makes the sized path reachable at
-        all.
+        ⛔ EXACT KEY ONLY, and both softer rules were tried and removed.
+        A listing stores what the device PRINTED -- ``DAQiFi/log.bin`` --
+        while a download is asked for by the name the caller holds, usually
+        the bare ``log.bin``, so an exact lookup misses for a path-prefixed
+        listing and the download runs unsized. That is the safe direction.
 
-        ⚠ Ambiguity resolves to ``None``, never to a guess: two listed files
-        sharing a basename cannot say which one is being fetched, and an
-        enforced boundary from the wrong file rejects a good download. The
-        unsized path is the safe direction.
+        Matching on the final path segment closed that gap and opened a
+        worse one: it BORROWS ACROSS DIRECTORIES. With ``OTHER/log.bin``
+        listed at 3 bytes, a download of ``log.bin`` took 3 as its enforced
+        boundary and a valid 6-byte transfer was rejected. Joining the name
+        to a listed directory fails the same way and for the same reason:
+        the device resolves a bare GET in its OWN default directory, not in
+        whichever one happened to be listed last. Neither is done.
 
-        ⚠ A 0 is "unknown", not "empty": the old listing format records 0
-        for a file whose size it did not print, and enforcing a zero-byte
-        boundary would reject every download of it.
+        ⚠ A listed 0 is an EMPTY FILE and is returned as 0. "That listing
+        did not state a size" is a different fact and is stored as ``None``
+        by :meth:`sd_list_files`, which is what makes the ``is not None``
+        test below safe -- an ``if size:`` sent an empty file down the
+        unsized path and, in the basename revision, let it borrow another
+        entry's boundary.
         """
-        exact = self._file_sizes.get(filename)
-        if exact:
-            return exact
-        wanted = filename.rsplit("/", 1)[-1]
-        sizes = [
-            size for path, size in self._file_sizes.items()
-            if path.rsplit("/", 1)[-1] == wanted and size
-        ]
-        return sizes[0] if len(sizes) == 1 else None
+        if filename not in self._file_sizes:
+            return None
+        # `is not None`, never truthiness: a listed size of 0 is a real,
+        # empty file and must stay distinguishable from "this listing did
+        # not say", which is stored as None. An `if size:` here sent an
+        # empty file down the unsized path and, in an earlier revision that
+        # also matched basenames, let it borrow another directory's size.
+        size = self._file_sizes[filename]
+        return size if size is not None else None
 
     def _forget_sd_file_sizes(self) -> None:
         """Drop the cached listing sizes.
@@ -851,9 +866,14 @@ class NyquistDevice:
         # accepts today, and choosing another encoding would change what
         # this returns; both are a separate decision from the receive
         # contract, so they are not bundled in here.
-        return self._receive_sd_file(filename, cmd, timeout).decode(
-            "ascii", errors="ignore"
-        )
+        # ⚠ idle_reset=True restores THIS path's original timeout semantics.
+        # The base reset its clock on every chunk, so the timeout measured
+        # SILENCE; delegating made it absolute, and a slow but progressing
+        # text download then died at the 30 s default. The binary sibling
+        # was absolute in the base and stays absolute.
+        return self._receive_sd_file(
+            filename, cmd, timeout, idle_reset=True,
+        ).decode("ascii", errors="ignore")
 
     def sd_get_file_binary(self, filename: str, timeout: float = 30.0) -> bytes:
         """
@@ -889,9 +909,91 @@ class NyquistDevice:
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
 
-        return self._receive_sd_file(filename, cmd, timeout)
+        return self._receive_sd_file(filename, cmd, timeout, idle_reset=False)
 
-    def _receive_sd_file(self, filename: str, cmd: str, timeout: float) -> bytes:
+    #: How long the capture waits for more data once a terminal marker has
+    #: been seen but the expected-size target has not been reached. This is
+    #: what makes a stale LARGER size cost a fraction of a second instead of
+    #: the whole timeout: the marker is already in hand, so the only question
+    #: is whether the rest of the promised bytes are still coming.
+    _SD_MARKER_GRACE_S = 0.3
+
+    def _read_sd_response(
+        self, timeout: float, idle_reset: bool, target: Optional[int],
+        echo: bytes = b"",
+    ) -> bytes:
+        """Read the GET response off the port. Transport only -- what the
+        bytes MEAN is the receiver's job.
+
+        ⛔ THE STOP RULE IS SIZE-AWARE, and it has to be. Stopping at the
+        first terminal marker would truncate exactly the case the listed
+        size exists to decide: a file whose own content contains
+        ``__END_OF_FILE__``. So with a size in hand this reads until the
+        promised bytes plus a marker have arrived; without one, the first
+        marker ends it.
+
+        ⚠ And a marker plus a quiet line ends it either way, after
+        ``_SD_MARKER_GRACE_S``. That is the stale-LARGER-size case: the
+        promised bytes are never coming, and waiting out the full timeout
+        for them would turn a stale cache into a 30-second stall.
+
+        ``idle_reset`` restores the text path's original semantics, where
+        the timeout measures SILENCE rather than total duration, so a slow
+        but progressing download is not cut off. The binary path's timeout
+        was absolute and stays that way.
+        """
+        serial = self._comm._serial
+        out = bytearray()
+        deadline = time.monotonic() + timeout
+        quiet_since: Optional[float] = None
+        while time.monotonic() < deadline:
+            pending = serial.in_waiting
+            if pending:
+                out.extend(serial.read(pending))
+                quiet_since = None
+                if idle_reset:
+                    deadline = time.monotonic() + timeout
+            # ⛔ NEVER SCAN THE ECHO FOR A TERMINAL MARKER. A GET names a
+            # file, and a file can be named `__TRANSFER_ERROR__.bin` or
+            # `__END_OF_FILE__`, so the echoed command can contain EITHER
+            # marker's bytes -- stopping on that ends the capture on the
+            # echo and loses the payload. (An earlier revision of this loop
+            # scanned the whole buffer and broke an existing pin for the
+            # first of those names; a comment then claimed the second could
+            # not happen, which the audit's own defect-4 input disproves.)
+            #
+            # So the scan starts after the echo when the echo is complete,
+            # and waits when the echo is still arriving. With echo off there
+            # is no echo and the payload starts at 0, which this also gets
+            # right.
+            buf = bytes(out)
+            if buf.startswith(echo):
+                region = buf[len(echo):]
+            elif echo.startswith(buf):
+                region = b""            # the echo is still coming in
+            else:
+                region = buf            # echo is off, or something else
+            eof_present = END_OF_FILE_MARKER in region
+            err_present = TRANSFER_ERROR_MARKER in region
+            if eof_present and (target is None or len(out) >= target):
+                break
+            if (eof_present or err_present) and quiet_since is not None:
+                # A terminal marker in hand and the line gone quiet. Either
+                # the transfer ended with an error marker, or a stale LARGER
+                # listed size promised bytes that are not coming. Both are
+                # the receiver's to interpret; waiting out the full timeout
+                # for them would turn a stale cache into a 30-second stall.
+                if time.monotonic() - quiet_since >= self._SD_MARKER_GRACE_S:
+                    break
+            if not pending:
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                time.sleep(0.01)
+        return bytes(out)
+
+    def _receive_sd_file(
+        self, filename: str, cmd: str, timeout: float, idle_reset: bool,
+    ) -> bytes:
         """The SD receive contract, applied by the one implementation of it.
 
         ⛔ THIS USED TO BE A SECOND COPY OF THAT CONTRACT, and the copy is
@@ -913,24 +1015,52 @@ class NyquistDevice:
 
         from .sdcard import SdCardFileReceiver
 
-        destination = io.BytesIO()
-        SdCardFileReceiver(self._comm._serial).receive(
-            destination,
-            filename,
-            timeout_s=timeout,
-            # Resolved by name, not by an exact dict hit: listings are
-            # path-prefixed and callers pass bare names, so a plain lookup
-            # misses in the normal case and the size silently goes unused.
-            expected_size=self._listed_size_for(filename),
-            # The command as sent, because the console may echo it back
-            # ahead of the payload. Removed as a prefix, and before any
-            # marker classification -- the echo of a GET for a file named
-            # "__TRANSFER_ERROR__.bin" carries that marker's own bytes, and
-            # classifying first reports a working transfer as a device read
-            # error.
-            preamble=cmd.encode("ascii"),
+        size = self._listed_size_for(filename)
+        target = None if size is None else size + len(END_OF_FILE_MARKER)
+        raw = self._read_sd_response(
+            timeout, idle_reset, target, echo=cmd.encode("ascii"),
         )
-        return destination.getvalue()
+        # The command as sent, because the console may echo it back ahead of
+        # the payload. Removed as a prefix, and before any marker
+        # classification -- the echo of a GET for a file named
+        # "__TRANSFER_ERROR__.bin" carries that marker's own bytes, and
+        # classifying first reports a working transfer as a device read
+        # error.
+        preamble = cmd.encode("ascii")
+
+        def interpret(expected_size: Optional[int]) -> bytes:
+            destination = io.BytesIO()
+            SdCardFileReceiver(io.BytesIO(raw)).receive(
+                destination, filename,
+                timeout_s=max(timeout, 0.001),
+                expected_size=expected_size,
+                preamble=preamble,
+            )
+            return destination.getvalue()
+
+        if size is not None:
+            try:
+                return interpret(size)
+            except (IOError, TimeoutError):
+                # ⛔ ON THIS PATH THE LISTED SIZE IS A HINT, NOT A BOUNDARY.
+                # The base ignored it entirely, so a disagreement between a
+                # cached size and the wire has never been an error here --
+                # and making it one turned every stale-cache path into an
+                # OSError on a VALID download. Eight such paths were found
+                # across two audit rounds, twice after I had claimed the
+                # list was complete, so the fault space is open and
+                # removing the consequence beats chasing the paths.
+                #
+                # A correct size still buys the marker-in-content
+                # discrimination; a wrong one now costs only that. The
+                # bytes are already in memory, so this re-reading is free:
+                # no extra wire time, nothing re-sent to the device.
+                #
+                # ⚠ SdCardTransferErrorException is NOT caught: it is not an
+                # OSError, and a device-reported read error is a fact about
+                # the transfer rather than a disagreement about its length.
+                pass
+        return interpret(None)
 
     def sd_delete_file(self, filename: str):
         """
@@ -1105,12 +1235,18 @@ class NyquistDevice:
                 self._comm, channels, sample_rate, format,
                 per_channel_dispatch=dispatch,
                 integer_units=integer_units,
+                # ⛔ THE EIGHTH SD WRITER, and the one an enumeration of
+                # sd_-named methods could not see: streaming to the card
+                # changes what is on it. The manager holds the transport,
+                # not this object, so it invalidates through this callback.
+                on_recording_change=self._forget_sd_file_sizes,
             )
         else:
             return StreamManager(
                 self._comm, channels, sample_rate, format,
                 per_channel_dispatch=dispatch,
                 integer_units=integer_units,
+                on_recording_change=self._forget_sd_file_sizes,
             )
 
     def _build_per_channel_dispatch(self):

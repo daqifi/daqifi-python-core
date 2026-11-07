@@ -73,6 +73,7 @@ class _Serial:
 
 
 LISTING = b'DAQiFi/log.bin 3\r\n__END_OF_LIST__ OK\r\n'
+LISTED = "DAQiFi/log.bin"
 DOWNLOAD = b"abcdef" + END_OF_FILE_MARKER
 
 
@@ -86,7 +87,7 @@ def test_a_listing_then_more_logging_does_not_reject_the_download() -> None:
     """The audit's scenario end to end: list, enable logging, download."""
     device = _device()
     device.sd_list_files()
-    assert device.sd_get_file_size("log.bin") == 3, "the listing did not cache"
+    assert device.sd_get_file_size(LISTED) == 3, "the listing did not cache"
     device.sd_enable(True)
     assert device.sd_get_file_binary("log.bin", timeout=2.0) == b"abcdef", (
         "a stale listed size rejected a valid download"
@@ -113,7 +114,7 @@ def test_every_writer_forgets_the_cached_sizes(writer) -> None:
     """
     device = _device()
     device.sd_list_files()
-    assert device.sd_get_file_size("log.bin") == 3
+    assert device.sd_get_file_size(LISTED) == 3
     try:
         writer(device)
     except Exception:                                         # noqa: BLE001
@@ -126,38 +127,53 @@ def test_every_writer_forgets_the_cached_sizes(writer) -> None:
     )
 
 
-def test_a_path_prefixed_listing_is_found_by_the_bare_name() -> None:
-    """⛔ THE OTHER HALF, and it failed SILENTLY. The listing stores what the
-    device printed -- ``DAQiFi/log.bin`` -- while a download is asked for by
-    bare name, so an exact dict lookup misses in the normal case. A miss
-    means no size, and no size means the marker scan falls back to "first
-    marker wins" -- so the discrimination this PR added never engaged on a
-    real listing, and nothing failed to say so.
+def test_a_size_is_never_borrowed_across_directories() -> None:
+    """r2 MED: an earlier revision matched on the final path segment, so a
+    size listed for OTHER/log.bin became the enforced boundary for a
+    download of DAQiFi/log.bin. The device resolves a bare GET in its OWN
+    default directory, not in whichever one was last listed, so neither a
+    join nor a basename match can be made safe. Exact key only.
     """
     device = _device()
-    device.sd_list_files()
-    assert device.sd_get_file_size("log.bin") == 3, (
-        "a path-prefixed listing was not found by the name a caller uses, "
-        "so expected_size stays None and the sized path is unreachable"
+    device._comm._serial = _Serial(
+        b"OTHER/log.bin 3\r\n__END_OF_LIST__ OK\r\n", DOWNLOAD,
     )
+    device.sd_list_files()
+    assert device.sd_get_file_size("DAQiFi/log.bin") == 0
+    assert device.sd_get_file_size("log.bin") == 0, (
+        "a bare name borrowed a size from a listed directory"
+    )
+    # 6 bytes against a borrowed 3-byte boundary used to raise OSError.
+    assert device.sd_get_file_binary("log.bin", timeout=2.0) == b"abcdef"
 
 
-def test_an_ambiguous_basename_resolves_to_no_size() -> None:
-    """Two listed files sharing a basename cannot say which is being
-    fetched, and a boundary from the wrong file rejects a good download. The
-    unsized path is the safe direction, so ambiguity means None."""
+def test_a_listed_zero_is_an_empty_file_not_an_unknown_size() -> None:
+    """r2 MED: `if size:` sent a listed 0 down the unsized path, and in the
+    basename revision let it borrow another entry's size. A listed 0 is a
+    real empty file; the OLD format's "no size given" is stored as None, so
+    the two are distinguishable and neither is guessed.
+    """
     device = _device()
     device._comm._serial = _Serial(
-        b'DAQiFi/log.bin 3\r\nOTHER/log.bin 99\r\n__END_OF_LIST__ OK\r\n',
-        DOWNLOAD,
+        b"DAQiFi/empty.bin 0\r\nOTHER/empty.bin 3\r\n__END_OF_LIST__ OK\r\n",
+        END_OF_FILE_MARKER,
     )
     device.sd_list_files()
-    assert device.sd_get_file_size("log.bin") == 0, (
-        "an ambiguous basename produced a size, so a download could be "
-        "measured against the wrong file"
+    assert device._listed_size_for("DAQiFi/empty.bin") == 0
+    assert device.sd_get_file_binary("DAQiFi/empty.bin", timeout=2.0) == b""
+
+
+def test_an_unsized_old_format_listing_enforces_no_boundary() -> None:
+    """The old listing format gives no size. Stored as None the download
+    runs unsized; stored as 0 it would enforce a zero-byte boundary and
+    reject every transfer of that file."""
+    device = _device()
+    device._comm._serial = _Serial(
+        b"DAQiFi/log.bin\r\n__END_OF_LIST__ OK\r\n", DOWNLOAD,
     )
-    # And the download still works, unsized.
-    assert device.sd_get_file_binary("log.bin", timeout=2.0) == b"abcdef"
+    device.sd_list_files()
+    assert device._listed_size_for("DAQiFi/log.bin") is None
+    assert device.sd_get_file_binary("DAQiFi/log.bin", timeout=2.0) == b"abcdef"
 
 
 def test_a_fresh_listing_restores_the_size() -> None:
@@ -167,6 +183,6 @@ def test_a_fresh_listing_restores_the_size() -> None:
     device = _device()
     device.sd_list_files()
     device.sd_enable(True)
-    assert device.sd_get_file_size("log.bin") == 0
+    assert device.sd_get_file_size(LISTED) == 0
     device.sd_list_files()
-    assert device.sd_get_file_size("log.bin") == 3
+    assert device.sd_get_file_size(LISTED) == 3

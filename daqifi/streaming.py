@@ -325,6 +325,7 @@ class StreamManager:
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
         buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE,
         integer_units: Optional[str] = None,
+        on_recording_change: Optional[Callable[[], None]] = None,
     ):
         """
         Initialize stream manager.
@@ -368,6 +369,7 @@ class StreamManager:
         self._integer_units = integer_units
         self._value_reader = self._new_value_reader()
         self._comm = comm
+        self._on_recording_change = on_recording_change
         self._channels = channels
         self._sample_rate = sample_rate
         self._format = format
@@ -479,6 +481,12 @@ class StreamManager:
                 print(sample)
             stream.start(callback=on_sample)
         """
+        # The device may be recording to the SD card, which changes what
+        # is on it; anything holding a listing is now holding a stale
+        # length. Fired before the state check below so a redundant
+        # call still invalidates.
+        if self._on_recording_change is not None:
+            self._on_recording_change()
         if self._state == StreamState.RUNNING:
             raise RuntimeError("Streaming already started")
         if self._thread is not None and self._thread.is_alive():
@@ -764,6 +772,12 @@ class StreamManager:
             time.sleep(10)
             stream.stop()
         """
+        # The device may be recording to the SD card, which changes what
+        # is on it; anything holding a listing is now holding a stale
+        # length. Fired before the state check below so a redundant
+        # call still invalidates.
+        if self._on_recording_change is not None:
+            self._on_recording_change()
         if self._state != StreamState.RUNNING and not self._device_streaming:
             return
 
@@ -1499,6 +1513,7 @@ class AsyncStreamManager:
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
         buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE,
         integer_units: Optional[str] = None,
+        on_recording_change: Optional[Callable[[], None]] = None,
     ):
         """
         Initialize async stream manager.
@@ -1512,6 +1527,7 @@ class AsyncStreamManager:
                 to the wrapped synchronous manager.
             buffer_size: See :class:`StreamManager`.
             integer_units: See :class:`StreamManager`.
+            on_recording_change: See :class:`StreamManager`.
         """
         self._stream = StreamManager(
             comm,
@@ -1521,6 +1537,9 @@ class AsyncStreamManager:
             per_channel_dispatch=per_channel_dispatch,
             buffer_size=buffer_size,
             integer_units=integer_units,
+            # Forwarded, not re-implemented: start()/stop() below delegate
+            # to the wrapped manager, so the hook fires exactly once.
+            on_recording_change=on_recording_change,
         )
 
     async def start(self):
