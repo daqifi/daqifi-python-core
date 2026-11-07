@@ -2698,9 +2698,10 @@ class DaqifiDevice:
     @property
     def delivery_fault(self) -> Optional[str]:
         """Why THIS connection can no longer be trusted to have received
-        what it was told, or ``None``. Set when a queued command was
-        dropped or failed after ``send()`` returned, or when the message
-        consumer could not be restarted. A fault recorded against an
+        what it was told, or ``None``. Set when the message consumer could
+        not be restarted after a text exchange, so nothing is reading the
+        stream. (``send()`` no longer queues commands, so a dropped queued
+        command is not a cause any more.) A fault recorded against an
         earlier connection does not apply here; a successful
         :meth:`connect` also clears it."""
         with self._state_lock:
