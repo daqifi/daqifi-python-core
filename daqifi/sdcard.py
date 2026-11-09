@@ -168,7 +168,25 @@ class _PreambleSkip:
     def __init__(self, expected_echo: bytes) -> None:
         echo = bytes(expected_echo)
         candidates = set()
-        for lead in self._ENDINGS:
+        # ⛔ A PROMPT CAN BE PENDING BEFORE THE ECHO. The console prints its
+        # prompt when it finishes the PREVIOUS command, so a GET issued into
+        # an idle console arrives as `DAQIFI> ` + the echoed command + an
+        # ending + `DAQIFI> `. r5's blind leg: with only an ENDING allowed in
+        # front, the longest candidate that matched was the bare leading
+        # prompt, `done` latched on it, and the echoed command plus the
+        # SECOND prompt were delivered as the first line of the CSV --
+        # where the base returned just `1,2`.
+        #
+        # So the lead is an optional prompt with an optional ending after
+        # it, not merely an ending. Still ONE bounded head span rather than
+        # a strip-while-it-matches loop: a loop would keep eating a payload
+        # whose own first lines look like framing, and the head is exactly
+        # what this class is defined to measure.
+        leads = set(self._ENDINGS)
+        for prompt in self._PROMPTS:
+            for after_prompt in self._ENDINGS:
+                leads.add(prompt + after_prompt)
+        for lead in leads:
             for body in (b"", echo):
                 for after in self._ENDINGS:
                     if not body and after:
@@ -270,12 +288,25 @@ class _SizedTransfer:
     window decides anything: content may pause.
     """
 
-    def __init__(self, expected_size: int) -> None:
+    def __init__(self, expected_size: int, eof_only: bool = False) -> None:
         self.expected = expected_size
         self.committed = 0
         self.pending = bytearray()
+        # ⛔ WHEN SET, ``__TRANSFER_ERROR__`` IS ORDINARY CONTENT HERE TOO.
+        # r5's blind leg: ``eof_only`` was honoured only on the unsized
+        # scan, so a sized receive still raised
+        # SdCardTransferErrorException on a file whose literal bytes are the
+        # marker -- reporting a device read error for what is really an
+        # incomplete transfer. With this set nothing is withheld as a
+        # candidate and no outcome classifies the error, so those bytes are
+        # written as content and a truncated transfer reaches the caller's
+        # timeout, which is the honest answer.
+        self.eof_only = eof_only
 
     def _open_candidate(self, limit: int) -> Optional[int]:
+        if self.eof_only:
+            # Nothing is a transfer-error candidate, so nothing is withheld.
+            return None
         buf = bytes(self.pending)
         marker = TRANSFER_ERROR_MARKER
         i = buf.find(marker[:1])
@@ -319,15 +350,23 @@ class _SizedTransfer:
         # start of) the end-of-file marker.
         tail = bytes(self.pending)
         marker = TRANSFER_ERROR_MARKER
-        if tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
-            return ("transfer_error", self.committed)
-        if marker.startswith(tail):
-            return None  # could still complete
+        if not self.eof_only:
+            if tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
+                return ("transfer_error", self.committed)
+            if marker.startswith(tail):
+                return None  # could still complete
+        # ``eof_only``: the size boundary was reached and what follows is not
+        # the end-of-file marker. That is a mismatch whatever those bytes
+        # spell -- the error classification is the caller's opt-out, the size
+        # check is not.
         return ("mismatch", None)
 
     def finish(self) -> Optional[Tuple[str, Any]]:
         """At idle, close or the deadline: an open complete candidate is the
         device's marker."""
+        if self.eof_only:
+            # No open candidate exists to promote: see __init__.
+            return None
         tail = bytes(self.pending)
         marker = TRANSFER_ERROR_MARKER
         if not (tail.startswith(marker) and _is_marker_trailer(tail[len(marker):])):
@@ -1041,7 +1080,8 @@ class SdCardFileReceiver:
         trailing = bytearray()
         total_bytes = 0
         # Known size: tells the device's __TRANSFER_ERROR__ from content.
-        sized = _SizedTransfer(expected_size) if expected_size is not None else None
+        sized = _SizedTransfer(expected_size, eof_only=eof_only) \
+            if expected_size is not None else None
         # Opt-in, so the two callers that do not share the console with the
         # download see no change at all.
         skip = _PreambleSkip(preamble) if preamble else None

@@ -29,6 +29,15 @@ from .exceptions import (
 )
 
 
+# ⛔ A LIVENESS BOUND, NOT A TRANSPORT TIMEOUT. The legacy text path captures
+# the whole response first and then re-reads it from an in-memory buffer that
+# cannot block, so there is nothing there for a transport timeout to measure.
+# This exists only so a defect in the parser cannot hang a caller forever, and
+# it is deliberately NOT derived from the caller's timeout: doing that turned a
+# completed 8 MiB transfer into a TimeoutError whenever the local parse
+# outlasted the transport allowance (#257 r5, device.py:1009).
+_LOCAL_REPARSE_LIVENESS_S = 3600.0
+
 _METADATA_FIELD_NAMES = (
     "device_pn",
     "device_sn",
@@ -977,11 +986,27 @@ class NyquistDevice:
 
         - **no listed size.** An unsized transfer ends at the first terminal
           marker, so a file whose content contains ``__END_OF_FILE__`` is
-          still truncated there -- the base's behaviour, now documented
-          rather than silently fixed-then-broken. The size machinery that
-          read past it produced both of r3's HIGHs, r4's HIGH and
-          three of r2's five defects, and delivered a
-          capability neither ticket requested.
+          truncated there. The size machinery that read past it produced
+          both of r3's HIGHs, r4's HIGH and three of r2's five defects, and
+          delivered a capability neither ticket requested.
+
+          ⛔ AND THAT IS A BEHAVIOUR CHANGE ON THE TEXT PATH, not "the
+          base's behaviour" as r5's revision of this docstring claimed. The
+          claim was false and is withdrawn rather than softened. Measured
+          on ``b'head__END_OF_FILE__tail__END_OF_FILE__'``: the base
+          returned ``'headtail'`` -- its ``.replace()`` deleted the marker's
+          bytes at EVERY offset and kept everything around them -- where
+          this returns ``'head'``. So for a text file whose content contains
+          the marker, the base corrupted the payload in place and this
+          truncates it instead.
+
+          Both are lossy and neither is recoverable without a size, which
+          is the point: with no length there is nothing that distinguishes
+          a marker ending the file from the same bytes inside it. Ruling
+          FO A2 chose truncation, and reading past the marker is the
+          mechanism that ruling removed -- so it is NOT re-added here to
+          close r5's finding. What r5 actually disproved was the claim, and
+          the claim is what changes.
         - **no error-marker detection** (``eof_only=True``). A file may
           legitimately contain ``__TRANSFER_ERROR__``, and the overlap at a
           join -- content ending ``...__TRANSFER_ERROR`` followed by the
@@ -1006,7 +1031,20 @@ class NyquistDevice:
         destination = io.BytesIO()
         SdCardFileReceiver(io.BytesIO(raw)).receive(
             destination, filename,
-            timeout_s=max(timeout, 0.001),
+            # ⛔ NOT ``timeout``. The transfer is already over: ``raw`` holds
+            # every byte, and this pass re-reads an in-memory buffer that
+            # cannot block. Passing the caller's timeout made it a SECOND
+            # absolute deadline over local parsing, so a transfer that had
+            # completely succeeded raised TimeoutError whenever the parse
+            # took longer than the transport allowance -- measured in r5 with
+            # ``timeout=0.001`` and 8 MiB already in hand, where the base
+            # returned all 8,388,608 characters and this raised.
+            #
+            # A timeout is still required by the signature, so this is a
+            # LIVENESS BOUND on a pure-CPU pass, not a transport timeout: it
+            # exists only so a defect in the parser cannot hang forever, and
+            # it must never be derived from the caller's value.
+            timeout_s=_LOCAL_REPARSE_LIVENESS_S,
             # The command as sent: the console may echo it back ahead of the
             # payload, and it is removed as a PREFIX, never searched for.
             preamble=cmd.encode("ascii"),
