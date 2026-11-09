@@ -168,25 +168,41 @@ class _PreambleSkip:
     def __init__(self, expected_echo: bytes) -> None:
         echo = bytes(expected_echo)
         candidates = set()
+
         # ⛔ A PROMPT CAN BE PENDING BEFORE THE ECHO. The console prints its
         # prompt when it finishes the PREVIOUS command, so a GET issued into
-        # an idle console arrives as `DAQIFI> ` + the echoed command + an
-        # ending + `DAQIFI> `. r5's blind leg: with only an ENDING allowed in
-        # front, the longest candidate that matched was the bare leading
+        # an idle console arrives as a prompt, the echoed command, an ending
+        # and the prompt that follows the echo. With only an ENDING allowed
+        # in front, the longest matching candidate was the bare leading
         # prompt, `done` latched on it, and the echoed command plus the
-        # SECOND prompt were delivered as the first line of the CSV --
-        # where the base returned just `1,2`.
+        # SECOND prompt were delivered as the first line of the CSV (r5 #3).
         #
-        # So the lead is an optional prompt with an optional ending after
-        # it, not merely an ending. Still ONE bounded head span rather than
-        # a strip-while-it-matches loop: a loop would keep eating a payload
-        # whose own first lines look like framing, and the head is exactly
-        # what this class is defined to measure.
-        leads = set(self._ENDINGS)
-        for prompt in self._PROMPTS:
-            for after_prompt in self._ENDINGS:
-                leads.add(prompt + after_prompt)
-        for lead in leads:
+        # ⛔⛔ BUT A PROMPT LEAD IS ONLY FRAMING WHEN AN ECHO FOLLOWS IT, and
+        # r6 learned that the hard way. Allowing the prompt lead to pair with
+        # an EMPTY body built the candidate `DAQIFI> DAQIFI> `, which
+        # longest-match then stripped off a file whose own first bytes are a
+        # prompt: `b"DAQIFI> DAQIFI> payload"` returned `b"payload"` where the
+        # base returned `b"DAQIFI> payload"`. That is this PR's own subject --
+        # reaching into file content -- reintroduced by a fix for a framing
+        # bug.
+        #
+        # The invariant, which is structural rather than a list of examples:
+        # **prompt-led framing must contain a command echo.** A prompt
+        # followed by a prompt contains no command, so it cannot be the
+        # framing around one. Two separate products express that, instead of
+        # one product plus a filter, so there is no combination to overlook:
+        #
+        #   no pending prompt   [ending]            [echo] [ending] prompt
+        #   pending prompt      [ending] prompt [ending]  echo  [ending] prompt
+        #
+        # Note the second REQUIRES the echo and the first still permits it to
+        # be absent, which is the echo-off case. Still ONE bounded head span,
+        # never a strip-while-it-matches loop: a loop would keep eating a
+        # payload whose own first lines look like framing, and the head is
+        # exactly what this class is defined to measure.
+
+        # 1. No pending prompt -- unchanged from the shape the base handled.
+        for lead in self._ENDINGS:
             for body in (b"", echo):
                 for after in self._ENDINGS:
                     if not body and after:
@@ -195,6 +211,17 @@ class _PreambleSkip:
                         continue
                     for prompt in self._PROMPTS:
                         candidates.add(lead + body + after + prompt)
+
+        # 2. A pending prompt, which may itself be preceded by an ending --
+        #    r6 #1 was a CRLF arriving before it. The echo is MANDATORY here.
+        for before in self._ENDINGS:
+            for pending in self._PROMPTS:
+                for after_pending in self._ENDINGS:
+                    for after in self._ENDINGS:
+                        for prompt in self._PROMPTS:
+                            candidates.add(before + pending + after_pending
+                                           + echo + after + prompt)
+
         # Longest first: `DAQIFI> ` must win over `DAQIFI>`.
         self._candidates = sorted(candidates, key=len, reverse=True)
         self._longest = len(self._candidates[0]) if self._candidates else 0
