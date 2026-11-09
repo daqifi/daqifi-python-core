@@ -28,14 +28,28 @@ that do.
   * the base deleted the command text and the EOF marker at every offset.
     Removed.
 
-⚠ ONE CASE IS DELIBERATELY NOT ASSERTED HERE: a payload whose own bytes are
-framing-like (``b'DAQIFI> DAQIFI> payload'``). Measured, the base returns
-``'payload'`` -- it deleted both prompts -- and this branch returns
-``'DAQIFI> payload'``. Which of those is correct is the subject of ruling GS,
-unresolved when this was written, so this file asserts nothing about it rather
-than encoding a criterion nobody has agreed. The structural invariant that
-matters either way -- prompt-led framing must contain an echo -- IS asserted,
-below.
+⭐ RULING GS A (operator, 2026-11-09) SETTLES THE CASE THIS FILE USED TO HOLD
+OPEN, and narrows the oracle in exactly these terms:
+
+  * branch output == base output is required ONLY for payloads with NO
+    framing-like bytes, allowing for the accepted ``.strip()`` divergence;
+  * framing-like bytes INSIDE a payload must be PRESERVED, and a differential
+    showing the base CORRUPTED them is pinned deliberately, as the intended
+    divergence;
+  * no framing shape the base did not handle.
+
+So the held case -- real framing in front of a file whose OWN first bytes are
+a prompt -- is now asserted in both directions: this branch preserves the
+file's bytes, and the base destroys them. An earlier revision of this
+docstring said the correct answer was "the subject of ruling GS, unresolved",
+and declined to encode a criterion nobody had agreed; that is no longer true.
+
+⛔ AUDIT FINDING r6 #2 IS WITHDRAWN under the same ruling: its premise was
+that the base PRESERVED framing-like payload bytes, and the base's own source
+deletes ``DAQIFI>`` at EVERY offset -- ff4d699 ``daqifi/device.py:795``,
+read at that revision and quoted verbatim in ``_base_transform`` below, not
+recalled. So the base cannot be the oracle for this case; it is the
+counter-example.
 
 BASE OUTPUTS BELOW ARE MEASURED, not predicted: each was obtained by running
 ff4d699's own ``sd_get_file`` against the same payload through the same fake
@@ -93,6 +107,37 @@ def _get(payload: bytes) -> str:
     return device.sd_get_file("log.csv", timeout=1.0)
 
 
+def _base_transform(wire: bytes, cmd: str) -> str:
+    """ff4d699's own ``sd_get_file`` tail, transcribed statement for statement.
+
+    Read out of ``git show ff4d699:daqifi/device.py`` (its lines 788-803) at
+    that revision, not recalled:
+
+        response_str = response.decode('ascii', errors='ignore')
+        if cmd in response_str:
+            response_str = response_str.replace(cmd, "")
+        response_str = response_str.replace("DAQIFI>", "")
+        response_str = response_str.replace("__END_OF_FILE__", "")
+        response_str = response_str.strip()
+
+    ⛔ EVERY ONE OF THOSE REPLACES IS UNANCHORED, which is the entire finding:
+    they hit the payload exactly as readily as the framing, and the prompt one
+    (``:795``) is why audit finding r6 #2's premise was false.
+
+    ⚠ A REIMPLEMENTATION USED AS AN ORACLE CONVICTS NOTHING UNTIL IT IS PROVEN
+    FAITHFUL -- `test_the_transcribed_base_reproduces_every_measured_output`
+    below replays it against every base output this file had already MEASURED
+    against the real ff4d699 code. Without that control this function would be
+    my belief about the base wearing the base's authority.
+    """
+    response_str = wire.decode("ascii", errors="ignore")
+    if cmd in response_str:
+        response_str = response_str.replace(cmd, "")
+    response_str = response_str.replace("DAQIFI>", "")
+    response_str = response_str.replace("__END_OF_FILE__", "")
+    return response_str.strip()
+
+
 # (name, payload, base output as MEASURED at ff4d699)
 #
 # Every one of these carries a payload with no framing-like bytes, so the base
@@ -128,6 +173,78 @@ def test_clean_payload_matches_the_base(name, payload, base_output) -> None:
 def test_an_empty_payload_is_empty() -> None:
     """Measured at ff4d699: ''. Nothing to strip, nothing to frame."""
     assert _get(END_OF_FILE_MARKER) == ""
+
+
+def test_the_transcribed_base_reproduces_every_measured_output() -> None:
+    """The control for `_base_transform`: faithful, or it convicts nothing.
+
+    Every expectation in CLEAN_SHAPES was measured by running the REAL
+    ff4d699 ``sd_get_file`` against that payload. Replaying the transcription
+    against the same payloads is therefore a two-sided check on the
+    transcription itself -- and it is what licenses using it, below, as the
+    base side of a differential that deliberately DISAGREES with this branch.
+    """
+    assert END_OF_FILE_MARKER == b"__END_OF_FILE__", (
+        "the base deleted the literal b'__END_OF_FILE__'; if this branch's "
+        "marker is no longer that string, the transcription is not comparable")
+    cmd = _echo().decode("ascii")
+    for name, payload, base_output in CLEAN_SHAPES:
+        got = _base_transform(payload + END_OF_FILE_MARKER, cmd)
+        assert got == base_output, (
+            "%s: the transcribed base returned %r where the real ff4d699 was "
+            "measured to return %r -- the transcription is wrong, fix it "
+            "before trusting any differential built on it"
+            % (name, got, base_output))
+    assert _base_transform(END_OF_FILE_MARKER, cmd) == ""
+
+
+# Payloads whose OWN bytes look like framing. Each is the FILE's content; the
+# wire adds real framing in front of it. Ruling GS A: these must be PRESERVED.
+#
+# ⚠ `__END_OF_FILE__` INSIDE a payload is deliberately absent from this list.
+# The read loop stops at the first marker occurrence, so such a file truncates
+# in transit -- identically on the base and on this branch. That is a device
+# protocol limit, not something a host-side framing fix can reach, and GS A's
+# third term ("no framing shape the base did not handle") is not an invitation
+# to invent one.
+FRAMING_LIKE = [
+    # The held case: the file's own first bytes are a prompt.
+    ("payload opens with a prompt", PROMPT, b"DAQIFI> payload\r\n"),
+    # Mid-content, so no leading-offset reasoning can accidentally pass it.
+    ("payload contains a prompt mid-content", PROMPT, b"1,2\r\nDAQIFI> 3,4\r\n"),
+    # The OTHER unanchored replace, base `device.py:791-792`: the echoed
+    # command text occurring inside the file.
+    ("payload contains the command echo",
+     PROMPT + _echo() + b"\r\n" + PROMPT, _echo() + b"\r\n1,2\r\n"),
+]
+
+
+@pytest.mark.parametrize("name,framing,body",
+                         FRAMING_LIKE,
+                         ids=[s[0] for s in FRAMING_LIKE])
+def test_framing_like_payload_bytes_survive_and_the_base_destroyed_them(
+        name, framing, body) -> None:
+    """Ruling GS A, both directions, in one assertion pair.
+
+    Kept as ONE test per shape on purpose: a preservation leg and a separate
+    base-corruption leg can drift apart silently, and then the differential
+    stops being about the same bytes. Here the file's content is a single
+    value used on both sides.
+    """
+    wire = framing + body + END_OF_FILE_MARKER
+    want = body.decode("ascii")
+
+    got = _get(wire)
+    assert got == want, (
+        "%s: this branch must return the file's own bytes verbatim. "
+        "want %r, got %r" % (name, want, got))
+
+    base = _base_transform(wire, _echo().decode("ascii"))
+    assert base != want, (
+        "%s: this differential asserts the base CORRUPTED these bytes, and "
+        "it did not -- it returned %r, which equals the file's content. The "
+        "shape is then not a counter-example and does not belong in this "
+        "list." % (name, base))
 
 
 def test_the_two_prompt_candidate_is_not_framing() -> None:
