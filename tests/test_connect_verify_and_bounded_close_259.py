@@ -363,3 +363,98 @@ def test_connect_re_raises_the_callables_own_exception(monkeypatch):
         NyquistDevice.connect("FAKEPORT", verify=_verify)
     assert caught.value is boom
     assert port.written == []
+
+
+# ===================================================================== 8
+# r1 HIGH: nothing unbounded may sit between the drain and the release
+# =====================================================================
+
+class _FlushBlocksPort(_Port):
+    """out_waiting is 0, and flush() never returns.
+
+    The FTDI/CTS case: the OS queue is empty, so a bounded out_waiting poll
+    is satisfied immediately, while tcdrain() is still waiting on a hardware
+    transmitter that will not drain. An earlier version of close() called
+    flush() at exactly this point, on the false premise that zero pending
+    bytes made it safe.
+    """
+
+    def __init__(self):
+        super().__init__(out_waiting=(0,))
+        self.released = threading.Event()
+        self.flush_entered = threading.Event()
+        self._never = threading.Event()
+        # ⚠ ARMED ONLY AFTER open(). open() flushes too, inside
+        # _send_disable_echo, and a fixture that blocks there hangs the test
+        # in SETUP -- which is not the condition under test and which made
+        # this leg time out instead of failing. The fixture must express
+        # exactly one thing: a flush that blocks during CLOSE.
+        self.block_on_flush = False
+
+    def arm(self):
+        self.block_on_flush = True
+
+    def flush(self):
+        self.flushes += 1
+        if not self.block_on_flush:
+            return
+        self.flush_entered.set()
+        self._never.wait()          # forever, as tcdrain would
+
+    def close(self):
+        super().close()
+        self.released.set()
+
+
+def test_close_returns_even_when_flush_would_block_forever(monkeypatch):
+    """close() must not depend on flush() returning.
+
+    ⛔ FAILS on 46d14335, which called flush() once out_waiting hit zero: the
+    close thread never returns, the handle is never released, and
+    last_close_error stays None — so close_drain_timeout never fires and the
+    caller is told nothing. Driven on a thread with a join deadline so this
+    leg FAILS rather than hanging the suite.
+    """
+    port = _FlushBlocksPort()
+    iface = _iface(monkeypatch, port)
+    assert iface.open() is True
+    port.arm()                      # only now does flush() block
+    iface.close_drain_timeout = 0.05
+
+    result = {}
+
+    def _closer():
+        try:
+            result["value"] = iface.close()
+        except BaseException as exc:                   # noqa: BLE001
+            result["raised"] = exc
+
+    t = threading.Thread(target=_closer, daemon=True)
+    t.start()
+    t.join(5.0)
+
+    assert not t.is_alive(), (
+        "close() did not return within 5s: it is blocked in an unbounded "
+        "flush() after the drain, which close_drain_timeout cannot bound")
+    assert port.released.is_set(), "the handle was never released"
+    assert port.closed == 1
+    assert "raised" not in result, "close() raised %r" % (result.get("raised"),)
+    # The documented skip is observable: the drain does not call flush at
+    # all, so the blocking path is never entered.
+    assert not port.flush_entered.is_set(), (
+        "close() entered flush(); the drain must not call it")
+    assert result["value"] is True, (
+        "the OS queue was empty, so this is a clean close: %r"
+        % (result.get("value"),))
+
+
+def test_the_drain_never_calls_flush(monkeypatch):
+    """The poll IS the drain. Pinned directly, so the claim cannot drift."""
+    port = _Port(out_waiting=(32, 16, 0))
+    iface = _iface(monkeypatch, port)
+    assert iface.open() is True
+    flushes_after_open = port.flushes      # _send_disable_echo's own flush
+    assert iface.close() is True
+    assert port.flushes == flushes_after_open, (
+        "close() flushed; tcdrain() cannot be bounded, so it must not be "
+        "called between the drain and the release")

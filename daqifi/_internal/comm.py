@@ -1607,23 +1607,42 @@ class SerialInterface:
             pass
 
     def _drain_bounded(self, deadline_s: float) -> None:
-        """Wait for the output buffer to reach the device, BOUNDED.
+        """Wait, BOUNDED, for the OS output queue to empty. No ``flush()``.
 
-        Raises ``serial.SerialTimeoutException`` if it does not drain in
+        Raises ``serial.SerialTimeoutException`` if it does not empty in
         time, so the caller's existing handler runs and the handle is still
-        released below.
+        released by close().
 
         ⛔ THE BOUND GOES WHERE THE UNBOUNDED WAIT IS. ``write_timeout`` does
         not govern ``flush()`` on either backend — pyserial 3.5 polls
         ``out_waiting`` with no deadline on Windows and calls ``tcdrain()``
-        on POSIX — so lowering it could never have bounded this. Polling
-        ``out_waiting`` to zero under a deadline and only then calling
-        ``flush()`` puts the deadline on the half that lacked one.
+        on POSIX — so lowering it could never have bounded this.
 
-        A port that exposes no ``out_waiting`` cannot be bounded this way.
-        That is reported by raising rather than by falling through to an
-        unbounded ``flush()``: an unbounded wait is the defect, and silently
-        taking it again would be a fail-open.
+        ⛔⛔ AND NOTHING UNBOUNDED MAY SIT BETWEEN THE DRAIN AND THE RELEASE,
+        which is where an earlier version of this function went wrong. It
+        polled ``out_waiting`` to zero and THEN called ``flush()``, with a
+        comment claiming that zero pending bytes made the flush safe. **That
+        claim is false.** ``out_waiting`` is the OS queue count;
+        ``tcdrain()`` waits for the HARDWARE TRANSMITTER, and Linux's
+        usb-serial (``generic.c``) keeps those two separate. On an FTDI
+        adapter with RTS/CTS where CTS is deasserted, the bytes sit in the
+        adapter's FIFO, ``out_waiting`` reads 0, and ``tcdrain()`` blocks
+        forever — so ``close_drain_timeout`` never fired, the handle was
+        never released and ``last_close_error`` stayed None. Exactly the
+        defect this function exists to remove, one layer down (#259 r1).
+
+        So the poll IS the drain, and there is no flush. ⚠ What that
+        honestly costs: when this returns, the OS queue is empty, but bytes
+        may still be in the adapter's FIFO or the UART shift register. There
+        is no bounded way to wait for those — ``tcdrain()`` takes no timeout
+        — and the alternative is a call that can never return. For close()'s
+        purpose (a courtesy ``SYSTem:ECHO 1`` on the way out) an unbounded
+        wait is the worse trade.
+
+        A port that exposes no ``out_waiting`` cannot be bounded at all, and
+        that is reported by raising rather than by falling through to an
+        unbounded ``flush()``: silently taking the unbounded wait again
+        would be the fail-open.
         """
         end = time.monotonic() + deadline_s
         try:
@@ -1641,8 +1660,6 @@ class SerialInterface:
                 )
             time.sleep(0.01)
             pending = self._serial.out_waiting
-        # Safe now: there is nothing left to wait for.
-        self._serial.flush()
 
     def close(self) -> bool:
         """Close the serial connection. True if it closed cleanly.
@@ -1665,6 +1682,13 @@ class SerialInterface:
         either way. Silence is the one thing it does not do — returning
         normally after a failed drain would be a verified-false reported as
         success.
+
+        ⚠ WHAT "DRAINED" MEANS HERE, stated rather than implied: the OS
+        output queue emptied. It does NOT mean the bytes left the hardware.
+        There is no ``flush()`` on this path at all — see _drain_bounded for
+        why ``tcdrain()`` cannot be bounded and what an earlier version got
+        wrong by calling it once ``out_waiting`` hit zero. Bytes may remain
+        in a USB adapter's FIFO when this returns True.
         """
         self.last_close_error = None
         if not (self._serial and self._serial.is_open):
