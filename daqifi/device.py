@@ -4,7 +4,7 @@ Main device controller for DAQiFi Nyquist devices.
 Provides high-level API for device interaction.
 """
 
-from typing import Dict, Any, Optional, Union, List
+from typing import Callable, Dict, Any, Optional, Union, List
 from ._internal.comm import DataSample, SerialInterface, PowerState, DeviceMetadata
 from ._internal import scpi, scpi_commands
 from ._internal.scpi import check_setter_response
@@ -118,19 +118,42 @@ class NyquistDevice:
         self._digital_io: Optional[DigitalIO] = None
 
     @classmethod
-    def connect(cls, port_or_info: Union[str, DeviceInfo], baudrate: int = 115200) -> 'NyquistDevice':
+    def connect(cls, port_or_info: Union[str, DeviceInfo], baudrate: int = 115200,
+                verify: Optional[Callable[[Any], bool]] = None) -> 'NyquistDevice':
         """
         Connect to a Nyquist device.
 
         Args:
             port_or_info: Serial port path (str) or DeviceInfo from discovery
             baudrate: Serial baud rate (default 115200)
+            verify: Optional callable run on the freshly opened port BEFORE
+                this library writes anything, so a caller can confirm the
+                device is the one it meant to address and refuse without
+                touching it (#259). It receives the live handle and may read
+                AND write — `*IDN?` is a write, and the caller's own
+                verification bytes are the point; what is guaranteed is that
+                the library writes nothing of its own first.
+
+                Return truthy to proceed. A falsy return raises
+                DeviceVerificationError; an exception from the callable is
+                re-raised unchanged. Either way the port is CLOSED and the
+                device is left untouched by this library.
+
+                Without it there is no write-free way to find out which board
+                is on a path: open() sends `SYSTem:ECHO -1` before any caller
+                can read `*IDN?`. Verifying over a separate port first leaves
+                a window between that port's close and the first byte to the
+                reopened one — measured at 186.5 ms on one bench, most of it
+                open()'s own settle — in which the path can be reassigned.
+                Passing a callable here removes the window entirely, because
+                verification and the first write happen on the same handle.
 
         Returns:
             Connected NyquistDevice instance
 
         Raises:
             ConnectionError: If connection fails
+            DeviceVerificationError: If `verify` returned falsy
 
         Example:
             # Connect by port
@@ -148,6 +171,10 @@ class NyquistDevice:
 
         # Create and connect device
         device = cls(port, baudrate)
+        # Set like cancel_event is — an attribute consulted inside open() —
+        # so no constructor signature changes and the hook reaches the one
+        # place that can honour it: before the first library write.
+        device._comm.verify = verify
         device._connect()
         return device
 
