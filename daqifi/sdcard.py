@@ -160,6 +160,38 @@ class _PreambleSkip:
     indistinguishable from framing and loses them. That is strictly narrower
     than what it replaces -- the search lost everything before a ``DAQIFI>``
     occurring anywhere in the first 200 bytes -- but it is not nothing.
+
+    ⚠⚠ AND THE SAME RESIDUAL HAS A LARGER FORM, which is a DOCUMENTED
+    EXCEPTION rather than an oversight (ruling GV A, recorded here under
+    ruling HJ B). A payload whose own first bytes are the WHOLE framing
+    shape -- ``DAQIFI> `` then the echoed GET then an ending then
+    ``DAQIFI> `` -- loses all of it. Measured on this head: 49 of 54 content
+    bytes, ``sd_get_file`` returning ``'1,2\\r\\n'`` for a file that really
+    held ``b'DAQIFI> SYSTem:STORage:SD:GET "log.csv"\\r\\nDAQIFI> 1,2\\r\\n'``.
+
+    ⭐ IT IS NOT FIXABLE HERE, and that is a measurement rather than a
+    concession. Those 54 bytes are BYTE-IDENTICAL to a real idle-console
+    preamble around the same command, so ``head_span`` is answering one
+    question about one byte string and there is no second signal in it to
+    consult. The choice is forced both ways:
+
+      * strip (what this does): real framing is removed, and a file whose
+        content is that shape loses 49 bytes.
+      * do not strip: that file is returned whole, and every real idle
+        console leaks 49 framing bytes INTO the caller's file.
+
+    GS A term 2 asks for framing-like payload bytes to be preserved; GV A
+    accepted this bounded strip as the exception to it, because leaked
+    framing is visible and recoverable while a short file is silent. The
+    exception is pinned by ``test_case_d_is_the_documented_strip_exception``
+    in ``tests/test_sd_framing_oracle_154.py``.
+
+    ⛔ THE REAL FIX IS OUT OF BAND AND IS NOT THIS PR'S. Whether a preamble
+    is present is knowable from the device's ECHO STATE, which the caller
+    sets and this module never reads -- see #260. Until that lands, the strip
+    is a byte-shape guess with a documented cost. Note the direction: this is
+    a residual the change NARROWS, not one it adds. On those same bytes the
+    pre-``_PreambleSkip`` code returned ``'1,2'``, losing 51 of the 54.
     """
 
     _ENDINGS = (b"", b"\r\n", b"\n", b"\r")

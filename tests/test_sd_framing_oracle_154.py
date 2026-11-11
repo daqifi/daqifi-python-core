@@ -247,6 +247,69 @@ def test_framing_like_payload_bytes_survive_and_the_base_destroyed_them(
         "list." % (name, base))
 
 
+def test_case_d_is_the_documented_strip_exception() -> None:
+    """⚠ THIS PIN ASSERTS DATA LOSS ON PURPOSE, AND IT IS SCHEDULED TO DIE.
+
+    Ruling GV A, recorded here under ruling HJ B. Case D is a file whose own
+    content is exactly the framing shape: ``DAQIFI> `` then the echoed GET
+    then an ending then ``DAQIFI> ``. Those bytes are BYTE-IDENTICAL to case
+    C, a real idle-console preamble around the same command -- the identity
+    is asserted below rather than claimed, because it is the whole reason
+    this exception exists. One byte string cannot be classified two ways, so
+    the choice is forced:
+
+      * strip (what ships): case C returns the file intact; case D loses 49
+        of its 54 bytes.
+      * do not strip: case D is returned whole; every real idle console
+        leaks 49 framing bytes INTO the caller's file.
+
+    GS A term 2 asks for framing-like payload bytes to be preserved --
+    ``test_framing_like_payload_bytes_survive_and_the_base_destroyed_them``
+    above is that rule. This is its one accepted exception, bounded at the
+    measured 49 bytes, taken because leaked framing is visible and
+    recoverable while a silently short file is not.
+
+    ⭐ SO THIS IS A TRIPWIRE, NOT A BLESSING. The real fix reads the device's
+    ECHO STATE, which is knowable out of band and which this module never
+    consults -- #260, its own PR. WHEN #260 LANDS THIS TEST MUST FAIL. The
+    correct response then is to DELETE it and move case D into FRAMING_LIKE,
+    NOT to adjust the expected value. A failure here is the scheduled signal
+    that the exception is no longer needed; it is not a regression.
+
+    ⚠ Direction, because it is easy to read this test as the opposite: the
+    change NARROWS this loss rather than introducing it. On the same bytes
+    the pre-``_PreambleSkip`` base returned ``'1,2'`` -- 51 of 54 lost, the
+    trailing CRLF eaten too. That differential is asserted last.
+    """
+    framing_shape = PROMPT + _echo() + b"\r\n" + PROMPT
+    content = framing_shape + b"1,2\r\n"          # ALL of this is file content
+
+    # The identity that forces the exception. Assert it, do not narrate it.
+    assert framing_shape + b"1,2\r\n" == content, (
+        "case D's content must BE case C's wire, or this exception has no "
+        "justification and the strip should simply be removed")
+    assert _PreambleSkip(_echo()).head_span(content) == len(framing_shape), (
+        "one byte string, one head span: if these ever differ, a second "
+        "signal has appeared and #260's fix may now be possible here")
+
+    got = _get(content + END_OF_FILE_MARKER)
+    assert got == "1,2\r\n", (
+        "the documented GV A exception: the framing-shaped head is stripped. "
+        "got %r" % (got,))
+    assert len(content) - len(got.encode("ascii")) == 49, (
+        "the exception is BOUNDED at 49 bytes; a different number means the "
+        "candidate set changed and the bound GV A accepted no longer holds")
+
+    # The exception buys something: case C, the real console, is correct.
+    assert _get(framing_shape + b"1,2\r\n" + END_OF_FILE_MARKER) == "1,2\r\n"
+
+    # And it is strictly less loss than the code it replaces.
+    base = _base_transform(content + END_OF_FILE_MARKER, _echo().decode("ascii"))
+    assert base == "1,2", (
+        "the differential this PR is measured against: the base lost 51 of "
+        "the 54 bytes here. got %r" % (base,))
+
+
 def test_the_two_prompt_candidate_is_not_framing() -> None:
     """⛔ r6's regression, pinned structurally rather than by example.
 
