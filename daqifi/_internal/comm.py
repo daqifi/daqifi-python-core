@@ -22,6 +22,22 @@ from .scpi import ConnectionStatus
 
 T = TypeVar("T")
 
+#: Deadline for SerialInterface.close()'s output drain, in seconds (#259).
+#:
+#: ⛔ close() used to call serial.flush() with no bound at all, and
+#: write_timeout does not govern flush(): pyserial 3.5 polls out_waiting with
+#: no deadline on Windows and calls tcdrain() on POSIX, neither of which takes
+#: a timeout. So a device that stopped draining hung disconnect() forever,
+#: AFTER the session's work was finished and before the caller could report
+#: its result.
+#:
+#: Generous on purpose. A real post-soak USB-CDC drain on this hardware has
+#: measured over 5 s and under 20 s, so a short bound would report a LIVE
+#: device as wedged — which is the failure this bound exists to avoid
+#: creating, not one to trade for. Per-instance via
+#: SerialInterface.close_drain_timeout.
+CLOSE_DRAIN_TIMEOUT_S = 20.0
+
 
 @dataclass
 class TransportStatusEventArgs:
@@ -1363,9 +1379,44 @@ class SerialInterface:
         # nothing but closing (see CancellablePort), so a late open or a
         # stalled call can't disturb a newer session on it.
         self.cancel_event: Optional[threading.Event] = None
+        # Called by open() on the freshly opened handle BEFORE this library
+        # writes anything of its own, so a caller can confirm the device is
+        # the one it meant to address and refuse without touching it. Set the
+        # same way cancel_event is — an optional attribute, not a constructor
+        # parameter — because that is the shape the one existing write-free
+        # lever already uses. See open() for the contract (#259).
+        self.verify: Optional[Callable[[Any], bool]] = None
+        # Why the last close() could not drain, if it could not. close()
+        # never raises: a dying device must not turn a finished session into
+        # a teardown traceback. The fault is recorded here and close()
+        # returns False, so a caller that cares can tell (#259).
+        self.last_close_error: Optional[BaseException] = None
+        #: Deadline for close()'s drain, in seconds. Generous on purpose: a
+        #: real post-soak USB-CDC drain on this hardware has measured over
+        #: 5 s and under 20 s, so a short bound would report a LIVE device as
+        #: wedged — the failure this bound exists to avoid creating.
+        self.close_drain_timeout: float = CLOSE_DRAIN_TIMEOUT_S
 
     def _cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
+
+    def _refuse_open(self, error: Optional[BaseException]) -> bool:
+        """Close the port, write nothing more, and report the refusal.
+
+        The shape is lifted from open()'s own cancel branch, which already
+        had it right: close the handle, drop it, return False. Factored out
+        so the verify paths cannot drift from the cancel path.
+        """
+        try:
+            if self._serial is not None:
+                self._serial.close()
+        except (serial.SerialException, OSError):
+            # The handle is being abandoned either way; a failure to close it
+            # must not mask the refusal that got us here.
+            pass
+        self._serial = None
+        self.last_open_error = error
+        return False
 
     def open(self) -> bool:
         """
@@ -1424,6 +1475,53 @@ class SerialInterface:
             # Clear any pending data
             self._serial.reset_input_buffer()
             self._serial.reset_output_buffer()
+            # ---- #259: the caller's own look at the device, before ours ----
+            # Runs here and not earlier: the settle and the buffer resets
+            # above touch no device state (they clear HOST-side buffers), so
+            # the callable gets a stabilised port and a clean buffer. Runs
+            # here and not later because the next statement is the first byte
+            # this library puts on the wire.
+            #
+            # ⚠ THE CALLABLE MAY WRITE, and that is not a contradiction.
+            # `*IDN?` is a write. What this guarantees is that the LIBRARY
+            # writes nothing on its own behalf until the caller has decided;
+            # the caller's own verification bytes are the whole point.
+            #
+            # It is handed `self._serial` POST-WRAP, i.e. the same object the
+            # library will use. With cancel_event set that is a
+            # CancellablePort, so a verify that stalls is still cancellable
+            # rather than defeating the one lever that stops an abandoned
+            # probe.
+            if self.verify is not None:
+                try:
+                    verdict = self.verify(self._serial)
+                except BaseException as verify_exc:   # noqa: BLE001
+                    # CANCEL WINS. If the event was set while the callable
+                    # ran, its next port operation raised PortCancelled, and
+                    # that is a cancellation rather than a judgement about
+                    # the device — report it as the cancel branch does, with
+                    # no error, because the caller asked for this.
+                    if self._cancelled():
+                        return self._refuse_open(None)
+                    # Otherwise the callable's own exception is preserved
+                    # EXACTLY, not wrapped: _connect() re-raises
+                    # last_open_error, so the caller gets what its own code
+                    # raised. Deliberately NOT allowed to reach the
+                    # `except (SerialException, OSError)` below, which would
+                    # turn a considered refusal into a port-open failure.
+                    return self._refuse_open(verify_exc)
+                # Checked again after a CLEAN return, too: the callable may
+                # have finished just as the caller gave up, and a truthy
+                # verdict must not authorise a write past a cancellation.
+                if self._cancelled():
+                    return self._refuse_open(None)
+                if not verdict:
+                    # Imported here, not at module scope: this file imports
+                    # from ..exceptions lazily throughout (see
+                    # serial_open_error) to keep the import graph acyclic.
+                    from ..exceptions import DeviceVerificationError
+                    return self._refuse_open(
+                        DeviceVerificationError(self.port))
             # Disable echo + prompt for the rest of the session.
             # Failure here doesn't abort the connection — the existing
             # response-stripping fallbacks compensate; we just won't
@@ -1508,20 +1606,106 @@ class SerialInterface:
         except (serial.SerialException, OSError):
             pass
 
-    def close(self):
-        """Close serial connection. Restores echo to terminal-friendly
-        defaults (SYSTem:ECHO 1) before closing so a human opening the
-        port in a serial terminal afterward sees the prompt."""
-        if self._serial and self._serial.is_open:
-            try:
-                # Refused by CancellablePort once the caller has given up.
-                self._serial.write(b"SYSTem:ECHO 1\r\n")
-                self._serial.flush()
-                time.sleep(0.05)
-            except (serial.SerialException, OSError):
-                # Best-effort; the underlying port may already be gone.
-                pass
-            self._serial.close()
+    def _drain_bounded(self, deadline_s: float) -> None:
+        """Wait, BOUNDED, for the OS output queue to empty. No ``flush()``.
+
+        Raises ``serial.SerialTimeoutException`` if it does not empty in
+        time, so the caller's existing handler runs and the handle is still
+        released by close().
+
+        ⛔ THE BOUND GOES WHERE THE UNBOUNDED WAIT IS. ``write_timeout`` does
+        not govern ``flush()`` on either backend — pyserial 3.5 polls
+        ``out_waiting`` with no deadline on Windows and calls ``tcdrain()``
+        on POSIX — so lowering it could never have bounded this.
+
+        ⛔⛔ AND NOTHING UNBOUNDED MAY SIT BETWEEN THE DRAIN AND THE RELEASE,
+        which is where an earlier version of this function went wrong. It
+        polled ``out_waiting`` to zero and THEN called ``flush()``, with a
+        comment claiming that zero pending bytes made the flush safe. **That
+        claim is false.** ``out_waiting`` is the OS queue count;
+        ``tcdrain()`` waits for the HARDWARE TRANSMITTER, and Linux's
+        usb-serial (``generic.c``) keeps those two separate. On an FTDI
+        adapter with RTS/CTS where CTS is deasserted, the bytes sit in the
+        adapter's FIFO, ``out_waiting`` reads 0, and ``tcdrain()`` blocks
+        forever — so ``close_drain_timeout`` never fired, the handle was
+        never released and ``last_close_error`` stayed None. Exactly the
+        defect this function exists to remove, one layer down (#259 r1).
+
+        So the poll IS the drain, and there is no flush. ⚠ What that
+        honestly costs: when this returns, the OS queue is empty, but bytes
+        may still be in the adapter's FIFO or the UART shift register. There
+        is no bounded way to wait for those — ``tcdrain()`` takes no timeout
+        — and the alternative is a call that can never return. For close()'s
+        purpose (a courtesy ``SYSTem:ECHO 1`` on the way out) an unbounded
+        wait is the worse trade.
+
+        A port that exposes no ``out_waiting`` cannot be bounded at all, and
+        that is reported by raising rather than by falling through to an
+        unbounded ``flush()``: silently taking the unbounded wait again
+        would be the fail-open.
+        """
+        end = time.monotonic() + deadline_s
+        try:
+            pending = self._serial.out_waiting
+        except (AttributeError, NotImplementedError) as exc:
+            raise serial.SerialTimeoutException(
+                "this port exposes no out_waiting, so the drain cannot be "
+                "bounded; refusing an unbounded flush"
+            ) from exc
+        while pending:
+            if time.monotonic() >= end:
+                raise serial.SerialTimeoutException(
+                    f"output buffer still holds {pending} byte(s) after "
+                    f"{deadline_s:.1f}s"
+                )
+            time.sleep(0.01)
+            pending = self._serial.out_waiting
+
+    def close(self) -> bool:
+        """Close the serial connection. True if it closed cleanly.
+
+        Restores echo to terminal-friendly defaults (SYSTem:ECHO 1) before
+        closing so a human opening the port in a serial terminal afterward
+        sees the prompt.
+
+        ⛔ #259: THE DRAIN IS BOUNDED, AND THIS STILL DOES NOT RAISE. The
+        flush used to be unbounded, so a device that stopped draining hung
+        disconnect() indefinitely. It is bounded now — but making close()
+        raise would trade a hang for a different defect: a dying device
+        turning a FINISHED session into a teardown traceback, after the work
+        is done and before the caller can report its result. That is the
+        shape this change exists to remove, not to relocate.
+
+        So the outcome is: **the handle is ALWAYS released, and the failure
+        is always observable.** A drain that expires sets
+        ``last_close_error`` and makes this return False; the port is closed
+        either way. Silence is the one thing it does not do — returning
+        normally after a failed drain would be a verified-false reported as
+        success.
+
+        ⚠ WHAT "DRAINED" MEANS HERE, stated rather than implied: the OS
+        output queue emptied. It does NOT mean the bytes left the hardware.
+        There is no ``flush()`` on this path at all — see _drain_bounded for
+        why ``tcdrain()`` cannot be bounded and what an earlier version got
+        wrong by calling it once ``out_waiting`` hit zero. Bytes may remain
+        in a USB adapter's FIFO when this returns True.
+        """
+        self.last_close_error = None
+        if not (self._serial and self._serial.is_open):
+            return True
+        clean = True
+        try:
+            # Refused by CancellablePort once the caller has given up.
+            self._serial.write(b"SYSTem:ECHO 1\r\n")
+            self._drain_bounded(self.close_drain_timeout)
+            time.sleep(0.05)
+        except (serial.SerialException, OSError) as exc:
+            # Best-effort on the wire; the underlying port may already be
+            # gone. But RECORDED, not swallowed.
+            self.last_close_error = exc
+            clean = False
+        self._serial.close()
+        return clean
 
     def is_open(self) -> bool:
         """Check if serial connection is open"""

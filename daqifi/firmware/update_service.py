@@ -405,6 +405,29 @@ class DefaultFirmwareUpdateService:
     ) -> None:
         if device is None:
             raise TypeError("device must not be None")
+        # ⛔ BEFORE ANYTHING ELSE TOUCHES THE DEVICE (#254). This refusal
+        # used to be incidental: PREPARING_DEVICE stopped streaming first --
+        # a send the consumer thread try-acquires and wins when the exchange
+        # is idle -- and only the next step's run_exclusive refused. The
+        # caller got an exception AND a device whose stream had been
+        # stopped. A refused update must leave the device untouched, so the
+        # rule is asserted here, before the first byte.
+        #
+        # The refusal itself is right, not the defect: two steps later the
+        # flow captures the console, which pauses and restarts the very
+        # consumer thread a message-received callback runs on (#238). Do
+        # not "fix" #254 by switching _send_and_settle to the owning
+        # exchange form -- that deletes the refusal and walks the update
+        # into the capture.
+        on_consumer_thread = getattr(device, "_on_consumer_thread", None)
+        if on_consumer_thread is not None and on_consumer_thread():
+            raise RuntimeError(
+                "update_firmware cannot run on the protobuf consumer thread, "
+                "that is, from a message-received callback: the update "
+                "captures the device's console, which pauses and restarts "
+                "that very thread. Nothing was sent. Start the update from "
+                "your own thread."
+            )
         if hex_file_path is None or not str(hex_file_path).strip():
             raise ValueError("HEX file path cannot be empty.")
         if not os.path.isfile(hex_file_path):
@@ -437,6 +460,29 @@ class DefaultFirmwareUpdateService:
     ) -> None:
         if device is None:
             raise TypeError("device must not be None")
+        # ⛔ BEFORE ANYTHING ELSE TOUCHES THE DEVICE -- the WiFi sibling of
+        # #254. Nothing refused this at the entry, and the refusal that did
+        # exist upstream was SWALLOWED: _is_wifi_firmware_up_to_date calls
+        # get_lan_chip_info(), which the consumer thread is refused, but it
+        # catches that and answers "not up to date". PREPARING_DEVICE then
+        # stopped streaming (stop_streaming() and an unconditional STOP --
+        # sends the consumer thread wins when the exchange is idle) and only
+        # the next _send_and_settle refused: an exception AND a device whose
+        # stream had been stopped. Asserted here, before the first byte.
+        #
+        # The refusal itself is right: the flow captures the console, which
+        # pauses and restarts the very consumer thread a message-received
+        # callback runs on (#238). Do not switch _send_and_settle to the
+        # owning exchange form instead -- that deletes the refusal.
+        on_consumer_thread = getattr(device, "_on_consumer_thread", None)
+        if on_consumer_thread is not None and on_consumer_thread():
+            raise RuntimeError(
+                "update_wifi_module cannot run on the protobuf consumer "
+                "thread, that is, from a message-received callback: the "
+                "update captures the device's console, which pauses and "
+                "restarts that very thread. Nothing was sent. Start the "
+                "update from your own thread."
+            )
         if firmware_path is None or not str(firmware_path).strip():
             raise ValueError("WiFi firmware path cannot be empty.")
         if not (os.path.isfile(firmware_path) or os.path.isdir(firmware_path)):
