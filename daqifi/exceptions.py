@@ -23,6 +23,31 @@ class ConnectionError(DAQiFiError):
     pass
 
 
+class DeviceVerificationError(ConnectionError):
+    """A ``verify=`` callable refused the device on the freshly opened port.
+
+    Raised by ``NyquistDevice.connect(..., verify=...)`` when the callable
+    returns a falsy value — i.e. it reached a decision and the answer was no.
+    When the callable raises instead, THAT exception is preserved and
+    re-raised unchanged; this type is only for a refusal with no exception of
+    its own, so a caller always has something typed to catch.
+
+    A ``ConnectionError``, not a ``SerialPortConnectError``: nothing went
+    wrong with the port. It opened, the caller looked at what was behind it,
+    and declined. The port is closed and the library wrote nothing to the
+    device — see ``SerialInterface.open``.
+    """
+
+    def __init__(self, port: str, reason: Optional[str] = None):
+        self.port = port
+        self.reason = reason
+        detail = f": {reason}" if reason else ""
+        super().__init__(
+            f"the verify callable refused the device on {port}{detail}; "
+            f"the port was closed and nothing was written to it"
+        )
+
+
 class DeviceNotFoundError(DAQiFiError):
     """Device not found during discovery"""
     pass
