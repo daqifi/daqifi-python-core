@@ -364,3 +364,124 @@ def test_a_listing_publishes_its_cache_in_one_step() -> None:
         "incrementally and an invalidation split it: %r vs listed %r"
         % (cached, files)
     )
+
+
+# ----------------------------------------------------------------------------
+# r11 :835 (MAIN + BLIND): the compare and the publish must be ONE step.
+#
+# r11 fixed :830's check-then-index and then introduced another check-then-act
+# in the fix itself: `if gen == captured: self._file_sizes = sizes`. An
+# invalidation landing BETWEEN the comparison and the assignment publishes
+# stale sizes anyway, so sd_get_file_size answers 3 after disconnect().
+#
+# ⭐ PINNED WITH A LINE TRACE, not a sleep. sys.settrace fires per line, so the
+# pause lands exactly between the comparison and the assignment -- the window
+# is entered deterministically rather than hoped for. On 3.9 the same window is
+# reachable through ordinary bytecode switching; the trace just makes it
+# certain on every run and every build.
+# ----------------------------------------------------------------------------
+
+def test_the_generation_check_and_the_publish_are_one_step() -> None:
+    """⛔ FAILS AT a464b08e: sd_get_file_size answers 3 after disconnect().
+
+    The trace pauses the listing thread on the line that assigns
+    `self._file_sizes`, i.e. after the generation comparison has passed. A
+    THIRD thread then runs the invalidation.
+
+    ⚠ THE INVALIDATION MUST NOT RUN ON THE THREAD THAT RELEASES THE PAUSE, and
+    the first version of this test did exactly that. With the fix in place the
+    pause lands INSIDE the lock, so `disconnect()` on the releasing thread
+    blocked on that lock while the paused thread waited to be released --
+    a deadlock, broken only by the 10 s timeout, after which the publish and
+    the clear happened in order and the assertions passed. The test was GREEN
+    FOR THE WRONG REASON: not because the lock serialised anything, but
+    because the timeout expired. The 10.19 s runtime was the only visible
+    symptom.
+
+    ⭐ Running the invalidation on its own thread makes both outcomes mean
+    something. Fixed: it BLOCKS on the lock until the publish completes, then
+    clears -- serialisation, observed. Broken: no lock, so it bumps and clears
+    immediately and the parked publish then overwrites it with stale sizes.
+    """
+    import sys
+    import threading
+
+    import daqifi.device as device_mod
+
+    device = NyquistDevice("COM41")
+    device._comm._serial = _Serial(LISTING, DOWNLOAD)
+
+    target_file = device_mod.__file__
+    paused = threading.Event()
+    release = threading.Event()
+    armed = {"on": True}
+
+    def _source_line(frame):
+        import linecache
+        return linecache.getline(frame.f_code.co_filename, frame.f_lineno)
+
+    def _tracer(frame, event, arg):
+        if (event == "line" and armed["on"]
+                and frame.f_code.co_filename == target_file
+                and frame.f_code.co_name == "sd_list_files"
+                and "self._file_sizes = sizes" in _source_line(frame)):
+            armed["on"] = False
+            paused.set()
+            release.wait(10.0)
+        return _tracer
+
+    result = {}
+
+    def _list():
+        sys.settrace(_tracer)
+        try:
+            result["files"] = device.sd_list_files()
+        except Exception as exc:                              # noqa: BLE001
+            result["error"] = exc
+        finally:
+            sys.settrace(None)
+
+    invalidated = threading.Event()
+
+    def _invalidate():
+        # On the fixed code this BLOCKS on the lock the paused thread holds.
+        device.disconnect()
+        invalidated.set()
+
+    threading.settrace(_tracer)
+    t = threading.Thread(target=_list, daemon=True)
+    t.start()
+    try:
+        reached = paused.wait(10.0)
+    finally:
+        threading.settrace(None)
+
+    if not reached:
+        release.set()
+        t.join(10.0)
+        raise AssertionError(
+            "the trace never paused on the publish line, so the race window "
+            "was not entered and this test asserted nothing"
+        )
+
+    inv = threading.Thread(target=_invalidate, daemon=True)
+    inv.start()
+    # Give the invalidation a moment to either take effect (broken) or park on
+    # the lock (fixed). Bounded and small: it is not timing the race, only
+    # letting the other thread reach its blocking point.
+    invalidated.wait(0.5)
+    release.set()
+    t.join(10.0)
+    inv.join(10.0)
+    assert not t.is_alive(), "the listing thread did not finish"
+    assert not inv.is_alive(), "the invalidation thread did not finish"
+
+    assert device.sd_get_file_size("DAQiFi/log.bin") == 0, (
+        "an invalidation that landed between the generation check and the "
+        "publish was overwritten, so the getter resurrected a size for a "
+        "disconnected device"
+    )
+    assert device._file_sizes == {}, (
+        "the cache should be the empty one the invalidation left: %r"
+        % (device._file_sizes,)
+    )

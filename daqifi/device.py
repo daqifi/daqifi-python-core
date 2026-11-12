@@ -4,6 +4,7 @@ Main device controller for DAQiFi Nyquist devices.
 Provides high-level API for device interaction.
 """
 
+import threading
 from typing import Callable, Dict, Any, Optional, Union, List
 from ._internal.comm import DataSample, SerialInterface, PowerState, DeviceMetadata
 import time
@@ -125,6 +126,26 @@ class NyquistDevice:
         # r10 introduced could RESURRECT sizes an invalidation had already
         # dropped (see sd_list_files).
         self._file_sizes_generation = 0
+        # ⛔ r11 :835 -- AND THE COMPARE AND THE PUBLISH MUST BE ONE STEP.
+        # r11 wrote `if gen == captured: self._file_sizes = sizes`, which is
+        # itself a CHECK-THEN-ACT: an invalidation landing between the
+        # comparison and the assignment was observed (deterministically, with
+        # a line-trace pause, and reachable through ordinary bytecode
+        # switching) to publish stale sizes anyway. Fixing a check-then-act
+        # with another check-then-act is the shape to watch for.
+        #
+        # ⭐ THIS LOCK IS A LEAF, which is what makes its ordering trivially
+        # safe: it is held only around the bump-and-clear and the
+        # compare-and-publish -- a handful of attribute writes -- and NEVER
+        # across I/O, a device command, or a call that could acquire anything
+        # else. So no acquirer can deadlock against it whatever else it holds,
+        # and there is no ordering rule for callers to get wrong. (Checked:
+        # no existing lock guards `_file_sizes`; `NyquistDevice` had none at
+        # all, and the ones in channels/communication/streaming guard other
+        # state. StreamManager fires its recording-change callback OUTSIDE its
+        # own `_lock`, so even a non-leaf design would not have nested there --
+        # but the leaf property does not depend on that staying true.)
+        self._file_sizes_lock = threading.Lock()
         # Protobuf-populated metadata (real SN, MAC, IP, SSID, ...).
         # Best-effort populated during `_connect()`; callers can re-
         # fetch on demand via :meth:`refresh_metadata` (e.g. after a
@@ -831,9 +852,14 @@ class NyquistDevice:
                     # reports the second as 0 without claiming the first.
                     files.append(line)
                     sizes[line] = None
-        # The single publish, and only if no invalidation intervened.
-        if self._file_sizes_generation == generation_at_entry:
-            self._file_sizes = sizes
+        # The single publish, and only if no invalidation intervened. ⛔ r11
+        # :835: the comparison and the assignment are ONE step under the lock.
+        # Separately they are a check-then-act, and an invalidation arriving
+        # between them published stale sizes -- the same class as :830, which
+        # this publish was introduced to fix.
+        with self._file_sizes_lock:
+            if self._file_sizes_generation == generation_at_entry:
+                self._file_sizes = sizes
         return files
 
     def sd_get_file_size(self, filename: str) -> int:
@@ -919,8 +945,9 @@ class NyquistDevice:
         the same for the modern path -- including on disconnect, since a
         listing from an earlier session is not a safe length either.
         """
-        self._file_sizes = {}
-        self._file_sizes_generation += 1
+        with self._file_sizes_lock:
+            self._file_sizes = {}
+            self._file_sizes_generation += 1
 
     def sd_get_file(self, filename: str, timeout: float = 30.0) -> str:
         """
