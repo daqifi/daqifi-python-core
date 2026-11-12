@@ -511,6 +511,12 @@ class _StallingSerial:
     def in_waiting(self):
         return len(self.input)
 
+    @property
+    def out_waiting(self):
+        # Every write is taken at once, so the OS queue is always empty.
+        # open() polls this as its bounded drain (#262).
+        return 0
+
     def read(self, n=1):
         taken = bytes(self.input[:n])
         del self.input[:n]
@@ -549,12 +555,17 @@ def stalling(monkeypatch):
 
 
 def test_an_abandoned_idn_probe_leaves_a_newer_sessions_input_alone(monkeypatch, stalling) -> None:
-    # The echo-off flush stalls past the hard timeout; discovery returns and a
-    # newer session's frame arrives on the shared port; then the flush returns.
+    # The echo-off write stalls past the hard timeout; discovery returns and a
+    # newer session's frame arrives on the shared port; then the write returns.
     # The abandoned probe must not read, drain or reset the input.
+    #
+    # This used to stall the echo-off FLUSH. open() no longer calls flush()
+    # (#262: it was an unbounded tcdrain), so the stall moved to the write
+    # just before it: the same open-time output path, and the one blocking
+    # output call open() still makes.
     import daqifi.discovery as discovery
 
-    stalling.stall_on = "flush"
+    stalling.stall_on = "write"
     monkeypatch.setattr(discovery, "_IDENTIFY_HARD_TIMEOUT_S", 0.2)
     monkeypatch.setattr(list_ports, "comports", lambda: [_port("COM56", 0x04D8, 0xF794)])
     assert DeviceFinder.discover() == []
