@@ -121,9 +121,14 @@ def test_a_port_without_out_waiting_fails_the_open(monkeypatch):
 
     Its drain cannot be bounded, and falling back to an unbounded flush()
     would be the hang this ticket removes. So the open is refused, the port
-    is released, and the reason names out_waiting. Every pyserial backend
-    (POSIX, Windows, the rfc2217/loop:// URL handlers) implements
-    out_waiting, so in practice only a hand-rolled port object reaches this.
+    is released, and the reason names out_waiting.
+
+    Who can reach it (pyserial 3.5): open() constructs ``serial.Serial``,
+    which is ``serialposix`` or ``serialwin32`` on CPython, and both define
+    out_waiting. The backends without it (``serialjava``, ``serialcli`` for
+    Jython/IronPython, and the rfc2217:// and socket:// URL handlers) are not
+    reachable here: the first two are not CPython, and URL handlers need
+    ``serial_for_url``, which open() never calls.
     """
     port = _Port(omit_out_waiting=True)
     iface = _iface(monkeypatch, port)
