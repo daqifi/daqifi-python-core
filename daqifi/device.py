@@ -119,6 +119,12 @@ class NyquistDevice:
         # wrong answer from that getter and nothing else. It used to be an
         # enforced transfer boundary, which is what made staleness fatal.
         self._file_sizes: Dict[str, Optional[int]] = {}
+        # ⛔ r10 :808 -- INVALIDATION GENERATION. Bumped by
+        # _forget_sd_file_sizes; a listing captures it before its query and
+        # publishes only if it has not moved. Without it the atomic publish
+        # r10 introduced could RESURRECT sizes an invalidation had already
+        # dropped (see sd_list_files).
+        self._file_sizes_generation = 0
         # Protobuf-populated metadata (real SN, MAC, IP, SSID, ...).
         # Best-effort populated during `_connect()`; callers can re-
         # fetch on demand via :meth:`refresh_metadata` (e.g. after a
@@ -748,6 +754,12 @@ class NyquistDevice:
             cmd = scpi_commands.get_sd_file_list_for_directory(directory)
         else:
             cmd = scpi_commands.get_sd_file_list()
+        # ⛔ r10 :808 -- CAPTURED BEFORE THE QUERY, compared at the publish.
+        # Taken here rather than after the parse so it covers the whole window
+        # in which an invalidation could arrive: the wire exchange is the long
+        # part, and an invalidation during it is exactly the case the audit
+        # reproduced.
+        generation_at_entry = self._file_sizes_generation
         response = self._comm.send_command(cmd.data)
         lines = response.strip().split('\n')
 
@@ -776,13 +788,28 @@ class NyquistDevice:
         # sd_get_file_size rather than a crash and so would not have shown up
         # as a failure anywhere.
         #
-        # ⭐ Building a local dict and assigning it in one statement at the end
-        # makes the publish atomic, so an invalidation racing this listing
-        # either wins (the cache is empty, the next caller re-lists) or loses
-        # (the cache is this listing, whole). There is no interleaving that
-        # yields a partial cache. The invalidation is deliberately allowed to
-        # lose: it means "what I have is stale", and a listing that completes
-        # after it holds strictly newer data.
+        # ⛔⛔ r10 :808 -- AND THE INVALIDATION WINS, WHICH IS THE OPPOSITE OF
+        # WHAT THIS COMMENT USED TO CLAIM. The earlier text said the
+        # invalidation was "deliberately allowed to lose" because "a listing
+        # that completes after it holds strictly newer data". THAT IS FALSE,
+        # and the audit demonstrated it: thread A parses a listing and pauses
+        # before publishing, thread B calls disconnect() which clears the
+        # cache, A resumes and writes the stale entry back -- so
+        # sd_get_file_size answers 3 for a device we have stopped talking to,
+        # where its documented miss value is 0.
+        #
+        # ⭐ `disconnect()` does not invalidate because the data is old. It
+        # invalidates because THE DEVICE'S STATE IS NO LONGER KNOWN, and
+        # nothing a listing finished afterwards can re-establish that. So the
+        # invalidation is authoritative and a listing that completes across one
+        # is DISCARDED, not published.
+        #
+        # The generation counter is what makes that decidable: captured before
+        # the query, compared at the publish. Equal means no invalidation
+        # intervened and this listing still describes a live cache; changed
+        # means one did, and the right cache is the empty one the invalidation
+        # left. Still exactly one write to the attribute, so the
+        # half-populated window r10 closed stays closed.
         sizes = {}
         for line in lines:
             line = line.strip()
@@ -804,8 +831,9 @@ class NyquistDevice:
                     # reports the second as 0 without claiming the first.
                     files.append(line)
                     sizes[line] = None
-        # The single publish. See the note above.
-        self._file_sizes = sizes
+        # The single publish, and only if no invalidation intervened.
+        if self._file_sizes_generation == generation_at_entry:
+            self._file_sizes = sizes
         return files
 
     def sd_get_file_size(self, filename: str) -> int:
@@ -892,6 +920,7 @@ class NyquistDevice:
         listing from an earlier session is not a safe length either.
         """
         self._file_sizes = {}
+        self._file_sizes_generation += 1
 
     def sd_get_file(self, filename: str, timeout: float = 30.0) -> str:
         """
@@ -1019,15 +1048,61 @@ class NyquistDevice:
         out = bytearray()
         deadline = time.monotonic() + timeout
         skip = _PreambleSkip(echo)
+        # ⛔ r10 :1028 (MEDIUM) -- SCAN INCREMENTALLY, AND NEVER COPY THE
+        # BUFFER. This loop did `buf = bytes(out)` and then
+        # `END_OF_FILE_MARKER in buf[head:]` on EVERY iteration, idle polls
+        # included: a full copy of everything received so far, plus a full
+        # rescan of it, per 4 KiB read. That is O(n^2) over a download and it
+        # turned a working transfer into a TimeoutError. Measured by the audit
+        # on a 32 MiB source fed in 4096-byte chunks with no delays: the base
+        # returned all 33,554,432 bytes in 22.8 s, while this code raised
+        # TimeoutError at 30 s having read only ~21 MB.
+        #
+        # `head` is resolved ONCE. `head_span` answers None only while the
+        # preamble may still be arriving; once it returns a span that span is
+        # final, so re-asking it per iteration bought nothing.
+        #
+        # `scanned` is how far the marker search has already looked.
+        # Re-searching from `scanned - (len(marker) - 1)` is what makes the
+        # incremental scan exact rather than merely fast: a marker split
+        # across two reads straddles that boundary, and without the overlap it
+        # would be missed by both passes. `bytearray.find` searches in place,
+        # so no copy is made.
+        head = None
+        scanned = 0
+        overlap = len(END_OF_FILE_MARKER) - 1
         while time.monotonic() < deadline:
             pending = serial.in_waiting
             if pending:
                 out.extend(serial.read(pending))
-                if idle_reset:
-                    deadline = time.monotonic() + timeout
-            buf = bytes(out)
-            head = skip.head_span(buf)
-            if head is not None and END_OF_FILE_MARKER in buf[head:]:
+            if head is None:
+                head = skip.head_span(out)
+            done = False
+            if head is not None:
+                start = scanned - overlap
+                if start < head:
+                    start = head
+                done = out.find(END_OF_FILE_MARKER, start) != -1
+                scanned = len(out)
+            # ⛔ r10 :1027 (MEDIUM, blind leg) -- THE IDLE DEADLINE IS RESET
+            # AFTER THE WORK, NOT BEFORE IT. The reset used to sit inside the
+            # `if pending` block above, so the time spent copying and scanning
+            # was charged against the NEXT silence window rather than excluded
+            # from it. With a short timeout and a continuously-fed source the
+            # loop then exited mid-transfer: the audit measured
+            # sd_get_file('log.csv', timeout=0.001) against 8 MiB supplied in
+            # 4096-byte reads ending with ~3 MiB captured, over 5 MiB still
+            # unread, and a TimeoutError on reparse. The base reset after
+            # scanning, so this restores that order rather than inventing one.
+            #
+            # ⭐ This is what makes the parameter mean what it says: the
+            # docstring promises the timeout measures SILENCE, and silence
+            # cannot include the host's own processing time. Fixing :1028
+            # shrinks that processing time, but the ORDER is the correctness
+            # fix and would be needed even if the scan were free.
+            if pending and idle_reset:
+                deadline = time.monotonic() + timeout
+            if done:
                 break
             if not pending:
                 time.sleep(0.01)
