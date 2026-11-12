@@ -186,3 +186,181 @@ def test_a_fresh_listing_restores_the_size() -> None:
     assert device.sd_get_file_size(LISTED) == 0
     device.sd_list_files()
     assert device.sd_get_file_size(LISTED) == 3
+
+
+# ----------------------------------------------------------------------------
+# r9 :830 (MEDIUM): the size lookup must be ATOMIC against invalidation.
+#
+# `_forget_sd_file_sizes` REPLACES `device._file_sizes` and is wired to
+# StreamManager's recording-change callback, which runs on ANOTHER THREAD --
+# AsyncStreamManager.stop() in particular. The lookup used to read the
+# attribute TWICE, `if filename not in self._file_sizes` and then
+# `self._file_sizes[filename]`, so an invalidation landing between them left
+# the index hitting a fresh empty dict: KeyError out of a getter whose
+# contract is to return a number. The base did one `dict.get()`, so the window
+# was INTRODUCED by splitting the lookup.
+#
+# ⭐ NO THREADS AND NO SLEEPS IN THESE TESTS. A real race would be
+# nondeterministic and would pass by luck on a good day. Instead the dict
+# itself performs the invalidation, from inside the very operation the old code
+# used as its check -- which makes the interleaving exact and repeatable.
+# ----------------------------------------------------------------------------
+
+class _SwapOnContains(dict):
+    """A cache that invalidates itself the moment someone tests membership.
+
+    This stands in for "another thread replaced the attribute between the
+    check and the index". `__contains__` is the old code's check, so the swap
+    happens exactly in the window under test -- and the fixed code never calls
+    it, which is the property being pinned.
+    """
+
+    def __init__(self, *a, **kw):
+        dict.__init__(self, *a, **kw)
+        self.device = None
+        self.contains_calls = 0
+
+    def __contains__(self, key):
+        self.contains_calls += 1
+        if self.device is not None:
+            self.device._file_sizes = {}        # the concurrent invalidation
+        return dict.__contains__(self, key)
+
+
+def test_the_size_lookup_survives_invalidation_between_check_and_access() -> None:
+    """⛔ FAILS AT a07b4886 with KeyError: 'DAQiFi/log.bin'."""
+    device = _device()
+    device.sd_list_files()
+    assert device.sd_get_file_size(LISTED) == 3, "the listing did not cache"
+
+    hostile = _SwapOnContains(device._file_sizes)
+    hostile.device = device
+    device._file_sizes = hostile
+
+    # The old code: `in` fires the swap, then the index hits the new empty
+    # dict and raises. The fixed code does one `.get()` on the object it
+    # already holds and answers from it.
+    assert device.sd_get_file_size(LISTED) == 3, (
+        "an invalidation racing the lookup changed the answer"
+    )
+    assert hostile.contains_calls == 0, (
+        "the lookup tested membership before reading, which is the "
+        "check-then-index window r9 :830 closed -- %d call(s)"
+        % hostile.contains_calls
+    )
+
+
+class _SwapOnGet(dict):
+    """A cache that invalidates itself from inside `get` itself.
+
+    The stronger form: even when the invalidation lands during the ONE
+    operation the fix relies on, the answer still comes from the object the
+    caller had already resolved. This is what "one operation on one object"
+    buys, and it holds whether the clear REPLACES the attribute or calls
+    `.clear()` on it.
+    """
+
+    def __init__(self, *a, **kw):
+        dict.__init__(self, *a, **kw)
+        self.device = None
+
+    def get(self, key, *a):
+        if self.device is not None:
+            self.device._file_sizes = {}
+        return dict.get(self, key, *a)
+
+
+def test_the_size_lookup_answers_from_the_dict_it_resolved() -> None:
+    device = _device()
+    device.sd_list_files()
+    hostile = _SwapOnGet(device._file_sizes)
+    hostile.device = device
+    device._file_sizes = hostile
+    assert device.sd_get_file_size(LISTED) == 3, (
+        "the lookup re-read the attribute after resolving it"
+    )
+    # ⭐ The positive control for the swap itself: it really did fire, so the
+    # assertion above is not passing because nothing happened.
+    assert device._file_sizes == {}, (
+        "the simulated invalidation never ran, so this test proves nothing"
+    )
+
+
+def test_a_listing_publishes_its_cache_in_one_step() -> None:
+    """An invalidation DURING a listing leaves the cache whole, not partial.
+
+    The listing used to assign `self._file_sizes = {}` and then write into the
+    attribute once per line. An invalidation part-way through split the writes
+    across two dicts and left a HALF POPULATED cache -- a wrong size from the
+    getter rather than a crash, so nothing failed and nobody noticed.
+
+    ⚠ TWO THINGS HERE ARE LOAD-BEARING, both measured after a version of this
+    test passed on the UNFIXED code:
+
+      * THREE files, not the module's one-file LISTING. With a single entry a
+        mid-listing invalidation cannot produce a state distinguishable from
+        "empty" or "complete". Three, split after the first, make the partial
+        cache {b, c}: not empty, not complete, detectable.
+      * THE TRIGGER IS CONTENT-BASED, and it took two wrong tries to get
+        there. `sd_list_files` runs the helper over the lines TWICE --
+        measured, 8 calls for 4 lines -- and the first pass caches nothing, so
+        firing on "call 2" landed in that first pass and changed nothing:
+        the test passed on the defect. Firing instead on "the cache looks
+        partly built" then failed on the FIXED code, because the fix keeps the
+        attribute EMPTY for the whole loop, so that trigger can never fire --
+        the property being tested makes a state-based trigger unobservable.
+        Firing on the SECOND sighting of the middle file's line works on both
+        versions: it is inside the caching pass, after the first entry and
+        before the last, and it depends on nothing the fix changes.
+    """
+    # Patched on daqifi.sdcard, not on daqifi.device: sd_list_files imports
+    # the helper INSIDE the function (`from .sdcard import _list_end_status`),
+    # so the name resolves from the sdcard module at call time.
+    import daqifi.sdcard as sdcard_mod
+
+    three = (b"DAQiFi/a.bin 1\r\n"
+             b"DAQiFi/b.bin 2\r\n"
+             b"DAQiFi/c.bin 3\r\n"
+             b"__END_OF_LIST__ OK\r\n")
+    device = NyquistDevice("COM41")
+    device._comm._serial = _Serial(three, DOWNLOAD)
+
+    calls = {"n": 0, "b": 0, "fired": False}
+    real = sdcard_mod._list_end_status
+
+    def _invalidate_midway(line):
+        calls["n"] += 1
+        if line.strip().startswith("DAQiFi/b.bin"):
+            calls["b"] += 1
+            # The SECOND sighting is the caching pass: a.bin has been recorded
+            # by then and b.bin / c.bin have not.
+            if calls["b"] == 2 and not calls["fired"]:
+                calls["fired"] = True
+                device._forget_sd_file_sizes()
+        return real(line)
+
+    sdcard_mod._list_end_status = _invalidate_midway
+    try:
+        files = device.sd_list_files()
+    finally:
+        sdcard_mod._list_end_status = real
+
+    assert len(files) == 3, "the listing itself did not parse three files"
+    # ⭐ THE POSITIVE CONTROL: the invalidation must really have fired, and
+    # fired while the cache was PARTLY built. Without this the assertion below
+    # passes whenever the hook did nothing -- which is how the first version
+    # of this test passed on the defect.
+    assert calls["fired"], "the invalidation never fired, so this proves nothing"
+    assert calls["b"] >= 2, (
+        "the middle file's line was seen %d time(s); the caching pass was "
+        "never reached, so the invalidation did not land mid-build"
+        % calls["b"]
+    )
+    cached = dict(device._file_sizes)
+    # Either the listing won (whole) or the invalidation won (empty). A
+    # partially populated cache is the defect and is neither.
+    assert cached == {} or set(cached) == set(files), (
+        "the cache is neither empty nor complete -- it was published "
+        "incrementally and an invalidation split it: %r vs listed %r"
+        % (cached, files)
+    )

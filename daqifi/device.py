@@ -765,7 +765,25 @@ class NyquistDevice:
 
         # Parse file list from response (format: path,size per line)
         files = []
-        self._file_sizes = {}  # Store for later use
+        # ⛔ r9 :830, the same class at the WRITING end: BUILD LOCALLY, PUBLISH
+        # ONCE. This used to assign `self._file_sizes = {}` here and then write
+        # into `self._file_sizes[...]` per line -- one attribute read per
+        # write. A concurrent `_forget_sd_file_sizes` (StreamManager's
+        # recording-change callback, on another thread) REPLACES the attribute,
+        # so writes before the replacement landed in a dict nobody holds any
+        # more and writes after it landed in the one the forget had just
+        # emptied: a cache left HALF POPULATED, which is a wrong answer from
+        # sd_get_file_size rather than a crash and so would not have shown up
+        # as a failure anywhere.
+        #
+        # ⭐ Building a local dict and assigning it in one statement at the end
+        # makes the publish atomic, so an invalidation racing this listing
+        # either wins (the cache is empty, the next caller re-lists) or loses
+        # (the cache is this listing, whole). There is no interleaving that
+        # yields a partial cache. The invalidation is deliberately allowed to
+        # lose: it means "what I have is stale", and a listing that completes
+        # after it holds strictly newer data.
+        sizes = {}
         for line in lines:
             line = line.strip()
             if _list_end_status(line) is not None:
@@ -778,14 +796,16 @@ class NyquistDevice:
                     path = ' '.join(parts[:-1])  # Rejoin in case path has spaces
                     size = int(parts[-1])
                     files.append(path)
-                    self._file_sizes[path] = size
+                    sizes[path] = size
                 else:
                     # Old format: just path, no size. Stored as None, not
                     # 0: "this file is empty" and "this listing did not
                     # say" are different facts, and sd_get_file_size()
                     # reports the second as 0 without claiming the first.
                     files.append(line)
-                    self._file_sizes[line] = None
+                    sizes[line] = None
+        # The single publish. See the note above.
+        self._file_sizes = sizes
         return files
 
     def sd_get_file_size(self, filename: str) -> int:
@@ -820,15 +840,33 @@ class NyquistDevice:
         is ``None``, which is what makes the ``is not None`` test below
         meaningful rather than a truthiness accident.
         """
-        if filename not in self._file_sizes:
-            return None
-        # `is not None`, never truthiness: a listed size of 0 is a real,
-        # empty file and must stay distinguishable from "this listing did
-        # not say", which is stored as None. An `if size:` here sent an
-        # empty file down the unsized path and, in an earlier revision that
-        # also matched basenames, let it borrow another directory's size.
-        size = self._file_sizes[filename]
-        return size if size is not None else None
+        # ⛔ r9 :830 (MEDIUM) -- ONE DICT OPERATION, NEVER CHECK-THEN-INDEX.
+        # This read `if filename not in self._file_sizes` and then indexed
+        # `self._file_sizes[filename]`, two separate reads of the attribute.
+        # `_forget_sd_file_sizes` REPLACES it (`self._file_sizes = {}`,
+        # below) and is wired to StreamManager's recording-change callback,
+        # which runs ON ANOTHER THREAD -- AsyncStreamManager.stop() in
+        # particular. So a listing could satisfy the membership check and the
+        # index could then hit the fresh empty dict and raise KeyError at the
+        # caller. The base had a single `dict.get()` here, so the window was
+        # INTRODUCED by splitting the lookup in two.
+        #
+        # `.get()` is one operation on one object: whichever dict is current
+        # when it runs answers, and a replacement racing it means the caller
+        # sees the old cache or the new empty one -- both legitimate answers,
+        # neither an exception. Taking a local reference first would ALSO fix
+        # the crash, but `.get()` needs no reasoning about how the clear is
+        # spelled, so it survives someone changing it to `.clear()`.
+        #
+        # ⚠ `.get()` with no default returns None for a MISSING key, which is
+        # this method's documented miss value, and 0 for a file the listing
+        # said is 0 bytes. That distinction is the point of the old
+        # `is not None` dance and it is preserved exactly: a listed 0 comes
+        # back as 0, never as None and never falsy-collapsed. Do NOT
+        # reintroduce an `if size:` here -- it sent an empty file down the
+        # unsized path, and in an earlier revision that also matched
+        # basenames it let that file borrow another directory's size.
+        return self._file_sizes.get(filename)
 
     def _forget_sd_file_sizes(self) -> None:
         """Drop the cached listing sizes.
