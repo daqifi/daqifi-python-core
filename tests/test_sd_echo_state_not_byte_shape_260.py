@@ -36,7 +36,6 @@ same kind of evidence:
     guards against a WRONG implementation and their teeth are shown by
     MUTATION (treat 0 as silent -> they fire), not by a cross-head run.
 """
-import io
 import re
 import time
 from pathlib import Path
