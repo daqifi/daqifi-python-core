@@ -1371,7 +1371,8 @@ class PortCancelled(serial.SerialException):
 
 class _OpenDrainFailed(serial.SerialException):
     """open()'s echo-disable drain did not finish (#262): it missed its
-    bound, or the caller cancelled during it.
+    bound, the port failed under it (an I/O error), or the caller cancelled
+    during it.
 
     Private: open() turns it into a refused open, with a
     SerialPortConnectError in ``last_open_error`` (or no error, for a
@@ -1671,9 +1672,16 @@ class SerialInterface:
         # call it replaces, re-checks a CancellablePort on every iteration:
         # a cancel mid-drain must reach open()'s cancel handling, not be
         # swallowed as a lost echo-disable and reported as a good open.
+        # ANY failure of the drain fails the open, not only the timeout: an
+        # out_waiting poll on a port that went away mid-open raises
+        # OSError(EIO) or a SerialException, and leaving those to open()'s
+        # tolerant write handler returned True on a dead port with the handle
+        # still held (#262 r1). Only the WRITE above stays tolerated.
+        # OSError covers all of them: in pyserial 3.5 SerialException (and so
+        # SerialTimeoutException and PortCancelled) derives from IOError.
         try:
             self._drain_bounded(self.open_drain_timeout)
-        except (serial.SerialTimeoutException, PortCancelled) as exc:
+        except OSError as exc:
             raise _OpenDrainFailed(str(exc)) from exc
         time.sleep(0.1)
         # Drain loop — bytes can arrive after the initial settle if the
