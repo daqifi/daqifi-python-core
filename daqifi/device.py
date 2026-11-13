@@ -6,7 +6,8 @@ Provides high-level API for device interaction.
 
 import threading
 from typing import Callable, Dict, Any, Optional, Union, List
-from ._internal.comm import DataSample, SerialInterface, PowerState, DeviceMetadata
+from ._internal.comm import (DataSample, SerialInterface, PowerState, DeviceMetadata,
+                             SEND_DRAIN_TIMEOUT_S, drain_output_bounded)
 import time
 
 from ._internal import scpi, scpi_commands
@@ -1041,7 +1042,10 @@ class NyquistDevice:
         cmd = scpi_commands.get_sd_file(filename).data
         cmd_bytes = (cmd + "\r").encode('ascii')
         self._comm._serial.write(cmd_bytes)
-        self._comm._serial.flush()
+        # #263: bounded, no flush(); a stall raises SerialTimeoutException.
+        drain_output_bounded(
+            self._comm._serial,
+            getattr(self._comm, "send_drain_timeout", SEND_DRAIN_TIMEOUT_S))
 
         # ⛔ SAME RECEIVE AS THE BINARY SIBLING, and the sweeps that used to
         # be here are gone with it. This path removed the command text, the
@@ -1106,7 +1110,10 @@ class NyquistDevice:
         cmd = scpi_commands.get_sd_file(filename).data
         cmd_bytes = (cmd + "\r").encode('ascii')
         self._comm._serial.write(cmd_bytes)
-        self._comm._serial.flush()
+        # #263: bounded, no flush(); a stall raises SerialTimeoutException.
+        drain_output_bounded(
+            self._comm._serial,
+            getattr(self._comm, "send_drain_timeout", SEND_DRAIN_TIMEOUT_S))
 
         return self._receive_sd_file(filename, cmd, timeout, idle_reset=False)
 

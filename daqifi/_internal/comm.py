@@ -53,6 +53,51 @@ CLOSE_DRAIN_TIMEOUT_S = 20.0
 #: rather than a hang. Per-instance via SerialInterface.open_drain_timeout.
 OPEN_DRAIN_TIMEOUT_S = 1.0
 
+#: Deadline for the drain after a command write, in seconds (#263).
+#:
+#: send_command(), query_binary(), the SD file getters and streaming's START
+#: wrote a command and then called serial.flush(), the same unbounded wait
+#: close() (#259) and open() (#262) had: a port that stopped taking bytes
+#: blocked the caller forever, with nothing raised. They now use the same
+#: bounded poll, drain_output_bounded().
+#:
+#: A command is tens of bytes, which a USB-CDC port hands to the host stack
+#: in one transfer and a 9600-baud UART sends in well under 0.1 s. 5 s is
+#: generous for that while still turning a wedged port into an error the
+#: caller sees, rather than a hang. Per-instance via
+#: SerialInterface.send_drain_timeout.
+SEND_DRAIN_TIMEOUT_S = 5.0
+
+
+def drain_output_bounded(port, deadline_s: float) -> None:
+    """Wait, BOUNDED, for ``port``'s OS output queue to empty. No ``flush()``.
+
+    The one implementation of the bounded drain (#259, #262, #263); see
+    SerialInterface._drain_bounded for why there is no ``flush()`` after it.
+    Takes the port explicitly so a caller holding its own reference
+    (query_binary, the SD getters, streaming's START) drains THAT port.
+
+    Raises ``serial.SerialTimeoutException`` if the queue does not empty in
+    time, or if the port exposes no ``out_waiting`` (an unbounded flush would
+    be the fail-open).
+    """
+    end = time.monotonic() + deadline_s
+    try:
+        pending = port.out_waiting
+    except (AttributeError, NotImplementedError) as exc:
+        raise serial.SerialTimeoutException(
+            "this port exposes no out_waiting, so the drain cannot be "
+            "bounded; refusing an unbounded flush"
+        ) from exc
+    while pending:
+        if time.monotonic() >= end:
+            raise serial.SerialTimeoutException(
+                f"output buffer still holds {pending} byte(s) after "
+                f"{deadline_s:.1f}s"
+            )
+        time.sleep(0.01)
+        pending = port.out_waiting
+
 
 @dataclass
 class TransportStatusEventArgs:
@@ -1426,6 +1471,9 @@ class SerialInterface:
         #: Deadline for open()'s echo-disable drain, in seconds. A drain that
         #: misses it fails the open and releases the port (#262).
         self.open_drain_timeout: float = OPEN_DRAIN_TIMEOUT_S
+        #: Deadline for the drain after each command write, in seconds. A
+        #: drain that misses it raises instead of hanging the caller (#263).
+        self.send_drain_timeout: float = SEND_DRAIN_TIMEOUT_S
 
     def _cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
@@ -1699,23 +1747,11 @@ class SerialInterface:
         that is reported by raising rather than by falling through to an
         unbounded ``flush()``: silently taking the unbounded wait again
         would be the fail-open.
+
+        The poll itself is drain_output_bounded() (#263), shared with every
+        other send path.
         """
-        end = time.monotonic() + deadline_s
-        try:
-            pending = self._serial.out_waiting
-        except (AttributeError, NotImplementedError) as exc:
-            raise serial.SerialTimeoutException(
-                "this port exposes no out_waiting, so the drain cannot be "
-                "bounded; refusing an unbounded flush"
-            ) from exc
-        while pending:
-            if time.monotonic() >= end:
-                raise serial.SerialTimeoutException(
-                    f"output buffer still holds {pending} byte(s) after "
-                    f"{deadline_s:.1f}s"
-                )
-            time.sleep(0.01)
-            pending = self._serial.out_waiting
+        drain_output_bounded(self._serial, deadline_s)
 
     def close(self) -> bool:
         """Close the serial connection. True if it closed cleanly.
@@ -1788,7 +1824,9 @@ class SerialInterface:
             # Send command with CR terminator
             cmd_bytes = (command + "\r").encode('ascii')
             self._serial.write(cmd_bytes)
-            self._serial.flush()
+            # #263: bounded, no flush(). A stall raises SerialTimeoutException,
+            # which the handler below reports as a RuntimeError.
+            self._drain_bounded(self.send_drain_timeout)
 
             # Wait for device to process
             time.sleep(delay)
@@ -1918,7 +1956,9 @@ class SerialInterface:
                 # wire format. send_command() uses bare \r for legacy
                 # compatibility but binary queries expect the canonical form.
                 ser.write((query + "\r\n").encode("ascii"))
-                ser.flush()
+                # #263: bounded, no flush(); a stall is reported as the
+                # RuntimeError below.
+                drain_output_bounded(ser, self.send_drain_timeout)
 
                 received = bytearray()
                 deadline = time.monotonic() + timeout

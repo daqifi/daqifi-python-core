@@ -37,7 +37,9 @@ from ._internal.comm import (
     MessageReceivedEventArgs,
     OutboundMessage,
     ScpiMessage,
+    SEND_DRAIN_TIMEOUT_S,
     TransportStatusEventArgs,
+    drain_output_bounded,
 )
 from ._internal.scpi import ChannelDirection, ConnectionStatus, DeviceState, StreamInterface
 from ._internal import scpi_commands
@@ -1075,10 +1077,20 @@ class DaqifiDevice:
                         f"after {total_written} of {len(data)} bytes."
                     )
                 total_written += written
-            try:
-                stream.flush()
-            except AttributeError:
-                pass
+            # #263: a SERIAL stream (SerialStreamTransport.stream is the
+            # pyserial port itself) drains BOUNDED, with no flush(): pyserial's
+            # flush() is an unbounded out_waiting loop on Windows and
+            # tcdrain() on POSIX, so a port that stopped taking bytes blocked
+            # this send forever. A stall raises SerialTimeoutException into
+            # the handler below, which marks the link Lost. Any other stream
+            # (TCP) keeps its own flush().
+            if hasattr(type(stream), "out_waiting"):
+                drain_output_bounded(stream, SEND_DRAIN_TIMEOUT_S)
+            else:
+                try:
+                    stream.flush()
+                except AttributeError:
+                    pass
         except Exception as exc:
             # Decided and applied under the lock connect() bumps the
             # generation with, so no disconnect/reconnect can land

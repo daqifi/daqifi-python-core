@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from ._internal.comm import SerialInterface
+from ._internal.comm import (SEND_DRAIN_TIMEOUT_S, SerialInterface,
+                             drain_output_bounded)
 from ._internal import scpi
 from .communication import ProtobufMessageParser
 from .exceptions import CommandError, ConfigurationError
@@ -636,7 +637,10 @@ class StreamManager:
         """
         port = self._comm._serial
         port.write((start_cmd + "\r").encode("ascii"))
-        port.flush()
+        # #263: bounded, no flush(). A stall raises SerialTimeoutException,
+        # which start() reports as "Failed to start streaming".
+        drain_output_bounded(
+            port, getattr(self._comm, "send_drain_timeout", SEND_DRAIN_TIMEOUT_S))
         time.sleep(0.2)
         # As send_command: wait up to its timeout for the first bytes (a
         # rejection can arrive after the 200 ms settle), then read until the
