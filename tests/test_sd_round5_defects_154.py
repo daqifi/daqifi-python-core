@@ -18,6 +18,8 @@ head proves nothing:
 import io
 
 from daqifi._internal import scpi_commands
+import daqifi.device as device_module
+import daqifi.sdcard as sdcard_module
 from daqifi.device import NyquistDevice
 from daqifi.exceptions import SdCardTransferErrorException
 from daqifi.sdcard import (
@@ -107,15 +109,94 @@ def test_a_completed_text_transfer_is_not_timed_out_by_local_parsing() -> None:
     that had already completely succeeded raised ``TimeoutError`` whenever
     the local parse outlasted the transport allowance.
 
-    ⚠ The 8 MiB is LOAD-BEARING and is not padding: a 2 MiB probe parses fast
-    enough to finish inside the allowance and does NOT reproduce. Measured on
-    the frozen head, this raises ``TimeoutError``; the base returned all
-    8,388,608 characters, and so does the fix.
+    ⛔⛔ r15 -- REWRITTEN BECAUSE THE ORIGINAL WAS FLAKY IN CI, and the flake
+    was NOT in the property under test. The old form drove 8 MiB against
+    ``timeout=0.001`` and depended on the runner being fast enough. Two things
+    were wrong with that:
+
+      * ``_read_sd_response`` computes ``deadline = time.monotonic() +
+        timeout`` and then tests ``while time.monotonic() < deadline``. With a
+        1 ms allowance, ANY scheduling delay between those two statements
+        means ZERO iterations and an EMPTY capture -- no partial read, no
+        bytes at all. MEASURED: 20 of 400 trials returned 0 bytes under CPU
+        contention (60 spinners on 20 cores), with no clock patching. CI hit
+        it in 2 of 8 runs on this branch.
+      * The failure was therefore NOTHING to do with 8 MiB. The size is
+        load-bearing for the ORIGINAL r5 defect, not for the flake, and
+        "2 MiB does not reproduce" described the defect rather than the
+        runner.
+
+    ⭐ THE FIX IS TO STOP MEASURING PARSE TIME WITH THE WALL CLOCK. The
+    property is that the caller's timeout must not bound the LOCAL PASS, and
+    that only needs the timeout to be small RELATIVE TO PARSE TIME -- not
+    small in real time. So the allowance is a generous 5 s of real time, which
+    the capture of a small payload cannot miss, while the parse is made to
+    consume 60 s of VIRTUAL time. The defect's deadline (5 s) is exceeded; the
+    fix's liveness bound (3600 s) is not.
+
+    Only ``daqifi.sdcard``'s clock is virtualised. The capture in
+    ``daqifi.device`` keeps the real one, so this test cannot reproduce the
+    flake it replaces.
     """
-    payload = b"x" * (8 * 1024 * 1024)
+    payload = b"x" * (256 * 1024)
     device = _device(payload + END_OF_FILE_MARKER)
-    got = device.sd_get_file("log.csv", timeout=0.001)
-    assert len(got) == 8 * 1024 * 1024
+
+    # ⭐ A CLOCK THAT ADVANCES WHEN IT IS READ. Nothing sleeps and nothing
+    # depends on how fast this machine is: each consultation jumps VIRTUAL time
+    # by 10 s, and the number of consultations is a function of payload size
+    # over buffer size, not of wall time.
+    #
+    # ⛔ THE PATCH IS GLOBAL, NOT PER-MODULE, and sizing it wrongly reproduces
+    # the very flake this replaces. `daqifi.sdcard.time`, `daqifi.device.time`
+    # and the stdlib `time` are ONE module object (asserted below), so this
+    # clock governs the CAPTURE as well as the parse. MEASURED call counts at
+    # 256 KiB: capture 2, parse 19. Hence:
+    #
+    #   capture  deadline = t+10+ALLOWANCE, first check at t+20
+    #            -> needs ALLOWANCE > 10 s         (60 gives 6x)
+    #   parse, with the FIX     19 x 10 = 190 s < 3600 s liveness bound (19x)
+    #   parse, with the DEFECT  190 s > ALLOWANCE -> raises             (3x)
+    #
+    # Every margin is a multiple, and all three are asserted after the run
+    # rather than trusted.
+    assert sdcard_module.time is device_module.time, (
+        "this test's clock patch assumes ONE shared time module; if these ever "
+        "differ the margins above are measuring the wrong phase")
+    VIRTUAL_STEP_S = 10.0
+    ALLOWANCE_S = 60.0
+    LIVENESS_BOUND_S = 3600.0
+    clock = {"t": 10_000.0, "calls": 0}
+    real_monotonic = sdcard_module.time.monotonic
+
+    def _advancing_clock() -> float:
+        clock["calls"] += 1
+        clock["t"] += VIRTUAL_STEP_S
+        return clock["t"]
+
+    sdcard_module.time.monotonic = _advancing_clock
+    try:
+        got = device.sd_get_file("log.csv", timeout=ALLOWANCE_S)
+    finally:
+        sdcard_module.time.monotonic = real_monotonic
+
+    assert len(got) == 256 * 1024, (
+        "a transfer that completed must not be failed by the local parse; "
+        "got %d of %d bytes" % (len(got), 256 * 1024))
+
+    # ⛔ SOUNDNESS CONDITIONS, both directions. This leg proves nothing unless
+    # the parse outran the caller's allowance in virtual time; and it is a
+    # FALSE pass if it also outran the liveness bound, because then the fix
+    # would have raised too and the bytes came from somewhere else.
+    elapsed = clock["t"] - 10_000.0
+    assert elapsed > ALLOWANCE_S, (
+        "the run consumed only %.1f s of virtual time against a %.1f s "
+        "allowance, so this leg would pass WITH the defect present (clock "
+        "read %d times -- did the buffer size change?)"
+        % (elapsed, ALLOWANCE_S, clock["calls"]))
+    assert elapsed < LIVENESS_BOUND_S, (
+        "the run consumed %.1f s of virtual time, at or past the %.1f s "
+        "liveness bound the fix uses -- the margin this leg rests on is gone"
+        % (elapsed, LIVENESS_BOUND_S))
 
 
 def test_a_prompt_pending_before_the_echo_is_still_framing() -> None:
