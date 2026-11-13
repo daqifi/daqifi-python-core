@@ -88,6 +88,26 @@ class EchoProbeFake:
     #: test written for the byte-shape path keeps exercising it.
     echo_state = 1
 
+    #: #260 r4: a real port exposes this, and `_drain_bounded` REFUSES a port
+    #: that does not ("refusing an unbounded flush"). Zero means the output
+    #: queue is already empty, which is true of every fake here -- they accept
+    #: writes synchronously. A fake without it would make every probe refuse
+    #: for a reason that has nothing to do with the behaviour under test.
+    out_waiting = 0
+
+    #: #260 r4: the real `close()` calls these, so a fake driven through the
+    #: actual close()/open() cycle must have them. Without `close` the test
+    #: that exercises finding 1 fails on an AttributeError rather than on the
+    #: behaviour -- an inert leg, which is the mistake this file keeps making.
+    def close(self):
+        self.is_open = False
+
+    def cancel_read(self):
+        pass
+
+    def cancel_write(self):
+        pass
+
     _probe_reply = b""
     _probe_armed = True
 

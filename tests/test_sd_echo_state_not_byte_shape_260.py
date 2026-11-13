@@ -36,7 +36,6 @@ same kind of evidence:
     guards against a WRONG implementation and their teeth are shown by
     MUTATION (treat 0 as silent -> they fire), not by a cross-head run.
 """
-import re
 import time
 from pathlib import Path
 
@@ -208,15 +207,20 @@ def test_an_unanswered_probe_refuses_the_download_and_does_not_hang():
     b"-1 extra\r\n",          # -1 with anything after it, terminated
     b"\r\n",                  # a bare terminator
 ])
-def test_a_complete_but_unparseable_reply_falls_back(garbage):
-    """⚠ r2 KEEPS THIS HALF: a COMPLETE reply that does not parse still falls
-    back, because a complete reply leaves nothing in flight. Only an exact
-    `-1\r\n` confirms; a false positive would silently corrupt a file.
+def test_a_reply_not_attributable_to_this_probe_refuses(garbage):
+    """⛔⛔ r4 WITHDRAWS r2's FALLBACK HALF, and the reversal is the fix.
 
-    ⛔ EVERY CASE HERE IS TERMINATED, deliberately. An UNTERMINATED reply such
-    as `b"-"` is INCOMPLETE, not unparseable -- more may be coming -- so it
-    refuses rather than falling back, and it lives in the split-terminator
-    table below instead.
+    r2 and r3 treated a TERMINATED buffer that was not our reply as
+    "complete but unparseable" and fell back to the byte-shape download. r4
+    finding 3 shows why that is unsafe: a PRECEDING command's delayed CRLF is
+    exactly such a buffer, and it completed the probe before our own reply had
+    arrived -- so the download ran with the reply still in flight and returned
+    contaminated bytes. The audit's clearest evidence: disabling the probe
+    entirely gave the CORRECT payload under the same schedule.
+
+    ⭐ "COMPLETE GARBAGE" AND "FOREIGN BYTES, OUR REPLY STILL COMING" ARE THE
+    SAME BYTES. Nothing can separate them, so every one of these now means
+    keep waiting and then refuse.
     """
     class _Garbage(_Port):
         def write(self, data):
@@ -232,9 +236,13 @@ def test_a_complete_but_unparseable_reply_falls_back(garbage):
 
     content = PROMPT + b"payload\r\n"
     dev = NyquistDevice("COM41")
-    dev._comm._serial = _Garbage(content + END_OF_FILE_MARKER)
-    assert dev.sd_get_file_binary("log.csv", timeout=5.0) == b"payload\r\n", (
-        "%r must not confirm a silent console" % (garbage,))
+    port = _Garbage(content + END_OF_FILE_MARKER)
+    dev._comm._serial = port
+    with pytest.raises(EchoProbeUnansweredError):
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+    assert b"SYSTem:STORage:SD:GET" not in bytes(port.written), (
+        "%r is not attributable to this probe, so no GET may be written"
+        % (garbage,))
 
 
 class _Scheduled(_Port):
@@ -470,24 +478,54 @@ def test_the_poison_clears_only_on_a_reopen():
         port._sent = 0
     assert dev._comm._echo_probe_poisoned is True
 
-    # A reopen resynchronises the stream by construction, so it clears.
-    dev._comm._echo_probe_poisoned = True
+    # ⛔ r4 finding 1: A REOPEN DOES NOT CLEAR IT. Swapping in a fresh port
+    # models exactly what close()/open() achieves host-side -- and it is not
+    # enough, because the device may still send the old reply.
     fresh = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
                        [(0.02, SILENT_REPLY)], echo_state=-1)
-    dev._comm._echo_probe_poisoned = False      # what open() does
     dev._comm._serial = fresh
-    assert dev.sd_get_file_binary("log.csv", timeout=5.0) == PAYLOAD, (
-        "after a reopen the probe must work again")
+    with pytest.raises(EchoProbeUnansweredError) as err:
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+    assert "REOPEN DOES NOT CLEAR" in str(err.value), (
+        "a new port must not revive downloads on a poisoned transport")
+
+    # A NEW connection object starts clean -- the documented escape hatch, and
+    # the only one. Verified per-instance so one device cannot brick another.
+    other = NyquistDevice("COM42")
+    other._comm._serial = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
+                                     [(0.02, SILENT_REPLY)], echo_state=-1)
+    assert other.sd_get_file_binary("log.csv", timeout=5.0) == PAYLOAD, (
+        "a fresh connection object must work; the poison is per-instance")
 
 
-def test_open_is_what_clears_the_poison():
-    """The clearing lives in `open()` and nowhere else -- pinned structurally
-    so a later edit cannot move it somewhere that does not resynchronise."""
+def test_open_does_NOT_clear_the_poison():
+    """⛔⛔ r4 finding 1 REVERSES r3's pin, which asserted the opposite.
+
+    r3 cleared the poison in `open()` and claimed "a fresh port resynchronises
+    the stream by construction". That claim is FALSE: close()/open() resets
+    HOST-side buffers, which discards only what has already ARRIVED, and the
+    firmware's DTR handler does not cancel output the device has already
+    queued. Measured on r3: a late first-probe reply satisfied the
+    post-reopen probe and the download returned
+    ``b'DAQIFI> SYSTem:ECHO -1\r\n-1\r\npayload'`` -- carrying the reopen's
+    OWN echo-disable traffic into the file.
+
+    ⚠ So the clearing must NOT be in open(), and the only remaining exit is a
+    content-confirmed completion. The brief's other option -- clear on a reply
+    "uniquely attributable to THIS probe" -- is unavailable: `SYSTem:ECHO?`
+    admits no nonce, so two probes' replies are byte-identical and no reply
+    can be tied to a particular one. A caller needing downloads after a
+    poisoned probe must build a NEW connection object.
+    """
     import inspect
-    src = inspect.getsource(type(NyquistDevice("COM41")._comm).open)
-    assert "_echo_probe_poisoned = False" in src, (
-        "open() must clear the poison; nothing weaker proves the stream is "
-        "resynchronised")
+    comm_cls = type(NyquistDevice("COM41")._comm)
+    assert "_echo_probe_poisoned = False" not in inspect.getsource(comm_cls.open), (
+        "open() must NOT clear the probe poison -- a reopen does not "
+        "resynchronise a reply the device has already queued")
+    probe_src = inspect.getsource(comm_cls.probe_echo_silent)
+    assert "settled is not None" in probe_src, (
+        "the only clearing must be the content-confirmed one in the probe's "
+        "finally block")
 
 
 # ---------------------------------------------------------------------------
@@ -564,9 +602,218 @@ def test_every_sd_fake_answers_the_probe_through_the_shared_helper():
             continue                      # not a port-installing module
         if "EchoProbeFake" in src or "echo_probe_reply" in src:
             continue                      # goes through the shared helper
-        # A module that installs a port but answers ECHO? itself is a copy.
-        if re.search(r"ECHO\?", src):
-            offenders.append(path.name)
+        # ⛔ r4: ANY module that installs a port must go through the helper,
+        # whether or not it mentions ECHO? itself. The first version only
+        # flagged modules containing "ECHO?", so a fake that simply IGNORED
+        # the probe slipped through -- and under r4 that is not benign: a port
+        # without `out_waiting` cannot have its drain bounded, so every
+        # download on it refuses. test_sd_size_cache_invalidation_154.py was
+        # exactly that, and the full suite found it instead of this test.
+        offenders.append(path.name)
     assert offenders == [], (
         "these modules answer the echo probe without the shared helper: %s"
         % offenders)
+
+
+# ---------------------------------------------------------------------------
+# r4: the four audit findings
+# ---------------------------------------------------------------------------
+
+def test_a_real_close_open_cycle_does_not_revive_a_poisoned_transport(
+        monkeypatch):
+    """⛔⛔ r4 FINDING 1, through the REAL close() and open().
+
+    r3 cleared the poison inside `open()`. The audit showed the reopen does
+    not resynchronise anything the DEVICE has queued: host-side resets discard
+    only what has already ARRIVED, and the firmware's DTR handler does not
+    cancel pending output. Measured on r3, the download came back as
+    ``b'DAQIFI> SYSTem:ECHO -1\r\n-1\r\npayload'`` -- the reopen's own
+    echo-disable traffic inside the file.
+
+    ⚠ This drives the real methods rather than swapping a port object,
+    because the defect WAS in `open()`. `serial.Serial` is patched to hand
+    back a fake, which is the only part that cannot run here.
+    """
+    import daqifi._internal.comm as comm_mod
+
+    made = []
+
+    def _factory(*a, **kw):
+        port = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
+                          [(0.65, SILENT_REPLY)], echo_state=-1)
+        made.append(port)
+        return port
+
+    monkeypatch.setattr(comm_mod.serial, "Serial", _factory)
+    dev = NyquistDevice("COM41")
+    assert dev._comm.open() is True, "the patched open() must succeed"
+
+    with pytest.raises(EchoProbeUnansweredError):
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+    assert dev._comm._echo_probe_poisoned is True
+
+    # The real cycle, which r3 believed was a resynchronisation.
+    dev._comm.close()
+    assert dev._comm.open() is True
+    assert dev._comm._echo_probe_poisoned is True, (
+        "close()/open() must NOT clear the poison -- it resets host buffers, "
+        "not the device's output queue")
+    with pytest.raises(EchoProbeUnansweredError) as err:
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+    assert "REOPEN DOES NOT CLEAR" in str(err.value)
+    assert not any(b"SYSTem:STORage:SD:GET" in bytes(p.written) for p in made), (
+        "no GET may reach any port in this sequence")
+
+
+class _BlockingFlush(_Port):
+    """A port whose ``flush()`` blocks, as pyserial's really can.
+
+    ⛔ `write_timeout` governs neither backend's flush: pyserial 3.5 polls
+    `out_waiting` with NO deadline on Windows and calls `tcdrain()` on POSIX,
+    and `tcdrain()` takes no timeout at all. `_drain_bounded`'s own docstring
+    records the measured case -- an FTDI adapter with CTS deasserted, where
+    `out_waiting` reads 0 and `tcdrain()` blocks forever.
+    """
+
+    flush_calls = 0
+
+    def flush(self):
+        type(self).flush_calls += 1
+        time.sleep(5.0)
+
+
+def test_the_probe_does_not_flush_and_is_bounded_even_if_flush_would_block():
+    """⛔ r4 FINDING 2. r3 called `flush()` -- unbounded on both backends --
+    and only THEN computed the deadline, so the budget could be spent before
+    the clock started.
+
+    Asserted two ways: the probe must not call `flush()` at all, and it must
+    return within its budget even against a port whose flush would block for
+    seconds. The second is what makes the first more than a style rule.
+    """
+    _BlockingFlush.flush_calls = 0
+    dev = NyquistDevice("COM41")
+    port = _BlockingFlush(PAYLOAD + END_OF_FILE_MARKER, echo_state=-1)
+    dev._comm._serial = port
+    bound = dev._comm.ECHO_PROBE_TIMEOUT_S
+
+    # ⚠ SCOPED TO THE PROBE. An earlier version drove a whole download and
+    # asserted zero flushes -- but `_receive_sd_file` flushes its own GET
+    # write, so the count was 1 for a reason that has nothing to do with the
+    # probe. A pin has to measure the thing it names.
+    t0 = time.monotonic()
+    assert dev._comm.probe_echo_silent() is True
+    elapsed = time.monotonic() - t0
+    assert _BlockingFlush.flush_calls == 0, (
+        "the PROBE must not call flush(); it is unbounded on both backends")
+    assert elapsed < bound * 4, (
+        "the probe must stay inside its budget (%.2fs); took %.2fs"
+        % (bound, elapsed))
+
+
+def test_the_deadline_is_created_before_the_drain():
+    """The ordering from finding 2, pinned structurally as well: a later edit
+    that moves the drain ahead of the deadline reintroduces the defect without
+    changing any observable behaviour on a fast port."""
+    import ast
+    import inspect
+    import textwrap
+
+    # ⚠ ASKED OVER THE AST. The first version compared TEXT indices and failed
+    # on correct code, because `_drain_bounded` is named in a COMMENT above
+    # the deadline assignment -- so the pin was measuring my own prose. That
+    # is the eighth text-pin trap in this series; comments may pin the WIRING,
+    # never the ORDER of statements.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(
+        type(NyquistDevice("COM41")._comm).probe_echo_silent)))
+    deadline_line = min(
+        n.lineno for n in ast.walk(tree) if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "deadline" for t in n.targets))
+    drain_line = min(
+        n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+        and getattr(n.func, "attr", None) == "_drain_bounded")
+    assert deadline_line < drain_line, (
+        "the deadline must be created BEFORE the drain (line %d vs %d), or "
+        "the budget can be spent before the clock starts"
+        % (deadline_line, drain_line))
+
+
+PRECEDING = [
+    (b"\r\n", "a bare CRLF from the previous command"),
+    (b"DAQIFI> ", "a pending prompt"),
+    (b"0,\"No error\"\r\n", "a previous query's answer"),
+    (b"SYSTem:ECHO -1\r\n", "the open-time echo-disable echo"),
+]
+
+
+@pytest.mark.parametrize("foreign,label", PRECEDING,
+                         ids=[x[1] for x in PRECEDING])
+@pytest.mark.parametrize("arrives_at", [0.0, 0.05, 0.2])
+def test_a_preceding_commands_bytes_do_not_complete_our_probe(foreign, label,
+                                                              arrives_at):
+    """⛔⛔ r4 FINDING 3, across when the foreign bytes land -- before, during
+    and after the probe write.
+
+    r3 called any terminated buffer "unparseable" and fell back to the
+    byte-shape download on it. A preceding command's delayed CRLF is exactly
+    that, and it completed the probe before our own reply arrived, so the
+    download ran with the reply in flight and returned contaminated bytes.
+
+    ⭐ THE ASSERTION IS A DISJUNCTION: a clean payload, or the refusal. Never
+    contaminated bytes, and never a payload with foreign bytes glued on.
+    """
+    dev = NyquistDevice("COM41")
+    port = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
+                      [(arrives_at, foreign), (arrives_at + 0.05, SILENT_REPLY)],
+                      echo_state=-1)
+    dev._comm._serial = port
+    try:
+        got = dev.sd_get_file_binary("log.csv", timeout=5.0)
+    except EchoProbeUnansweredError:
+        assert b"SYSTem:STORage:SD:GET" not in bytes(port.written), (
+            "refused, so no GET may have been written (%s)" % label)
+        return
+    assert got == PAYLOAD, (
+        "%s arriving at %.2fs contaminated the file: got %r"
+        % (label, arrives_at, got))
+
+
+class _InterruptDuringProbe(_Port):
+    """Raises KeyboardInterrupt from the probe's read loop."""
+
+    def __init__(self, payload, echo_state=-1, after=1):
+        super().__init__(payload, echo_state)
+        self._polls = 0
+        self._after = after
+
+    @property
+    def in_waiting(self):
+        self._polls += 1
+        if self._polls >= self._after:
+            raise KeyboardInterrupt("operator pressed Ctrl-C mid-probe")
+        return self._probe_pending(lambda: len(self._buf))
+
+
+def test_a_keyboard_interrupt_during_the_probe_still_poisons():
+    """⛔ r4 FINDING 4. r3 set the poison only on its refusal path, so ANY
+    BaseException escaping the probe left the transport marked CLEAN with a
+    reply outstanding -- and the retry then accepted the earlier reply.
+
+    ⚠ KeyboardInterrupt PROPAGATES AS ITSELF, deliberately: an operator
+    pressing Ctrl-C must not be reported as a device fault. What changes is
+    that the transport is marked on the way out.
+    """
+    dev = NyquistDevice("COM41")
+    port = _InterruptDuringProbe(PAYLOAD + END_OF_FILE_MARKER)
+    dev._comm._serial = port
+    with pytest.raises(KeyboardInterrupt):
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+    assert dev._comm._echo_probe_poisoned is True, (
+        "a BaseException during the probe must leave the transport marked")
+
+    # And the retry must refuse rather than accept the earlier reply.
+    dev._comm._serial = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
+                                   [(0.02, SILENT_REPLY)], echo_state=-1)
+    with pytest.raises(EchoProbeUnansweredError):
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+
