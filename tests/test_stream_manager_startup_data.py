@@ -15,6 +15,7 @@ from daqifi.streaming import StreamManager
 
 
 class _FakeSerial:
+    out_waiting = 0  # #263: the send path drains this queue, bounded
     def __init__(self, enabled_mask=1, on_start=b"", echo=False, start_delay_s=0.0):
         self.is_open = True
         self.rx = bytearray()

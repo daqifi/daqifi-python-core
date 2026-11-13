@@ -25,6 +25,7 @@ PROMPT = b"DAQIFI> "
 
 
 class _Serial:
+    out_waiting = 0  # #263: the send path drains this queue, bounded
     def __init__(self, listing: bytes = b"", download: bytes = b"") -> None:
         self.is_open = True
         self.written: list = []
@@ -59,6 +60,7 @@ class _Serial:
 class _Trickle:
     """Hands out one chunk per read with a gap, so a total duration longer
     than the timeout is reached without any single gap approaching it."""
+    out_waiting = 0  # #263: the send path drains this queue, bounded
 
     def __init__(self, payload: bytes, chunk: int = 4, gap: float = 0.05):
         self.is_open = True

@@ -27,6 +27,7 @@ from daqifi.timestamp import TimestampProcessor
 
 
 class _SerialWithReply:
+    out_waiting = 0  # #263: the send path drains this queue, bounded
     def __init__(self, reply: bytes):
         self.is_open = True
         self.written = []

@@ -39,6 +39,7 @@ class _Serial:
     tests failed for a fake-construction reason rather than for the defect
     they are about. Dispatching on the command text cannot drift that way.
     """
+    out_waiting = 0  # #263: the send path drains this queue, bounded
 
     def __init__(self, listing: bytes = b"", download: bytes = b"") -> None:
         self.is_open = True
