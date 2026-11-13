@@ -126,6 +126,252 @@ def _is_marker_trailer(trailer: bytes) -> bool:
     return False
 
 
+class _PreambleSkip:
+    """The echoed GET command, and the prompt that may follow it, removed
+    from the HEAD of a download as a PREFIX -- never by searching.
+
+    ⛔ WHY A PREFIX. The legacy code this replaces located ``DAQIFI>``
+    anywhere in the first 200 bytes and discarded everything before it, so a
+    file whose own bytes contain the prompt lost its head (#206 item 5). A
+    prefix test cannot do that: it only consumes bytes it has matched from
+    position 0.
+
+    ⛔ WHY BEFORE MARKER CLASSIFICATION. The echoed command line can itself
+    carry a terminal marker's bytes -- a GET for a file named
+    ``__TRANSFER_ERROR__.bin`` is the measured case, and on the previous head
+    the receiver raised ``SdCardTransferErrorException`` for it, reporting a
+    transfer that worked as a device read error. So the head has to go before
+    anything looks for a marker, which is why this lives inside the receiver
+    rather than in the caller.
+
+    ⛔ EVERY CANDIDATE MUST END IN A PROMPT, and that is the whole
+    discriminator. With echo **off** there is no framing at all, so an echo
+    or a line ending at position 0 is just the file's first bytes -- and a
+    file whose first line happens to be the GET command's own text is a real
+    case, pinned by ``test_carried_items_206``'s
+    ``test_a_command_shaped_payload_is_kept_with_echo_off``. The prompt is
+    the one token the device emits that a payload is not expected to open
+    with, so an echo is removed only when a prompt follows it and proves it
+    was framing. A leading ``\\r\\n`` goes the same way: only ahead of a
+    prompt.
+
+    ⚠ RESIDUAL, stated because it cannot be decided rather than hidden: a
+    payload whose own first bytes are exactly ``DAQIFI> `` is
+    indistinguishable from framing and loses them. That is strictly narrower
+    than what it replaces -- the search lost everything before a ``DAQIFI>``
+    occurring anywhere in the first 200 bytes -- but it is not nothing.
+
+    ⚠⚠ AND THE SAME RESIDUAL HAS A LARGER FORM, which is a DOCUMENTED
+    EXCEPTION rather than an oversight (ruling GV A, recorded here under
+    ruling HJ B). A payload whose own first bytes are the WHOLE framing
+    shape -- ``DAQIFI> `` then the echoed GET then an ending then
+    ``DAQIFI> `` -- loses all of it. Measured on this head: 49 of 54 content
+    bytes, ``sd_get_file`` returning ``'1,2\\r\\n'`` for a file that really
+    held ``b'DAQIFI> SYSTem:STORage:SD:GET "log.csv"\\r\\nDAQIFI> 1,2\\r\\n'``.
+
+    ⭐ IT IS NOT FIXABLE HERE, and that is a measurement rather than a
+    concession. Those 54 bytes are BYTE-IDENTICAL to a real idle-console
+    preamble around the same command, so ``head_span`` is answering one
+    question about one byte string and there is no second signal in it to
+    consult. The choice is forced both ways:
+
+      * strip (what this does): real framing is removed, and a file whose
+        content is that shape loses 49 bytes.
+      * do not strip: that file is returned whole, and every real idle
+        console leaks 49 framing bytes INTO the caller's file.
+
+    GS A term 2 asks for framing-like payload bytes to be preserved; GV A
+    accepted this bounded strip as the exception to it, because leaked
+    framing is visible and recoverable while a short file is silent. The
+    exception is pinned by ``test_case_d_is_the_documented_strip_exception``
+    in ``tests/test_sd_framing_oracle_154.py``.
+
+    ⛔ THE REAL FIX IS OUT OF BAND AND IS NOT THIS PR'S. Whether a preamble
+    is present is knowable from the device's ECHO STATE, which the caller
+    sets and this module never reads -- see #260. Until that lands, the strip
+    is a byte-shape guess with a documented cost.
+
+    ⛔⛔ THE CLAIM THAT USED TO STAND HERE WAS FALSE, and r13's blind and
+    main legs disproved it with base-vs-PR differentials. It said this was
+    "a residual the change NARROWS, not one it adds", citing the base
+    returning ``'1,2'`` -- 51 of 54 lost. That number is real but it is the
+    TEXT path's, and the sentence generalised it to the change as a whole.
+    Measured on both paths, same payloads, base 01343229 vs this head:
+
+        content 54 B, b'DAQIFI> SYSTem:...GET "log.csv"\r\nDAQIFI> 1,2\r\n'
+          sd_get_file          base kept   3   this head kept   5   NARROWED
+          sd_get_file_binary   base kept  46   this head kept   5   WIDENED
+
+        content 220 B, file named 'a'*176 + '.bin', content opening with its
+        own echo + b'\r\nDAQIFI> ' (so the prompt sits at offset 206, past
+        the base's 200-byte search window)
+          sd_get_file          base kept   4   this head kept   6   NARROWED
+          sd_get_file_binary   base kept 220   this head kept   6   WIDENED
+
+    So: on the TEXT path the old claim holds. On the BINARY path it is
+    backwards -- the base PRESERVED these shapes (fully, in the long-name
+    case) and this head deletes them. And the loss is NOT bounded at the 49
+    bytes an earlier revision cited: it scales with the FILENAME, up to the
+    whole matched framing, because the candidate it matches contains the echo.
+
+    ⭐ RULING HJ B accepts that deletion (the operator selected option B;
+    the option wording is the convergence coordinator's). Option B was r8's
+    longest-match behaviour, with case D losing its 41 bytes, and the operator
+    added: "case D seems increadibly unlikely. seems like B would be okay"
+    (2026-11-11). So this is an ACCEPTED TRADE, not a narrowing, and it is
+    written that way here because the next reader needs the cost, not a
+    reassurance. The accepted outputs are pinned in
+    ``tests/test_sd_framing_oracle_154.py`` as accepted-LOSS pins -- they
+    assert today's bytes so a move in EITHER direction is visible, and they
+    are not correctness tests.
+    """
+
+    _ENDINGS = (b"", b"\r\n", b"\n", b"\r")
+    _PROMPTS = (b"DAQIFI> ", b"DAQIFI>")
+
+    def __init__(self, expected_echo: bytes) -> None:
+        echo = bytes(expected_echo)
+        candidates = set()
+
+        # ⛔ A PROMPT CAN BE PENDING BEFORE THE ECHO. The console prints its
+        # prompt when it finishes the PREVIOUS command, so a GET issued into
+        # an idle console arrives as a prompt, the echoed command, an ending
+        # and the prompt that follows the echo. With only an ENDING allowed
+        # in front, the longest matching candidate was the bare leading
+        # prompt, `done` latched on it, and the echoed command plus the
+        # SECOND prompt were delivered as the first line of the CSV (r5 #3).
+        #
+        # ⛔⛔ BUT A PROMPT LEAD IS ONLY FRAMING WHEN AN ECHO FOLLOWS IT, and
+        # r6 learned that the hard way. Allowing the prompt lead to pair with
+        # an EMPTY body built the candidate `DAQIFI> DAQIFI> `, which
+        # longest-match then stripped off a file whose own first bytes are a
+        # prompt: `b"DAQIFI> DAQIFI> payload"` returned `b"payload"` where the
+        # base returned `b"DAQIFI> payload"`. That is this PR's own subject --
+        # reaching into file content -- reintroduced by a fix for a framing
+        # bug.
+        #
+        # The invariant, which is structural rather than a list of examples:
+        # **prompt-led framing must contain a command echo.** A prompt
+        # followed by a prompt contains no command, so it cannot be the
+        # framing around one. Two separate products express that, instead of
+        # one product plus a filter, so there is no combination to overlook:
+        #
+        #   no pending prompt   [ending]            [echo] [ending] prompt
+        #   pending prompt      [ending] prompt [ending]  echo  [ending] prompt
+        #
+        # Note the second REQUIRES the echo and the first still permits it to
+        # be absent, which is the echo-off case. Still ONE bounded head span,
+        # never a strip-while-it-matches loop: a loop would keep eating a
+        # payload whose own first lines look like framing, and the head is
+        # exactly what this class is defined to measure.
+
+        # 1. No pending prompt -- unchanged from the shape the base handled.
+        for lead in self._ENDINGS:
+            for body in (b"", echo):
+                for after in self._ENDINGS:
+                    if not body and after:
+                        # No echo means nothing for a second ending to
+                        # follow; two endings in a row are not framing.
+                        continue
+                    for prompt in self._PROMPTS:
+                        candidates.add(lead + body + after + prompt)
+
+        # 2. A pending prompt, which may itself be preceded by an ending --
+        #    r6 #1 was a CRLF arriving before it. The echo is MANDATORY here.
+        for before in self._ENDINGS:
+            for pending in self._PROMPTS:
+                for after_pending in self._ENDINGS:
+                    for after in self._ENDINGS:
+                        for prompt in self._PROMPTS:
+                            candidates.add(before + pending + after_pending
+                                           + echo + after + prompt)
+
+        # Longest first: `DAQIFI> ` must win over `DAQIFI>`.
+        self._candidates = sorted(candidates, key=len, reverse=True)
+        self._longest = len(self._candidates[0]) if self._candidates else 0
+        self._buf = bytearray()
+        self.done = False
+
+    def head_span(self, buf: bytes) -> Optional[int]:
+        """Length of the framing at the start of ``buf``, or ``None`` while
+        that is still undecidable.
+
+        ⛔ ONE DEFINITION OF "WHERE THE HEAD ENDS" FOR THE CAPTURE LOOP in
+        ``device.py``, which had two approximations of its own and both
+        scanned or counted the ECHO AND PROMPT as if they were payload.
+
+        ⚠⚠ r14 -- THE SCOPE OF THAT SENTENCE IS NARROWER THAN IT READS, and
+        the qualifier above was added because it misled me. This method is
+        what the capture loop consults; it is NOT what performs the strip.
+        :meth:`feed` and :meth:`flush` run their own
+        ``next(c for c in self._candidates if buf.startswith(c))``, so there
+        are TWO implementations of this question in this class. They agree by
+        construction -- same candidate list, same prefix rule -- and nothing
+        enforced it until
+        ``test_head_span_and_the_strip_agree_on_every_shape`` did.
+
+        How it surfaced: neutering this method to ``return 0`` left the strip
+        working perfectly, so a mutation meant to test the strip came back
+        green. A surviving mutant and a mutation that never reached its target
+        look identical; the discriminator was asking which function the strip
+        actually calls.
+        The size machinery that made the counting matter is gone (ruling FO
+        A2), but the scanning still does: a GET names a file, so an echoed
+        command can contain a terminal marker's own bytes, and a capture
+        that scans the head stops before the payload.
+
+        0 means "no framing here" (echo off). ``None`` means the buffer is
+        still a proper prefix of a longer candidate, so nothing can be
+        measured from it yet.
+        """
+        if any(c.startswith(buf) and len(c) > len(buf) for c in self._candidates):
+            return None
+        matched = next((c for c in self._candidates if buf.startswith(c)), None)
+        return len(matched) if matched is not None else 0
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Bytes to pass downstream; may be empty while still deciding.
+
+        Holds at most the longest candidate's length, so the wait is bounded
+        by the head's own size and cannot stall a transfer.
+        """
+        if self.done:
+            return chunk
+        self._buf.extend(chunk)
+        buf = bytes(self._buf)
+        matched = next((c for c in self._candidates if buf.startswith(c)), None)
+        # A longer candidate may still complete, so do not commit yet: with
+        # the buffer at exactly `DAQIFI>` the next byte decides whether 7 or
+        # 8 bytes are framing.
+        if len(buf) < self._longest and any(
+            c.startswith(buf) and len(c) > len(buf) for c in self._candidates
+        ):
+            return b""
+        self.done = True
+        self._buf = bytearray()
+        return buf[len(matched):] if matched is not None else buf
+
+    def flush(self) -> bytes:
+        """Whatever is still held, head removed if the head is decidable.
+
+        ⛔ CALLED WHEN NO MORE BYTES ARE COMING, and without it those bytes
+        are LOST. :meth:`feed` holds while a longer candidate could still
+        complete, which is correct mid-stream and wrong at the end: a whole
+        payload that is a proper prefix of a candidate -- the measured case
+        is a GET for a file named ``__END_OF_FILE__`` -- stayed buffered,
+        the receiver saw nothing, and it reported a TIMEOUT for a transfer
+        whose bytes it was holding. Deciding with what has arrived is the
+        only honest answer at EOF.
+        """
+        if self.done:
+            return b""
+        buf = bytes(self._buf)
+        self._buf = bytearray()
+        self.done = True
+        matched = next((c for c in self._candidates if buf.startswith(c)), None)
+        return buf[len(matched):] if matched is not None else buf
+
+
 class _SizedTransfer:
     """The body of a download whose size is known, telling the device's
     ``__TRANSFER_ERROR__`` from file content that happens to contain it.
@@ -149,12 +395,25 @@ class _SizedTransfer:
     window decides anything: content may pause.
     """
 
-    def __init__(self, expected_size: int) -> None:
+    def __init__(self, expected_size: int, eof_only: bool = False) -> None:
         self.expected = expected_size
         self.committed = 0
         self.pending = bytearray()
+        # ⛔ WHEN SET, ``__TRANSFER_ERROR__`` IS ORDINARY CONTENT HERE TOO.
+        # r5's blind leg: ``eof_only`` was honoured only on the unsized
+        # scan, so a sized receive still raised
+        # SdCardTransferErrorException on a file whose literal bytes are the
+        # marker -- reporting a device read error for what is really an
+        # incomplete transfer. With this set nothing is withheld as a
+        # candidate and no outcome classifies the error, so those bytes are
+        # written as content and a truncated transfer reaches the caller's
+        # timeout, which is the honest answer.
+        self.eof_only = eof_only
 
     def _open_candidate(self, limit: int) -> Optional[int]:
+        if self.eof_only:
+            # Nothing is a transfer-error candidate, so nothing is withheld.
+            return None
         buf = bytes(self.pending)
         marker = TRANSFER_ERROR_MARKER
         i = buf.find(marker[:1])
@@ -198,15 +457,23 @@ class _SizedTransfer:
         # start of) the end-of-file marker.
         tail = bytes(self.pending)
         marker = TRANSFER_ERROR_MARKER
-        if tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
-            return ("transfer_error", self.committed)
-        if marker.startswith(tail):
-            return None  # could still complete
+        if not self.eof_only:
+            if tail.startswith(marker) and _is_marker_trailer(tail[len(marker):]):
+                return ("transfer_error", self.committed)
+            if marker.startswith(tail):
+                return None  # could still complete
+        # ``eof_only``: the size boundary was reached and what follows is not
+        # the end-of-file marker. That is a mismatch whatever those bytes
+        # spell -- the error classification is the caller's opt-out, the size
+        # check is not.
         return ("mismatch", None)
 
     def finish(self) -> Optional[Tuple[str, Any]]:
         """At idle, close or the deadline: an open complete candidate is the
         device's marker."""
+        if self.eof_only:
+            # No open candidate exists to promote: see __init__.
+            return None
         tail = bytes(self.pending)
         marker = TRANSFER_ERROR_MARKER
         if not (tail.startswith(marker) and _is_marker_trailer(tail[len(marker):])):
@@ -810,6 +1077,8 @@ class SdCardFileReceiver:
         progress: Optional[Callable[[SdCardTransferProgress], None]] = None,
         timeout_s: Optional[float] = None,
         expected_size: Optional[int] = None,
+        preamble: Optional[bytes] = None,
+        eof_only: bool = False,
     ) -> int:
         """Read until the EOF marker, write everything before it to
         ``destination_stream``, and return the total bytes written.
@@ -832,6 +1101,22 @@ class SdCardFileReceiver:
                 upstream). ``None`` uses the default; pass an
                 explicit value to override.
             expected_size: the file's size, if known.
+            eof_only: treat ONLY ``__END_OF_FILE__`` as terminal, so
+                ``__TRANSFER_ERROR__`` is ordinary content and is never
+                raised. Omitted (the default) both markers terminate, which
+                is what the streaming-device and download-to-temp callers
+                rely on. The legacy ``NyquistDevice`` download passes it
+                because its error-marker detection was withdrawn: a file may
+                legitimately contain those bytes, and on that path a false
+                device-error is worse than the base's silence.
+            preamble: the GET command's bytes as sent, when the caller
+                shares the console with the download and so may see that
+                command echoed back, followed by a prompt. Given it, that
+                head is removed as a **prefix** before anything is
+                classified; omitted (the default) nothing is stripped and
+                this method behaves exactly as it did before the parameter
+                existed, which is what the streaming-device and
+                download-to-temp callers rely on.
 
         Returns:
             Total bytes written to ``destination_stream`` (the EOF
@@ -902,15 +1187,39 @@ class SdCardFileReceiver:
         trailing = bytearray()
         total_bytes = 0
         # Known size: tells the device's __TRANSFER_ERROR__ from content.
-        sized = _SizedTransfer(expected_size) if expected_size is not None else None
+        sized = _SizedTransfer(expected_size, eof_only=eof_only) \
+            if expected_size is not None else None
+        # Opt-in, so the two callers that do not share the console with the
+        # download see no change at all.
+        skip = _PreambleSkip(preamble) if preamble else None
 
         def _transfer_error_if_open() -> None:
             outcome = sized.finish() if sized is not None else None
             if outcome is not None:
                 raise SdCardTransferErrorException(file_name, outcome[1])
 
+        # Bytes released by the preamble skip at the end of the stream, fed
+        # back through the SAME classification path as a read chunk. An
+        # earlier revision flushed only on the EOF branch and tried to
+        # `continue` on the deadline branch, where re-entering past an
+        # expired deadline discarded them -- so a serial-shaped source
+        # (in_waiting) that never reports EOF raised a timeout for a whole
+        # payload the skip was holding.
+        injected: Optional[bytes] = None
+
         while True:
-            if time.monotonic() >= deadline:
+            if injected is not None:
+                chunk = injected
+                injected = None
+            elif time.monotonic() >= deadline:
+                if skip is not None:
+                    tail = skip.flush()
+                    skip = None
+                    if tail:
+                        # One more pass to classify what was held; the
+                        # deadline is already expired, so this cannot loop.
+                        injected = tail
+                        continue
                 _transfer_error_if_open()
                 raise TimeoutError(
                     f"SD card file download timed out after "
@@ -918,7 +1227,7 @@ class SdCardFileReceiver:
                     f"{total_bytes} bytes before timeout."
                 )
 
-            if has_in_waiting:
+            elif has_in_waiting:
                 pending = self._source.in_waiting
                 if not pending:
                     time.sleep(self._IDLE_SLEEP_S)
@@ -942,6 +1251,19 @@ class SdCardFileReceiver:
                     # deadline above decides when to give up.
                     continue
                 if not chunk:
+                    # ⛔ FLUSH THE PREAMBLE SKIP FIRST. It holds bytes while a
+                    # longer head candidate could still complete, so at the
+                    # end of the stream a payload that is a proper prefix of
+                    # one is sitting in it; raising here reported a timeout
+                    # for bytes we had. Released through `injected`, the same
+                    # way the deadline branch does it, so there is ONE path
+                    # from "held" to "classified" rather than two.
+                    if skip is not None:
+                        tail = skip.flush()
+                        skip = None
+                        if tail:
+                            injected = tail
+                            continue
                     # Closed: nothing can follow, so an open transfer-error
                     # candidate is the device's marker.
                     _transfer_error_if_open()
@@ -950,6 +1272,16 @@ class SdCardFileReceiver:
                         f"marker. Received {total_bytes} bytes."
                     )
             chunk_bytes = bytes(chunk)
+            if skip is not None:
+                # BEFORE either classification path below, deliberately: the
+                # echoed command can carry a marker's own bytes. The skip
+                # holds at most the head's length, so an empty result here
+                # is a bounded wait for the rest of the head, not a stall.
+                chunk_bytes = skip.feed(chunk_bytes)
+                if skip.done:
+                    skip = None
+                if not chunk_bytes:
+                    continue
             if sized is not None:
                 body, outcome = sized.feed(chunk_bytes)
                 if body:
@@ -969,7 +1301,9 @@ class SdCardFileReceiver:
                         "file is longer than listed or the transfer is corrupt."
                     )
                 continue
-            found, position, found_marker = _find_terminal_marker(trailing, chunk_bytes)
+            scan = _find_eof_terminal_marker if eof_only \
+                else _find_terminal_marker
+            found, position, found_marker = scan(trailing, chunk_bytes)
             if found:
                 # ``position`` is in the virtual [trailing + chunk] view.
                 # Write everything before it; preserve everything after
@@ -1048,6 +1382,28 @@ def _find_terminal_marker(
         if position >= 0 and (not best[0] or position < best[1]):
             best = (True, position, marker)
     return best
+
+
+def _find_eof_terminal_marker(
+    trailing: bytes, chunk: bytes
+) -> Tuple[bool, int, bytes]:
+    """``_find_terminal_marker`` restricted to the END-OF-FILE marker.
+
+    ⛔ A TWIN RATHER THAN A PARAMETER, because ``_find_terminal_marker`` is
+    shared with the two already-correct download callers and the ruling
+    leaves it untouched. Identical scan and identical return shape, so the
+    read loop's index arithmetic is unchanged -- only the marker set
+    differs.
+
+    ⚠ Not ``_find_eof_marker`` (right above), which is dead upstream-mirror
+    code with DIFFERENT scan bounds: it starts at
+    ``max(0, len(trailing) - len(marker) + 1)`` on the assumption that
+    ``trailing`` was already scanned. Reusing it would have changed the
+    loop's semantics subtly, which is the last thing this path needs.
+    """
+    combined = bytes(trailing) + bytes(chunk)
+    position = combined.find(END_OF_FILE_MARKER)
+    return (position >= 0, position, END_OF_FILE_MARKER)
 
 
 def _find_eof_marker(

@@ -325,6 +325,7 @@ class StreamManager:
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
         buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE,
         integer_units: Optional[str] = None,
+        on_recording_change: Optional[Callable[[], None]] = None,
     ):
         """
         Initialize stream manager.
@@ -355,6 +356,20 @@ class StreamManager:
                 form it is. "millivolts" or "raw" says; None reads integers
                 as raw codes and warns once per session. Decimal values are
                 volts either way.
+            on_recording_change: Optional callback fired when a recording
+                starts or stops, i.e. at the top of :meth:`start` and
+                :meth:`stop`.
+
+                ⛔ Exists because streaming to the SD card CHANGES WHAT IS
+                ON THE CARD while carrying no ``sd_`` in its name: an
+                enumeration of SD-named methods could not see it, and
+                :meth:`NyquistDevice.sd_get_file_size` then reported a
+                length from before the recording. This manager holds a
+                SerialInterface, not the device, so it cannot reach that
+                cache itself.
+
+                Set by :meth:`NyquistDevice.create_stream`; default None,
+                so every other construction is unchanged.
         """
         if buffer_size is not None and buffer_size <= 0:
             raise ValueError("buffer_size must be positive (or None for unbounded).")
@@ -368,6 +383,7 @@ class StreamManager:
         self._integer_units = integer_units
         self._value_reader = self._new_value_reader()
         self._comm = comm
+        self._on_recording_change = on_recording_change
         self._channels = channels
         self._sample_rate = sample_rate
         self._format = format
@@ -479,6 +495,11 @@ class StreamManager:
                 print(sample)
             stream.start(callback=on_sample)
         """
+        # The device may be recording to the SD card, which changes what is
+        # on it, so a cached listing length is stale. Fired before the state
+        # check below, so a redundant call still invalidates.
+        if self._on_recording_change is not None:
+            self._on_recording_change()
         if self._state == StreamState.RUNNING:
             raise RuntimeError("Streaming already started")
         if self._thread is not None and self._thread.is_alive():
@@ -764,6 +785,11 @@ class StreamManager:
             time.sleep(10)
             stream.stop()
         """
+        # The device may be recording to the SD card, which changes what is
+        # on it, so a cached listing length is stale. Fired before the state
+        # check below, so a redundant call still invalidates.
+        if self._on_recording_change is not None:
+            self._on_recording_change()
         if self._state != StreamState.RUNNING and not self._device_streaming:
             return
 
@@ -1499,6 +1525,7 @@ class AsyncStreamManager:
         per_channel_dispatch: Optional[Callable[[int, float, float], None]] = None,
         buffer_size: Optional[int] = DEFAULT_BUFFER_SIZE,
         integer_units: Optional[str] = None,
+        on_recording_change: Optional[Callable[[], None]] = None,
     ):
         """
         Initialize async stream manager.
@@ -1512,6 +1539,7 @@ class AsyncStreamManager:
                 to the wrapped synchronous manager.
             buffer_size: See :class:`StreamManager`.
             integer_units: See :class:`StreamManager`.
+            on_recording_change: See :class:`StreamManager`.
         """
         self._stream = StreamManager(
             comm,
@@ -1521,6 +1549,9 @@ class AsyncStreamManager:
             per_channel_dispatch=per_channel_dispatch,
             buffer_size=buffer_size,
             integer_units=integer_units,
+            # Forwarded, not re-implemented: start()/stop() below delegate
+            # to the wrapped manager, so the hook fires exactly once.
+            on_recording_change=on_recording_change,
         )
 
     async def start(self):

@@ -4,8 +4,11 @@ Main device controller for DAQiFi Nyquist devices.
 Provides high-level API for device interaction.
 """
 
+import threading
 from typing import Callable, Dict, Any, Optional, Union, List
 from ._internal.comm import DataSample, SerialInterface, PowerState, DeviceMetadata
+import time
+
 from ._internal import scpi, scpi_commands
 from ._internal.scpi import check_setter_response
 from .channels import (
@@ -18,6 +21,7 @@ from .channels import (
 )
 from .streaming import StreamManager, AsyncStreamManager
 from .discovery import DeviceInfo, BoardVariant
+from .sdcard import END_OF_FILE_MARKER, TRANSFER_ERROR_MARKER
 from .exceptions import (
     ConnectionError as DAQiFiConnectionError,
     CommandError,
@@ -25,6 +29,15 @@ from .exceptions import (
     FeatureNotSupportedError
 )
 
+
+# ⛔ A LIVENESS BOUND, NOT A TRANSPORT TIMEOUT. The legacy text path captures
+# the whole response first and then re-reads it from an in-memory buffer that
+# cannot block, so there is nothing there for a transport timeout to measure.
+# This exists only so a defect in the parser cannot hang a caller forever, and
+# it is deliberately NOT derived from the caller's timeout: doing that turned a
+# completed 8 MiB transfer into a TimeoutError whenever the local parse
+# outlasted the transport allowance (#257 r5, device.py:1009).
+_LOCAL_REPARSE_LIVENESS_S = 3600.0
 
 _METADATA_FIELD_NAMES = (
     "device_pn",
@@ -34,6 +47,55 @@ _METADATA_FIELD_NAMES = (
     "host_name",
     "ssid",
 )
+
+
+def _require_finite_sd_timeout(timeout: Any, caller: str) -> float:
+    """Reject a non-finite SD download timeout as a USAGE error.
+
+    ⛔ RULING HW A. `_read_sd_response`'s loop is `while time.monotonic() <
+    deadline`, and the head-resolution wait it contains has no other bound: a
+    payload that is a proper PREFIX of the echoed command keeps `head_span`
+    answering None, so the marker scan never runs. With a finite timeout that
+    costs the timeout and then returns the CORRECT bytes. With `inf` the loop
+    cannot terminate at all, and with `nan` every comparison is False so it
+    returns EMPTY immediately -- a silent wrong answer, which is the worse of
+    the two.
+
+    ⭐ A USAGE ERROR RATHER THAN A CLAMP. Substituting some finite value would
+    be this module inventing a deadline the caller did not ask for, and the
+    caller cannot tell it happened. `inf` is not a slow download, it is a
+    request this transport cannot honour, so it is refused by name.
+
+    ⛔ CALLED BEFORE THE GET IS WRITTEN, which is the whole point of its
+    position. Both entries write the command and only then read, so a check
+    placed after the write would refuse the call having ALREADY set the device
+    streaming a file nobody is going to read -- a refusal that leaves the bench
+    worse off than no check.
+
+    ⚠ ZERO AND NEGATIVE ARE DELIBERATELY NOT REJECTED HERE. They terminate --
+    the loop simply does not run -- so they are not this ruling's subject, and
+    bundling them in would change behaviour for callers who pass 0 to mean
+    "poll once" without anyone having asked for that. Scope is the non-finite
+    case; see #260 for the real fix to the underlying ambiguity.
+    """
+    try:
+        t = float(timeout)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "%s: timeout must be a finite number of seconds, got %r"
+            % (caller, timeout)
+        )
+    # NaN is its own test because `nan != nan`; `inf` is caught by the bound.
+    if t != t or t in (float("inf"), float("-inf")):
+        raise ValueError(
+            "%s: timeout must be FINITE, got %r. An SD download ends at a "
+            "terminal marker, and the host cannot tell a payload that is a "
+            "proper prefix of the echoed command from framing still in "
+            "flight -- so with a non-finite timeout the read has no bound at "
+            "all. Pass a real deadline (the default is 30.0). See daqifi "
+            "python-core #260 for the out-of-band fix." % (caller, timeout)
+        )
+    return t
 
 
 def _frame_has_metadata_fields(data: Any) -> bool:
@@ -99,8 +161,40 @@ class NyquistDevice:
         self._variant = BoardVariant.UNKNOWN
         self._device_info: Dict[str, Any] = {}
         self._connected = False
-        # File sizes from the last sd_list_files(); empty until one runs.
-        self._file_sizes: Dict[str, int] = {}
+        # Sizes from the last sd_list_files(); empty until one runs.
+        # Optional[int]: None means "that listing did not state a size"
+        # (the old listing format), a different fact from a listed 0, an
+        # empty file. ⚠ Read ONLY by sd_get_file_size() now -- the download
+        # stopped using it under ruling FO A2, so a stale entry costs a
+        # wrong answer from that getter and nothing else. It used to be an
+        # enforced transfer boundary, which is what made staleness fatal.
+        self._file_sizes: Dict[str, Optional[int]] = {}
+        # ⛔ r10 :808 -- INVALIDATION GENERATION. Bumped by
+        # _forget_sd_file_sizes; a listing captures it before its query and
+        # publishes only if it has not moved. Without it the atomic publish
+        # r10 introduced could RESURRECT sizes an invalidation had already
+        # dropped (see sd_list_files).
+        self._file_sizes_generation = 0
+        # ⛔ r11 :835 -- AND THE COMPARE AND THE PUBLISH MUST BE ONE STEP.
+        # r11 wrote `if gen == captured: self._file_sizes = sizes`, which is
+        # itself a CHECK-THEN-ACT: an invalidation landing between the
+        # comparison and the assignment was observed (deterministically, with
+        # a line-trace pause, and reachable through ordinary bytecode
+        # switching) to publish stale sizes anyway. Fixing a check-then-act
+        # with another check-then-act is the shape to watch for.
+        #
+        # ⭐ THIS LOCK IS A LEAF, which is what makes its ordering trivially
+        # safe: it is held only around the bump-and-clear and the
+        # compare-and-publish -- a handful of attribute writes -- and NEVER
+        # across I/O, a device command, or a call that could acquire anything
+        # else. So no acquirer can deadlock against it whatever else it holds,
+        # and there is no ordering rule for callers to get wrong. (Checked:
+        # no existing lock guards `_file_sizes`; `NyquistDevice` had none at
+        # all, and the ones in channels/communication/streaming guard other
+        # state. StreamManager fires its recording-change callback OUTSIDE its
+        # own `_lock`, so even a non-leaf design would not have nested there --
+        # but the leaf property does not depend on that staying true.)
+        self._file_sizes_lock = threading.Lock()
         # Protobuf-populated metadata (real SN, MAC, IP, SSID, ...).
         # Best-effort populated during `_connect()`; callers can re-
         # fetch on demand via :meth:`refresh_metadata` (e.g. after a
@@ -282,6 +376,10 @@ class NyquistDevice:
 
     def disconnect(self):
         """Disconnect from device"""
+        # A listing from this session is not a safe download length for
+        # the next one: the card may change while disconnected. Same
+        # reasoning as DaqifiStreamingDevice.disconnect.
+        self._forget_sd_file_sizes()
         if self._connected:
             self._comm.close()
             self._connected = False
@@ -700,6 +798,9 @@ class NyquistDevice:
         Example:
             device.sd_enable(True)
         """
+        # Can change what is on the card, so a listed size is no longer a
+        # safe answer from sd_get_file_size() (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         msg = scpi_commands.enable_storage_sd() if enable else scpi_commands.disable_storage_sd()
         success, error_response = self._comm.send_command_with_error(msg.data)
         check_setter_response(success, error_response, f"set SD enabled={enable}")
@@ -723,6 +824,12 @@ class NyquistDevice:
             cmd = scpi_commands.get_sd_file_list_for_directory(directory)
         else:
             cmd = scpi_commands.get_sd_file_list()
+        # ⛔ r10 :808 -- CAPTURED BEFORE THE QUERY, compared at the publish.
+        # Taken here rather than after the parse so it covers the whole window
+        # in which an invalidation could arrive: the wire exchange is the long
+        # part, and an invalidation during it is exactly the case the audit
+        # reproduced.
+        generation_at_entry = self._file_sizes_generation
         response = self._comm.send_command(cmd.data)
         lines = response.strip().split('\n')
 
@@ -740,7 +847,40 @@ class NyquistDevice:
 
         # Parse file list from response (format: path,size per line)
         files = []
-        self._file_sizes = {}  # Store for later use
+        # ⛔ r9 :830, the same class at the WRITING end: BUILD LOCALLY, PUBLISH
+        # ONCE. This used to assign `self._file_sizes = {}` here and then write
+        # into `self._file_sizes[...]` per line -- one attribute read per
+        # write. A concurrent `_forget_sd_file_sizes` (StreamManager's
+        # recording-change callback, on another thread) REPLACES the attribute,
+        # so writes before the replacement landed in a dict nobody holds any
+        # more and writes after it landed in the one the forget had just
+        # emptied: a cache left HALF POPULATED, which is a wrong answer from
+        # sd_get_file_size rather than a crash and so would not have shown up
+        # as a failure anywhere.
+        #
+        # ⛔⛔ r10 :808 -- AND THE INVALIDATION WINS, WHICH IS THE OPPOSITE OF
+        # WHAT THIS COMMENT USED TO CLAIM. The earlier text said the
+        # invalidation was "deliberately allowed to lose" because "a listing
+        # that completes after it holds strictly newer data". THAT IS FALSE,
+        # and the audit demonstrated it: thread A parses a listing and pauses
+        # before publishing, thread B calls disconnect() which clears the
+        # cache, A resumes and writes the stale entry back -- so
+        # sd_get_file_size answers 3 for a device we have stopped talking to,
+        # where its documented miss value is 0.
+        #
+        # ⭐ `disconnect()` does not invalidate because the data is old. It
+        # invalidates because THE DEVICE'S STATE IS NO LONGER KNOWN, and
+        # nothing a listing finished afterwards can re-establish that. So the
+        # invalidation is authoritative and a listing that completes across one
+        # is DISCARDED, not published.
+        #
+        # The generation counter is what makes that decidable: captured before
+        # the query, compared at the publish. Equal means no invalidation
+        # intervened and this listing still describes a live cache; changed
+        # means one did, and the right cache is the empty one the invalidation
+        # left. Still exactly one write to the attribute, so the
+        # half-populated window r10 closed stays closed.
+        sizes = {}
         for line in lines:
             line = line.strip()
             if _list_end_status(line) is not None:
@@ -753,17 +893,110 @@ class NyquistDevice:
                     path = ' '.join(parts[:-1])  # Rejoin in case path has spaces
                     size = int(parts[-1])
                     files.append(path)
-                    self._file_sizes[path] = size
+                    sizes[path] = size
                 else:
-                    # Old format: just path
+                    # Old format: just path, no size. Stored as None, not
+                    # 0: "this file is empty" and "this listing did not
+                    # say" are different facts, and sd_get_file_size()
+                    # reports the second as 0 without claiming the first.
                     files.append(line)
-                    self._file_sizes[line] = 0  # Unknown size
+                    sizes[line] = None
+        # The single publish, and only if no invalidation intervened. ⛔ r11
+        # :835: the comparison and the assignment are ONE step under the lock.
+        # Separately they are a check-then-act, and an invalidation arriving
+        # between them published stale sizes -- the same class as :830, which
+        # this publish was introduced to fix.
+        with self._file_sizes_lock:
+            if self._file_sizes_generation == generation_at_entry:
+                self._file_sizes = sizes
         return files
 
     def sd_get_file_size(self, filename: str) -> int:
         """Get cached file size from last LIST command (0 if the file wasn't
-        in it, or no listing has run yet)."""
-        return self._file_sizes.get(filename, 0)
+        in it, or no listing has run yet).
+
+        ⚠ Also 0 after anything that can change the card — see
+        :meth:`_forget_sd_file_sizes`. A size from before a recording is not
+        a size.
+        """
+        return self._listed_size_for(filename) or 0
+
+    def _listed_size_for(self, filename: str) -> Optional[int]:
+        """The last listing's size for ``filename``, or ``None`` if that
+        listing did not state one or did not contain the file.
+
+        ⚠ READ ONLY BY :meth:`sd_get_file_size`. The download used to pass
+        this to the receiver as an enforced boundary; that is gone with the
+        legacy path's size logic (ruling FO A2), so a wrong answer here is
+        now a wrong number rather than a rejected transfer.
+
+        ⛔ EXACT KEY ONLY, and two softer rules were tried and removed.
+        A listing stores what the device PRINTED -- ``DAQiFi/log.bin`` --
+        while callers hold bare names, so matching on the final path
+        segment looked like the fix. It BORROWS ACROSS DIRECTORIES: with
+        ``OTHER/log.bin`` listed at 3 bytes, ``log.bin`` resolved to 3.
+        Joining the name to a listed directory fails the same way, because
+        the device resolves a bare GET in its OWN default directory, not in
+        whichever one was listed last. Neither is done.
+
+        A listed 0 is an empty file and is returned as 0; "no size given"
+        is ``None``, which is what makes the ``is not None`` test below
+        meaningful rather than a truthiness accident.
+        """
+        # ⛔ r9 :830 (MEDIUM) -- ONE DICT OPERATION, NEVER CHECK-THEN-INDEX.
+        # This read `if filename not in self._file_sizes` and then indexed
+        # `self._file_sizes[filename]`, two separate reads of the attribute.
+        # `_forget_sd_file_sizes` REPLACES it (`self._file_sizes = {}`,
+        # below) and is wired to StreamManager's recording-change callback,
+        # which runs ON ANOTHER THREAD -- AsyncStreamManager.stop() in
+        # particular. So a listing could satisfy the membership check and the
+        # index could then hit the fresh empty dict and raise KeyError at the
+        # caller. The base had a single `dict.get()` here, so the window was
+        # INTRODUCED by splitting the lookup in two.
+        #
+        # `.get()` is one operation on one object: whichever dict is current
+        # when it runs answers, and a replacement racing it means the caller
+        # sees the old cache or the new empty one -- both legitimate answers,
+        # neither an exception. Taking a local reference first would ALSO fix
+        # the crash, but `.get()` needs no reasoning about how the clear is
+        # spelled, so it survives someone changing it to `.clear()`.
+        #
+        # ⚠ `.get()` with no default returns None for a MISSING key, which is
+        # this method's documented miss value, and 0 for a file the listing
+        # said is 0 bytes. That distinction is the point of the old
+        # `is not None` dance and it is preserved exactly: a listed 0 comes
+        # back as 0, never as None and never falsy-collapsed. Do NOT
+        # reintroduce an `if size:` here -- it sent an empty file down the
+        # unsized path, and in an earlier revision that also matched
+        # basenames it let that file borrow another directory's size.
+        return self._file_sizes.get(filename)
+
+    def _forget_sd_file_sizes(self) -> None:
+        """Drop the cached listing sizes.
+
+        ⛔ CALLED FROM THE EIGHT OPERATIONS FOUND TO CHANGE THE CARD, so
+        :meth:`sd_get_file_size` does not report a length from before a
+        recording. ⚠ "Eight" is the enumeration I ran -- by what WRITES,
+        not by what is named ``sd_*``, which is how StreamManager was missed
+        the first time -- and not a proof of completeness. I claimed that
+        twice and was wrong twice. A ninth path would now cost a wrong
+        number from one getter, which is why the list no longer has to be
+        perfect. ⚠ The download no longer reads these numbers at all
+        (ruling FO A2), so a stale entry is now a wrong answer from that
+        getter rather than a rejected transfer -- it was the latter, which
+        is what made staleness worth eight invalidation points.
+
+        Forgetting everything rather than tracking what changed is still the
+        right trade: the cost is one extra listing, and the next listing
+        restores it.
+
+        Mirrors ``DaqifiStreamingDevice._forget_sd_card_sizes``, which does
+        the same for the modern path -- including on disconnect, since a
+        listing from an earlier session is not a safe length either.
+        """
+        with self._file_sizes_lock:
+            self._file_sizes = {}
+            self._file_sizes_generation += 1
 
     def sd_get_file(self, filename: str, timeout: float = 30.0) -> str:
         """
@@ -771,7 +1004,13 @@ class NyquistDevice:
 
         Args:
             filename: Name of file to retrieve
-            timeout: Maximum time to wait for file transfer (default: 30s)
+            timeout: Maximum time to wait for file transfer (default: 30s).
+                Must be FINITE: a non-finite value raises ValueError, because
+                the read has no other bound (ruling HW A). One rare shape
+                waits out this whole timeout and then returns the correct
+                bytes -- a file whose content is exactly the echoed command's
+                prefix AND whose name begins with ``__END_OF_FILE__``. See
+                ``_read_sd_response`` and python-core #260.
 
         Returns:
             File contents as string
@@ -779,9 +1018,22 @@ class NyquistDevice:
         Example:
             data = device.sd_get_file("test.csv")
             print(data)
-        """
-        import time
 
+        Raises:
+            TimeoutError: no ``__END_OF_FILE__`` arrived within ``timeout``.
+            RuntimeError: the serial port is not open.
+
+        ⚠ Does NOT raise ``SdCardTransferErrorException``. A file may
+        legitimately contain ``__TRANSFER_ERROR__``, so this path stopped
+        classifying it (ruling FO A2): a failed transfer reads as a short
+        file or a timeout, as it did before this PR. #253 is where the
+        reason becomes available, by asking the error queue.
+        """
+        # ⛔ RULING HW A -- VALIDATED BEFORE THE PORT CHECK AND BEFORE THE
+        # WRITE. A usage error must not depend on port state, and refusing
+        # AFTER the GET went out would leave the device streaming a file
+        # nobody will read.
+        timeout = _require_finite_sd_timeout(timeout, "sd_get_file")
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
@@ -791,43 +1043,28 @@ class NyquistDevice:
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
 
-        # Read until we see __END_OF_FILE__ marker (simplified, no CRLF)
-        response = b""
-        start_time = time.time()
-        end_marker = b"__END_OF_FILE__"
-
-        while (time.time() - start_time) < timeout:
-            if self._comm._serial.in_waiting > 0:
-                chunk = self._comm._serial.read(self._comm._serial.in_waiting)
-                response += chunk
-
-                # Check if we've received the end marker
-                if end_marker in response:
-                    break
-
-                # Reset start time when receiving data (prevents timeout during large transfers)
-                start_time = time.time()
-            else:
-                # No data available, wait a bit
-                time.sleep(0.01)
-
-        # Decode response
-        response_str = response.decode('ascii', errors='ignore')
-
-        # Remove echoed command
-        if cmd in response_str:
-            response_str = response_str.replace(cmd, "")
-
-        # Remove DAQIFI> prompt
-        response_str = response_str.replace("DAQIFI>", "")
-
-        # Remove end marker
-        response_str = response_str.replace("__END_OF_FILE__", "")
-
-        # Clean up
-        response_str = response_str.strip()
-
-        return response_str
+        # ⛔ SAME RECEIVE AS THE BINARY SIBLING, and the sweeps that used to
+        # be here are gone with it. This path removed the command text, the
+        # prompt and the marker with `.replace()`, which deletes EVERY
+        # occurrence at ANY offset -- so a payload legitimately containing
+        # any of the three was corrupted throughout, not merely at the head
+        # -- and then `.strip()`ed the result, which is no part of the
+        # transfer contract and ate the file's own leading and trailing
+        # whitespace.
+        #
+        # ⚠ The decode is deliberately unchanged, including
+        # `errors="ignore"`. Making it strict would raise on logs this
+        # accepts today, and choosing another encoding would change what
+        # this returns; both are a separate decision from the receive
+        # contract, so they are not bundled in here.
+        # ⚠ idle_reset=True restores THIS path's original timeout semantics.
+        # The base reset its clock on every chunk, so the timeout measured
+        # SILENCE; delegating made it absolute, and a slow but progressing
+        # text download then died at the 30 s default. The binary sibling
+        # was absolute in the base and stays absolute.
+        return self._receive_sd_file(
+            filename, cmd, timeout, idle_reset=True,
+        ).decode("ascii", errors="ignore")
 
     def sd_get_file_binary(self, filename: str, timeout: float = 30.0) -> bytes:
         """
@@ -838,7 +1075,11 @@ class NyquistDevice:
 
         Args:
             filename: Name of file to retrieve
-            timeout: Maximum time to wait for file transfer (default: 30s)
+            timeout: Maximum time to wait for file transfer (default: 30s).
+                Must be FINITE -- see the sibling ``sd_get_file`` and ruling
+                HW A. The same rare echo-prefix shape waits out the timeout
+                and then returns the correct bytes; python-core #260 is the
+                out-of-band fix.
 
         Returns:
             File contents as raw bytes
@@ -847,12 +1088,17 @@ class NyquistDevice:
             TimeoutError: If __END_OF_FILE__ marker not received within timeout
             RuntimeError: If serial port not open
 
+        ⚠ Does NOT raise ``SdCardTransferErrorException`` -- see
+        :meth:`sd_get_file`.
+
         Example:
             data = device.sd_get_file_binary("benchmark.dat")
             assert len(data) == expected_size
         """
-        import time
-
+        # ⛔ RULING HW A -- see the sibling. Both entries guard, because both
+        # reach the same unbounded head-resolution wait and a caller reaching
+        # only one of them would still hang.
+        timeout = _require_finite_sd_timeout(timeout, "sd_get_file_binary")
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
@@ -862,43 +1108,216 @@ class NyquistDevice:
         self._comm._serial.write(cmd_bytes)
         self._comm._serial.flush()
 
-        # Read until we see __END_OF_FILE__ marker
-        # Use bytearray for O(n) accumulation instead of O(n^2) bytes concat
-        response = bytearray()
-        end_marker = b"__END_OF_FILE__"
+        return self._receive_sd_file(filename, cmd, timeout, idle_reset=False)
+
+    def _read_sd_response(
+        self, timeout: float, idle_reset: bool, echo: bytes = b"",
+    ) -> bytes:
+        """Read the GET response off the port. Transport only -- what the
+        bytes MEAN is the receiver's job.
+
+        Stops at the first ``__END_OF_FILE__`` that is not inside the
+        echoed command, which is the base's rule. ⛔ NEVER SCAN THE ECHO: a
+        GET names a file, and a file can be named ``__END_OF_FILE__``, so
+        the echoed command can carry the marker's own bytes and stopping on
+        that ends the capture before the payload. ``head_span`` is what THIS
+        loop uses to decide where the head ends; ``None`` means it is still
+        arriving.
+
+        ⚠⚠ r14 -- AN EARLIER REVISION OF THIS LINE SAID ``head_span`` was
+        "shared with the receiver that strips it". It is not: the receiver
+        strips through ``_PreambleSkip.feed``/``flush``, which run their own
+        prefix match, so there are TWO implementations of where the head ends.
+        They agree by construction and are now pinned equal by
+        ``test_head_span_and_the_strip_agree_on_every_shape``; before that pin
+        nothing enforced it, and a mutation aimed at one of them came back
+        green because the other still worked.
+
+        ⛔ NO SIZE, AND NO GRACE PERIOD. Both are gone with the legacy
+        path's size logic (ruling FO A2). The size-aware stop rule and the
+        quiet-line grace between them produced every HIGH from r3 and r4:
+        framing counted toward a payload target, and marker-shaped content
+        ended the capture early. What they bought -- reading past a marker
+        inside file content -- is a capability neither #154 nor #206 asked
+        for and the base never had.
+
+        ``idle_reset`` keeps the text path's original semantics, where the
+        timeout measures SILENCE rather than total duration, so a slow but
+        progressing download is not cut off. The binary path's timeout was
+        absolute and stays that way.
+
+        ⚠⚠ ONE ACCEPTED LATENCY CASE, under ruling HW A. The marker scan is
+        gated on the head being RESOLVED, and ``head_span`` answers None while
+        the buffer is a proper prefix of a candidate. A payload that is itself
+        such a prefix therefore keeps the head unresolved, and the marker it
+        has ALREADY received is never looked for: the call waits out the
+        caller's timeout and THEN returns the correct bytes.
+
+        Reaching it needs two coincidences -- the content must be exactly the
+        echo's prefix AND the filename must begin with ``__END_OF_FILE__``, so
+        that the marker's bytes CONTINUE the echo instead of breaking the
+        prefix. An ordinary filename does not stall.
+
+        ⛔ IT IS NOT FIXABLE FROM THIS BUFFER. A complete payload of that
+        shape and a PARTIAL ECHO for that same file are BYTE-IDENTICAL here,
+        and the first must stop while the second must keep waiting. Ending the
+        capture on a marker with the head unresolved was measured: it returns
+        the 23-byte echo fragment in place of a real file, which is the silent
+        short-file direction ruling GV A rejected. The real discriminator is
+        the device's ECHO STATE, which this module never reads -- python-core
+        #260. Both directions are pinned in
+        ``tests/test_sd_timeout_bound_and_echo_prefix_257.py``.
+        """
+        from .sdcard import _PreambleSkip
+
+        serial = self._comm._serial
+        out = bytearray()
         deadline = time.monotonic() + timeout
-
+        skip = _PreambleSkip(echo)
+        # ⛔ r10 :1028 (MEDIUM) -- SCAN INCREMENTALLY, AND NEVER COPY THE
+        # BUFFER. This loop did `buf = bytes(out)` and then
+        # `END_OF_FILE_MARKER in buf[head:]` on EVERY iteration, idle polls
+        # included: a full copy of everything received so far, plus a full
+        # rescan of it, per 4 KiB read. That is O(n^2) over a download and it
+        # turned a working transfer into a TimeoutError. Measured by the audit
+        # on a 32 MiB source fed in 4096-byte chunks with no delays: the base
+        # returned all 33,554,432 bytes in 22.8 s, while this code raised
+        # TimeoutError at 30 s having read only ~21 MB.
+        #
+        # `head` is resolved ONCE. `head_span` answers None only while the
+        # preamble may still be arriving; once it returns a span that span is
+        # final, so re-asking it per iteration bought nothing.
+        #
+        # `scanned` is how far the marker search has already looked.
+        # Re-searching from `scanned - (len(marker) - 1)` is what makes the
+        # incremental scan exact rather than merely fast: a marker split
+        # across two reads straddles that boundary, and without the overlap it
+        # would be missed by both passes. `bytearray.find` searches in place,
+        # so no copy is made.
+        head = None
+        scanned = 0
+        overlap = len(END_OF_FILE_MARKER) - 1
         while time.monotonic() < deadline:
-            if self._comm._serial.in_waiting > 0:
-                chunk = self._comm._serial.read(self._comm._serial.in_waiting)
-                response.extend(chunk)
-
-                if end_marker in response:
-                    break
-            else:
-                time.sleep(0.01)
-        else:
-            raise TimeoutError(
-                f"SD file download timed out after {timeout}s "
-                f"({len(response)} bytes received, no EOF marker)")
-
-        # Strip leading echo and prompt from raw bytes
-        # Echo format: <cmd>\r\nDAQIFI> <file data>__END_OF_FILE__...
-        # Only search the first 200 bytes to avoid truncating binary data
-        # that might coincidentally contain the prompt string
-        header = bytes(response[:200])
-        for marker in (b"DAQIFI> ", b"DAQIFI>"):
-            echo_end = header.find(marker)
-            if echo_end >= 0:
-                response = response[echo_end + len(marker):]
+            pending = serial.in_waiting
+            if pending:
+                out.extend(serial.read(pending))
+            if head is None:
+                head = skip.head_span(out)
+            done = False
+            if head is not None:
+                start = scanned - overlap
+                if start < head:
+                    start = head
+                done = out.find(END_OF_FILE_MARKER, start) != -1
+                scanned = len(out)
+            # ⛔ r10 :1027 (MEDIUM, blind leg) -- THE IDLE DEADLINE IS RESET
+            # AFTER THE WORK, NOT BEFORE IT. The reset used to sit inside the
+            # `if pending` block above, so the time spent copying and scanning
+            # was charged against the NEXT silence window rather than excluded
+            # from it. With a short timeout and a continuously-fed source the
+            # loop then exited mid-transfer: the audit measured
+            # sd_get_file('log.csv', timeout=0.001) against 8 MiB supplied in
+            # 4096-byte reads ending with ~3 MiB captured, over 5 MiB still
+            # unread, and a TimeoutError on reparse. The base reset after
+            # scanning, so this restores that order rather than inventing one.
+            #
+            # ⭐ This is what makes the parameter mean what it says: the
+            # docstring promises the timeout measures SILENCE, and silence
+            # cannot include the host's own processing time. Fixing :1028
+            # shrinks that processing time, but the ORDER is the correctness
+            # fix and would be needed even if the scan were free.
+            if pending and idle_reset:
+                deadline = time.monotonic() + timeout
+            if done:
                 break
+            if not pending:
+                time.sleep(0.01)
+        return bytes(out)
 
-        # Strip EOF marker
-        eof_idx = response.find(end_marker)
-        if eof_idx >= 0:
-            response = response[:eof_idx]
 
-        return bytes(response)
+    def _receive_sd_file(
+        self, filename: str, cmd: str, timeout: float, idle_reset: bool,
+    ) -> bytes:
+        """The SD receive contract, applied by the one implementation of it.
+
+        ⛔ THIS USED TO BE A SECOND COPY OF THAT CONTRACT (#154, #206 item
+        5): it hardcoded ``__END_OF_FILE__``, ended the read at the first
+        occurrence ANYWHERE so a file containing those bytes truncated
+        itself, found the prompt by searching 200 bytes so a file containing
+        ``DAQIFI>`` lost its head, and swept the command, prompt and marker
+        out with ``.replace()`` at every offset. Those are what the
+        delegation fixes.
+
+        ⛔ WHAT IT DELIBERATELY DOES NOT DO, by ruling FO A2:
+
+        - **no listed size.** An unsized transfer ends at the first terminal
+          marker, so a file whose content contains ``__END_OF_FILE__`` is
+          truncated there. The size machinery that read past it produced
+          both of r3's HIGHs, r4's HIGH and three of r2's five defects, and
+          delivered a capability neither ticket requested.
+
+          ⛔ AND THAT IS A BEHAVIOUR CHANGE ON THE TEXT PATH, not "the
+          base's behaviour" as r5's revision of this docstring claimed. The
+          claim was false and is withdrawn rather than softened. Measured
+          on ``b'head__END_OF_FILE__tail__END_OF_FILE__'``: the base
+          returned ``'headtail'`` -- its ``.replace()`` deleted the marker's
+          bytes at EVERY offset and kept everything around them -- where
+          this returns ``'head'``. So for a text file whose content contains
+          the marker, the base corrupted the payload in place and this
+          truncates it instead.
+
+          Both are lossy and neither is recoverable without a size, which
+          is the point: with no length there is nothing that distinguishes
+          a marker ending the file from the same bytes inside it. Ruling
+          FO A2 chose truncation, and reading past the marker is the
+          mechanism that ruling removed -- so it is NOT re-added here to
+          close r5's finding. What r5 actually disproved was the claim, and
+          the claim is what changes.
+        - **no error-marker detection** (``eof_only=True``). A file may
+          legitimately contain ``__TRANSFER_ERROR__``, and the overlap at a
+          join -- content ending ``...__TRANSFER_ERROR`` followed by the
+          real ``__END_OF_FILE__`` -- completes those bytes by accident. On
+          this path a false device-error is worse than the base's silence,
+          and fixing it in the shared scan would have reached the two
+          already-correct callers. So the legacy path stops classifying
+          error markers and ``_find_terminal_marker`` is untouched.
+
+        ⚠ Consequence, stated because callers depend on it: this method no
+        longer raises ``SdCardTransferErrorException``. A failed transfer
+        reads as a short file or a timeout, exactly as before this PR. #253
+        is where the reason becomes available, by asking the error queue.
+        """
+        import io
+
+        from .sdcard import SdCardFileReceiver
+
+        raw = self._read_sd_response(
+            timeout, idle_reset, echo=cmd.encode("ascii"),
+        )
+        destination = io.BytesIO()
+        SdCardFileReceiver(io.BytesIO(raw)).receive(
+            destination, filename,
+            # ⛔ NOT ``timeout``. The transfer is already over: ``raw`` holds
+            # every byte, and this pass re-reads an in-memory buffer that
+            # cannot block. Passing the caller's timeout made it a SECOND
+            # absolute deadline over local parsing, so a transfer that had
+            # completely succeeded raised TimeoutError whenever the parse
+            # took longer than the transport allowance -- measured in r5 with
+            # ``timeout=0.001`` and 8 MiB already in hand, where the base
+            # returned all 8,388,608 characters and this raised.
+            #
+            # A timeout is still required by the signature, so this is a
+            # LIVENESS BOUND on a pure-CPU pass, not a transport timeout: it
+            # exists only so a defect in the parser cannot hang forever, and
+            # it must never be derived from the caller's value.
+            timeout_s=_LOCAL_REPARSE_LIVENESS_S,
+            # The command as sent: the console may echo it back ahead of the
+            # payload, and it is removed as a PREFIX, never searched for.
+            preamble=cmd.encode("ascii"),
+            eof_only=True,
+        )
+        return destination.getvalue()
+
 
     def sd_delete_file(self, filename: str):
         """
@@ -910,6 +1329,9 @@ class NyquistDevice:
         Example:
             device.sd_delete_file("old_data.csv")
         """
+        # Can change what is on the card, so a listed size is no longer a
+        # safe answer from sd_get_file_size() (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         success, error_response = self._comm.send_command_with_error(
             scpi_commands.delete_sd_file(filename).data
         )
@@ -924,6 +1346,9 @@ class NyquistDevice:
         Example:
             device.sd_format()  # Careful!
         """
+        # Can change what is on the card, so a listed size is no longer a
+        # safe answer from sd_get_file_size() (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         success, error_response = self._comm.send_command_with_error(
             scpi_commands.format_sd_card().data
         )
@@ -941,6 +1366,11 @@ class NyquistDevice:
             device.sd_set_logging("data.csv")
             # Now streaming will log to SD card
         """
+        # Names the file a following recording appends to, and the legacy
+        # API has no separate "start logging" step that would invalidate
+        # later. Forgetting costs a listing; keeping costs a rejected
+        # download (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         success, error_response = self._comm.send_command_with_error(
             scpi_commands.set_sd_logging_file_name(filename).data
         )
@@ -960,6 +1390,9 @@ class NyquistDevice:
             results = device.sd_benchmark(1024)
             print(f"Speed: {results['speed_mbps']:.2f} MB/s")
         """
+        # Can change what is on the card, so a listed size is no longer a
+        # safe answer from sd_get_file_size() (see _forget_sd_file_sizes).
+        self._forget_sd_file_sizes()
         # Run benchmark
         self._comm.send_command(scpi_commands.run_sd_benchmark(size_kb).data)
 
@@ -1059,12 +1492,18 @@ class NyquistDevice:
                 self._comm, channels, sample_rate, format,
                 per_channel_dispatch=dispatch,
                 integer_units=integer_units,
+                # ⛔ THE EIGHTH SD WRITER, and the one an enumeration of
+                # sd_-named methods could not see: streaming to the card
+                # changes what is on it. The manager holds the transport,
+                # not this object, so it invalidates through this callback.
+                on_recording_change=self._forget_sd_file_sizes,
             )
         else:
             return StreamManager(
                 self._comm, channels, sample_rate, format,
                 per_channel_dispatch=dispatch,
                 integer_units=integer_units,
+                on_recording_change=self._forget_sd_file_sizes,
             )
 
     def _build_per_channel_dispatch(self):
