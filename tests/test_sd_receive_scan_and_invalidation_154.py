@@ -12,11 +12,12 @@ import time
 
 import pytest
 
+from _sd_echo_probe import EchoProbeFake
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import END_OF_FILE_MARKER
 
 
-class _ChunkedSerial:
+class _ChunkedSerial(EchoProbeFake):
     """A serial-shaped source that hands out `payload` in fixed-size reads.
 
     No delays: `in_waiting` is always the next chunk's size until the payload
@@ -33,22 +34,26 @@ class _ChunkedSerial:
 
     @property
     def in_waiting(self) -> int:
-        return min(self._chunk, len(self._payload) - self._pos)
+        return self._probe_pending(
+            lambda: min(self._chunk, len(self._payload) - self._pos))
 
     def read(self, n: int = 1) -> bytes:
-        end = min(self._pos + min(n, self._chunk), len(self._payload))
-        out = self._payload[self._pos:end]
-        self._pos = end
-        return out
+        def _own():
+            end = min(self._pos + min(n, self._chunk), len(self._payload))
+            out = self._payload[self._pos:end]
+            self._pos = end
+            return out
+        return self._probe_read(n, _own)
 
-    def write(self, data):            # the command write; nothing to answer
+    def write(self, data):            # the command write, or an echo probe
+        self._probe_write(data)
         return len(data)
 
     def flush(self):
         pass
 
     def reset_input_buffer(self):
-        pass
+        self._probe_reset()
 
     def close(self):
         self.is_open = False

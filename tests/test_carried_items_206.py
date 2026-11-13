@@ -17,6 +17,7 @@ from datetime import timedelta
 
 import pytest
 
+from _sd_echo_probe import EchoProbeFake
 from daqifi._internal import scpi_commands
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import SdCardCsvFileParser, SdCardParseOptions
@@ -26,7 +27,7 @@ from daqifi.timestamp import TimestampProcessor
 # ---- 5 ---------------------------------------------------------------------
 
 
-class _SerialWithReply:
+class _SerialWithReply(EchoProbeFake):
     def __init__(self, reply: bytes):
         self.is_open = True
         self.written = []
@@ -34,6 +35,8 @@ class _SerialWithReply:
 
     def write(self, data):
         self.written.append(bytes(data))
+        if self._probe_write(data):
+            return len(data)
         return len(data)
 
     def flush(self):
@@ -41,12 +44,14 @@ class _SerialWithReply:
 
     @property
     def in_waiting(self):
-        return len(self._reply)
+        return self._probe_pending(lambda: len(self._reply))
 
     def read(self, n):
-        out = bytes(self._reply[:n])
-        del self._reply[:n]
-        return out
+        def _own():
+            out = bytes(self._reply[:n])
+            del self._reply[:n]
+            return out
+        return self._probe_read(n, _own)
 
 
 def _download(reply: bytes) -> bytes:

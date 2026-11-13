@@ -1606,6 +1606,93 @@ class SerialInterface:
         except (serial.SerialException, OSError):
             pass
 
+    #: How long :meth:`probe_echo_silent` will wait for the device to answer
+    #: before giving up and letting the caller fall back. Bounded on purpose:
+    #: a download must never hang because a probe went unanswered.
+    ECHO_PROBE_TIMEOUT_S = 0.5
+
+    def probe_echo_silent(self) -> bool:
+        """Did the device just CONFIRM the one state in which it emits no
+        framing? (#260)
+
+        \u26d4 THE PROMPT AND THE COMMAND ECHO ARE ONE FIRMWARE VARIABLE.
+        `microrl.c` gates the prompt with ``if (pThis->echoOn > -1)``, and
+        ``echoOn`` is an **int** -- ``SCPI_SetEcho`` accepts only -1..1 and
+        EVERY gate in microrl is ``> -1``. So -1 is the only silent state, and
+        0 behaves exactly like 1. ``SYSTem:ECHO 0`` does NOT turn echo off.
+        Because one field decides both, a device cannot truthfully answer -1
+        while printing a prompt -- which is what makes a confirmed -1 a sound
+        basis for stripping nothing.
+
+        \u26d4 NOT CACHED, DELIBERATELY. A cached confirmation is this design's
+        whole failure mode: the caller can send ``SYSTem:ECHO 1`` down the raw
+        path, or the device can REBOOT to its per-transport default (USB 1,
+        TCP 0) with no event anyone could invalidate on. The next download
+        would then skip the strip on a framed stream -- a silent leak, worse
+        than the byte-shape guess it replaces. So this is asked immediately
+        before each download and the answer is used at once.
+
+        \u2b50 REUSES THIS MODULE'S OWN COMPLETION RULE rather than inventing
+        one: the bounded drain and the belt-and-suspenders
+        ``reset_input_buffer()`` are :meth:`_send_disable_echo`'s, for the same
+        reason stated there -- bytes still in flight when polling stops must
+        not bleed into the next caller's read. Here that next read is the file
+        payload, so a late or fragmented reply would otherwise land INSIDE the
+        downloaded file.
+
+        \u26a0 ONE ADAPTATION, named because it is a real difference. In
+        ``_send_disable_echo`` no reply is expected, so stopping after two
+        empty polls is right immediately. Here silence IS the thing being
+        measured, so the empty-poll counter only starts once some bytes have
+        arrived; until then this waits out the bound. Without that, a device
+        slower than 40 ms would read as "no answer" on every download.
+
+        \u26a0 FAIL-SAFE: only an exact ``-1`` returns True. Anything else --
+        0, 1, nothing at all, a partial or garbled reply, a raised error --
+        returns False and leaves the caller on the byte-shape path this repo
+        has always used. A false negative costs an accepted strip; a false
+        positive would silently corrupt a file.
+        """
+        if self._serial is None or not getattr(self._serial, "is_open", False):
+            return False
+        try:
+            self._serial.write(b"SYSTem:ECHO?\r\n")
+            self._serial.flush()
+        except (serial.SerialException, OSError):
+            return False
+
+        got = bytearray()
+        deadline = time.monotonic() + self.ECHO_PROBE_TIMEOUT_S
+        empty_polls = 0
+        while time.monotonic() < deadline:
+            try:
+                pending = self._serial.in_waiting
+            except (serial.SerialException, OSError):
+                break
+            if pending:
+                try:
+                    got.extend(self._serial.read(pending))
+                except (serial.SerialException, OSError):
+                    break
+                empty_polls = 0
+            elif got:
+                # Only count silence AFTER something arrived -- see the
+                # adaptation note above.
+                empty_polls += 1
+                if empty_polls >= 2:
+                    break
+            time.sleep(0.02)
+
+        # Belt-and-suspenders, exactly as _send_disable_echo does it: anything
+        # still in flight must not bleed into the download that follows.
+        try:
+            if hasattr(self._serial, "reset_input_buffer"):
+                self._serial.reset_input_buffer()
+        except (serial.SerialException, OSError):
+            pass
+
+        return bytes(got).strip() == b"-1"
+
     def _drain_bounded(self, deadline_s: float) -> None:
         """Wait, BOUNDED, for the OS output queue to empty. No ``flush()``.
 

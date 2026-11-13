@@ -24,6 +24,7 @@ import time
 
 import pytest
 
+from _sd_echo_probe import EchoProbeFake
 import daqifi.exceptions as exc_mod
 import daqifi.sdcard as sdcard
 
@@ -260,12 +261,13 @@ def test_download_the_total_cap_also_classifies_an_open_candidate(total_s, idle_
 # ---- legacy NyquistDevice: unchanged -------------------------------------
 
 
-class _SerialWithReply:
+class _SerialWithReply(EchoProbeFake):
     def __init__(self, *reads: bytes):
         self.is_open = True
         self._reads = [bytearray(r) for r in reads]
 
     def write(self, data):
+        self._probe_write(data)
         return len(data)
 
     def flush(self):
@@ -273,14 +275,17 @@ class _SerialWithReply:
 
     @property
     def in_waiting(self):
-        return len(self._reads[0]) if self._reads else 0
+        return self._probe_pending(
+            lambda: len(self._reads[0]) if self._reads else 0)
 
     def read(self, n):
-        out = bytes(self._reads[0][:n])
-        del self._reads[0][:n]
-        if not self._reads[0]:
-            self._reads.pop(0)
-        return out
+        def _own():
+            out = bytes(self._reads[0][:n])
+            del self._reads[0][:n]
+            if not self._reads[0]:
+                self._reads.pop(0)
+            return out
+        return self._probe_read(n, _own)
 
 
 def test_the_legacy_download_isnt_stopped_by_an_echoed_filename() -> None:

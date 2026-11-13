@@ -58,6 +58,7 @@ serial. Re-measure before changing one.
 
 import pytest
 
+from _sd_echo_probe import EchoProbeFake
 from daqifi._internal import scpi_commands
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import END_OF_FILE_MARKER, _PreambleSkip
@@ -66,7 +67,7 @@ PROMPT = b"DAQIFI> "
 BODY = b"1,2\r\n"
 
 
-class _Serial:
+class _Serial(EchoProbeFake):
     """Serial-shaped: ``in_waiting`` and never EOF, as pyserial behaves."""
 
     def __init__(self, payload: bytes) -> None:
@@ -76,16 +77,19 @@ class _Serial:
 
     def write(self, data) -> int:
         self.written.append(bytes(data))
+        self._probe_write(data)
         return len(data)
 
     @property
     def in_waiting(self) -> int:
-        return len(self._buf)
+        return self._probe_pending(lambda: len(self._buf))
 
     def read(self, size: int = 1) -> bytes:
-        out = bytes(self._buf[:size])
-        del self._buf[:size]
-        return out
+        def _own():
+            out = bytes(self._buf[:size])
+            del self._buf[:size]
+            return out
+        return self._probe_read(size, _own)
 
     def reset_input_buffer(self) -> None:
         pass

@@ -16,6 +16,7 @@ import time
 
 import pytest
 
+from _sd_echo_probe import EchoProbeFake
 from daqifi._internal import scpi_commands
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import END_OF_FILE_MARKER, SdCardFileReceiver
@@ -24,7 +25,7 @@ from daqifi.streaming import StreamManager
 PROMPT = b"DAQIFI> "
 
 
-class _Serial:
+class _Serial(EchoProbeFake):
     def __init__(self, listing: bytes = b"", download: bytes = b"") -> None:
         self.is_open = True
         self.written: list = []
@@ -35,6 +36,8 @@ class _Serial:
     def write(self, data) -> int:
         text = bytes(data)
         self.written.append(text)
+        if self._probe_write(text):
+            return len(data)
         if b"SD:LIST?" in text:
             self._pending.extend(self._listing)
         elif b"SD:GET" in text:
@@ -56,7 +59,7 @@ class _Serial:
         return out
 
 
-class _Trickle:
+class _Trickle(EchoProbeFake):
     """Hands out one chunk per read with a gap, so a total duration longer
     than the timeout is reached without any single gap approaching it."""
 
@@ -68,6 +71,7 @@ class _Trickle:
         self._last = 0.0
 
     def write(self, data) -> int:
+        self._probe_write(data)
         return len(data)
 
     def flush(self) -> None:
@@ -75,17 +79,21 @@ class _Trickle:
 
     @property
     def in_waiting(self) -> int:
-        if not self._data:
-            return 0
-        if time.monotonic() - self._last < self._gap:
-            return 0
-        return min(self._chunk, len(self._data))
+        def _own():
+            if not self._data:
+                return 0
+            if time.monotonic() - self._last < self._gap:
+                return 0
+            return min(self._chunk, len(self._data))
+        return self._probe_pending(_own)
 
     def read(self, n: int) -> bytes:
-        self._last = time.monotonic()
-        out = bytes(self._data[:n])
-        del self._data[:n]
-        return out
+        def _own():
+            self._last = time.monotonic()
+            out = bytes(self._data[:n])
+            del self._data[:n]
+            return out
+        return self._probe_read(n, _own)
 
 
 def _device(listing: bytes = b"", download: bytes = b"") -> NyquistDevice:

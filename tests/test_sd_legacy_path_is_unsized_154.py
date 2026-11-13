@@ -26,6 +26,7 @@ import time
 
 import pytest
 
+from _sd_echo_probe import EchoProbeFake
 from daqifi._internal import scpi_commands
 from daqifi.device import NyquistDevice
 from daqifi.exceptions import SdCardTransferErrorException
@@ -38,7 +39,7 @@ from daqifi.sdcard import (
 PROMPT = b"DAQIFI> "
 
 
-class _Serial:
+class _Serial(EchoProbeFake):
     """Serial-shaped: exposes ``in_waiting`` and never reports EOF, which is
     what pyserial does and what makes an absent marker a timeout."""
 
@@ -56,6 +57,8 @@ class _Serial:
 
     def write(self, data) -> int:
         self.written.append(bytes(data))
+        if self._probe_write(data):
+            return len(data)
         if b"SD:GET" in bytes(data):
             # Staged delays are measured from the GET when there is one.
             self._t0 = time.monotonic()
@@ -71,14 +74,18 @@ class _Serial:
 
     @property
     def in_waiting(self) -> int:
-        self._release()
-        return len(self._pending)
+        def _own():
+            self._release()
+            return len(self._pending)
+        return self._probe_pending(_own)
 
     def read(self, n: int) -> bytes:
-        self._release()
-        out = bytes(self._pending[:n])
-        del self._pending[:n]
-        return out
+        def _own():
+            self._release()
+            out = bytes(self._pending[:n])
+            del self._pending[:n]
+            return out
+        return self._probe_read(n, _own)
 
 
 def _device(*stages) -> NyquistDevice:

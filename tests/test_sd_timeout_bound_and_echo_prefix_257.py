@@ -35,6 +35,7 @@ import time
 
 import pytest
 
+from _sd_echo_probe import EchoProbeFake
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import END_OF_FILE_MARKER
 
@@ -43,7 +44,7 @@ MARKER_NAME = "__END_OF_FILE__"
 FULL_ECHO = ('SYSTem:STORage:SD:GET "%s"' % MARKER_NAME).encode("ascii")
 
 
-class _ScriptedSerial:
+class _ScriptedSerial(EchoProbeFake):
     """Hands out queued chunks; a ``None`` entry is one SILENT poll.
 
     A silent poll is how "the rest of the framing is still in flight" is
@@ -59,23 +60,27 @@ class _ScriptedSerial:
 
     @property
     def in_waiting(self) -> int:
-        if self._q and self._q[0] is None:
-            self._q.pop(0)
-            return 0
-        return len(self._q[0]) if self._q else 0
+        def _own():
+            if self._q and self._q[0] is None:
+                self._q.pop(0)
+                return 0
+            return len(self._q[0]) if self._q else 0
+        return self._probe_pending(_own)
 
     def read(self, n: int = 1) -> bytes:
-        return self._q.pop(0) if self._q else b""
+        return self._probe_read(
+            n, lambda: self._q.pop(0) if self._q else b"")
 
     def write(self, data):
         self.written.extend(data)
+        self._probe_write(data)
         return len(data)
 
     def flush(self):
         pass
 
     def reset_input_buffer(self):
-        pass
+        self._probe_reset()
 
     def close(self):
         self.is_open = False
@@ -159,7 +164,15 @@ def test_a_finite_timeout_is_still_accepted(entry):
     dev, ser = _device([ECHO_PREFIX + END_OF_FILE_MARKER])
     got = getattr(dev, entry)("log.csv", timeout=1.0)
     assert got in (ECHO_PREFIX, ECHO_PREFIX.decode("ascii"))
-    assert bytes(ser.written).startswith(b"SYSTem:STORage:SD:GET")
+    # ⛔ #260: THE PROBE PRECEDES THE GET, asserted as an ORDER rather than
+    # loosened. The echo state must be established BEFORE the command that
+    # starts the stream; afterwards the device is already sending and a query
+    # would interleave with the payload.
+    wire = bytes(ser.written)
+    assert wire.startswith(b"SYSTem:ECHO?"), (
+        "the echo probe must be the first thing on the wire; got %r" % wire[:40])
+    assert b"SYSTem:STORage:SD:GET" in wire, "the GET must still be sent"
+    assert wire.index(b"SYSTem:ECHO?") < wire.index(b"SYSTem:STORage:SD:GET")
 
 
 # --------------------------------------------------------------------------

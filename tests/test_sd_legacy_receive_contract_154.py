@@ -18,6 +18,7 @@ import io
 
 import pytest
 
+from _sd_echo_probe import EchoProbeFake
 from daqifi._internal import scpi_commands
 from daqifi.device import NyquistDevice
 from daqifi.exceptions import SdCardTransferErrorException
@@ -30,7 +31,7 @@ from daqifi.sdcard import (
 PROMPT = b"DAQIFI> "
 
 
-class _Serial:
+class _Serial(EchoProbeFake):
     """pyserial-shaped fake: ``in_waiting`` plus a draining ``read``.
 
     Stays "open" after its bytes run out, which is what pyserial does and
@@ -44,6 +45,7 @@ class _Serial:
 
     def write(self, data) -> int:
         self.written.append(bytes(data))
+        self._probe_write(data)
         return len(data)
 
     def flush(self) -> None:
@@ -51,12 +53,14 @@ class _Serial:
 
     @property
     def in_waiting(self) -> int:
-        return len(self._data)
+        return self._probe_pending(lambda: len(self._data))
 
     def read(self, n: int) -> bytes:
-        out = bytes(self._data[:n])
-        del self._data[:n]
-        return out
+        def _own():
+            out = bytes(self._data[:n])
+            del self._data[:n]
+            return out
+        return self._probe_read(n, _own)
 
 
 def _device(*chunks: bytes, sizes=None) -> NyquistDevice:
