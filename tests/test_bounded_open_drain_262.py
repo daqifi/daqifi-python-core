@@ -19,6 +19,7 @@ than copied so the two tickets pin the same surface. Every pin here is
 device-free.
 """
 
+import errno
 import threading
 
 import pytest
@@ -115,6 +116,45 @@ def test_a_stuck_drain_fails_the_open_and_releases_the_port(monkeypatch):
     assert "64" in str(err), "the error does not say what was stuck"
     assert port.flushes == 0
 
+
+
+class _DiesDuringTheDrain(_Port):
+    """The echo-disable write lands, then the device goes away: the
+    out_waiting poll raises, as a POSIX ioctl on a disconnected USB device
+    does (EIO), or as pyserial wraps it."""
+
+    def __init__(self, exc):
+        super().__init__()
+        self._exc = exc
+
+    @property
+    def out_waiting(self):
+        if self.written:
+            raise self._exc
+        return 0
+
+
+@pytest.mark.parametrize("exc", [
+    OSError(errno.EIO, "Input/output error"),
+    serial.SerialException("device disconnected"),
+], ids=["OSError-EIO", "SerialException"])
+def test_a_drain_that_errors_fails_the_open_and_releases_the_port(
+        monkeypatch, exc):
+    """⛔ FAILS on d484fb22 (#262 r1): its handler wrapped only the timeout
+    and a cancel, so an I/O error from the poll fell through to open()'s
+    TOLERANT write handler, and open() returned True on a dead port with
+    last_open_error unset and the handle still held. Any drain failure is
+    the drain not finishing; only the write is tolerated."""
+    port = _DiesDuringTheDrain(exc)
+    iface = _iface(monkeypatch, port)
+    assert iface.open() is False, "open() succeeded on a port that died"
+    assert port.written == [ECHO_OFF]
+    assert port.closed == 1, "the handle was not released"
+    assert iface.is_open() is False
+    err = iface.last_open_error
+    assert isinstance(err, SerialPortConnectError), repr(err)
+    assert err.__cause__ is exc, "the original error is not chained"
+    assert port.flushes == 0
 
 def test_a_port_without_out_waiting_fails_the_open(monkeypatch):
     """The pinned choice for a port that cannot be bounded at all.
@@ -224,7 +264,10 @@ def test_connect_raises_when_the_open_drain_is_stuck(monkeypatch):
 
     port = _Port(out_waiting=(64,))
     monkeypatch.setattr(comm_mod.serial, "Serial", lambda *a, **k: port)
-    monkeypatch.setattr(comm_mod, "OPEN_DRAIN_TIMEOUT_S", 0.05)
+    # raising=False: so that on a base without the name, this test reaches
+    # connect() and fails on behaviour, not on the patch.
+    monkeypatch.setattr(comm_mod, "OPEN_DRAIN_TIMEOUT_S", 0.05,
+                        raising=False)
     with pytest.raises(SerialPortConnectError) as caught:
         NyquistDevice.connect("FAKEPORT")
     assert "64" in str(caught.value)

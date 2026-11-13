@@ -26,6 +26,7 @@ named non-serial receivers.
 """
 
 import ast
+import errno
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,6 +55,9 @@ class _Wedge:
         which is tcdrain() waiting on a transmitter that will not drain.
     ``mode="stuck"``: out_waiting stays nonzero, and flush() is
         serialwin32's own body, so an unbounded flush() hangs on it too.
+    ``mode="dies"``: the device went away after the write; out_waiting
+        raises OSError(EIO), as a POSIX ioctl on a disconnected USB device
+        does.
 
     out_waiting is a class-level property, as on pyserial's Serial, because
     DaqifiDevice detects a serial stream by the TYPE having one.
@@ -72,6 +76,8 @@ class _Wedge:
 
     @property
     def out_waiting(self):
+        if self.armed and self.mode == "dies":
+            raise OSError(errno.EIO, "Input/output error")
         return 64 if (self.armed and self.mode == "stuck") else 0
 
     def flush(self):
@@ -291,6 +297,35 @@ def test_a_send_on_a_port_that_never_drains_raises(name, make_port, make_call,
     assert "output buffer still holds" in str(r), f"{name}: {r!r}"
     assert not port.flush_entered.is_set(), f"{name}: called flush()"
 
+
+
+def _chain(exc):
+    while exc is not None:
+        yield exc
+        exc = exc.__cause__ or exc.__context__
+
+
+@pytest.mark.parametrize("name,make_port,make_call,stuck_raises", SITES,
+                         ids=IDS)
+def test_a_send_on_a_port_that_dies_mid_drain_raises(name, make_port,
+                                                     make_call, stuck_raises,
+                                                     monkeypatch):
+    """The device goes away between the write and the drain. The call must
+    RAISE, never swallow it and return as if the bytes went out (#262 r1
+    found exactly that swallow in open()).
+
+    The exception TYPE is deliberately not pinned: send_command and
+    query_binary give RuntimeError and stream START gives CommandError, each
+    site's existing wrapper, while the SD getters and DaqifiDevice's send let
+    the OSError through raw, as they did for a failed write before #263.
+    """
+    port = make_port("dies")
+    finished, r = _run(_call(make_call, port, monkeypatch), port)
+    assert finished, f"{name}: still blocked after {JOIN_S}s"
+    assert isinstance(r, BaseException), f"{name}: returned {r!r}"
+    assert any(isinstance(e, OSError) and e.errno == errno.EIO
+               for e in _chain(r)), f"{name}: lost the I/O error: {r!r}"
+    assert not port.flush_entered.is_set(), f"{name}: called flush()"
 
 def test_device_send_on_a_non_serial_stream_still_flushes(monkeypatch):
     """Positive control for the type check: a stream without out_waiting
