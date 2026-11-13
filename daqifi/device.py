@@ -49,6 +49,55 @@ _METADATA_FIELD_NAMES = (
 )
 
 
+def _require_finite_sd_timeout(timeout: Any, caller: str) -> float:
+    """Reject a non-finite SD download timeout as a USAGE error.
+
+    ⛔ RULING HW A. `_read_sd_response`'s loop is `while time.monotonic() <
+    deadline`, and the head-resolution wait it contains has no other bound: a
+    payload that is a proper PREFIX of the echoed command keeps `head_span`
+    answering None, so the marker scan never runs. With a finite timeout that
+    costs the timeout and then returns the CORRECT bytes. With `inf` the loop
+    cannot terminate at all, and with `nan` every comparison is False so it
+    returns EMPTY immediately -- a silent wrong answer, which is the worse of
+    the two.
+
+    ⭐ A USAGE ERROR RATHER THAN A CLAMP. Substituting some finite value would
+    be this module inventing a deadline the caller did not ask for, and the
+    caller cannot tell it happened. `inf` is not a slow download, it is a
+    request this transport cannot honour, so it is refused by name.
+
+    ⛔ CALLED BEFORE THE GET IS WRITTEN, which is the whole point of its
+    position. Both entries write the command and only then read, so a check
+    placed after the write would refuse the call having ALREADY set the device
+    streaming a file nobody is going to read -- a refusal that leaves the bench
+    worse off than no check.
+
+    ⚠ ZERO AND NEGATIVE ARE DELIBERATELY NOT REJECTED HERE. They terminate --
+    the loop simply does not run -- so they are not this ruling's subject, and
+    bundling them in would change behaviour for callers who pass 0 to mean
+    "poll once" without anyone having asked for that. Scope is the non-finite
+    case; see #260 for the real fix to the underlying ambiguity.
+    """
+    try:
+        t = float(timeout)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "%s: timeout must be a finite number of seconds, got %r"
+            % (caller, timeout)
+        )
+    # NaN is its own test because `nan != nan`; `inf` is caught by the bound.
+    if t != t or t in (float("inf"), float("-inf")):
+        raise ValueError(
+            "%s: timeout must be FINITE, got %r. An SD download ends at a "
+            "terminal marker, and the host cannot tell a payload that is a "
+            "proper prefix of the echoed command from framing still in "
+            "flight -- so with a non-finite timeout the read has no bound at "
+            "all. Pass a real deadline (the default is 30.0). See daqifi "
+            "python-core #260 for the out-of-band fix." % (caller, timeout)
+        )
+    return t
+
+
 def _frame_has_metadata_fields(data: Any) -> bool:
     """Heuristic: does ``data`` (a parsed DaqifiOutMessage) look like
     a SYSInfoPB? reply rather than a streaming-status frame?
@@ -955,7 +1004,13 @@ class NyquistDevice:
 
         Args:
             filename: Name of file to retrieve
-            timeout: Maximum time to wait for file transfer (default: 30s)
+            timeout: Maximum time to wait for file transfer (default: 30s).
+                Must be FINITE: a non-finite value raises ValueError, because
+                the read has no other bound (ruling HW A). One rare shape
+                waits out this whole timeout and then returns the correct
+                bytes -- a file whose content is exactly the echoed command's
+                prefix AND whose name begins with ``__END_OF_FILE__``. See
+                ``_read_sd_response`` and python-core #260.
 
         Returns:
             File contents as string
@@ -974,6 +1029,11 @@ class NyquistDevice:
         file or a timeout, as it did before this PR. #253 is where the
         reason becomes available, by asking the error queue.
         """
+        # ⛔ RULING HW A -- VALIDATED BEFORE THE PORT CHECK AND BEFORE THE
+        # WRITE. A usage error must not depend on port state, and refusing
+        # AFTER the GET went out would leave the device streaming a file
+        # nobody will read.
+        timeout = _require_finite_sd_timeout(timeout, "sd_get_file")
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
@@ -1015,7 +1075,11 @@ class NyquistDevice:
 
         Args:
             filename: Name of file to retrieve
-            timeout: Maximum time to wait for file transfer (default: 30s)
+            timeout: Maximum time to wait for file transfer (default: 30s).
+                Must be FINITE -- see the sibling ``sd_get_file`` and ruling
+                HW A. The same rare echo-prefix shape waits out the timeout
+                and then returns the correct bytes; python-core #260 is the
+                out-of-band fix.
 
         Returns:
             File contents as raw bytes
@@ -1031,6 +1095,10 @@ class NyquistDevice:
             data = device.sd_get_file_binary("benchmark.dat")
             assert len(data) == expected_size
         """
+        # ⛔ RULING HW A -- see the sibling. Both entries guard, because both
+        # reach the same unbounded head-resolution wait and a caller reaching
+        # only one of them would still hang.
+        timeout = _require_finite_sd_timeout(timeout, "sd_get_file_binary")
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
@@ -1068,6 +1136,28 @@ class NyquistDevice:
         timeout measures SILENCE rather than total duration, so a slow but
         progressing download is not cut off. The binary path's timeout was
         absolute and stays that way.
+
+        ⚠⚠ ONE ACCEPTED LATENCY CASE, under ruling HW A. The marker scan is
+        gated on the head being RESOLVED, and ``head_span`` answers None while
+        the buffer is a proper prefix of a candidate. A payload that is itself
+        such a prefix therefore keeps the head unresolved, and the marker it
+        has ALREADY received is never looked for: the call waits out the
+        caller's timeout and THEN returns the correct bytes.
+
+        Reaching it needs two coincidences -- the content must be exactly the
+        echo's prefix AND the filename must begin with ``__END_OF_FILE__``, so
+        that the marker's bytes CONTINUE the echo instead of breaking the
+        prefix. An ordinary filename does not stall.
+
+        ⛔ IT IS NOT FIXABLE FROM THIS BUFFER. A complete payload of that
+        shape and a PARTIAL ECHO for that same file are BYTE-IDENTICAL here,
+        and the first must stop while the second must keep waiting. Ending the
+        capture on a marker with the head unresolved was measured: it returns
+        the 23-byte echo fragment in place of a real file, which is the silent
+        short-file direction ruling GV A rejected. The real discriminator is
+        the device's ECHO STATE, which this module never reads -- python-core
+        #260. Both directions are pinned in
+        ``tests/test_sd_timeout_bound_and_echo_prefix_257.py``.
         """
         from .sdcard import _PreambleSkip
 
