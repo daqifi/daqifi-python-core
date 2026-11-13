@@ -107,6 +107,20 @@ def _get(payload: bytes) -> str:
     return device.sd_get_file("log.csv", timeout=1.0)
 
 
+def _get_binary(payload: bytes, filename: str = "log.csv") -> bytes:
+    """⛔ r14: THE BINARY PATH, because the text path cannot stand in for it.
+
+    r13's blind leg found this file justifying BINARY behaviour with a TEXT
+    measurement, and the two differ in exactly the direction that mattered:
+    on these shapes the base's text path already destroyed the bytes, while
+    its binary path PRESERVED them. A differential taken on the wrong path
+    reported a narrowing where there was a widening.
+    """
+    device = NyquistDevice("COM41")
+    device._comm._serial = _Serial(payload)
+    return device.sd_get_file_binary(filename, timeout=1.0)
+
+
 def _base_transform(wire: bytes, cmd: str) -> str:
     """ff4d699's own ``sd_get_file`` tail, transcribed statement for statement.
 
@@ -276,10 +290,18 @@ def test_case_d_is_the_documented_strip_exception() -> None:
     NOT to adjust the expected value. A failure here is the scheduled signal
     that the exception is no longer needed; it is not a regression.
 
-    ⚠ Direction, because it is easy to read this test as the opposite: the
-    change NARROWS this loss rather than introducing it. On the same bytes
-    the pre-``_PreambleSkip`` base returned ``'1,2'`` -- 51 of 54 lost, the
-    trailing CRLF eaten too. That differential is asserted last.
+    ⛔⛔ r14 -- THE DIRECTION CLAIM THAT USED TO BE HERE WAS PATH-BLIND AND
+    WRONG. It said the change NARROWS this loss rather than introducing it,
+    citing the base returning ``'1,2'``, 51 of 54 lost. That is TRUE and it is
+    the TEXT path only. On the BINARY path the base kept 46 of these 54 bytes
+    and this head keeps 5 -- a WIDENING of 41. Both differentials are asserted
+    below, each on its own path, and
+    ``test_accepted_case_d_loss_on_both_paths`` carries the long-name shape
+    where the binary base kept all 220.
+
+    ⚠ And the 49 bytes are THIS PAYLOAD's number, not a bound on the
+    exception. The loss scales with the FILENAME, because the candidate being
+    matched contains the echo; the long-name pin measures 214.
     """
     framing_shape = PROMPT + _echo() + b"\r\n" + PROMPT
     content = framing_shape + b"1,2\r\n"          # ALL of this is file content
@@ -297,17 +319,138 @@ def test_case_d_is_the_documented_strip_exception() -> None:
         "the documented GV A exception: the framing-shaped head is stripped. "
         "got %r" % (got,))
     assert len(content) - len(got.encode("ascii")) == 49, (
-        "the exception is BOUNDED at 49 bytes; a different number means the "
-        "candidate set changed and the bound GV A accepted no longer holds")
+        "49 is THIS PAYLOAD's loss, and a different number means the "
+        "candidate set changed. ⚠ It is NOT a bound on the exception: the "
+        "loss scales with the filename, and test_accepted_case_d_loss_on_"
+        "both_paths measures 214 for a 176-character name")
 
     # The exception buys something: case C, the real console, is correct.
     assert _get(framing_shape + b"1,2\r\n" + END_OF_FILE_MARKER) == "1,2\r\n"
 
-    # And it is strictly less loss than the code it replaces.
+    # And on THIS PATH it is less loss than the code it replaces. The
+    # qualifier is load-bearing: see the docstring and the binary pin below.
     base = _base_transform(content + END_OF_FILE_MARKER, _echo().decode("ascii"))
     assert base == "1,2", (
-        "the differential this PR is measured against: the base lost 51 of "
-        "the 54 bytes here. got %r" % (base,))
+        "the TEXT-path differential: the base lost 51 of the 54 bytes here. "
+        "got %r" % (base,))
+
+
+def test_head_span_and_the_strip_agree_on_every_shape() -> None:
+    """⛔⛔ r14: TWO IMPLEMENTATIONS OF "WHERE DOES THE HEAD END", pinned to
+    agree. Found by a mutation that was aimed WRONG and survived.
+
+    `head_span` governs the capture loop's MARKER SCAN. The actual head REMOVAL
+    goes through `feed`/`flush`, which run their own
+    `next(c for c in self._candidates if buf.startswith(c))`. Two copies of one
+    predicate. Neutering `head_span` to `return 0` left the strip working
+    perfectly -- which is how the duplication became visible, and it is the
+    whole reason this test exists.
+
+    ⚠ `head_span`'s own docstring says it is "ONE DEFINITION of where the head
+    ends, shared with the capture loop in device.py". That is true OF THE
+    CAPTURE LOOP and does not cover the strip, so a reader can reasonably take
+    the stronger meaning. They agree today -- same candidate list, same
+    `startswith` rule -- and nothing enforced it until now.
+
+    This is a CONSISTENCY pin, not a correctness claim about either value: if
+    they diverge, one of the two paths is wrong and the symptom would be a
+    marker scanned from the wrong offset, or bytes stripped that the scan
+    treated as payload.
+    """
+    long_name = "a" * 176 + ".bin"
+    long_echo = scpi_commands.get_sd_file(long_name).data.encode("ascii")
+
+    shapes = [
+        ("echo off, plain body", _echo(), BODY),
+        ("prompt only", _echo(), PROMPT + BODY),
+        ("full framing", _echo(), PROMPT + _echo() + b"\r\n" + PROMPT + BODY),
+        ("echo then prompt", _echo(), _echo() + b"\r\n" + PROMPT + BODY),
+        ("crlf then prompt", _echo(), b"\r\n" + PROMPT + BODY),
+        ("case D content", _echo(),
+         PROMPT + _echo() + b"\r\n" + PROMPT + BODY),
+        ("long name framing", long_echo,
+         long_echo + b"\r\nDAQIFI> " + b"DATA\r\n"),
+        ("body that is a prompt", _echo(), PROMPT + b"DAQIFI> payload\r\n"),
+    ]
+    for name, echo, buf in shapes:
+        span = _PreambleSkip(echo).head_span(buf)
+        stripper = _PreambleSkip(echo)
+        kept = stripper.feed(buf) + stripper.flush()
+        removed = len(buf) - len(kept)
+        assert span is not None, (
+            "%s: head_span says STILL ARRIVING for a complete buffer, so the "
+            "two paths cannot be compared on it" % name)
+        assert span == removed, (
+            "%s: head_span says %d bytes of head, the strip removed %d. The "
+            "two implementations of 'where the head ends' have DIVERGED."
+            % (name, span, removed))
+
+
+def test_accepted_case_d_loss_on_both_paths() -> None:
+    """⛔⛔ AN ACCEPTED-LOSS PIN, NOT A CORRECTNESS TEST (ruling HJ B).
+
+    Every assertion here records a deletion this project has DECIDED to live
+    with. Nothing below is a statement that the behaviour is right; the point
+    is that a change in EITHER direction becomes visible, because an accepted
+    cost that drifts silently stops being accepted and becomes unknown.
+
+    ⭐ RULING HJ B: the operator selected option B; the option wording is the
+    convergence coordinator's. Option B was r8's longest-match behaviour, with
+    case D losing its bytes, and the operator's own words were "case D seems
+    increadibly unlikely. seems like B would be okay" (2026-11-11). So the
+    operator CHOSE this outcome and the coordinator WORDED it -- the same
+    split as HN C on the firmware side, recorded because tracing an accepted
+    defect to the wrong author is the failure that matters here.
+
+    ⚠ TWO SHAPES, because one of them disproves a bound the docs used to
+    claim. The 49-byte figure is a property of the 7-character filename
+    ``log.csv``; the candidate being matched CONTAINS the echo, so the loss
+    scales with the filename up to the whole matched framing.
+
+    ⚠ AND BOTH PATHS, because r13's blind leg found this file using a TEXT
+    measurement to justify BINARY behaviour. On these shapes the base's text
+    path had already destroyed the bytes while its binary path preserved them
+    -- fully, for the long name -- so a text-only differential reported a
+    narrowing where the binary path widened.
+
+    ⛔ WHEN #260 LANDS THIS TEST MUST FAIL, like its sibling above. The
+    correct response then is to DELETE it, not to adjust the numbers.
+    """
+    # --- shape 1: the blind-leg repro, 7-character filename ----------------
+    short_content = PROMPT + _echo() + b"\r\n" + PROMPT + b"1,2\r\n"
+    assert len(short_content) == 54
+
+    assert _get(short_content + END_OF_FILE_MARKER) == "1,2\r\n"
+    assert _get_binary(short_content + END_OF_FILE_MARKER) == b"1,2\r\n", (
+        "accepted: the binary path deletes 49 of these 54 bytes"
+    )
+    # The base, on each path, so the DIRECTION of the change is recorded and
+    # not inferred: text already lost more, binary lost less.
+    assert _base_transform(
+        short_content + END_OF_FILE_MARKER, _echo().decode("ascii")) == "1,2", (
+        "base TEXT kept 3 of 54 -- this head keeps 5, so the text path is a "
+        "narrowing"
+    )
+
+    # --- shape 2: the main-leg repro, 176-character filename ---------------
+    # The prompt inside the content sits at offset 206, PAST the base's
+    # 200-byte search window, which is why the base's text path missed it and
+    # its binary path returned all 220 bytes untouched.
+    long_name = "a" * 176 + ".bin"
+    long_echo = scpi_commands.get_sd_file(long_name).data.encode("ascii")
+    long_content = long_echo + b"\r\nDAQIFI> " + b"DATA\r\n"
+    assert len(long_content) == 220
+    assert long_content.index(b"DAQIFI> ") == 206, (
+        "this shape's whole point is a prompt BEYOND the base's 200-byte "
+        "search; if the offset moves the differential is about something else"
+    )
+
+    assert _get_binary(long_content + END_OF_FILE_MARKER, long_name) == (
+        b"DATA\r\n"), (
+        "accepted: 214 of 220 bytes deleted. ⚠ This is the assertion that "
+        "disproves any 49-byte bound on the exception -- the loss scales with "
+        "the filename"
+    )
 
 
 def test_the_two_prompt_candidate_is_not_framing() -> None:

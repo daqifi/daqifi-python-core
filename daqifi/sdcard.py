@@ -189,9 +189,41 @@ class _PreambleSkip:
     ⛔ THE REAL FIX IS OUT OF BAND AND IS NOT THIS PR'S. Whether a preamble
     is present is knowable from the device's ECHO STATE, which the caller
     sets and this module never reads -- see #260. Until that lands, the strip
-    is a byte-shape guess with a documented cost. Note the direction: this is
-    a residual the change NARROWS, not one it adds. On those same bytes the
-    pre-``_PreambleSkip`` code returned ``'1,2'``, losing 51 of the 54.
+    is a byte-shape guess with a documented cost.
+
+    ⛔⛔ THE CLAIM THAT USED TO STAND HERE WAS FALSE, and r13's blind and
+    main legs disproved it with base-vs-PR differentials. It said this was
+    "a residual the change NARROWS, not one it adds", citing the base
+    returning ``'1,2'`` -- 51 of 54 lost. That number is real but it is the
+    TEXT path's, and the sentence generalised it to the change as a whole.
+    Measured on both paths, same payloads, base 01343229 vs this head:
+
+        content 54 B, b'DAQIFI> SYSTem:...GET "log.csv"\r\nDAQIFI> 1,2\r\n'
+          sd_get_file          base kept   3   this head kept   5   NARROWED
+          sd_get_file_binary   base kept  46   this head kept   5   WIDENED
+
+        content 220 B, file named 'a'*176 + '.bin', content opening with its
+        own echo + b'\r\nDAQIFI> ' (so the prompt sits at offset 206, past
+        the base's 200-byte search window)
+          sd_get_file          base kept   4   this head kept   6   NARROWED
+          sd_get_file_binary   base kept 220   this head kept   6   WIDENED
+
+    So: on the TEXT path the old claim holds. On the BINARY path it is
+    backwards -- the base PRESERVED these shapes (fully, in the long-name
+    case) and this head deletes them. And the loss is NOT bounded at the 49
+    bytes an earlier revision cited: it scales with the FILENAME, up to the
+    whole matched framing, because the candidate it matches contains the echo.
+
+    ⭐ RULING HJ B accepts that deletion (the operator selected option B;
+    the option wording is the convergence coordinator's). Option B was r8's
+    longest-match behaviour, with case D losing its 41 bytes, and the operator
+    added: "case D seems increadibly unlikely. seems like B would be okay"
+    (2026-11-11). So this is an ACCEPTED TRADE, not a narrowing, and it is
+    written that way here because the next reader needs the cost, not a
+    reassurance. The accepted outputs are pinned in
+    ``tests/test_sd_framing_oracle_154.py`` as accepted-LOSS pins -- they
+    assert today's bytes so a move in EITHER direction is visible, and they
+    are not correctness tests.
     """
 
     _ENDINGS = (b"", b"\r\n", b"\n", b"\r")
@@ -264,9 +296,25 @@ class _PreambleSkip:
         """Length of the framing at the start of ``buf``, or ``None`` while
         that is still undecidable.
 
-        ⛔ ONE DEFINITION OF "WHERE THE HEAD ENDS", shared with the capture
-        loop in ``device.py``, which had two approximations of its own and
-        both scanned or counted the ECHO AND PROMPT as if they were payload.
+        ⛔ ONE DEFINITION OF "WHERE THE HEAD ENDS" FOR THE CAPTURE LOOP in
+        ``device.py``, which had two approximations of its own and both
+        scanned or counted the ECHO AND PROMPT as if they were payload.
+
+        ⚠⚠ r14 -- THE SCOPE OF THAT SENTENCE IS NARROWER THAN IT READS, and
+        the qualifier above was added because it misled me. This method is
+        what the capture loop consults; it is NOT what performs the strip.
+        :meth:`feed` and :meth:`flush` run their own
+        ``next(c for c in self._candidates if buf.startswith(c))``, so there
+        are TWO implementations of this question in this class. They agree by
+        construction -- same candidate list, same prefix rule -- and nothing
+        enforced it until
+        ``test_head_span_and_the_strip_agree_on_every_shape`` did.
+
+        How it surfaced: neutering this method to ``return 0`` left the strip
+        working perfectly, so a mutation meant to test the strip came back
+        green. A surviving mutant and a mutation that never reached its target
+        look identical; the discriminator was asking which function the strip
+        actually calls.
         The size machinery that made the counting matter is gone (ruling FO
         A2), but the scanning still does: a GET names a file, so an echoed
         command can contain a terminal marker's own bytes, and a capture

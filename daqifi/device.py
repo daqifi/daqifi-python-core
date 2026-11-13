@@ -1120,9 +1120,18 @@ class NyquistDevice:
         echoed command, which is the base's rule. ⛔ NEVER SCAN THE ECHO: a
         GET names a file, and a file can be named ``__END_OF_FILE__``, so
         the echoed command can carry the marker's own bytes and stopping on
-        that ends the capture before the payload. ``head_span`` is the one
-        definition of where the head ends, shared with the receiver that
-        strips it; ``None`` means it is still arriving.
+        that ends the capture before the payload. ``head_span`` is what THIS
+        loop uses to decide where the head ends; ``None`` means it is still
+        arriving.
+
+        ⚠⚠ r14 -- AN EARLIER REVISION OF THIS LINE SAID ``head_span`` was
+        "shared with the receiver that strips it". It is not: the receiver
+        strips through ``_PreambleSkip.feed``/``flush``, which run their own
+        prefix match, so there are TWO implementations of where the head ends.
+        They agree by construction and are now pinned equal by
+        ``test_head_span_and_the_strip_agree_on_every_shape``; before that pin
+        nothing enforced it, and a mutation aimed at one of them came back
+        green because the other still worked.
 
         ⛔ NO SIZE, AND NO GRACE PERIOD. Both are gone with the legacy
         path's size logic (ruling FO A2). The size-aware stop rule and the
