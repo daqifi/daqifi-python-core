@@ -51,12 +51,14 @@ class _Serial(EchoProbeFake):
 
     @property
     def in_waiting(self) -> int:
-        return len(self._pending)
+        return self._probe_pending(lambda: len(self._pending))
 
     def read(self, n: int) -> bytes:
-        out = bytes(self._pending[:n])
-        del self._pending[:n]
-        return out
+        def _own():
+            out = bytes(self._pending[:n])
+            del self._pending[:n]
+            return out
+        return self._probe_read(n, _own)
 
 
 class _Trickle(EchoProbeFake):

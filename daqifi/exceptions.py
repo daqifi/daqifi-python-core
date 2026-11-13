@@ -239,6 +239,52 @@ class SdCardOperationException(DAQiFiError):
             self.last_scpi_error = s or None
 
 
+class EchoProbeUnansweredError(SdCardOperationException):
+    """The echo probe got no COMPLETE reply, so no download was attempted.
+
+    ⛔ #260 r2. This is raised INSTEAD of downloading, and that is the point.
+    The probe asks ``SYSTem:ECHO?`` before the GET to learn whether the device
+    frames its replies. If the reply is absent, or arrives only partly inside
+    the budget, then bytes of it MAY STILL BE IN FLIGHT -- and sending the GET
+    then puts them at the front of the file. `reset_input_buffer()` cannot
+    prevent that: it discards what is already BUFFERED, not what the device
+    has yet to send.
+
+    ⚠ FALLING BACK IS NOT SAFE HERE, which is the correction r1 earned. A
+    half-arrived reply cannot be told from a finished one by waiting, so
+    "give up and download anyway" returns a file with ``-1\r\n`` or
+    ``\r\n`` glued to its front. Measured on r1: a reply split as ``-1``
+    then ``\r\n`` at 120 ms produced ``b'\r\npayload'``, and a whole reply
+    arriving at 650 ms produced ``b'-1\r\npayload'``.
+
+    ⚠ THIS IS A CONTRACT CHANGE and it is deliberate. The base never probed,
+    so a link that cannot answer ``SYSTem:ECHO?`` used to download anyway.
+    Every firmware this library ships against registers that query, so a
+    non-answer means the link is broken -- and a loud refusal beats a silently
+    corrupted file.
+
+    ⭐ A COMPLETE reply that merely does not PARSE is a different case and does
+    NOT raise: it leaves nothing in flight, so the download proceeds on the
+    byte-shape path exactly as before.
+
+    Subclasses :class:`SdCardOperationException` so callers that already
+    handle "my SD download failed" keep working, even though the fault is in
+    the link rather than the card.
+
+    ⛔ IT TAKES JUST A MESSAGE, and that override is not cosmetic. The base
+    requires ``raw_device_response``, which is meaningless here -- the whole
+    complaint is that the device did not respond. Raising it with only a
+    message threw ``TypeError`` instead, and the caller's narrowed
+    ``except`` swallowed that and DOWNLOADED ANYWAY, turning the r2 fix back
+    into the r1 defect. A pin caught it; the lesson is that a refusal path is
+    only as reliable as its own constructor.
+    """
+
+    def __init__(self, message: str, raw_device_response=(),
+                 last_scpi_error=None):
+        super().__init__(message, raw_device_response, last_scpi_error)
+
+
 class SdCardTransferErrorException(SdCardOperationException):
     """The device reported a read error part-way through sending an SD card
     file, ending the transfer with ``__TRANSFER_ERROR__`` instead of

@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from _sd_echo_probe import EchoProbeFake, echo_probe_reply
+from daqifi.exceptions import EchoProbeUnansweredError
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import END_OF_FILE_MARKER
 
@@ -171,34 +172,51 @@ class _SilentToProbe(_Port):
         return len(data)
 
 
-def test_an_unanswered_probe_falls_back_and_does_not_hang():
-    """⛔ BOUNDED. A probe nobody answers must cost the bound and no more, and
-    the download must still complete on the byte-shape path."""
+def test_an_unanswered_probe_refuses_the_download_and_does_not_hang():
+    """⛔ r2 REVERSES r1 HERE, and the reversal is the fix.
+
+    r1 fell back and downloaded. That is unsafe whenever the reply MIGHT STILL
+    ARRIVE: nothing distinguishes "never answered" from "answered slowly", so
+    the GET can go out ahead of bytes still on the wire. r2 refuses instead,
+    loudly, and never sends the GET.
+
+    ⚠ A CONTRACT CHANGE against the base, which never probed. Stated in the
+    PR body: every firmware this ships against registers `SYSTem:ECHO?`, so a
+    non-answer means the link is broken, and a named refusal beats a silently
+    corrupted file.
+    """
     content = PROMPT + b"payload\r\n"
     dev = NyquistDevice("COM41")
     port = _SilentToProbe(content + END_OF_FILE_MARKER)
     dev._comm._serial = port
     t0 = time.monotonic()
-    got = dev.sd_get_file_binary("log.csv", timeout=5.0)
+    with pytest.raises(EchoProbeUnansweredError) as err:
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
     elapsed = time.monotonic() - t0
-    assert got == b"payload\r\n", "the byte-shape path still ran; got %r" % (got,)
+    assert "download not attempted" in str(err.value)
     bound = dev._comm.ECHO_PROBE_TIMEOUT_S
     assert elapsed < bound * 4, (
-        "an unanswered probe must cost about its bound (%.2fs), not hang; "
-        "took %.2fs" % (bound, elapsed))
+        "the refusal must cost about the bound (%.2fs), not hang; took %.2fs"
+        % (bound, elapsed))
+    assert b"SYSTem:STORage:SD:GET" not in bytes(port.written), (
+        "the GET must NOT be written when the probe did not finish")
 
 
 @pytest.mark.parametrize("garbage", [
-    b"\x80\x81\r\n",          # non-ASCII
-    b"-1 extra\r\n",          # -1 with anything after it
-    b"",                      # nothing
+    b"\x80\x81\r\n",          # non-ASCII, terminated
+    b"-1 extra\r\n",          # -1 with anything after it, terminated
     b"\r\n",                  # a bare terminator
-    b"-",                     # a truncated prefix of -1
 ])
-def test_an_unreadable_reply_falls_back_rather_than_confirming(garbage):
-    """⚠ FAIL-SAFE: only an exact -1 confirms. A false negative costs an
-    accepted strip; a false positive would silently corrupt a file, so every
-    ambiguity resolves to "strip"."""
+def test_a_complete_but_unparseable_reply_falls_back(garbage):
+    """⚠ r2 KEEPS THIS HALF: a COMPLETE reply that does not parse still falls
+    back, because a complete reply leaves nothing in flight. Only an exact
+    `-1\r\n` confirms; a false positive would silently corrupt a file.
+
+    ⛔ EVERY CASE HERE IS TERMINATED, deliberately. An UNTERMINATED reply such
+    as `b"-"` is INCOMPLETE, not unparseable -- more may be coming -- so it
+    refuses rather than falling back, and it lives in the split-terminator
+    table below instead.
+    """
     class _Garbage(_Port):
         def write(self, data):
             self.written.extend(data)
@@ -218,45 +236,133 @@ def test_an_unreadable_reply_falls_back_rather_than_confirming(garbage):
         "%r must not confirm a silent console" % (garbage,))
 
 
-def test_a_late_probe_reply_does_not_leak_into_the_payload():
-    """⛔ THE LEAK THIS DESIGN COULD HAVE INTRODUCED, pinned.
+class _Scheduled(_Port):
+    """A port whose probe reply arrives ON A SCHEDULE -- i.e. in flight -- and
+    whose FILE also arrives over time.
 
-    If the reply arrives too late for the probe to consume, those bytes are
-    still in the port when the GET goes out -- and would land INSIDE the file.
-    `probe_echo_silent` ends with `reset_input_buffer()` for exactly this,
-    reusing `_send_disable_echo`'s own belt-and-suspenders.
-
-    MEASURED with that reset stubbed out: 25 bytes of probe reply inside a
-    256 KiB download. This is why the fakes model `reset_input_buffer` rather
-    than leaving it `pass`.
+    ⛔ THE PAYLOAD SCHEDULE IS NOT DECORATION, and leaving it out cost me 40
+    worthless pins. With the whole file readable the instant the GET lands,
+    the download finishes in microseconds and a probe remainder arriving at
+    120 ms is simply too late to be read -- so the pin passed against the r1
+    defect it was written to catch. A real download reads over many
+    iterations; that is the window a late byte lands in, so the fake has to
+    have one.
     """
-    class _LateReply(_Port):
-        def write(self, data):
-            self.written.extend(data)
-            if self._probe_write(data):
-                # The reply is queued but the probe will not get to read it:
-                # arrange for it to still be pending when the GET is written.
-                self._late = True
-                return len(data)
-            self._buf.extend(self._payload)
-            self._payload = b""
+
+    #: Gap between payload chunks once the GET has been answered.
+    payload_gap = 0.03
+    payload_chunk = 4
+
+    def __init__(self, payload, schedule, echo_state=-1):
+        super().__init__(payload, echo_state)
+        self.echo_reply_schedule = schedule
+        self._released_at = None
+
+    def write(self, data):
+        self.written.extend(data)
+        if self._probe_write(data):
             return len(data)
+        self._released_at = time.monotonic()
+        return len(data)
 
-        @property
-        def in_waiting(self):
-            # Report nothing while the probe is polling, so it gives up with
-            # the reply still queued -- the "arrived too late" shape.
-            if getattr(self, "_late", False) and self._probe_reply:
-                return 0
-            return self._probe_pending(lambda: len(self._buf))
+    def _file_available(self):
+        """How much of the file has 'arrived' by now."""
+        if self._released_at is None:
+            return 0
+        elapsed = time.monotonic() - self._released_at
+        return min(len(self._payload),
+                   self.payload_chunk * (1 + int(elapsed / self.payload_gap)))
 
-    content = b"payload\r\n"
+    @property
+    def in_waiting(self):
+        return self._probe_pending(
+            lambda: self._file_available() - self._sent)
+
+    def read(self, n=1):
+        def _own():
+            avail = self._file_available() - self._sent
+            take = min(n, max(0, avail))
+            out = self._payload[self._sent:self._sent + take]
+            self._sent += take
+            return out
+        return self._probe_read(n, _own)
+
+    _sent = 0
+
+
+SILENT_REPLY = b"-1\r\n"
+FRAMED_REPLY = b"SYSTem:ECHO?\r\n1\r\nDAQIFI> "
+PAYLOAD = b"payload\r\n"
+
+
+@pytest.mark.parametrize("reply", [SILENT_REPLY, FRAMED_REPLY],
+                         ids=["silent", "framed"])
+@pytest.mark.parametrize("split_at", list(range(1, 5)) + [-1])
+@pytest.mark.parametrize("remainder_at", [0.02, 0.1, 0.3, 0.6])
+def test_a_split_reply_never_contaminates_the_payload(reply, split_at,
+                                                      remainder_at):
+    """⛔⛔ THE r1 DEFECT, PINNED ACROSS THE WHOLE SPLIT SPACE.
+
+    r1 decided completion by QUIET TIME: two empty polls (~40 ms) and it
+    called the reply done. Measured consequences, both legs of the audit:
+
+      * ``-1`` now, ``\r\n`` at 120 ms -> "confirmed" silence, reset cleared
+        an EMPTY buffer, download returned ``b'\r\npayload'``;
+      * the whole ``-1\r\n`` at 650 ms -> fell back, returned
+        ``b'-1\r\npayload'``.
+
+    ``reset_input_buffer()`` cannot prevent either: it discards what is
+    BUFFERED, never what is still in flight.
+
+    ⭐ THE ASSERTION IS A DISJUNCTION, and that is the contract: either a
+    CLEAN payload, or the named refusal. NEVER contaminated bytes. Which of
+    the two depends on whether the remainder beats the budget, and pinning
+    that split point would be pinning the timeout rather than the property.
+    """
+    first, rest = reply[:split_at], reply[split_at:]
     dev = NyquistDevice("COM41")
-    dev._comm._serial = _LateReply(content + END_OF_FILE_MARKER)
-    got = dev.sd_get_file_binary("log.csv", timeout=5.0)
-    assert got == content, (
-        "a probe reply that arrived too late leaked into the file; got %r"
-        % (got,))
+    port = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
+                      [(0.0, first), (remainder_at, rest)],
+                      echo_state=-1)
+    dev._comm._serial = port
+    try:
+        got = dev.sd_get_file_binary("log.csv", timeout=5.0)
+    except EchoProbeUnansweredError:
+        assert b"SYSTem:STORage:SD:GET" not in bytes(port.written), (
+            "refused, so the GET must not have been written")
+        return
+    assert got == PAYLOAD, (
+        "split %r/%r arriving at %.2fs contaminated the file: got %r"
+        % (first, rest, remainder_at, got))
+
+
+def test_a_reply_arriving_after_the_budget_refuses_rather_than_downloading():
+    """⛔ CASE (b) FROM THE AUDIT, with the reply genuinely IN FLIGHT.
+
+    r1's own late-reply pin was INERT: its reply was already QUEUED when the
+    probe gave up, so `reset_input_buffer()` swept it and the pin passed while
+    both real cases went undetected. Here the whole reply is scheduled for
+    650 ms -- past the 500 ms budget -- so at the moment of decision it does
+    not exist yet and nothing can reset it away.
+    """
+    dev = NyquistDevice("COM41")
+    port = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
+                      [(0.65, SILENT_REPLY)], echo_state=-1)
+    dev._comm._serial = port
+    with pytest.raises(EchoProbeUnansweredError):
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+    assert b"SYSTem:STORage:SD:GET" not in bytes(port.written), (
+        "a reply still in flight must not be raced by a GET")
+
+
+def test_a_whole_reply_inside_the_budget_still_confirms():
+    """⭐ POSITIVE CONTROL. Without it every pin above is satisfied by a probe
+    that refuses unconditionally."""
+    dev = NyquistDevice("COM41")
+    port = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
+                      [(0.05, SILENT_REPLY)], echo_state=-1)
+    dev._comm._serial = port
+    assert dev.sd_get_file_binary("log.csv", timeout=5.0) == PAYLOAD
 
 
 # ---------------------------------------------------------------------------

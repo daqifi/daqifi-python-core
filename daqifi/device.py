@@ -1138,15 +1138,34 @@ class NyquistDevice:
 
         ⚠ A transport without the method falls back to the byte-shape path
         rather than raising. That keeps this change additive for any
-        `_comm` that is not a SerialInterface, and it is the same fail-safe
-        direction as every other branch here: unknown means strip.
+        `_comm` that is not a SerialInterface: a transport that never probes
+        cannot have left a reply in flight, so there is nothing to be unsafe
+        about.
+
+        ⛔ BUT AN INCOMPLETE REPLY IS NOT A FALLBACK CASE (r2). If the probe
+        ran and could not finish, bytes may still be arriving and
+        :class:`EchoProbeUnansweredError` propagates so no GET is sent. The
+        distinction is "never probed" versus "probed and did not finish", and
+        only the first is safe to continue from.
         """
         probe = getattr(self._comm, "probe_echo_silent", None)
         if probe is None:
             return False
+        # ⛔ #260 r2: EchoProbeUnansweredError MUST PROPAGATE. An earlier
+        # revision caught bare `Exception` here and returned False, which
+        # would have turned the whole r2 fix back into r1's defect -- a
+        # refusal silently downgraded to "download anyway on the byte-shape
+        # path", with the unfinished reply still in flight. Only transport
+        # faults are swallowed, and they are named.
+        # ⛔ TRANSPORT FAULTS ONLY, and the list is short on purpose. An
+        # earlier revision also caught TypeError/AttributeError/ValueError --
+        # and a TypeError from this very refusal's own constructor was then
+        # swallowed into "download anyway", which is precisely the defect r2
+        # exists to remove. A bug in the probe must fail loudly, not quietly
+        # become a fallback.
         try:
             return bool(probe())
-        except Exception:                                     # noqa: BLE001
+        except OSError:
             return False
 
     def _read_sd_response(

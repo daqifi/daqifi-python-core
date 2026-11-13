@@ -1606,92 +1606,164 @@ class SerialInterface:
         except (serial.SerialException, OSError):
             pass
 
-    #: How long :meth:`probe_echo_silent` will wait for the device to answer
-    #: before giving up and letting the caller fall back. Bounded on purpose:
-    #: a download must never hang because a probe went unanswered.
+    #: How long :meth:`probe_echo_silent` will wait for a COMPLETE reply
+    #: before refusing the download. Bounded, but a timeout now RAISES rather
+    #: than falling back -- see :class:`EchoProbeUnansweredError`.
     ECHO_PROBE_TIMEOUT_S = 0.5
 
-    def probe_echo_silent(self) -> bool:
-        """Did the device just CONFIRM the one state in which it emits no
-        framing? (#260)
+    #: The probe command, and the exact reply a SILENT console sends back.
+    #: ⛔ `-1\r\n` is not a guess: libscpi writes the value and then
+    #: `SCPI_LINE_ENDING`, which this firmware sets to `LINE_ENDING_CRLF`
+    #: (`libscpi/inc/scpi/config.h`), emitted in ONE `writeData` by
+    #: `writeNewLine`. Knowing the exact terminator is what makes a CONTENT
+    #: completion test possible at all.
+    _ECHO_QUERY = b"SYSTem:ECHO?"
+    _ECHO_SILENT_REPLY = b"-1\r\n"
+    _ECHO_PROMPT = b"DAQIFI> "
 
-        \u26d4 THE PROMPT AND THE COMMAND ECHO ARE ONE FIRMWARE VARIABLE.
-        `microrl.c` gates the prompt with ``if (pThis->echoOn > -1)``, and
-        ``echoOn`` is an **int** -- ``SCPI_SetEcho`` accepts only -1..1 and
-        EVERY gate in microrl is ``> -1``. So -1 is the only silent state, and
-        0 behaves exactly like 1. ``SYSTem:ECHO 0`` does NOT turn echo off.
-        Because one field decides both, a device cannot truthfully answer -1
-        while printing a prompt -- which is what makes a confirmed -1 a sound
-        basis for stripping nothing.
+    @classmethod
+    def _echo_probe_verdict(cls, buf):
+        """``"incomplete"`` / ``"silent"`` / ``"framed"`` / ``"unparseable"``,
+        decided from CONTENT alone.
 
-        \u26d4 NOT CACHED, DELIBERATELY. A cached confirmation is this design's
-        whole failure mode: the caller can send ``SYSTem:ECHO 1`` down the raw
-        path, or the device can REBOOT to its per-transport default (USB 1,
-        TCP 0) with no event anyone could invalidate on. The next download
-        would then skip the strip on a framed stream -- a silent leak, worse
-        than the byte-shape guess it replaces. So this is asked immediately
-        before each download and the answer is used at once.
+        ⛔ #260 r2: QUIET TIME PROVES NOTHING. r1 stopped after two empty polls
+        and called that done, which cannot tell a finished reply from a
+        half-arrived one. Both legs of the audit found the consequence:
 
-        \u2b50 REUSES THIS MODULE'S OWN COMPLETION RULE rather than inventing
-        one: the bounded drain and the belt-and-suspenders
-        ``reset_input_buffer()`` are :meth:`_send_disable_echo`'s, for the same
-        reason stated there -- bytes still in flight when polling stops must
-        not bleed into the next caller's read. Here that next read is the file
-        payload, so a late or fragmented reply would otherwise land INSIDE the
-        downloaded file.
+          * ``-1`` now and ``\r\n`` at 120 ms -> r1 "confirmed" silence,
+            reset cleared an EMPTY buffer, and the download returned
+            ``b'\r\npayload'``;
+          * the whole ``-1\r\n`` at 650 ms -> r1 fell back and returned
+            ``b'-1\r\npayload'``.
 
-        \u26a0 ONE ADAPTATION, named because it is a real difference. In
-        ``_send_disable_echo`` no reply is expected, so stopping after two
-        empty polls is right immediately. Here silence IS the thing being
-        measured, so the empty-poll counter only starts once some bytes have
-        arrived; until then this waits out the bound. Without that, a device
-        slower than 40 ms would read as "no answer" on every download.
+        `reset_input_buffer()` cannot fix either: it discards what is
+        BUFFERED, never what is still in flight. So completion has to be a
+        statement about the BYTES, and the only safe answer while they are
+        incomplete is "keep waiting, then refuse".
 
-        \u26a0 FAIL-SAFE: only an exact ``-1`` returns True. Anything else --
-        0, 1, nothing at all, a partial or garbled reply, a raised error --
-        returns False and leaves the caller on the byte-shape path this repo
-        has always used. A false negative costs an accepted strip; a false
-        positive would silently corrupt a file.
+        ⚠ NEITHER EXISTING RULE IN THIS PACKAGE FITS, so this one is new and
+        that is deliberate. `_send_disable_echo`'s is quiet-time based -- the
+        very shape that failed here. The SD receiver's IS content-based but it
+        looks for `__END_OF_FILE__`, a marker a short query reply does not
+        carry. Reusing either would have reproduced the defect or asserted the
+        wrong terminator.
+
+        The two forms, from the firmware:
+
+          silent (-1)   the value line and nothing else:  ``-1\r\n``
+          framed (0/1)  the echoed command, the value line, THEN the prompt:
+                        ``[DAQIFI> ]SYSTem:ECHO?\r\n<v>\r\nDAQIFI> ``
+
+        ⚠ THE PROMPT MUST BE FOUND AFTER THE VALUE, not merely present. A
+        pending prompt can PRECEDE the echo (the console prints one when it
+        finishes the previous command), so "contains a prompt" is satisfied
+        before the reply is complete -- the first-occurrence trap this
+        codebase has paid for twice already.
         """
+        b = bytes(buf)
+        if b == cls._ECHO_SILENT_REPLY:
+            return "silent"
+        if cls._ECHO_SILENT_REPLY.startswith(b):
+            # A proper prefix -- including b"" -- so more may still arrive.
+            return "incomplete"
+        if cls._ECHO_QUERY in b:
+            after_echo = b.find(cls._ECHO_QUERY) + len(cls._ECHO_QUERY)
+            value_end = b.find(b"\r\n", after_echo)
+            if value_end < 0:
+                return "incomplete"          # echo line not finished
+            value_end = b.find(b"\r\n", value_end + 2)
+            if value_end < 0:
+                return "incomplete"          # value line not finished
+            if b.find(cls._ECHO_PROMPT, value_end) < 0:
+                return "incomplete"          # prompt not yet arrived
+            return "framed"
+        if b.endswith(b"\r\n"):
+            # Terminated, but neither form. Complete, so nothing is in flight.
+            return "unparseable"
+        return "incomplete"
+
+    def probe_echo_silent(self) -> bool:
+        """True iff the device CONFIRMED the one state with no framing (#260).
+
+        ⛔ THE PROMPT AND THE COMMAND ECHO ARE ONE FIRMWARE VARIABLE.
+        `microrl.c` gates the prompt with ``if (pThis->echoOn > -1)`` and
+        ``echoOn`` is an **int**; ``SCPI_SetEcho`` accepts only -1..1 and
+        EVERY gate in microrl is ``> -1``. So -1 is the only silent state and
+        0 behaves exactly like 1 -- ``SYSTem:ECHO 0`` does NOT turn echo off.
+        Because one field decides both, a device cannot truthfully answer -1
+        while printing a prompt, which is what makes a confirmed -1 sound.
+
+        ⛔ NOT CACHED. The caller can send ``SYSTem:ECHO 1`` down the raw
+        path, or the device can REBOOT to its per-transport default (USB 1,
+        TCP 0) with no event anyone could invalidate on. So this is asked
+        immediately before each download and used at once.
+
+        ⛔ NEVER RETURNS WHILE A REPLY MAY BE OUTSTANDING. On an incomplete
+        reply, or no reply, inside the budget it raises
+        :class:`EchoProbeUnansweredError` and the caller does NOT download.
+        That is a contract change from the base, which never probed; it is
+        taken because a partly-arrived reply is indistinguishable from a
+        finished one by waiting, and downloading anyway glues its bytes to the
+        front of the file.
+
+        ⭐ NO `reset_input_buffer()` ANY MORE, and its absence is the
+        improvement rather than an omission. Completion is now decided by
+        content, so on every returning path the whole reply has been consumed
+        and the port is empty by construction. r1 needed a reset precisely
+        because it stopped early; a belt-and-suspenders that cannot stop
+        in-flight bytes was never the guarantee it looked like.
+
+        Returns True only for a confirmed -1. A COMPLETE framed or
+        unparseable reply returns False and the caller falls back to the
+        byte-shape path, unchanged from the base -- a complete reply leaves
+        nothing in flight.
+        """
+        from ..exceptions import EchoProbeUnansweredError
+
         if self._serial is None or not getattr(self._serial, "is_open", False):
             return False
         try:
-            self._serial.write(b"SYSTem:ECHO?\r\n")
+            self._serial.write(self._ECHO_QUERY + b"\r\n")
             self._serial.flush()
         except (serial.SerialException, OSError):
             return False
 
         got = bytearray()
         deadline = time.monotonic() + self.ECHO_PROBE_TIMEOUT_S
-        empty_polls = 0
-        while time.monotonic() < deadline:
+        verdict = "incomplete"
+        # ⛔ READ FIRST, CHECK THE CLOCK AFTER -- a do-while, not a while.
+        # An earlier revision tested `time.monotonic() < deadline` BEFORE the
+        # first read, which is the exact defect ts#516 r15 fixed one layer
+        # down: with a short budget, any scheduling delay between computing
+        # the deadline and testing it means ZERO reads and an empty capture
+        # that looks like "the device said nothing". Under r2 that is worse
+        # than before, because an empty capture now REFUSES the download. The
+        # work happens at least once, and the deadline bounds the RETRIES.
+        while True:
             try:
                 pending = self._serial.in_waiting
+                if pending:
+                    got.extend(self._serial.read(pending))
             except (serial.SerialException, OSError):
                 break
-            if pending:
-                try:
-                    got.extend(self._serial.read(pending))
-                except (serial.SerialException, OSError):
-                    break
-                empty_polls = 0
-            elif got:
-                # Only count silence AFTER something arrived -- see the
-                # adaptation note above.
-                empty_polls += 1
-                if empty_polls >= 2:
-                    break
-            time.sleep(0.02)
+            verdict = self._echo_probe_verdict(got)
+            if verdict != "incomplete":
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
 
-        # Belt-and-suspenders, exactly as _send_disable_echo does it: anything
-        # still in flight must not bleed into the download that follows.
-        try:
-            if hasattr(self._serial, "reset_input_buffer"):
-                self._serial.reset_input_buffer()
-        except (serial.SerialException, OSError):
-            pass
-
-        return bytes(got).strip() == b"-1"
+        if verdict == "silent":
+            return True
+        if verdict in ("framed", "unparseable"):
+            return False
+        raise EchoProbeUnansweredError(
+            "echo probe unanswered; download not attempted. Sent %r and got "
+            "%r inside %.2fs, which is not a complete reply -- more of it may "
+            "still be in flight, and downloading now would put those bytes at "
+            "the front of the file."
+            % (self._ECHO_QUERY, bytes(got), self.ECHO_PROBE_TIMEOUT_S)
+        )
 
     def _drain_bounded(self, deadline_s: float) -> None:
         """Wait, BOUNDED, for the OS output queue to empty. No ``flush()``.
