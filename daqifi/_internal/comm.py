@@ -1452,6 +1452,10 @@ class SerialInterface:
         if self.timeout is not None and self.timeout > 0:
             write_timeout = self.timeout
         self.last_open_error = None
+        # ⛔ #260 r3: a fresh port resynchronises the stream by construction,
+        # so this is the ONE place the probe poison clears. Nothing short of a
+        # reopen can prove that no byte of an old reply is still in transit.
+        self._echo_probe_poisoned = False
         try:
             self._serial = serial.Serial(
                 port=self.port,
@@ -1621,6 +1625,12 @@ class SerialInterface:
     _ECHO_SILENT_REPLY = b"-1\r\n"
     _ECHO_PROMPT = b"DAQIFI> "
 
+    #: #260 r3: set once a probe has been written whose reply was not fully
+    #: accounted for. While true, every download REFUSES without probing.
+    #: Cleared only by :meth:`open`, because only a fresh port resynchronises
+    #: the stream by construction.
+    _echo_probe_poisoned = False
+
     @classmethod
     def _echo_probe_verdict(cls, buf):
         """``"incomplete"`` / ``"silent"`` / ``"framed"`` / ``"unparseable"``,
@@ -1722,11 +1732,45 @@ class SerialInterface:
 
         if self._serial is None or not getattr(self._serial, "is_open", False):
             return False
+
+        # ⛔ r3 finding 1: THE GUARANTEE WAS PER-CALL, NOT ACROSS CALLS. r2
+        # claimed "every returning path consumed the whole reply" -- true of
+        # one call, and the REFUSAL path is exactly the one that leaves a
+        # reply outstanding. Measured: first reply delayed to 650 ms, the
+        # download refuses at 500 ms, the caller retries at once, the RETRY's
+        # probe completes on the FIRST reply, the GET goes out, and the
+        # SECOND reply lands in the file as b'-1\r\npayload'.
+        if self._echo_probe_poisoned:
+            raise EchoProbeUnansweredError(
+                "echo probe unanswered earlier on this connection; download "
+                "not attempted. A previous probe was written whose reply was "
+                "never fully accounted for, so bytes of it may still arrive "
+                "at any time and would land inside a downloaded file. "
+                "Reconnect (close() then open()) to resynchronise the stream."
+            )
+
         try:
             self._serial.write(self._ECHO_QUERY + b"\r\n")
             self._serial.flush()
-        except (serial.SerialException, OSError):
-            return False
+        except Exception:                                     # noqa: BLE001
+            # ⛔ r3 finding 2: AN ATTEMPTED WRITE IS NOT A WRITE THAT DID NOT
+            # HAPPEN. pyserial's POSIX write() checks its deadline AFTER
+            # os.write, so SerialTimeoutException can be raised with the query
+            # FULLY SENT -- and it discards the written byte count, so
+            # 0..len(query) bytes landed and which is unknowable. r2 returned
+            # False here and downloaded, putting the reply in the file.
+            #
+            # ⚠ EVERY exception, not a named list: the whole point is that we
+            # cannot tell how much went out, and that is just as true of an
+            # exception type nobody anticipated.
+            self._echo_probe_poisoned = True
+            raise EchoProbeUnansweredError(
+                "echo probe write failed; download not attempted. The query "
+                "may have been sent in full before the error -- pyserial "
+                "discards the written byte count on a write timeout -- so a "
+                "reply may still arrive and would land inside a downloaded "
+                "file. Reconnect to resynchronise the stream."
+            )
 
         got = bytearray()
         deadline = time.monotonic() + self.ECHO_PROBE_TIMEOUT_S
@@ -1757,6 +1801,8 @@ class SerialInterface:
             return True
         if verdict in ("framed", "unparseable"):
             return False
+        # The reply was not fully accounted for, so it is still coming.
+        self._echo_probe_poisoned = True
         raise EchoProbeUnansweredError(
             "echo probe unanswered; download not attempted. Sent %r and got "
             "%r inside %.2fs, which is not a complete reply -- more of it may "

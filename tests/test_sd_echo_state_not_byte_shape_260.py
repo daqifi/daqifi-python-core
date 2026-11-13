@@ -41,6 +41,7 @@ import time
 from pathlib import Path
 
 import pytest
+import serial
 
 from _sd_echo_probe import EchoProbeFake, echo_probe_reply
 from daqifi.exceptions import EchoProbeUnansweredError
@@ -363,6 +364,130 @@ def test_a_whole_reply_inside_the_budget_still_confirms():
                       [(0.05, SILENT_REPLY)], echo_state=-1)
     dev._comm._serial = port
     assert dev.sd_get_file_binary("log.csv", timeout=5.0) == PAYLOAD
+
+
+# ---------------------------------------------------------------------------
+# r3: a refused probe leaves a reply OUTSTANDING -- across calls
+# ---------------------------------------------------------------------------
+
+class _WriteRaisesAfterSending(_Scheduled):
+    """A port whose write ACCEPTS the bytes and THEN raises.
+
+    ⛔ MODELLING "SENT BUT RAISED" IS THE POINT. pyserial's POSIX write()
+    checks its deadline AFTER `os.write`, so `SerialTimeoutException` can be
+    raised with the query fully on the wire -- and the written byte count is
+    discarded, so how much went out is unknowable. A fake that raises BEFORE
+    accepting the bytes models a write that did NOT happen, which is the
+    comfortable case and not this one; that mistake is the r1 instrument
+    error repeated.
+    """
+
+    def write(self, data):
+        self.written.extend(data)          # the bytes ARE on the wire
+        probe = self._probe_write(data)
+        if probe:
+            raise serial.SerialTimeoutException("write timed out after sending")
+        self._released_at = time.monotonic()
+        return len(data)
+
+
+@pytest.mark.parametrize("schedule,label", [
+    ([(0.65, SILENT_REPLY)], "wholly late"),
+    ([(0.0, b"-1"), (0.65, b"\r\n")], "split, remainder late"),
+])
+def test_a_retry_after_a_refusal_does_not_accept_the_first_reply(schedule,
+                                                                 label):
+    """⛔⛔ r3 FINDING 1. r2's guarantee was PER CALL, and the refusal path is
+    exactly the one that leaves a reply outstanding.
+
+    Measured on r2: the first reply is delayed past the budget, the download
+    refuses, the caller retries AT ONCE, and the retry's probe completes on
+    the FIRST reply -- so the GET goes out and the SECOND reply lands in the
+    file as ``b'-1\r\npayload'``.
+
+    ⭐ POISON, NOT A COUNT, and this is why. Counting outstanding replies is
+    ill-defined after a PARTIAL consumption (what is owed is a remainder, not
+    a whole reply), and -- decisively -- THE PORT IS SHARED: `send_command`,
+    `send_query`, `query_binary`, `_send_disable_echo`, seventeen direct uses
+    in device.py and `streaming.py` reading `_comm._serial` can all consume or
+    interleave the outstanding bytes between two downloads. No counter the
+    probe maintains can survive that. So the transport is marked unusable for
+    downloads until a reopen resynchronises it.
+    """
+    dev = NyquistDevice("COM41")
+    port = _Scheduled(PAYLOAD + END_OF_FILE_MARKER, schedule, echo_state=-1)
+    dev._comm._serial = port
+    with pytest.raises(EchoProbeUnansweredError):
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+    # The caller retries immediately, which is the realistic thing to do.
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    port._sent = 0
+    with pytest.raises(EchoProbeUnansweredError) as err:
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+    assert "earlier on this connection" in str(err.value), (
+        "the retry must refuse because the transport is poisoned, not "
+        "re-probe and accept the first reply (%s)" % label)
+    assert b"SYSTem:STORage:SD:GET" not in bytes(port.written), (
+        "no GET may reach the wire on either attempt")
+
+
+def test_a_write_that_raises_after_sending_refuses_and_poisons():
+    """⛔ r3 FINDING 2. r2 treated a probe write exception as "fall back and
+    download", and the reply then landed in the file. An attempted write is
+    not a write that did not happen."""
+    dev = NyquistDevice("COM41")
+    port = _WriteRaisesAfterSending(PAYLOAD + END_OF_FILE_MARKER,
+                                    [(0.05, SILENT_REPLY)], echo_state=-1)
+    dev._comm._serial = port
+    with pytest.raises(EchoProbeUnansweredError) as err:
+        dev.sd_get_file_binary("log.csv", timeout=5.0)
+    assert "write failed" in str(err.value)
+    assert bytes(port.written).startswith(b"SYSTem:ECHO?"), (
+        "this fake must model the query reaching the wire BEFORE the raise, "
+        "or it is testing the comfortable case")
+    assert b"SYSTem:STORage:SD:GET" not in bytes(port.written), (
+        "a write that may have been sent must not be followed by a GET")
+
+
+def test_the_poison_clears_only_on_a_reopen():
+    """⛔ A THREE-ATTEMPT CHAIN. Under poison the shape is refuse, refuse,
+    then refuse again -- not "succeed on the third". That is a deliberate
+    difference from the counting design, which would have consumed three
+    replies and confirmed; counting was rejected for the reasons in
+    `test_a_retry_after_a_refusal_does_not_accept_the_first_reply`.
+
+    ⭐ AND RECOVERY IS PINNED, because a poison nothing clears is a bricked
+    connection rather than a safety property.
+    """
+    dev = NyquistDevice("COM41")
+    port = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
+                      [(0.65, SILENT_REPLY)], echo_state=-1)
+    dev._comm._serial = port
+    for attempt in range(3):
+        with pytest.raises(EchoProbeUnansweredError):
+            dev.sd_get_file_binary("log.csv", timeout=5.0)
+        port._payload = PAYLOAD + END_OF_FILE_MARKER
+        port._sent = 0
+    assert dev._comm._echo_probe_poisoned is True
+
+    # A reopen resynchronises the stream by construction, so it clears.
+    dev._comm._echo_probe_poisoned = True
+    fresh = _Scheduled(PAYLOAD + END_OF_FILE_MARKER,
+                       [(0.02, SILENT_REPLY)], echo_state=-1)
+    dev._comm._echo_probe_poisoned = False      # what open() does
+    dev._comm._serial = fresh
+    assert dev.sd_get_file_binary("log.csv", timeout=5.0) == PAYLOAD, (
+        "after a reopen the probe must work again")
+
+
+def test_open_is_what_clears_the_poison():
+    """The clearing lives in `open()` and nowhere else -- pinned structurally
+    so a later edit cannot move it somewhere that does not resynchronise."""
+    import inspect
+    src = inspect.getsource(type(NyquistDevice("COM41")._comm).open)
+    assert "_echo_probe_poisoned = False" in src, (
+        "open() must clear the poison; nothing weaker proves the stream is "
+        "resynchronised")
 
 
 # ---------------------------------------------------------------------------
