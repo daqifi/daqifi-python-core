@@ -6,7 +6,8 @@ Provides high-level API for device interaction.
 
 import threading
 from typing import Callable, Dict, Any, Optional, Union, List
-from ._internal.comm import DataSample, SerialInterface, PowerState, DeviceMetadata
+from ._internal.comm import (DataSample, SerialInterface, PowerState, DeviceMetadata,
+                             SEND_DRAIN_TIMEOUT_S, drain_output_bounded)
 import time
 
 from ._internal import scpi, scpi_commands
@@ -1047,7 +1048,10 @@ class NyquistDevice:
         cmd = scpi_commands.get_sd_file(filename).data
         cmd_bytes = (cmd + "\r").encode('ascii')
         self._comm._serial.write(cmd_bytes)
-        self._comm._serial.flush()
+        # #263: bounded, no flush(); a stall raises SerialTimeoutException.
+        drain_output_bounded(
+            self._comm._serial,
+            getattr(self._comm, "send_drain_timeout", SEND_DRAIN_TIMEOUT_S))
 
         # ⛔ SAME RECEIVE AS THE BINARY SIBLING, and the sweeps that used to
         # be here are gone with it. This path removed the command text, the
@@ -1119,7 +1123,10 @@ class NyquistDevice:
         cmd = scpi_commands.get_sd_file(filename).data
         cmd_bytes = (cmd + "\r").encode('ascii')
         self._comm._serial.write(cmd_bytes)
-        self._comm._serial.flush()
+        # #263: bounded, no flush(); a stall raises SerialTimeoutException.
+        drain_output_bounded(
+            self._comm._serial,
+            getattr(self._comm, "send_drain_timeout", SEND_DRAIN_TIMEOUT_S))
 
         return self._receive_sd_file(
             filename, cmd, timeout, idle_reset=False,
@@ -1163,9 +1170,25 @@ class NyquistDevice:
         # swallowed into "download anyway", which is precisely the defect r2
         # exists to remove. A bug in the probe must fail loudly, not quietly
         # become a fallback.
+        # ⛔⛔ AND THE POISON DECIDES WHICH OSError IS SAFE, not the class.
+        # pc#266 r5 made the probe let a port fault propagate unwrapped, so
+        # that all six of #263's send sites report a stuck output queue
+        # identically. `serial.SerialTimeoutException` subclasses
+        # `SerialException` subclasses `OSError` -- so the bare `except
+        # OSError` above silently became "drain timed out => download
+        # anyway", reintroducing the r2 defect this handler exists to
+        # prevent. Measured: the GET went out as
+        # b'SYSTem:ECHO?\r\nSYSTem:STORage:SD:GET "x.csv"\r'.
+        #
+        # The discriminator is not the exception type but whether the probe
+        # GOT AS FAR AS WRITING: the poison is set before the write and
+        # cleared only on a settled verdict, so a poisoned transport IS the
+        # "probed and did not finish" case, whatever class came out of it.
         try:
             return bool(probe())
         except OSError:
+            if getattr(self._comm, "_echo_probe_poisoned", False):
+                raise
             return False
 
     def _read_sd_response(

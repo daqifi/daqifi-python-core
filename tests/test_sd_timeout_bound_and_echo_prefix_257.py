@@ -51,6 +51,7 @@ class _ScriptedSerial(EchoProbeFake):
     expressed without sleeping: `in_waiting` reports 0 once, the loop takes its
     idle branch, and the next chunk arrives on a later pass.
     """
+    out_waiting = 0  # #263: the send path drains this queue, bounded
 
     def __init__(self, chunks):
         self._q = list(chunks)

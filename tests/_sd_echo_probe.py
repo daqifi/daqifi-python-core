@@ -88,7 +88,8 @@ class EchoProbeFake:
     #: test written for the byte-shape path keeps exercising it.
     echo_state = 1
 
-    #: #260 r4: a real port exposes this, and `_drain_bounded` REFUSES a port
+    #: #260 r4: a real port exposes this, and drain_output_bounded() REFUSES
+    #: a port
     #: that does not ("refusing an unbounded flush"). Zero means the output
     #: queue is already empty, which is true of every fake here -- they accept
     #: writes synchronously. A fake without it would make every probe refuse

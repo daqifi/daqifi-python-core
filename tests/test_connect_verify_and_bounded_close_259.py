@@ -47,11 +47,20 @@ class _Port:
     """
 
     def __init__(self, out_waiting=(0,), omit_out_waiting=False):
+        # ⚠ open() drains too (#262), and since that fix a port that will
+        # not drain makes open() FAIL. A test about close() therefore opens
+        # a healthy port and calls stall() afterwards, so the fixture
+        # expresses exactly one condition: a drain that sticks during CLOSE.
         self.written = []
         self.flushes = 0
         self.closed = 0
         self.is_open = True
         self.in_waiting = 0
+        self._out = list(out_waiting)
+        self._omit_out_waiting = omit_out_waiting
+
+    def stall(self, out_waiting=(64,), omit_out_waiting=False):
+        """From now on, report ``out_waiting`` (or lack it)."""
         self._out = list(out_waiting)
         self._omit_out_waiting = omit_out_waiting
 
@@ -276,14 +285,17 @@ def test_a_clean_close_returns_true_and_records_nothing(monkeypatch):
     assert iface.close() is True
     assert iface.last_close_error is None
     assert port.closed == 1
-    assert port.flushes >= 1
+    # Neither open() nor close() calls flush() any more (#259, #262): the
+    # bounded out_waiting poll is the drain on both paths.
+    assert port.flushes == 0
 
 
 def test_a_stuck_drain_is_bounded_reported_and_still_releases(monkeypatch):
     """The three things that must all hold at once."""
-    port = _Port(out_waiting=(64,))        # never drains
+    port = _Port()
     iface = _iface(monkeypatch, port)
     assert iface.open() is True
+    port.stall(out_waiting=(64,))          # never drains, from here on
     iface.close_drain_timeout = 0.05       # keep the pin quick
     result = iface.close()
     assert result is False, "a failed drain reported success"
@@ -294,9 +306,10 @@ def test_a_stuck_drain_is_bounded_reported_and_still_releases(monkeypatch):
 
 def test_a_port_without_out_waiting_is_reported_not_flushed_unbounded(monkeypatch):
     """An unbounded wait is the defect; silently taking it again is fail-open."""
-    port = _Port(omit_out_waiting=True)
+    port = _Port()
     iface = _iface(monkeypatch, port)
     assert iface.open() is True
+    port.stall(omit_out_waiting=True)
     flushes_after_open = port.flushes
     assert iface.close() is False
     assert isinstance(iface.last_close_error, serial.SerialTimeoutException)
@@ -308,9 +321,10 @@ def test_a_port_without_out_waiting_is_reported_not_flushed_unbounded(monkeypatc
 
 def test_last_close_error_is_keyed_to_the_attempt(monkeypatch):
     """Same attempt-keyed rule as last_open_error."""
-    stuck = _Port(out_waiting=(64,))
+    stuck = _Port()
     iface = _iface(monkeypatch, stuck)
     assert iface.open() is True
+    stuck.stall(out_waiting=(64,))
     iface.close_drain_timeout = 0.05
     assert iface.close() is False
     assert iface.last_close_error is not None
@@ -324,9 +338,10 @@ def test_last_close_error_is_keyed_to_the_attempt(monkeypatch):
 
 def test_close_never_raises_even_when_the_drain_fails(monkeypatch):
     """A dying device must not turn a FINISHED session into a traceback."""
-    port = _Port(out_waiting=(64,))
+    port = _Port()
     iface = _iface(monkeypatch, port)
     assert iface.open() is True
+    port.stall(out_waiting=(64,))
     iface.close_drain_timeout = 0.05
     try:
         iface.close()
@@ -384,11 +399,12 @@ class _FlushBlocksPort(_Port):
         self.released = threading.Event()
         self.flush_entered = threading.Event()
         self._never = threading.Event()
-        # ⚠ ARMED ONLY AFTER open(). open() flushes too, inside
-        # _send_disable_echo, and a fixture that blocks there hangs the test
+        # ⚠ ARMED ONLY AFTER open(). open() used to flush too, inside
+        # _send_disable_echo, and a fixture that blocked there hung the test
         # in SETUP -- which is not the condition under test and which made
-        # this leg time out instead of failing. The fixture must express
-        # exactly one thing: a flush that blocks during CLOSE.
+        # this leg time out instead of failing. open() no longer flushes
+        # (#262), but the arming stays: the fixture must express exactly one
+        # thing, a flush that blocks during CLOSE.
         self.block_on_flush = False
 
     def arm(self):
@@ -453,7 +469,7 @@ def test_the_drain_never_calls_flush(monkeypatch):
     port = _Port(out_waiting=(32, 16, 0))
     iface = _iface(monkeypatch, port)
     assert iface.open() is True
-    flushes_after_open = port.flushes      # _send_disable_echo's own flush
+    flushes_after_open = port.flushes      # 0 since #262; kept as a delta
     assert iface.close() is True
     assert port.flushes == flushes_after_open, (
         "close() flushed; tcdrain() cannot be bounded, so it must not be "

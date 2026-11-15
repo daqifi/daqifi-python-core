@@ -595,8 +595,32 @@ def test_every_sd_fake_answers_the_probe_through_the_shared_helper():
     function, never its own copy of "what a device replies".
     """
     here = Path(__file__).parent
+
+    # ⛔ A CARVE-OUT STATED, not a glob that quietly misses it. #263's drain
+    # fakes install a port and drive sd_get_file, so the rule's own words
+    # ("any module that installs a fake port") reach them -- but the mixin is
+    # WRONG for them: its `out_waiting = 0` is flat, and their whole subject
+    # is a port whose `out_waiting` is a property that STAYS NONZERO or
+    # raises. Converting them would delete what they test. They are listed
+    # here, rather than left outside the glob, so the exemption is visible
+    # and a NEW port-installing module in either family still gets flagged.
+    exempt = {
+        "test_bounded_open_drain_262.py",   # models out_waiting=(16, 8, 0)
+        "test_bounded_send_drain_263.py",   # models stuck / dies / blocks
+    }
+    # The list must not outlive what it exempts: a stale name exempts
+    # nothing and reads as if it still did.
+    missing = sorted(n for n in exempt if not (here / n).exists())
+    assert missing == [], (
+        "exempt modules no longer present -- drop them from the list: %s"
+        % missing)
+
     offenders = []
-    for path in sorted(here.glob("test_sd_*.py")) + [here / "test_carried_items_206.py"]:
+    for path in (sorted(here.glob("test_sd_*.py"))
+                 + sorted(here.glob("test_bounded_*.py"))
+                 + [here / "test_carried_items_206.py"]):
+        if path.name in exempt:
+            continue
         src = path.read_text(encoding="utf-8")
         if "_comm._serial" not in src:
             continue                      # not a port-installing module
@@ -711,6 +735,74 @@ def test_the_probe_does_not_flush_and_is_bounded_even_if_flush_would_block():
         % (bound, elapsed))
 
 
+class _NeverDrains(_Port):
+    """A port whose OS output queue never empties, as #263's does.
+
+    ``out_waiting`` is a property, as on pyserial's Serial, and it stays
+    nonzero: the bounded drain can only end by raising.
+    """
+
+    @property
+    def out_waiting(self):
+        return 7
+
+
+def test_a_probe_whose_own_drain_never_completes_refuses_the_download():
+    """⛔ THE REFUSAL PATH THAT HAD NO PIN OF ITS OWN.
+
+    Found by mutation, not by reading: inserting `return True` into the
+    probe's drain-failure handler -- the r2 regression the audit withdrew,
+    "unanswered => fall back and download" -- left all 96 pins in this file
+    and #263's green. Every `out_waiting` in this module was PROSE; no fake
+    ever made the probe's own drain time out.
+
+    ⛔⛔ THE TYPE HERE IS A RULING, not a preference. An earlier version of
+    this round re-raised the drain timeout as EchoProbeUnansweredError and
+    widened two rows of test_bounded_send_drain_263.py's SITES table to
+    accept it. Ruled against (coordinator, pc#266 r5): a stuck output queue
+    is a PORT FAULT, not an unanswered probe, and all six of #263's send
+    sites must fail it identically so callers keep one handler. #263's file
+    is back to main's exact content and the probe no longer wraps this.
+
+    ⚠ So the refusal information cannot live in the type, and this test
+    pins where it DOES live: the poison, set before the write and left set
+    because `settled` is still None.
+    """
+    dev = NyquistDevice("COM41")
+    port = _NeverDrains(PAYLOAD + END_OF_FILE_MARKER, echo_state=-1)
+    dev._comm._serial = port
+    bound = dev._comm.ECHO_PROBE_TIMEOUT_S
+
+    t0 = time.monotonic()
+    with pytest.raises(serial.SerialTimeoutException) as first:
+        dev._comm.probe_echo_silent()
+    elapsed = time.monotonic() - t0
+    assert elapsed < bound * 4, (
+        "the drain must be BOUNDED (%.2fs); took %.2fs" % (bound, elapsed))
+    assert "output buffer still holds" in str(first.value), (
+        "the port fault must say what it was: %r" % str(first.value))
+
+    # ⛔ THE POISON IS WHAT CARRIES "a reply may still arrive" NOW. Without
+    # it the unwrapping above would silently drop the warning the r4 audit
+    # required, so this is the assertion that makes the ruling safe.
+    assert dev._comm._echo_probe_poisoned is True, (
+        "a probe that died mid-flight must leave the transport poisoned")
+    with pytest.raises(EchoProbeUnansweredError):
+        dev._comm.probe_echo_silent()
+
+    # And the download must refuse rather than proceed: no GET on the wire.
+    # ⚠ A FRESH device, because `dev` is now POISONED -- reusing it would
+    # exercise the poison short-circuit and prove nothing about the drain.
+    fresh = NyquistDevice("COM41")
+    fresh_port = _NeverDrains(PAYLOAD + END_OF_FILE_MARKER, echo_state=-1)
+    fresh._comm._serial = fresh_port
+    with pytest.raises(serial.SerialTimeoutException):
+        fresh.sd_get_file("x.csv", timeout=1.0)
+    assert b"SD:GET" not in bytes(fresh_port.written).upper(), (
+        "a refused probe must not be followed by a GET: %r"
+        % bytes(fresh_port.written))
+
+
 def test_the_deadline_is_created_before_the_drain():
     """The ordering from finding 2, pinned structurally as well: a later edit
     that moves the drain ahead of the deadline reintroduces the defect without
@@ -729,9 +821,20 @@ def test_the_deadline_is_created_before_the_drain():
     deadline_line = min(
         n.lineno for n in ast.walk(tree) if isinstance(n, ast.Assign)
         and any(getattr(t, "id", None) == "deadline" for t in n.targets))
-    drain_line = min(
+    # Either spelling of the ONE bounded drain counts: the module-level
+    # helper (#263, what the probe calls) or the method wrapper that supplies
+    # `self._serial`. Keying on a single callee name would turn this
+    # ORDERING pin into a pin on which spelling is in fashion -- pc#267
+    # changed that spelling under us, and the ordering it guards did not move.
+    drain_lines = [
         n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
-        and getattr(n.func, "attr", None) == "_drain_bounded")
+        and (getattr(n.func, "id", None) == "drain_output_bounded"
+             or getattr(n.func, "attr", None) in ("drain_output_bounded",
+                                                  "_drain_bounded"))]
+    assert drain_lines, (
+        "no bounded drain found in probe_echo_silent -- the probe must drain "
+        "its own write, and this pin cannot judge an ordering that is absent")
+    drain_line = min(drain_lines)
     assert deadline_line < drain_line, (
         "the deadline must be created BEFORE the drain (line %d vs %d), or "
         "the budget can be spent before the clock starts"

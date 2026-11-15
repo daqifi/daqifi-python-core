@@ -42,6 +42,7 @@ PROMPT = b"DAQIFI> "
 class _Serial(EchoProbeFake):
     """Serial-shaped: exposes ``in_waiting`` and never reports EOF, which is
     what pyserial does and what makes an absent marker a timeout."""
+    out_waiting = 0  # #263: the send path drains this queue, bounded
 
     def __init__(self, *stages) -> None:
         self.is_open = True

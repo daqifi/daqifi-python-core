@@ -24,6 +24,7 @@ class _ChunkedSerial(EchoProbeFake):
     is exhausted. That makes the loop's own cost the only thing that can
     consume the timeout, which is what the two timing tests measure.
     """
+    out_waiting = 0  # #263: the send path drains this queue, bounded
 
     def __init__(self, payload: bytes, chunk: int = 4096):
         self._payload = payload

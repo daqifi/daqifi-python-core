@@ -27,6 +27,7 @@ MAX_BACKLOG = 150
 class _RateSerial:
     """A board that, after START, produces one record per 1/rate s of wall
     time."""
+    out_waiting = 0  # #263: the send path drains this queue, bounded
 
     def __init__(self, record, rate, on_start=b""):
         self.is_open = True
