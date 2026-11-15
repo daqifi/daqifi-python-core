@@ -30,6 +30,10 @@ def _make_fake_serial(in_waiting_seq=None):
     s.reset_output_buffer = MagicMock()
     s.read = MagicMock(return_value=b"")
     s.close = MagicMock()
+    # An int, as pyserial reports it. Left to MagicMock it would be a truthy
+    # mock, and open()'s bounded drain (#262) would wait out its deadline on
+    # an "output queue" that never empties, then fail the open.
+    s.out_waiting = 0
     if in_waiting_seq is None:
         s.in_waiting = 0
     else:

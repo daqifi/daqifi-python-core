@@ -23,6 +23,7 @@ def _make_fake_serial(read_chunks):
     s.is_open = True
     s.write = MagicMock(return_value=None)
     s.flush = MagicMock()
+    s.out_waiting = 0  # #263: an empty OS output queue; the drain is bounded
     s.reset_input_buffer = MagicMock()
 
     chunks_iter = iter(read_chunks)
@@ -77,7 +78,9 @@ class TestQueryBinary:
         iface.query_binary("SYSTem:SYSInfoPB?", timeout=0.5, idle_settle=0.02)
 
         s.write.assert_called_once_with(b"SYSTem:SYSInfoPB?\r\n")
-        s.flush.assert_called_once()
+        # #263: the drain is the bounded out_waiting poll; flush() (an
+        # unbounded wait in pyserial) must not be called at all.
+        s.flush.assert_not_called()
 
     def test_resets_input_buffer_before_writing(self):
         """Stale bytes from a prior text query must not bleed into the
@@ -166,6 +169,7 @@ class TestQueryBinary:
         s.is_open = True
         s.write = MagicMock(return_value=None)
         s.flush = MagicMock()
+        s.out_waiting = 0  # #263
         s.reset_input_buffer = MagicMock()
         s.timeout = 1.0
 

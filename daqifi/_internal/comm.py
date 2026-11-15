@@ -38,6 +38,66 @@ T = TypeVar("T")
 #: SerialInterface.close_drain_timeout.
 CLOSE_DRAIN_TIMEOUT_S = 20.0
 
+#: Deadline for open()'s echo-disable drain, in seconds (#262).
+#:
+#: open() used to call serial.flush() after writing ``SYSTem:ECHO -1``, the
+#: same unbounded wait close() had (see CLOSE_DRAIN_TIMEOUT_S), and the
+#: ``except SerialException`` around it could not help: a blocked tcdrain()
+#: raises nothing, so connect() simply never returned.
+#:
+#: Sized for what open() writes, not for close()'s post-soak case: 16 bytes
+#: into a freshly reset output buffer. That is ~1.4 ms on the wire at
+#: 115200 baud and ~17 ms even at 9600, and a USB-CDC port hands it to the
+#: host stack in one transfer. 1 s is a margin of 60x over the slowest of
+#: those, while still turning a wedged adapter into a prompt connect failure
+#: rather than a hang. Per-instance via SerialInterface.open_drain_timeout.
+OPEN_DRAIN_TIMEOUT_S = 1.0
+
+#: Deadline for the drain after a command write, in seconds (#263).
+#:
+#: send_command(), query_binary(), the SD file getters and streaming's START
+#: wrote a command and then called serial.flush(), the same unbounded wait
+#: close() (#259) and open() (#262) had: a port that stopped taking bytes
+#: blocked the caller forever, with nothing raised. They now use the same
+#: bounded poll, drain_output_bounded().
+#:
+#: A command is tens of bytes, which a USB-CDC port hands to the host stack
+#: in one transfer and a 9600-baud UART sends in well under 0.1 s. 5 s is
+#: generous for that while still turning a wedged port into an error the
+#: caller sees, rather than a hang. Per-instance via
+#: SerialInterface.send_drain_timeout.
+SEND_DRAIN_TIMEOUT_S = 5.0
+
+
+def drain_output_bounded(port, deadline_s: float) -> None:
+    """Wait, BOUNDED, for ``port``'s OS output queue to empty. No ``flush()``.
+
+    The one implementation of the bounded drain (#259, #262, #263); see
+    SerialInterface._drain_bounded for why there is no ``flush()`` after it.
+    Takes the port explicitly so a caller holding its own reference
+    (query_binary, the SD getters, streaming's START) drains THAT port.
+
+    Raises ``serial.SerialTimeoutException`` if the queue does not empty in
+    time, or if the port exposes no ``out_waiting`` (an unbounded flush would
+    be the fail-open).
+    """
+    end = time.monotonic() + deadline_s
+    try:
+        pending = port.out_waiting
+    except (AttributeError, NotImplementedError) as exc:
+        raise serial.SerialTimeoutException(
+            "this port exposes no out_waiting, so the drain cannot be "
+            "bounded; refusing an unbounded flush"
+        ) from exc
+    while pending:
+        if time.monotonic() >= end:
+            raise serial.SerialTimeoutException(
+                f"output buffer still holds {pending} byte(s) after "
+                f"{deadline_s:.1f}s"
+            )
+        time.sleep(0.01)
+        pending = port.out_waiting
+
 
 @dataclass
 class TransportStatusEventArgs:
@@ -1309,6 +1369,19 @@ class PortCancelled(serial.SerialException):
     on the port but closing it."""
 
 
+class _OpenDrainFailed(serial.SerialException):
+    """open()'s echo-disable drain did not finish (#262): it missed its
+    bound, the port failed under it (an I/O error), or the caller cancelled
+    during it.
+
+    Private: open() turns it into a refused open, with a
+    SerialPortConnectError in ``last_open_error`` (or no error, for a
+    cancel). It exists only so open() can tell a drain that never finished
+    (fatal) from a failed write (tolerated), which share
+    SerialTimeoutException otherwise.
+    """
+
+
 class CancellablePort:
     """A serial port that refuses every operation but ``close`` once
     ``cancel_event`` is set.
@@ -1396,6 +1469,12 @@ class SerialInterface:
         #: 5 s and under 20 s, so a short bound would report a LIVE device as
         #: wedged — the failure this bound exists to avoid creating.
         self.close_drain_timeout: float = CLOSE_DRAIN_TIMEOUT_S
+        #: Deadline for open()'s echo-disable drain, in seconds. A drain that
+        #: misses it fails the open and releases the port (#262).
+        self.open_drain_timeout: float = OPEN_DRAIN_TIMEOUT_S
+        #: Deadline for the drain after each command write, in seconds. A
+        #: drain that misses it raises instead of hanging the caller (#263).
+        self.send_drain_timeout: float = SEND_DRAIN_TIMEOUT_S
 
     def _cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
@@ -1523,14 +1602,27 @@ class SerialInterface:
                     return self._refuse_open(
                         DeviceVerificationError(self.port))
             # Disable echo + prompt for the rest of the session.
-            # Failure here doesn't abort the connection — the existing
+            # A failed WRITE doesn't abort the connection — the existing
             # response-stripping fallbacks compensate; we just won't
             # get the cleaner binary stream the disable affords.
             # Catch specific I/O exceptions (not bare Exception) so a
             # programmer error inside _send_disable_echo isn't silently
             # swallowed (Qodo PR #55 /improve pass 1 importance 7).
+            #
+            # ⛔ #262: A DRAIN THAT DOES NOT FINISH FAILS THE OPEN. It is
+            # not the tolerable "echo-disable was lost" case above: it means
+            # the port is not taking bytes, so every later command would
+            # stall the same way. Release the handle and report it, as the
+            # other refusals do — never continue into a session on it.
             try:
                 self._send_disable_echo()
+            except _OpenDrainFailed as drain_exc:
+                if self._cancelled():
+                    return self._refuse_open(None)
+                cause = drain_exc.__cause__ or drain_exc
+                error = serial_open_error(self.port, cause)
+                error.__cause__ = cause
+                return self._refuse_open(error)
             except (serial.SerialException, OSError):
                 pass
             return True
@@ -1572,7 +1664,25 @@ class SerialInterface:
         # compatibility but new writes should use the canonical form
         # (Qodo PR #55 /improve pass 4 importance 7).
         self._serial.write(b"SYSTem:ECHO -1\r\n")
-        self._serial.flush()
+        # #262: bounded, and NO flush(). flush() is tcdrain() on POSIX and
+        # takes no timeout, so it hung connect() forever on a port that had
+        # stopped draining; see _drain_bounded. Its failure is re-raised as
+        # _OpenDrainFailed so open() can tell it from a failed write.
+        # PortCancelled is included because the poll, unlike the one flush()
+        # call it replaces, re-checks a CancellablePort on every iteration:
+        # a cancel mid-drain must reach open()'s cancel handling, not be
+        # swallowed as a lost echo-disable and reported as a good open.
+        # ANY failure of the drain fails the open, not only the timeout: an
+        # out_waiting poll on a port that went away mid-open raises
+        # OSError(EIO) or a SerialException, and leaving those to open()'s
+        # tolerant write handler returned True on a dead port with the handle
+        # still held (#262 r1). Only the WRITE above stays tolerated.
+        # OSError covers all of them: in pyserial 3.5 SerialException (and so
+        # SerialTimeoutException and PortCancelled) derives from IOError.
+        try:
+            self._drain_bounded(self.open_drain_timeout)
+        except OSError as exc:
+            raise _OpenDrainFailed(str(exc)) from exc
         time.sleep(0.1)
         # Drain loop — bytes can arrive after the initial settle if the
         # firmware is still flushing the echo from the disable command
@@ -1610,8 +1720,8 @@ class SerialInterface:
         """Wait, BOUNDED, for the OS output queue to empty. No ``flush()``.
 
         Raises ``serial.SerialTimeoutException`` if it does not empty in
-        time, so the caller's existing handler runs and the handle is still
-        released by close().
+        time. close() records that and still releases the handle (#259);
+        open() releases the handle and fails the open (#262).
 
         ⛔ THE BOUND GOES WHERE THE UNBOUNDED WAIT IS. ``write_timeout`` does
         not govern ``flush()`` on either backend — pyserial 3.5 polls
@@ -1637,29 +1747,19 @@ class SerialInterface:
         is no bounded way to wait for those — ``tcdrain()`` takes no timeout
         — and the alternative is a call that can never return. For close()'s
         purpose (a courtesy ``SYSTem:ECHO 1`` on the way out) an unbounded
-        wait is the worse trade.
+        wait is the worse trade. For open()'s ``SYSTem:ECHO -1`` it is too:
+        bytes still in the adapter go out ahead of the next command anyway,
+        and open()'s own settle-and-drain reads whatever echo they produce.
 
         A port that exposes no ``out_waiting`` cannot be bounded at all, and
         that is reported by raising rather than by falling through to an
         unbounded ``flush()``: silently taking the unbounded wait again
         would be the fail-open.
+
+        The poll itself is drain_output_bounded() (#263), shared with every
+        other send path.
         """
-        end = time.monotonic() + deadline_s
-        try:
-            pending = self._serial.out_waiting
-        except (AttributeError, NotImplementedError) as exc:
-            raise serial.SerialTimeoutException(
-                "this port exposes no out_waiting, so the drain cannot be "
-                "bounded; refusing an unbounded flush"
-            ) from exc
-        while pending:
-            if time.monotonic() >= end:
-                raise serial.SerialTimeoutException(
-                    f"output buffer still holds {pending} byte(s) after "
-                    f"{deadline_s:.1f}s"
-                )
-            time.sleep(0.01)
-            pending = self._serial.out_waiting
+        drain_output_bounded(self._serial, deadline_s)
 
     def close(self) -> bool:
         """Close the serial connection. True if it closed cleanly.
@@ -1732,7 +1832,9 @@ class SerialInterface:
             # Send command with CR terminator
             cmd_bytes = (command + "\r").encode('ascii')
             self._serial.write(cmd_bytes)
-            self._serial.flush()
+            # #263: bounded, no flush(). A stall raises SerialTimeoutException,
+            # which the handler below reports as a RuntimeError.
+            self._drain_bounded(self.send_drain_timeout)
 
             # Wait for device to process
             time.sleep(delay)
@@ -1862,7 +1964,9 @@ class SerialInterface:
                 # wire format. send_command() uses bare \r for legacy
                 # compatibility but binary queries expect the canonical form.
                 ser.write((query + "\r\n").encode("ascii"))
-                ser.flush()
+                # #263: bounded, no flush(); a stall is reported as the
+                # RuntimeError below.
+                drain_output_bounded(ser, self.send_drain_timeout)
 
                 received = bytearray()
                 deadline = time.monotonic() + timeout

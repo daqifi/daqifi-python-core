@@ -54,6 +54,7 @@ def _make_comm_with_bytes(buf: bytes) -> MagicMock:
     # `__int__`. Easier: set the side_effect on a callable.
     type(serial).in_waiting = property(lambda self: _in_waiting())
     serial.read = MagicMock(side_effect=_read)
+    serial.out_waiting = 0  # #263: START's drain is bounded
     comm = MagicMock()
     comm._serial = serial
     return comm

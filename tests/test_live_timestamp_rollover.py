@@ -118,6 +118,7 @@ class _Clock:
 
 class _ScheduledSerial(_f._FakeSerial):
     """Releases each (host_time, bytes) once the host clock reaches it."""
+    out_waiting = 0  # #263: the send path drains this queue, bounded
 
     def __init__(self, clock, header, schedule):
         super().__init__(on_start=header)

@@ -36,6 +36,7 @@ class _Serial:
     Stays "open" after its bytes run out, which is what pyserial does and
     what makes an absent terminal marker a timeout rather than an EOF.
     """
+    out_waiting = 0  # #263: the send path drains this queue, bounded
 
     def __init__(self, *chunks: bytes) -> None:
         self.is_open = True

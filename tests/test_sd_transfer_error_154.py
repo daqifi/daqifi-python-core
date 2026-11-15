@@ -261,6 +261,7 @@ def test_download_the_total_cap_also_classifies_an_open_candidate(total_s, idle_
 
 
 class _SerialWithReply:
+    out_waiting = 0  # #263: the send path drains this queue, bounded
     def __init__(self, *reads: bytes):
         self.is_open = True
         self._reads = [bytearray(r) for r in reads]

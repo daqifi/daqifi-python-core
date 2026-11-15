@@ -68,6 +68,7 @@ BODY = b"1,2\r\n"
 
 class _Serial:
     """Serial-shaped: ``in_waiting`` and never EOF, as pyserial behaves."""
+    out_waiting = 0  # #263: the send path drains this queue, bounded
 
     def __init__(self, payload: bytes) -> None:
         self.is_open = True
