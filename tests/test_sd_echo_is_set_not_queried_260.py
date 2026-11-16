@@ -1524,3 +1524,99 @@ def test_a_device_that_stays_mute_still_refuses_when_exhausted():
         "a mute device must still refuse with the exhaustion message: %r"
         % str(err.value))
     assert port.get_writes == 0, "and nothing may be downloaded"
+
+
+@pytest.mark.parametrize("reader", ["send_command", "sd_list_files"],
+                         ids=["send_command", "sd_list_files"])
+def test_an_ordinary_command_read_reclaims_the_echoes_it_swallows(reader):
+    """⛔⛔ r10 AUDIT MEDIUM. After a setter timed out, an ordinary command
+    read consumed the late echo as part of its own response. The bytes had
+    left the port, so nothing could ever reclaim them: the spelling stayed
+    outstanding forever, and after enough cycles every download refused
+    with nothing left to reclaim.
+
+    Attribution now sits where bytes LEAVE THE PORT, so every reader inside
+    comm.py reclaims on the way past, whatever it was reading for.
+
+    ⚠ THE READER MUST PROVABLY BE THE CONSUMER. My first version let the
+    echo land during the NEXT setter attempt, which reclaimed it -- so the
+    `send_command` leg passed at the broken head having never routed a
+    single byte through `send_command`. The cell now waits until the echo
+    has ARRIVED, runs the reader, and asserts that THAT attempt's spelling
+    was reclaimed by it, before anything else touches the port.
+    """
+    port = _Device(echo_state=1, reply_delay=0.08)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.03
+    dev._comm.timeout = 0.2
+
+    def run_reader():
+        try:
+            if reader == "send_command":
+                dev._comm.send_command("SYST:ERR?", delay=0)
+            else:
+                dev.sd_list_files()
+        except Exception:                                     # noqa: BLE001
+            pass
+
+    for i in range(20):
+        with pytest.raises(EchoSetUnconfirmedError):
+            dev._comm.silence_echo_for_download()
+        mine = set(dev._comm._echo_spellings_outstanding)
+        assert mine, "the attempt must leave its spelling outstanding"
+
+        # Let the echo actually ARRIVE, so the reader is the consumer.
+        time.sleep(0.12)
+        assert port.in_waiting > 0, (
+            "iteration %d: the echo must be waiting before the reader runs, "
+            "or this cell is not testing %s at all" % (i, reader))
+
+        run_reader()
+
+        still = set(dev._comm._echo_spellings_outstanding) & mine
+        assert not still, (
+            "iteration %d: %s consumed the echo without reclaiming %r"
+            % (i, reader, sorted(still)[0][:20]))
+
+    # and the connection must still be usable
+    port.reply_delay = 0.02
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+    got, exc = _download(dev, port, timeout=30.0)
+    assert exc is None, "the connection must still download: %r" % exc
+    assert bytes(got) == PAYLOAD
+    assert port.get_writes >= 1, "and it must have reached the GET"
+
+
+def test_the_exhaustion_advice_does_not_send_the_caller_to_a_new_connection():
+    """⛔⛔ THIRD ROUND IN THIS PR WHERE THE ADVICE WAS THE DEFECT, and I had
+    written the lesson down two rounds earlier.
+
+    r5 said "use a NEW connection object" (which adopts the stale bytes).
+    r6 said "retry on THIS connection" (which matched the previous
+    attempt's marker). r10's exhaustion message said "open a new connection
+    to this port" -- and a fresh object draws blind against up to N markers
+    in flight, so it collides with NEAR CERTAINTY. That is the IG A
+    residual at its maximum, not at the 1/N the operator accepted.
+
+    Pinned as BEHAVIOUR, not as a phrase: the advice must name retrying on
+    this connection, and must not present a new connection as the remedy.
+    The mechanism it rests on is pinned by
+    `test_an_exhausted_pool_recovers_once_its_echoes_arrive`.
+    """
+    port = _Mute(echo_state=1)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.02
+    for _ in range(len(_family())):
+        with pytest.raises(EchoSetUnconfirmedError):
+            dev._comm.silence_echo_for_download()
+    with pytest.raises(EchoSetUnconfirmedError) as err:
+        dev._comm.silence_echo_for_download()
+
+    text = str(err.value).lower()
+    assert "this connection" in text, (
+        "the advice must point at THIS connection, which is where "
+        "reclamation can happen: %r" % text)
+    assert "do not open a new connection" in text, (
+        "and it must say plainly that a new connection is NOT the remedy, "
+        "because that is the action a reader would otherwise take: %r" % text)

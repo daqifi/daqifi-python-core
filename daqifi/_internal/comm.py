@@ -1742,7 +1742,7 @@ class SerialInterface:
                 break
             if pending:
                 try:
-                    self._serial.read(pending)
+                    self._consume_from_port(pending)
                 except (serial.SerialException, OSError):
                     break
                 empty_polls = 0
@@ -1868,6 +1868,38 @@ class SerialInterface:
     #: seeded.
     _echo_rng = random.SystemRandom()
 
+    def _consume_from_port(self, n: int, keep=None) -> bytes:
+        """Read ``n`` bytes from the port and ATTRIBUTE them on the way past.
+
+        ⛔ r10 AUDIT, MEDIUM: ORDINARY COMMAND READS WERE SWALLOWING LATE
+        SETTER ECHOES. After a setter timed out, a `send_command('SYST:ERR?')`
+        or a listing would read that late echo as part of its own response --
+        the bytes left the port, so nothing could ever reclaim them, and the
+        spelling stayed outstanding forever. After enough such cycles every
+        download refused and there was nothing left to reclaim.
+        
+        So attribution belongs where bytes LEAVE THE PORT, not in each
+        caller. Every reader inside this module goes through here; the
+        enumeration and the disposition of the readers OUTSIDE it are in the
+        commit message, because two of them live in other modules and
+        funnelling those is a larger change than this PR should carry.
+
+        ⚠ The bytes are still returned to the caller unchanged. Attribution
+        is bookkeeping about OUR OWN markers, not filtering: a caller's
+        response is its own business, and a setter echo that lands inside it
+        was already going to be noise to that caller.
+        """
+        data = self._serial.read(n)
+        if data:
+            self._echo_scan_tail.extend(data)
+            # `keep` is the spelling an in-progress scan is still waiting
+            # for: releasing it here would free the very marker that scan
+            # has not yet matched.
+            self._release_consumed_spellings(self._echo_scan_tail, keep=keep)
+            if len(self._echo_scan_tail) > self._ECHO_SCAN_TAIL_MAX:
+                del self._echo_scan_tail[:-self._ECHO_SCAN_TAIL_MAX]
+        return data
+
     def _reclaim_arrived_echoes(self) -> None:
         """Read what has ALREADY arrived and attribute it, without waiting.
 
@@ -1896,18 +1928,13 @@ class SerialInterface:
                 return          # a dead port is the caller's problem, not ours
             if not waiting:
                 break
-            chunk = self._serial.read(min(waiting,
-                                          self._ECHO_SCAN_TAIL_MAX - taken))
+            chunk = self._consume_from_port(
+                min(waiting, self._ECHO_SCAN_TAIL_MAX - taken))
             if not chunk:
                 break
             taken += len(chunk)
-            self._echo_scan_tail.extend(chunk)
-        # The SAME attribution path as the scan, so the r9 invariant holds:
-        # whatever is attributed is deleted from the tail, and a spelling is
-        # freed only together with the bytes that freed it.
-        self._release_consumed_spellings(self._echo_scan_tail)
-        if len(self._echo_scan_tail) > self._ECHO_SCAN_TAIL_MAX:
-            del self._echo_scan_tail[:-self._ECHO_SCAN_TAIL_MAX]
+        # Attribution already happened inside _consume_from_port, which is
+        # the single place that extends and trims the tail.
 
     def _release_consumed_spellings(self, buf, keep=None):
         """Release every family spelling whose echo appears in ``buf``, and
@@ -2007,11 +2034,26 @@ class SerialInterface:
         outstanding echo can match, waits for THAT one, and discards earlier
         family members as the known bytes they are.
 
-        ⚠ WITHIN ONE OBJECT THIS IS DETERMINISTIC, not probabilistic: the
-        object knows exactly which spellings it has sent and not yet
-        consumed. ACROSS objects it is not -- a new object cannot know
-        another's outstanding spellings -- and that residual is stated in
-        the PR body rather than papered over here.
+        ⚠ WITHIN ONE OBJECT THIS IS DETERMINISTIC, not probabilistic --
+        BUT ONLY WHILE NO EARLIER RESPONSE IS STILL IN FLIGHT. The object
+        knows exactly which spellings it has sent and not yet consumed, so
+        no echo of ITS OWN can be mistaken for another. It knows nothing
+        about a previous GET's payload: file content can contain any
+        spelling, so a download that timed out with bytes still coming can
+        feed the next scan a marker out of DATA. Measured with a file
+        crafted to contain all 128 spellings: 13,952 bytes of the old file
+        returned as the new one.
+        
+        That is the in-band-signalling class -- the marker shares a channel
+        with the payload -- and no content-based marker closes it; it needs
+        a state guard ("a GET was sent whose response did not complete"),
+        which is tracked separately. The same hazard is PRE-EXISTING and
+        broader before this change: on main the stale bytes come back for
+        ORDINARY file content, with no crafting at all.
+
+        ACROSS objects the choice is not deterministic either -- a new
+        object cannot know another's outstanding spellings -- and that
+        residual is ruling IG A's, stated in the PR body.
 
         A port fault propagates unwrapped, per pc#267's contract: all six
         send sites report a stuck output queue identically.
@@ -2033,10 +2075,17 @@ class SerialInterface:
                 "all %d echo-setter spellings are outstanding on this "
                 "connection, so every one of them could be matched by an "
                 "echo still in flight; no download attempted. Each "
-                "unconfirmed attempt consumes one. Open a new connection to "
-                "this port -- ⚠ which resets only the HOST's bookkeeping, "
-                "not the device's queue, so bytes already queued may still "
-                "arrive." % len(self._ECHO_SET_SILENT_FAMILY)
+                "unconfirmed attempt consumes one, and each is returned "
+                "when its echo is read. ⚠ DO NOT OPEN A NEW CONNECTION: a "
+                "fresh object draws blind against up to %d markers still in "
+                "flight, which collides with near certainty -- far worse "
+                "than retrying here. Let the device go quiet, then retry on "
+                "THIS connection: any command read, or the next attempt, "
+                "reclaims the spellings whose echoes have landed. If it "
+                "never clears, the device is still emitting and only a "
+                "power cycle or a device-side drain will settle it."
+                % (len(self._ECHO_SET_SILENT_FAMILY),
+                   len(self._ECHO_SET_SILENT_FAMILY))
             )
 
         framing = spelling + b"\r\n"
@@ -2067,7 +2116,8 @@ class SerialInterface:
         self._release_consumed_spellings(seen, keep=spelling)
         while True:
             if getattr(self._serial, "in_waiting", 0):
-                seen.extend(self._serial.read(self._serial.in_waiting))
+                seen.extend(self._consume_from_port(
+                    self._serial.in_waiting, keep=spelling))
                 # ⛔ r7 AUDIT, MEDIUM: RELEASE ON CONSUMPTION, NOT ON
                 # SUCCESS. These bytes have left the port and will be
                 # dropped when this call returns, so any spelling among them
@@ -2273,7 +2323,7 @@ class SerialInterface:
 
             while (time.time() - start_time) < self.timeout:
                 if self._serial.in_waiting > 0:
-                    chunk = self._serial.read(self._serial.in_waiting)
+                    chunk = self._consume_from_port(self._serial.in_waiting)
                     response += chunk
                     # Give a bit more time for any trailing data
                     time.sleep(0.05)
