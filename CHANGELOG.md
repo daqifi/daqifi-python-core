@@ -634,17 +634,15 @@ which was never tagged.
   for a 176-character name. A file that merely begins with `DAQIFI> ` loses
   those 8 bytes. Before 0.2.0 the text download already lost these bytes
   and the binary download kept most or all of them. Ordinary log files are
-  not affected. If your files can begin with `DAQIFI>`,
-  compare the downloaded length with the size `sd_list_files()` reports
-  (`sd_get_file_size()`). Fixed device-side by
-  daqifi/daqifi-nyquist-firmware#1265; host adoption is tracked in #260.
+  not affected. The shortened file is returned without an error. A
+  device-side fix is in progress (daqifi/daqifi-nyquist-firmware#1265);
+  python-core will use it under #260.
 - **After an SD download times out, the next download on the same device
   object can return the previous file's bytes.** A timeout leaves the rest
   of that file still arriving, and the next `sd_get_file` or
   `sd_get_file_binary` reads it as part of its own file, with no error.
-  After a download times out, disconnect, wait for the device to finish
-  sending, and reconnect before downloading again, and check the length of
-  the next file against the listed size. Tracked in #268.
+  There is no verified workaround yet, so do not trust a download made on
+  the same device object after one has timed out. Tracked in #268.
 
 ## [0.1.0]
 
