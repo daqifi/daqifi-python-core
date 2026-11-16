@@ -1475,6 +1475,18 @@ class SerialInterface:
         #: Deadline for the drain after each command write, in seconds. A
         #: drain that misses it raises instead of hanging the caller (#263).
         self.send_drain_timeout: float = SEND_DRAIN_TIMEOUT_S
+        #: Echo-setter spellings written on THIS connection whose echo has not
+        #: been accounted for. A new attempt never reuses one.
+        #:
+        #: ⛔ PER INSTANCE, AND IT HAS TO BE. The poison flag this replaces
+        #: was a CLASS attribute and that was safe, because `self.x = v`
+        #: REBINDS onto the instance. A set is MUTATED instead:
+        #: `self.x.add(v)` would reach the one class-level object, so every
+        #: SerialInterface in the process would share a single pool and one
+        #: device's unconfirmed attempts would exhaust another's family and
+        #: refuse its downloads.
+        #: `test_two_connections_do_not_share_the_spelling_pool` pins it.
+        self._echo_spellings_outstanding: set = set()
 
     def _cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
@@ -1773,6 +1785,10 @@ class SerialInterface:
     #: `test_the_download_marker_cannot_be_forged_by_open_or_close` pins the
     #: distinctness, so changing open()'s spelling fails loudly here rather
     #: than silently recreating the collision.
+    #: The family's first member, kept as a name for the pins that compare
+    #: the download's marker against open()'s and close()'s traffic. Every
+    #: member shares this prefix, so distinctness proven for it holds for
+    #: all of them.
     _ECHO_SET_SILENT = b"SYST:ECHO -1"
     _ECHO_PROMPT = b"DAQIFI> "
 
@@ -1792,50 +1808,103 @@ class SerialInterface:
     #: separates them), so scanning for the second never matches the first.
     _ECHO_SET_FRAMED = b"SYST:ECHO 1"
 
+    #: ⛔ ONE VALUE, EIGHT DISTINCT MARKERS. `-1`, `-01`, `-001`, ... all set
+    #: the console silent, and the device echoes whichever spelling it was
+    #: sent, VERBATIM -- so the marker carries a per-attempt nonce even
+    #: though `SYSTem:ECHO` has no nonce field. That is what closes the r6
+    #: HIGH: a retry waits for ITS spelling instead of matching the previous
+    #: attempt's identical echo.
+    #:
+    #: ⚠ BOUNDED ON PURPOSE. Each unconfirmed attempt consumes one spelling
+    #: and does not give it back, because its echo may still arrive. When
+    #: all eight are outstanding the next call REFUSES rather than wrapping
+    #: onto `-1` again, since reusing an outstanding spelling is precisely
+    #: the defect. Eight is a budget, not a guarantee; a caller retrying
+    #: forever on a mute device is told so rather than silently losing the
+    #: protection.
+    #:
+    #: ⚠ No member may be a substring of another (with its terminator), or
+    #: a scan for one would match inside another;
+    #: `test_the_spelling_family_members_cannot_match_inside_one_another`
+    #: pins that, and
+    #: `test_the_download_marker_cannot_be_forged_by_open_or_close`
+    #: pins distinctness from open()'s full `SYSTem:ECHO -1`.
+    _ECHO_SET_SILENT_FAMILY = tuple(
+        b"SYST:ECHO -" + b"0" * n + b"1" for n in range(8))
+
+    def _next_echo_spelling(self):
+        """The lowest-index family spelling whose echo is NOT outstanding.
+
+        ⛔⛔ r6 AUDIT, HIGH: THE RETRY WAS THE DEFECT, and my own exception
+        text advised it. r6 used ONE spelling, so attempt 2's search matched
+        attempt 1's echo arriving late; the GET then went out with attempt
+        2's own marker still in flight. Measured by both audit legs:
+        b'SYST:ECHO -1\r\nabc' returned as a successful download, and the
+        marker plus a prompt spliced between payload chunks 019 and 020.
+
+        ⭐ The echo returns bytes WE CHOSE, so the marker can carry a nonce
+        even though `SYSTem:ECHO` has no nonce field. `-1`, `-01`, `-001`
+        are one value and three distinct markers.
+
+        ⚠ MEASURED ON HARDWARE, not just read at source. On this lane's
+        registered board, 2026-11-15: `SYST:ECHO -01` with echo on echoes
+        back as exactly
+        `SYST:ECHO -01` -- the leading zero is NOT normalised away -- the
+        following `SYST:ECHO?` reads `-1`, and `SYST:ERR?` stays
+        `0,"No error"`. At source that is `strtol(str, &endptr, 10)`
+        (utils.c) under `DaqifiIntTokenFullyConsumed` (parser.c), which
+        requires the whole token to convert.
+        """
+        for spelling in self._ECHO_SET_SILENT_FAMILY:
+            if spelling not in self._echo_spellings_outstanding:
+                return spelling
+        return None
+
     def silence_echo_for_download(self) -> bytes:
         """Set the console silent before a download. Returns the framing
         bytes that may still appear at the head of the next response.
 
-        ⛔ WHY THIS REPLACED A PROBE (#260 r6, audit r5 finding 1). The
-        probe asked `SYSTem:ECHO?` and tried to decide, from the reply's
-        CONTENT, whether that reply was its own. It cannot be done: the
-        query takes no nonce, so every probe's reply is the same four bytes.
-        Every round from r2 to r5 added machinery to that unanswerable
-        question and the audit broke each one.
+        ⛔ WHY THIS IS A SET AND NOT A PROBE (#260 r6, audit r5 finding 1).
+        A probe asked `SYSTem:ECHO?` and tried to decide from the reply's
+        CONTENT whether that reply was its own. It cannot be done: the query
+        takes no nonce, so every probe's reply is the same four bytes, and
+        the per-object flag that stood in for attribution does not survive a
+        new connection object -- which r5's own refusal advised creating.
 
-        ⭐ The state is what the download needs, and a SET reaches the state
-        without asking anything. #260's text suggested a query; its GOAL is
-        the echo state.
+        ⛔ WHY EACH ATTEMPT USES A DIFFERENT SPELLING (audit r6). One
+        spelling made every attempt's marker identical, so a retry
+        synchronised on the PREVIOUS attempt's echo and sent the GET with
+        its own still in flight. Each attempt now takes a spelling no
+        outstanding echo can match, waits for THAT one, and discards earlier
+        family members as the known bytes they are.
 
-        What this still has to handle is the setter's OWN framing: if echo
-        is on when the setter lands, the device echoes the setter line and
-        may follow it with a prompt. ⚠ THE DIFFERENCE THAT MATTERS is that
-        those are EXACT KNOWN BYTES, which `-1\r\n` never was:
-
-        * consumed BY CONTENT here when they arrive in time -- the scan
-          discards anything ahead of them, which also sweeps out whatever a
-          previous client left in flight; and
-        * returned to the caller when they do not, so the receiver strips
-          them as a PREFIX. `_PreambleSkip` removes a candidate only when a
-          PROMPT follows it, so a payload that was never framed is passed
-          through untouched.
-
-        Either way no decision rests on attributing a reply to a request.
-
-        ⚠ RESIDUAL, stated rather than hidden: if the set does not take
-        effect at all -- a device that rejects it, which would also push an
-        SCPI error -- the GET is still echoed, and the GET's echo is not the
-        prefix returned here, so it would reach the caller's file. That is a
-        device fault with a visible symptom, not a silent corruption, and it
-        is strictly narrower than r5's hazard (a reply nobody could place).
+        ⚠ WITHIN ONE OBJECT THIS IS DETERMINISTIC, not probabilistic: the
+        object knows exactly which spellings it has sent and not yet
+        consumed. ACROSS objects it is not -- a new object cannot know
+        another's outstanding spellings -- and that residual is stated in
+        the PR body rather than papered over here.
 
         A port fault propagates unwrapped, per pc#267's contract: all six
         send sites report a stuck output queue identically.
         """
-        # Local import, matching this module's style for exception types.
         from ..exceptions import EchoSetUnconfirmedError
 
-        framing = self._ECHO_SET_SILENT + b"\r\n"
+        spelling = self._next_echo_spelling()
+        if spelling is None:
+            # ⛔ REFUSE RATHER THAN WRAP. Reusing a spelling whose echo is
+            # still outstanding is exactly the r6 defect, so an exhausted
+            # family is a refusal and not a reason to start again at `-1`.
+            raise EchoSetUnconfirmedError(
+                "all %d echo-setter spellings are outstanding on this "
+                "connection, so every one of them could be matched by an "
+                "echo still in flight; no download attempted. Each "
+                "unconfirmed attempt consumes one. Open a new connection to "
+                "this port -- ⚠ which resets only the HOST's bookkeeping, "
+                "not the device's queue, so bytes already queued may still "
+                "arrive." % len(self._ECHO_SET_SILENT_FAMILY)
+            )
+
+        framing = spelling + b"\r\n"
         if self._serial is None or not getattr(self._serial, "is_open", False):
             return framing
 
@@ -1844,62 +1913,76 @@ class SerialInterface:
         # ahead of the clock can spend the whole budget before it starts.
         deadline = time.monotonic() + self.ECHO_SET_TIMEOUT_S
 
-        # Echo ON, then OFF. The second line's echo is therefore certain,
-        # which is what gives the scan below a marker to synchronise on in
-        # every starting state.
+        # Echo ON, then OFF in the chosen spelling. The second line's echo
+        # is therefore certain -- microrl gates on the state as characters
+        # arrive -- which is what gives the scan a marker in every starting
+        # state.
+        self._echo_spellings_outstanding.add(spelling)
         self._serial.write(self._ECHO_SET_FRAMED + b"\r\n")
         self._serial.write(framing)
         drain_output_bounded(
             self._serial, max(0.0, deadline - time.monotonic()))
 
-        # Consume the setter's echo BY CONTENT, never by quiet time. A
-        # do-while: read first, check the clock after, so a reply that is
-        # already waiting is never missed by a timer that expired first.
+        # Consume THIS attempt's echo by CONTENT, never by quiet time. A
+        # do-while: read first, check the clock after, so a reply already
+        # waiting is never missed by a timer that expired first.
         seen = bytearray()
         while True:
             if getattr(self._serial, "in_waiting", 0):
                 seen.extend(self._serial.read(self._serial.in_waiting))
             end = seen.find(framing)
             if end >= 0:
-                # Found our own echo. Everything BEFORE it is foreign --
-                # another object's stale reply, a previous prompt -- and is
-                # discarded here, which is the resync the probe could never
-                # perform. Consume the trailing prompt too when present.
+                # ⛔ ONLY THIS SPELLING COUNTS. An earlier family member
+                # arriving first sits in the bytes BEFORE our marker and is
+                # discarded with everything else there -- foreign traffic, a
+                # stale prompt, another client's reply. That discard is the
+                # resync, and accepting any family member instead would
+                # restore the r6 defect exactly.
+                consumed = bytes(seen[:end])
                 rest = seen[end + len(framing):]
                 if rest.startswith(self._ECHO_PROMPT):
                     rest = rest[len(self._ECHO_PROMPT):]
-                # ⚠ ANYTHING LEFT IS DISCARDED, and that is safe for a
-                # reason worth stating: the GET has not been written yet, so
-                # nothing behind our own marker can belong to the download.
-                # It is leftover console traffic, and dropping it here is
-                # the point rather than a loss.
+                # Anything left belongs to no response: the GET has not been
+                # written yet, so dropping it here is the point.
                 del rest
+                # Our own echo is accounted for, and so is any earlier
+                # spelling whose echo we just swept up -- those spellings
+                # become reusable, which is what keeps a long-lived
+                # connection from exhausting the family.
+                self._echo_spellings_outstanding.discard(spelling)
+                for older in self._ECHO_SET_SILENT_FAMILY:
+                    if older + b"\r\n" in consumed:
+                        self._echo_spellings_outstanding.discard(older)
                 return b""
             if time.monotonic() >= deadline:
-                # ⛔⛔ REFUSE, DO NOT PROCEED -- and this is the one decision
-                # the probe design could never make soundly. The marker is
-                # GUARANTEED to be coming: echo was switched on immediately
-                # before, so the device will echo that line. "Not here yet"
-                # therefore means "still in flight", never "nothing was
-                # coming" -- which is exactly the ambiguity `SYSTem:ECHO?`
-                # could not resolve, because a missing `-1\r\n` could equally
-                # mean a silent console.
+                # ⛔⛔ REFUSE, DO NOT PROCEED. The marker is GUARANTEED to be
+                # coming: echo was switched on immediately before, so the
+                # device will echo that line. "Not here yet" therefore means
+                # "still in flight", never "nothing was coming" -- the
+                # ambiguity `SYSTem:ECHO?` could not resolve, since a missing
+                # `-1\r\n` could equally mean a silent console.
                 #
                 # Proceeding puts our own echo inside the file. Measured with
                 # a 0.65 s device against a 0.5 s budget:
-                # b'000,...,004,SYSTem:ECHO -1\r\nDAQIFI> 005,...' -- and a
-                # PREFIX strip cannot reach it there, which is why returning
-                # it as a strippable candidate was not good enough.
+                # b'000,...,004,SYST:ECHO -1\r\nDAQIFI> 005,...', which a
+                # PREFIX strip cannot reach.
+                #
+                # The spelling stays OUTSTANDING, so the next attempt takes a
+                # different one and cannot mistake this echo for its own.
                 raise EchoSetUnconfirmedError(
-                    "the echo setter's own echo did not arrive within "
+                    "the echo setter's own echo (%r) did not arrive within "
                     "%.2fs, so it is still in flight and would land inside "
-                    "the downloaded file; no download attempted. Retry on "
-                    "THIS connection -- the next attempt discards everything "
-                    "ahead of the marker it finds. ⚠ Do NOT reconnect to "
-                    "escape this: the bytes are queued on the DEVICE, and a "
-                    "new connection object cannot discard what has not "
-                    "arrived yet (r5 finding 1)."
-                    % self.ECHO_SET_TIMEOUT_S
+                    "the downloaded file; no download attempted. ⚠ RETRY ON "
+                    "THIS CONNECTION: the next attempt uses a different "
+                    "spelling of the same command, waits for that one, and "
+                    "discards this one as known bytes. %d of %d spellings "
+                    "remain. Reconnecting does NOT help -- the bytes are "
+                    "queued on the DEVICE and a new object cannot discard "
+                    "what has not arrived (r5 finding 1)."
+                    % (bytes(spelling), self.ECHO_SET_TIMEOUT_S,
+                       len(self._ECHO_SET_SILENT_FAMILY)
+                       - len(self._echo_spellings_outstanding),
+                       len(self._ECHO_SET_SILENT_FAMILY))
                 )
             time.sleep(0.005)
 
