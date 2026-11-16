@@ -55,7 +55,15 @@ PROMPT = b"DAQIFI> "
 SETTER = b"SYST:ECHO -1"
 SET_FRAMED = b"SYST:ECHO 1"
 OPEN_SETTER = b"SYSTem:ECHO -1"      # what open() writes
-FAMILY = [b"SYST:ECHO -" + b"0" * n + b"1" for n in range(8)]
+# ⛔ THE FAKE'S VOCABULARY MUST COVER THE IMPLEMENTATION'S. Kept as a local
+# literal so a cell run against an older head does not die on a missing
+# attribute -- but when the implementation grew from 8 spellings to 128 and
+# this list did not, the fake stopped recognising 120 of them and emitted NO
+# echo for those: every attempt then timed out, nothing was ever released,
+# and the pool-leak cell "found" a leak that was really my fake not
+# answering. A fake narrower than its subject turns "works" into "times
+# out". `test_the_fake_covers_every_implementation_spelling` pins the match.
+FAMILY = [b"SYST:ECHO -" + b"0" * n + b"1" for n in range(128)]
 
 
 def _family_member(text):
@@ -406,10 +414,14 @@ def test_the_setter_is_written_before_the_get(monkeypatch):
     dev = _fresh_device(port)
     _download(dev, port)
     wire = bytes(port.written)
-    assert SETTER in wire, "the setter must reach the wire: %r" % wire
+    # ⚠ ANY family member. The choice is random, so the literal
+    # `SYST:ECHO -1` is picked about 1 time in 128 -- an assertion on it
+    # would be a 0.8%-pass test, and it was exactly that until this round.
+    used = [sp for sp in FAMILY if sp + b"\r\n" in wire]
+    assert used, "a setter spelling must reach the wire: %r" % wire[:80]
     assert b"SD:GET" in wire.upper(), "the GET must reach the wire: %r" % wire
-    assert wire.index(SETTER) < wire.upper().index(b"SD:GET"), (
-        "the setter must precede the GET: %r" % wire)
+    assert wire.index(used[0]) < wire.upper().index(b"SD:GET"), (
+        "the setter must precede the GET: %r" % wire[:80])
 
 
 def test_the_download_marker_cannot_be_forged_by_open_or_close():
@@ -565,9 +577,11 @@ def test_the_state_is_set_for_every_download_not_once_per_session():
     port._payload = content + END_OF_FILE_MARKER
     assert dev.sd_get_file_binary("log.csv", timeout=2.0) == content, (
         "the second download must set the state again, not assume it")
-    assert bytes(port.written).count(SETTER) == 2, (
-        "one setter per download, not one per session: wrote %r"
-        % bytes(port.written))
+    wire = bytes(port.written)
+    setters = sum(wire.count(sp + b"\r\n") for sp in FAMILY)
+    assert setters == 2, (
+        "one setter per download, not one per session: counted %d in %r"
+        % (setters, wire[:120]))
 
 
 class _BlockingFlush(_Simple):
@@ -902,8 +916,12 @@ def test_the_family_is_bounded_and_exhaustion_refuses_rather_than_wrapping():
     """⛔ EXHAUSTION IS A REFUSAL, not a wrap. Reusing a spelling whose echo
     is still outstanding is the r6 defect, so running out is reported.
     """
-    port = _Device(echo_state=-1, reply_delay=_comm_budget() + 0.5)
+    port = _Mute(echo_state=1)
     dev = _fresh_device(port)
+    # ⚠ A SHORT BUDGET, because N is now 128. At the 2 s default this cell
+    # took 258 s on its own: it was written when the family had 8 members
+    # and silently became the slowest thing in the suite when N grew.
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.05
     n = len(_family())
     for _ in range(n):
         with pytest.raises(EchoSetUnconfirmedError):
@@ -930,7 +948,9 @@ def test_a_consumed_echo_returns_its_spelling_to_the_pool():
     """
     port = _Device(echo_state=1)          # answers inside the budget
     dev = _fresh_device(port)
-    for i in range(len(_family()) + 3):
+    # Six is enough to show the pool is returned; looping all N+3 cost
+    # ~90 s and proved nothing more.
+    for i in range(6):
         got, exc = _download(dev, port)
         assert exc is None, "download %d must succeed: %r" % (i, exc)
         assert bytes(got) == PAYLOAD
@@ -938,6 +958,10 @@ def test_a_consumed_echo_returns_its_spelling_to_the_pool():
     assert dev._comm._echo_spellings_outstanding == set(), (
         "every consumed echo must free its spelling: %r"
         % dev._comm._echo_spellings_outstanding)
+    used = [sp for sp in FAMILY if sp + b"\r\n" in bytes(port.written)]
+    assert len(used) >= 2, (
+        "6 downloads on one connection should not keep reusing one "
+        "spelling; the choice is random: %d distinct" % len(used))
 
 
 def test_two_connections_do_not_share_the_spelling_pool():
@@ -950,8 +974,12 @@ def test_two_connections_do_not_share_the_spelling_pool():
     process -- and one device's unconfirmed attempts would refuse another
     device's downloads.
     """
-    a = _fresh_device(_Device(echo_state=-1,
-                             reply_delay=_comm_budget() + 0.5))
+    a = _fresh_device(_Mute(echo_state=1))
+    # ⚠ A MUTE DEVICE AND A SHORT BUDGET. Exhausting the pool needs echoes
+    # that never arrive (a slow device's are reclaimed), and at the 2 s
+    # default N=128 attempts took 258 s -- this cell quietly became the
+    # slowest in the suite when N grew, exactly as the exhaustion cell did.
+    a._comm.ECHO_SET_TIMEOUT_S = 0.05
     b_port = _Device(echo_state=1)
     b = _fresh_device(b_port)
 
@@ -984,6 +1012,21 @@ def test_the_spelling_family_members_cannot_match_inside_one_another():
                 "%r matches inside %r, so a scan could sync on the wrong "
                 "attempt" % (a, b)
             )
+
+
+class _Mute(_Device):
+    """Answers nothing at all: no echo, ever.
+
+    ⛔ THE ONLY WAY TO EXHAUST THE POOL once a timed-out attempt reclaims
+    the echoes it consumed. Against a merely SLOW device the pool plateaus
+    at the number genuinely in flight, which is the correct behaviour and
+    therefore useless for testing exhaustion. The exhaustion path needs a
+    device whose echoes never arrive at all -- a mute console, a dead link.
+    """
+
+    def write(self, data):
+        self.written.extend(data)
+        return len(data)
 
 
 class _SlowThenFast(_Device):
@@ -1038,3 +1081,198 @@ def test_the_retry_the_refusal_advises_actually_SUCCEEDS():
     used = [m for m in FAMILY if m + b"\r\n" in bytes(port.written)]
     assert len(used) >= 2, (
         "the retry must use a DIFFERENT spelling: %r" % used)
+
+
+# ---------------------------------------------------------------------------
+# r7 audit: the cross-object choice, and the leaked pool
+# ---------------------------------------------------------------------------
+
+class _PinnedChoice:
+    """A stand-in for SystemRandom that returns a spelling we select.
+
+    ⛔ THE RESIDUAL IS PINNED FROM BOTH SIDES. Pinned to the COLLIDING
+    choice the cell must reproduce the corruption, which is what shows the
+    residual is real and what it costs; pinned to any OTHER choice it must
+    come back byte-exact, which is what shows the collision is the only way
+    in. A cell that only ever drew randomly would be flaky in one direction
+    and silent in the other.
+    """
+
+    def __init__(self, wanted):
+        self.wanted = wanted
+
+    def choice(self, seq):
+        return self.wanted if self.wanted in seq else seq[0]
+
+
+def test_a_new_object_colliding_on_the_previous_marker_is_the_known_residual():
+    """⛔⛔ r7 AUDIT HIGH, and it invalidated the number I gave the operator.
+
+    A's download times out, leaving its spelling queued on the device. A is
+    closed, B is opened on the same port and downloads at once. At
+    f1188119 B picked the LOWEST-INDEX free spelling -- always `-1`, the one
+    A had just used -- so B synchronised on A's echo and its own setter
+    echoes became file content. Measured there:
+    b'SYSTem:ECHO -1\r\nSYST:ECHO -1\r\n' + payload.
+
+    ⚠ That made the first collision after a reconnect CERTAIN on this
+    schedule, where ruling IG A had been granted on a premise of "about 1/8
+    per attempt". The code now picks uniformly at random among the free
+    spellings, so the collision is exactly 1-in-N and this cell pins what it
+    looks like when it happens.
+    """
+    port = _Device(echo_state=1, reply_delay=1.0)
+    a = _fresh_device(port)
+    a._comm.ECHO_SET_TIMEOUT_S = 0.3
+
+    with pytest.raises(EchoSetUnconfirmedError):
+        a.sd_get_file_binary("x.bin", timeout=10.0)
+    leaked = sorted(a._comm._echo_spellings_outstanding)
+    assert len(leaked) == 1, "A must leave exactly one spelling: %r" % leaked
+    collided = leaked[0]
+    a._comm.close()
+
+    # B, on the SAME physical port, pinned to the colliding choice.
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    b = _fresh_device(port)
+    b._comm.ECHO_SET_TIMEOUT_S = 2.0
+    b._comm._echo_rng = _PinnedChoice(collided)
+    got, exc = _download(b, port, timeout=30.0)
+    if exc is None:
+        assert bytes(got) != PAYLOAD, (
+            "pinned to the COLLIDING spelling this must reproduce the "
+            "residual; if it comes back clean the cell has stopped "
+            "measuring anything")
+
+    # B', pinned to any other spelling, must be byte-exact.
+    other = next(sp for sp in FAMILY if sp != collided)
+    port2 = _Device(echo_state=1, reply_delay=1.0)
+    port2.seed_foreign(collided + b"\r\n" + PROMPT, 0.4)
+    b2 = _fresh_device(port2)
+    b2._comm._echo_rng = _PinnedChoice(other)
+    got2, exc2 = _download(b2, port2, timeout=30.0)
+    assert exc2 is None, "a non-colliding choice must succeed: %r" % exc2
+    assert bytes(got2) == PAYLOAD, (
+        "a non-colliding choice must be byte-exact even with the other "
+        "spelling in flight: %r" % bytes(got2))
+
+
+def test_the_spelling_choice_is_not_lowest_index():
+    """⛔ THE CHOICE MUST NOT BE DETERMINISTIC, pinned so a mutation back to
+    "lowest free index" is red.
+
+    A fresh object has an empty outstanding set, so a deterministic rule
+    makes every object in the fleet choose identically -- and then the
+    cross-object collision is not 1-in-N, it is certain whenever the
+    previous object's marker is still in flight.
+    """
+    comm = NyquistDevice("COM41")._comm
+    picks = {comm._next_echo_spelling() for _ in range(40)}
+    assert len(picks) > 1, (
+        "40 draws from an empty outstanding set returned one spelling, so "
+        "the choice is deterministic: %r" % picks)
+    from daqifi._internal.comm import SerialInterface as SI
+    assert len(SI._ECHO_SET_SILENT_FAMILY) >= 64, (
+        "the residual is 1/N, so N must be large enough to be worth "
+        "stating: N=%d" % len(SI._ECHO_SET_SILENT_FAMILY))
+
+
+def test_the_residual_probability_is_one_over_N_and_N_is_stated():
+    """The number in the residual is part of the claim, so it is asserted
+    rather than written only in prose. N is bounded by the firmware's
+    MEASURED single-command ceiling (243 B for this abbreviated form), not
+    by SCPI_INPUT_BUFFER_LENGTH.
+    """
+    from daqifi._internal.comm import SerialInterface as SI
+    n = len(SI._ECHO_SET_SILENT_FAMILY)
+    assert n == 128, "N changed; the PR body states 1/%d" % n
+    longest = max(len(sp) for sp in SI._ECHO_SET_SILENT_FAMILY)
+    assert longest == 139, "longest spelling %d B" % longest
+    assert longest < 237, (
+        "the longest spelling must stay inside the measured 237 B "
+        "single-command ceiling, or libscpi rejects it as "
+        "INPUT_BUFFER_OVERRUN before the callback runs: %d B" % longest)
+
+
+def test_timed_out_retries_do_not_leak_the_pool():
+    """⛔⛔ r7 AUDIT MEDIUM. Spellings were released only when the CURRENT
+    attempt's marker matched, so each timed-out retry consumed the previous
+    attempt's echo without reclaiming it. Eight retries against a slow
+    device left seven consumed spellings marked outstanding, and every later
+    download refused forever -- even after the device recovered.
+
+    A spelling is now released the moment its echo is consumed, whoever
+    consumes it.
+    """
+    port = _Device(echo_state=1, reply_delay=1.0)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.3
+
+    for _ in range(8):
+        with pytest.raises(EchoSetUnconfirmedError):
+            dev._comm.silence_echo_for_download()
+    after_8 = len(dev._comm._echo_spellings_outstanding)
+    for _ in range(8):
+        with pytest.raises(EchoSetUnconfirmedError):
+            dev._comm.silence_echo_for_download()
+    after_16 = len(dev._comm._echo_spellings_outstanding)
+
+    # ⛔ THE INVARIANT IS "DOES NOT GROW WITHOUT BOUND", not a magic
+    # threshold. A correct implementation holds a few spellings -- the ones
+    # genuinely in flight, about latency/period -- and reclaims the rest, so
+    # the count PLATEAUS. My first version asserted `<= 2` and failed on
+    # correct code that sat at 3, which is a pin measuring my arithmetic
+    # rather than the behaviour.
+    assert after_8 < 8, (
+        "16 attempts consumed %d spellings without reclaiming: a timed-out "
+        "retry must release the echo it consumed" % after_8)
+    assert after_16 <= after_8, (
+        "the pool grew from %d to %d over the second eight attempts, so it "
+        "is leaking, just more slowly" % (after_8, after_16))
+
+    # The device recovers. The next download must work.
+    port.reply_delay = 0.05
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+    got, exc = _download(dev, port, timeout=30.0)
+    assert exc is None, (
+        "after the device recovers the next download must succeed, not "
+        "refuse on a leaked pool: %r" % exc)
+    assert bytes(got) == PAYLOAD
+
+
+def test_the_fake_covers_every_implementation_spelling():
+    """⛔ COUPLING, because the mismatch is SILENT and reads as a defect.
+
+    When the implementation's family grew and this module's local FAMILY did
+    not, the fake answered 8 spellings and ignored 120 -- so every attempt
+    using an unrecognised one timed out, and the pool-leak cell reported a
+    leak that was really the fake refusing to speak. Nothing failed loudly;
+    the cells just measured the wrong thing.
+    """
+    from daqifi._internal.comm import SerialInterface as SI
+    missing = [sp for sp in SI._ECHO_SET_SILENT_FAMILY if sp not in FAMILY]
+    assert not missing, (
+        "%d implementation spellings this fake would not answer (first %r) "
+        "-- every attempt using one would time out for a reason that has "
+        "nothing to do with the behaviour under test"
+        % (len(missing), missing[0][:20]))
+
+
+def test_the_shared_helper_covers_every_implementation_spelling():
+    """⛔ THE SAME COUPLING, one level down, and the level that actually bit.
+
+    The pin above checks this module's local list. The SHARED helper has its
+    own, and when that one lagged the implementation the fakes stopped
+    recognising the setter entirely -- so they treated it as the GET and
+    released their payload early, turning eight unrelated cells red. One
+    pin per vocabulary, because each can drift alone.
+    """
+    from daqifi._internal.comm import SerialInterface as SI
+    from tests._sd_echo_setter import ECHO_SET_SILENT_FAMILY
+    missing = [sp for sp in SI._ECHO_SET_SILENT_FAMILY
+               if sp not in ECHO_SET_SILENT_FAMILY]
+    assert not missing, (
+        "%d implementation spellings the SHARED helper would not recognise "
+        "(first %r): every fake using it would mistake the setter for the "
+        "GET" % (len(missing), missing[0][:20]))

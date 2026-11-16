@@ -24,7 +24,22 @@ import time
 #: `SYSTem:ECHO 1`, so a full-spelling marker here would be byte-identical
 #: to open()'s echo and the download would synchronise on the wrong one.
 ECHO_SET_FRAMED = b"SYST:ECHO 1"
-ECHO_SET_SILENT = b"SYST:ECHO -1"
+
+#: ⛔ THE WHOLE FAMILY, because the download picks one at RANDOM. `-1`,
+#: `-01`, `-001`, ... all set the console silent and the device echoes
+#: whichever it was sent, verbatim.
+#:
+#: ⛔⛔ A FAKE NARROWER THAN ITS SUBJECT FAILS SILENTLY AND MISLEADINGLY.
+#: When the implementation grew from 8 spellings to 128 and this helper
+#: still knew only `SYST:ECHO -1`, every other spelling stopped being
+#: recognised as echo traffic -- so the fakes treated the SETTER as the GET
+#: and released their payload early, and eight unrelated cells (case-D,
+#: setter-before-GET, state-per-download, no-flush) went red for a reason
+#: that had nothing to do with what they test.
+#: `test_the_shared_helper_covers_every_implementation_spelling` pins it.
+ECHO_SET_SILENT_FAMILY = tuple(
+    b"SYST:ECHO -" + b"0" * n + b"1" for n in range(128))
+ECHO_SET_SILENT = ECHO_SET_SILENT_FAMILY[0]
 
 #: What open() and close() write. Present so a fake can model them as the
 #: distinct commands they are.
@@ -47,7 +62,11 @@ def echo_setter_reply(written, echo_state):
     line's echo certain from any starting state.
     """
     text = bytes(written)
-    for cmd in (ECHO_SET_SILENT, OPEN_SET_SILENT):
+    # Longest first: a scan that matched `-1` inside `-01` would answer with
+    # the wrong spelling, which is the very confusion the family exists to
+    # prevent.
+    for cmd in sorted(ECHO_SET_SILENT_FAMILY + (OPEN_SET_SILENT,),
+                      key=len, reverse=True):
         if cmd in text:
             reply = (cmd + b"\r\n" + PROMPT) if echo_state != -1 else b""
             return reply, -1

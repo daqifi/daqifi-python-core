@@ -7,6 +7,7 @@ Not intended for direct use - use the public API instead.
 
 import errno
 import math
+import random
 import serial
 import sys
 import threading
@@ -1829,11 +1830,57 @@ class SerialInterface:
     #: pins that, and
     #: `test_the_download_marker_cannot_be_forged_by_open_or_close`
     #: pins distinctness from open()'s full `SYSTem:ECHO -1`.
+    #: ⚠ N IS SET BY THE FIRMWARE'S MEASURED COMMAND CEILING, not by the
+    #: input buffer's size. `SCPI_INPUT_BUFFER_LENGTH` is 512, but the
+    #: firmware records a BENCH-MEASURED single-command ceiling of 237 B
+    #: (long form) / 243 B (abbreviated, which this is), with anything
+    #: longer rejected as INPUT_BUFFER_OVERRUN by libscpi before the
+    #: callback runs. 128 members put the longest spelling at 139 B, ~100 B
+    #: inside that, and the longest one is bench-verified rather than
+    #: assumed: it echoes back with all 127 zeros intact, `SYST:ECHO?` then
+    #: reads -1, and the error queue stays clean.
     _ECHO_SET_SILENT_FAMILY = tuple(
-        b"SYST:ECHO -" + b"0" * n + b"1" for n in range(8))
+        b"SYST:ECHO -" + b"0" * n + b"1" for n in range(128))
+
+    #: ⛔ NOT `random`. A fresh process must not be able to agree with
+    #: another process's choice, and `random`'s default instance is seeded
+    #: from entropy but is still a user-visible global that application code
+    #: can reseed (`random.seed(0)` in a test harness would make every
+    #: object pick alike again, which is exactly the r7 defect). A
+    #: SystemRandom reads the OS entropy source on every call and cannot be
+    #: seeded.
+    _echo_rng = random.SystemRandom()
+
+    def _release_consumed_spellings(self, consumed, keep=None):
+        """Return every family spelling whose echo appears in ``consumed``.
+
+        ``keep`` is the current attempt's spelling, which is released by the
+        caller only once it has actually been synchronised on -- otherwise a
+        partially-read marker would free the spelling this attempt is still
+        waiting for.
+        """
+        blob = bytes(consumed)
+        for member in self._ECHO_SET_SILENT_FAMILY:
+            if member == keep:
+                continue
+            if member + b"\r\n" in blob:
+                self._echo_spellings_outstanding.discard(member)
 
     def _next_echo_spelling(self):
-        """The lowest-index family spelling whose echo is NOT outstanding.
+        """A spelling chosen UNIFORMLY AT RANDOM among those whose echo is
+        not outstanding on this connection, or None if all are.
+
+        ⛔⛔ r7 AUDIT, HIGH: CHOOSING THE LOWEST FREE INDEX MADE THE
+        CROSS-OBJECT COLLISION CERTAIN, not 1-in-N. A timed out, B opens
+        with an empty set, B picks `-1` -- the same spelling A just left in
+        flight -- and syncs on A's echo. Measured:
+        b'SYSTem:ECHO -1\r\nSYST:ECHO -1\r\n' + payload.
+        
+        ⚠ AND IT INVALIDATED THE RESIDUAL THE OPERATOR HAD ACCEPTED. Ruling
+        IG A was granted on a stated premise of "about 1/8 per attempt,
+        re-rollable"; a deterministic choice is not 1/8 of anything. The
+        number in a residual is part of the claim, and this one was measured
+        from the design I described rather than the one I shipped.
 
         ⛔⛔ r6 AUDIT, HIGH: THE RETRY WAS THE DEFECT, and my own exception
         text advised it. r6 used ONE spelling, so attempt 2's search matched
@@ -1855,10 +1902,11 @@ class SerialInterface:
         (utils.c) under `DaqifiIntTokenFullyConsumed` (parser.c), which
         requires the whole token to convert.
         """
-        for spelling in self._ECHO_SET_SILENT_FAMILY:
-            if spelling not in self._echo_spellings_outstanding:
-                return spelling
-        return None
+        free = [sp for sp in self._ECHO_SET_SILENT_FAMILY
+                if sp not in self._echo_spellings_outstanding]
+        if not free:
+            return None
+        return self._echo_rng.choice(free)
 
     def silence_echo_for_download(self) -> bytes:
         """Set the console silent before a download. Returns the framing
@@ -1930,6 +1978,16 @@ class SerialInterface:
         while True:
             if getattr(self._serial, "in_waiting", 0):
                 seen.extend(self._serial.read(self._serial.in_waiting))
+                # ⛔ r7 AUDIT, MEDIUM: RELEASE ON CONSUMPTION, NOT ON
+                # SUCCESS. These bytes have left the port and will be
+                # dropped when this call returns, so any spelling among them
+                # is accounted for NOW -- including when this attempt goes
+                # on to time out. Releasing only in the success branch
+                # leaked one spelling per timed-out retry: eight retries
+                # against a slow device marked seven consumed spellings
+                # outstanding forever, and every later download refused even
+                # after the device recovered.
+                self._release_consumed_spellings(seen, keep=spelling)
             end = seen.find(framing)
             if end >= 0:
                 # ⛔ ONLY THIS SPELLING COUNTS. An earlier family member
@@ -1949,10 +2007,8 @@ class SerialInterface:
                 # spelling whose echo we just swept up -- those spellings
                 # become reusable, which is what keeps a long-lived
                 # connection from exhausting the family.
+                self._release_consumed_spellings(consumed)
                 self._echo_spellings_outstanding.discard(spelling)
-                for older in self._ECHO_SET_SILENT_FAMILY:
-                    if older + b"\r\n" in consumed:
-                        self._echo_spellings_outstanding.discard(older)
                 return b""
             if time.monotonic() >= deadline:
                 # ⛔⛔ REFUSE, DO NOT PROCEED. The marker is GUARANTEED to be
