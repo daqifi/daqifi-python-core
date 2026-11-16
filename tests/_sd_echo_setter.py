@@ -82,6 +82,22 @@ CLOSE_SET_FRAMED = b"SYSTem:ECHO 1"
 
 PROMPT = b"DAQIFI> "
 
+#: The r16 exhaustion barrier, and the device's answer to it.
+#:
+#: ⭐ MEASURED on this lane's registered board 2026-11-16, echo ON:
+#:     b'*IDN?\r\nDAQiFi,Nq1,<serial>,01-02\r\nDAQIFI> '
+#: and echo OFF: the reply line alone, no prompt. The fake reproduces that
+#: shape exactly -- echo first, then reply, then prompt -- because the whole
+#: barrier argument rests on the echo arriving BEFORE the reply and not
+#: being confusable with it.
+#:
+#: ⚠ A PLACEHOLDER SERIAL, deliberately. Ruling HD permits our own bench
+#: serials in test constants, but a permission is not an obligation and the
+#: public-tree hygiene gate has failed on exactly this before. The matcher
+#: pins the SHAPE, so no real serial is needed to exercise it.
+BARRIER = b"*IDN?"
+BARRIER_REPLY = b"DAQiFi,Nq1,TESTSERIAL00000001,01-02\r\n"
+
 
 def echo_setter_reply(written, echo_state):
     """-> (reply_or_None, new_echo_state) for one write.
@@ -96,6 +112,14 @@ def echo_setter_reply(written, echo_state):
     line's echo certain from any starting state.
     """
     text = bytes(written)
+    # ⭐ THE BARRIER, answered exactly as the board answers it: the ECHO
+    # first (gated on the current state, like every other line), then the
+    # reply, then the prompt. The echo state is NOT changed -- `*IDN?` is a
+    # query, not a setter.
+    if BARRIER in text:
+        if echo_state == -1:
+            return BARRIER_REPLY, echo_state
+        return BARRIER + b"\r\n" + BARRIER_REPLY + PROMPT, echo_state
     # Longest first: a scan that matched `-1` inside `-01` would answer with
     # the wrong spelling, which is the very confusion the family exists to
     # prevent.
@@ -170,6 +194,12 @@ class EchoSetterFake:
     #: they accept writes synchronously.
     out_waiting = 0
 
+    #: Whether the device answers the r16 exhaustion barrier. Set False to
+    #: drive the refusal path: the write still happens, the device simply
+    #: never replies, which is the only state in which an exhausted pool is
+    #: allowed to stay exhausted.
+    barrier_answers = True
+
     #: The real close() calls these, so a fake driven through the actual
     #: close()/open() cycle must have them.
     def close(self):
@@ -198,6 +228,14 @@ class EchoSetterFake:
         withholds the payload. False for any other command, which re-arms
         the payload."""
         reply, state = echo_setter_reply(data, self.echo_state)
+        if reply is not None and BARRIER in bytes(data) \
+                and not self.barrier_answers:
+            # ⚠ A MUTE BARRIER. The write landed -- so this is NOT the same
+            # as a dead port -- and the device simply never answers it. The
+            # payload stays withheld because `*IDN?` is not the GET.
+            self._console_armed = False
+            self._console_sent_at = time.monotonic()
+            return True
         if reply is None:
             self._console_armed = True
             # ⛔ DO NOT CLEAR `_console_sent_at` HERE. The GET is a non-setter
