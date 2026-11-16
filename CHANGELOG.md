@@ -210,18 +210,23 @@ which was never tagged.
   path, which is now the bundle's version folder (`19.7.7` under
   `files/winc1500/`) rather than the release tag; a downloaded bundle
   without exactly one version raises `RuntimeError`. When the template uses
-  `{version}`, the update raises `ValueError` before anything is sent to the
-  device unless the template has exactly one `/v` (any of `/v`, `-v`, `/V`,
-  `-V`) whose value is exactly `{version}`, exactly one `/d` with a literal
-  device name, no argument other than an option or the value right after
-  one, and a value (or nothing) right before `/v` and before `/d`; unless
-  every template argument is made only of letters, digits and
-  `/ . _ : { } -`, the `/d` value only of letters, digits and `. _ -`, and
-  the version, given or read from the bundle, only of letters, digits and
-  `. _ -`; unless the port substituted for `{port}` (from
-  `wifi_port_override` or the serial port name) is made only of letters,
-  digits and `. _ : / -`; and unless `files/winc1500/<version>/firmware/programmer_firmware.bin`
-  (`winc3400` for a `/d` ending in 3400) exists beside the tool. Without
+  `{version}`, the flash request is built once, before anything is sent to
+  the device, and the update runs that same request; its arguments as the
+  tool receives them, after every substitution (`{port}`, `{firmwarePath}`,
+  `{version}`), are checked, and the update raises `ValueError` unless there
+  is exactly one `/v` (any of `/v`, `-v`, `/V`, `-V`) written as exactly
+  `{version}`, exactly one `/d` with a literal device name made of letters,
+  digits and `. _ -`, no argument other than an option or the value right
+  after one, no option right before `/v` or `/d`, and every argument is made
+  only of letters, digits and `/ . _ : { } -`. A value that starts with `/`
+  reads as an option, so a `/dev/tty*` port is refused with such a template;
+  a Windows path (as `wslpath -w` produces under WSL) contains backslashes,
+  so `{firmwarePath}` cannot be used with `{version}` there — leave it out,
+  as the default template does, since the tool runs in the bundle folder.
+  The version, given or read from the bundle, must be made of letters,
+  digits and `. _ -`, and
+  `files/winc1500/<version>/firmware/programmer_firmware.bin` (`winc3400`
+  for a `/d` ending in 3400) must exist beside the tool. Without
   `firmware_version=` the version is read from that one device folder, which
   must then hold exactly one such image. A flash tool that cannot be found
   is still reported where it was before, when the flash request is built. A

@@ -516,7 +516,7 @@ def test_a_port_outside_the_allow_list_is_refused(tmp_path, port):
     _assert_refused_untouched(service, runner, device, excinfo, repr(port))
 
 
-@pytest.mark.parametrize("port", ["COMx", "/dev/ttyACMx", "tty.usbmodem-x.y"])
+@pytest.mark.parametrize("port", ["COMx", "tty.usbmodem-x.y"])
 def test_ordinary_port_names_pass_the_allow_list(tmp_path, port):
     options = _f._fast_options()
     service, runner = _service(options)
@@ -545,3 +545,135 @@ def test_a_delayed_expansion_port_is_refused_on_native_windows(tmp_path, monkeyp
             device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
         )
     _assert_refused_untouched(service, runner, device, excinfo, "'COMx!y!'")
+
+
+
+def test_a_port_that_looks_like_an_option_is_refused(tmp_path):
+    """The rendered check cannot tell a value starting with / from an
+    option, so /dev/tty* ports are refused with a {version} template. The
+    WINC tool is a Windows script and takes a COM port name."""
+    options = _f._fast_options()
+    service, runner = _service(options)
+    options.wifi_port_override = "/dev/ttyACMx"
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
+        )
+    _assert_refused_untouched(service, runner, device, excinfo, "'/dev/ttyACMx'")
+
+
+# ---- r5 on PR #274: the RENDERED arguments are what is checked ------------
+
+_PATH_TEMPLATE = "/p {port} /d WINC1500 /v {version} /f {firmwarePath} /w"
+
+
+def _comma_bundle(tmp_path):
+    """A bundle folder whose own name carries a second -v once substituted."""
+    root = tmp_path / "fw,-v,19.6.1"
+    root.mkdir()
+    (root / "winc_flash_tool.cmd").write_text("@echo off")
+    for version in ("19.6.1", _VERSION):
+        _f._add_wifi_bundle_version(str(root), version)
+    return root
+
+
+def test_a_firmware_path_carrying_a_second_v_is_refused_wsl(tmp_path):
+    """r5 schedule (WSL): the template text is valid; the path substituted
+    for {firmwarePath} has no whitespace, so it goes unquoted, and cmd.exe
+    splits it at the commas into a second -v that flashes 19.6.1."""
+    options = _f._fast_options()
+    options.wifi_flash_tool_arguments_template = _PATH_TEMPLATE
+    service, runner = _service(options)
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_comma_bundle(tmp_path)), firmware_version=_VERSION
+        )
+    _assert_refused_untouched(
+        service, runner, device, excinfo, "{firmwarePath}", "backslashes",
+        "Leave {firmwarePath} out",
+    )
+
+
+def test_a_firmware_path_carrying_a_second_v_is_refused_posix(tmp_path):
+    """r5 schedule (POSIX tool, path passed untranslated): refused on the
+    rendered argument, which the template text alone could not show."""
+    options = _f._fast_options()
+    options.wifi_flash_tool_file_name = "flash-tool"
+    options.wifi_flash_tool_arguments_template = _PATH_TEMPLATE
+    service, runner = _service(options)
+    root = _comma_bundle(tmp_path)
+    (root / "flash-tool").write_text("#!/bin/sh\n")
+    (root / "winc_flash_tool.cmd").unlink()
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(device, str(root), firmware_version=_VERSION)
+    _assert_refused_untouched(
+        service, runner, device, excinfo, "fw,-v,19.6.1", "{firmwarePath}"
+    )
+
+
+def test_a_plain_posix_firmware_path_is_allowed(tmp_path):
+    """Nothing in the rendered argument to refuse: a {firmwarePath} that
+    stays inside the allow-list is passed."""
+    options = _f._fast_options()
+    options.wifi_flash_tool_file_name = "flash-tool"
+    options.wifi_flash_tool_arguments_template = _PATH_TEMPLATE
+    service, runner = _service(options)
+    root = _bundle(tmp_path, _VERSION)
+    (root / "flash-tool").write_text("#!/bin/sh\n")
+    (root / "winc_flash_tool.cmd").unlink()
+    service.update_wifi_module(_RecordingDevice(), str(root), firmware_version=_VERSION)
+
+    assert runner.last_request.arguments[-3:] == ["/f", str(root), "/w"]
+
+
+def test_the_flow_runs_the_request_that_was_checked(tmp_path, monkeypatch):
+    """The request is rendered ONCE, at entry, and the runner gets that very
+    object: no second render can change what was checked."""
+    import daqifi.firmware.update_service as update_service
+
+    rendered = []
+    real_render = update_service.DefaultFirmwareUpdateService._render_wifi_process_request
+
+    def _spy(self, *args, **kwargs):
+        request = real_render(self, *args, **kwargs)
+        rendered.append((request, kwargs.get("check_arguments") is not None))
+        return request
+
+    monkeypatch.setattr(
+        update_service.DefaultFirmwareUpdateService,
+        "_render_wifi_process_request", _spy,
+    )
+    service, runner = _service()
+    service.update_wifi_module(_RecordingDevice(), str(_bundle(tmp_path, _VERSION)))
+
+    assert len(rendered) == 1
+    request, checked = rendered[0]
+    assert checked
+    assert runner.last_request is request
+    assert service.current_state == FirmwareUpdateState.COMPLETE
+
+
+def test_a_template_switched_to_version_after_entry_is_not_rendered(tmp_path):
+    """Options are mutable: a {version} template that appears after entry
+    must not be rendered unchecked by the flow."""
+    options = _f._fast_options()
+    options.wifi_flash_tool_arguments_template = "/p {port} /d WINC1500 /w"
+    service, runner = _service(options)
+
+    class _SwitchingDevice(_RecordingDevice):
+        def get_lan_chip_info(self):
+            options.wifi_flash_tool_arguments_template = (
+                "/p {port} /d WINC1500 /v {version} /w"
+            )
+            return super().get_lan_chip_info()
+
+    with pytest.raises(Exception) as excinfo:
+        service.update_wifi_module(
+            _SwitchingDevice(), str(_bundle(tmp_path, _VERSION)),
+            firmware_version=_VERSION,
+        )
+    assert "was not checked" in str(excinfo.value.__cause__)
+    assert runner.last_request is None
