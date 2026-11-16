@@ -1488,6 +1488,18 @@ class SerialInterface:
         #: refuse its downloads.
         #: `test_two_connections_do_not_share_the_spelling_pool` pins it.
         self._echo_spellings_outstanding: set = set()
+        #: Bytes read while looking for a setter echo that did NOT complete a
+        #: marker, carried to the next call.
+        #:
+        #: ⛔ ON THE INSTANCE, because a marker can STRADDLE A CALL. r8 kept
+        #: this in a local `seen`: an echo whose CR arrived at +1.99 s and
+        #: whose LF arrived at +2.01 s against a 2 s budget was therefore
+        #: split across two calls and recognised by NEITHER, so its spelling
+        #: was never reclaimed -- and after 128 such attempts every spelling
+        #: was outstanding and every later download refused for good, even
+        #: after the device recovered. The stream is continuous; the thing
+        #: reading it must be too.
+        self._echo_scan_tail: bytearray = bytearray()
 
     def _cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
@@ -1809,6 +1821,11 @@ class SerialInterface:
     #: separates them), so scanning for the second never matches the first.
     _ECHO_SET_FRAMED = b"SYST:ECHO 1"
 
+    #: How much unmatched tail to carry between calls. Must exceed the
+    #: longest marker plus terminator and prompt (149 B); the rest is slack
+    #: for interleaved console traffic.
+    _ECHO_SCAN_TAIL_MAX = 4096
+
     #: ⛔ ONE VALUE, EIGHT DISTINCT MARKERS. `-1`, `-01`, `-001`, ... all set
     #: the console silent, and the device echoes whichever spelling it was
     #: sent, VERBATIM -- so the marker carries a per-attempt nonce even
@@ -1851,20 +1868,43 @@ class SerialInterface:
     #: seeded.
     _echo_rng = random.SystemRandom()
 
-    def _release_consumed_spellings(self, consumed, keep=None):
-        """Return every family spelling whose echo appears in ``consumed``.
+    def _release_consumed_spellings(self, buf, keep=None):
+        """Release every family spelling whose echo appears in ``buf``, and
+        DELETE those bytes from it when ``buf`` is a bytearray.
 
-        ``keep`` is the current attempt's spelling, which is released by the
-        caller only once it has actually been synchronised on -- otherwise a
+        ``keep`` is the current attempt's spelling, released by the caller
+        only once it has actually been synchronised on -- otherwise a
         partially-read marker would free the spelling this attempt is still
         waiting for.
+
+        ⛔⛔ THE DELETION IS NOT TIDYING, IT IS THE CORRECTNESS. An earlier
+        r9 revision carried the unmatched tail between calls but left
+        ALREADY-ATTRIBUTED bytes in it. A spelling freed by that attribution
+        can be re-drawn later, and its stale echo was still sitting in the
+        tail -- so the next attempt synchronised on it INSTANTLY and sent
+        the GET with its own marker still in flight. That is precisely the
+        r6 defect, reintroduced through the r9 fix for the r8 one.
+        Measured: an attempt that should have timed out returned success.
+
+        So the tail means "bytes not yet attributed to any marker", and the
+        code now matches the words.
         """
-        blob = bytes(consumed)
+        blob = bytes(buf)
+        cut = 0
         for member in self._ECHO_SET_SILENT_FAMILY:
             if member == keep:
                 continue
-            if member + b"\r\n" in blob:
-                self._echo_spellings_outstanding.discard(member)
+            framing = member + b"\r\n"
+            at = blob.find(framing)
+            if at < 0:
+                continue
+            self._echo_spellings_outstanding.discard(member)
+            end = at + len(framing)
+            if blob[end:end + len(self._ECHO_PROMPT)] == self._ECHO_PROMPT:
+                end += len(self._ECHO_PROMPT)
+            cut = max(cut, end)
+        if cut and isinstance(buf, bytearray):
+            del buf[:cut]
 
     def _next_echo_spelling(self):
         """A spelling chosen UNIFORMLY AT RANDOM among those whose echo is
@@ -1974,7 +2014,10 @@ class SerialInterface:
         # Consume THIS attempt's echo by CONTENT, never by quiet time. A
         # do-while: read first, check the clock after, so a reply already
         # waiting is never missed by a timer that expired first.
-        seen = bytearray()
+        # Continue from whatever an earlier call left unmatched, so a marker
+        # split across the boundary is completed rather than lost.
+        seen = bytearray(self._echo_scan_tail)
+        self._release_consumed_spellings(seen, keep=spelling)
         while True:
             if getattr(self._serial, "in_waiting", 0):
                 seen.extend(self._serial.read(self._serial.in_waiting))
@@ -2007,8 +2050,12 @@ class SerialInterface:
                 # spelling whose echo we just swept up -- those spellings
                 # become reusable, which is what keeps a long-lived
                 # connection from exhausting the family.
-                self._release_consumed_spellings(consumed)
+                self._release_consumed_spellings(bytearray(consumed))
                 self._echo_spellings_outstanding.discard(spelling)
+                # Synchronised: everything behind our marker is pre-GET
+                # console traffic and is deliberately dropped, so nothing
+                # carries forward.
+                self._echo_scan_tail = bytearray()
                 return b""
             if time.monotonic() >= deadline:
                 # ⛔⛔ REFUSE, DO NOT PROCEED. The marker is GUARANTEED to be
@@ -2025,6 +2072,14 @@ class SerialInterface:
                 #
                 # The spelling stays OUTSTANDING, so the next attempt takes a
                 # different one and cannot mistake this echo for its own.
+                # ⛔ CARRY THE UNMATCHED TAIL. A later call must be able
+                # to finish a marker this one only saw part of. Bounded so a
+                # chatty console cannot grow it without limit: the retained
+                # window is far larger than the longest marker plus its
+                # terminator and prompt (139 + 2 + 8 = 149 B), which is all
+                # that recognition needs.
+                self._echo_scan_tail = bytearray(
+                    seen[-self._ECHO_SCAN_TAIL_MAX:])
                 raise EchoSetUnconfirmedError(
                     "the echo setter's own echo (%r) did not arrive within "
                     "%.2fs, so it is still in flight and would land inside "

@@ -875,6 +875,17 @@ def test_a_retry_on_the_same_object_waits_for_its_own_marker(payload_gap):
     got, exc = _download(dev, port, timeout=30.0)
     _assert_clean_or_refused(got, exc, port, "same-object retry")
 
+    # ⛔ PROOF THAT BOTH ATTEMPTS RAN, independent of the outcome. The
+    # `if exc is None:` below is only sound because something unconditional
+    # has already asserted: `_assert_clean_or_refused` pins the exception
+    # TYPE, and this pins that the retry reached the wire at all. The third
+    # inert cell in this PR was exactly an `if exc is None:` with nothing
+    # behind it -- the port was closed, every download raised, and the cell
+    # passed having asserted nothing.
+    assert port.setter_writes >= 2, (
+        "both the first attempt and the retry must have written a setter; "
+        "saw %d" % port.setter_writes)
+
     if exc is None:
         # It succeeded, so no spelling may appear anywhere in the file --
         # head or interior.
@@ -1014,6 +1025,42 @@ def test_the_spelling_family_members_cannot_match_inside_one_another():
             )
 
 
+class _SplitEcho(_Device):
+    """Delivers each setter echo in two pieces, straddling the budget.
+
+    ⛔ THE AUDIT'S SCHEDULE: the echo's CR lands just inside the deadline
+    and its LF just outside, so no single call ever sees the whole marker.
+    A scan that lives in a local therefore recognises nothing, forever.
+    """
+
+    #: Fraction of the budget at which each piece lands.
+    split_early = 0.95
+    split_late = 1.05
+
+    #: Small, so FIFO lets the split pieces land near the boundary. With the
+    #: default 0.65 the ON-line echo was queued first and the monotonic
+    #: clamp pushed BOTH pieces onto its due time -- they arrived together,
+    #: the marker was whole, and the cell measured nothing.
+    reply_delay = 0.05
+    _budget = 0.4
+
+    def _enqueue(self, data, delay):
+        blob = bytes(data)
+        member = _family_member(blob)
+        if member is not None and b"\r\n" in blob:
+            # ⛔ SPLIT THE MARKER'S OWN TERMINATOR, which is the audit's
+            # schedule: CR just inside the deadline, LF just outside. My
+            # first version split off the last byte of the PROMPT, leaving
+            # `SYST:ECHO -01\r\n` intact in the first piece -- so there was
+            # no split marker to fail on and the cell passed at the broken
+            # head.
+            cut = blob.index(b"\r\n") + 1          # after CR, before LF
+            super()._enqueue(blob[:cut], self._budget * self.split_early)
+            super()._enqueue(blob[cut:], self._budget * self.split_late)
+            return
+        super()._enqueue(data, delay)
+
+
 class _Mute(_Device):
     """Answers nothing at all: no echo, ever.
 
@@ -1105,56 +1152,86 @@ class _PinnedChoice:
         return self.wanted if self.wanted in seq else seq[0]
 
 
-def test_a_new_object_colliding_on_the_previous_marker_is_the_known_residual():
-    """⛔⛔ r7 AUDIT HIGH, and it invalidated the number I gave the operator.
+def _reopen(port, monkeypatch):
+    """A NEW connection object reaching the SAME device through real open().
+
+    ⛔ THE INERT VERSION OF THIS ATTACHED A CLOSED PORT. `a._comm.close()`
+    closes the fake, and handing that object to a fresh device without
+    reopening made every download raise 'Serial port not open' -- which
+    `_download` caught, which `if exc is None:` then skipped. The cell
+    passed with ZERO GETs on the wire and I reported it as pinning the
+    residual. A reconnect test has to reconnect.
+    """
+    port.is_open = True            # the caller closed it; the DEVICE did not
+    monkeypatch.setattr(comm_mod.serial, "Serial", lambda *a, **kw: port)
+    dev = NyquistDevice("COM41")
+    assert dev._comm.open() is True, "the reopen must succeed"
+    return dev
+
+
+def test_a_new_object_colliding_on_the_previous_marker_is_the_known_residual(
+        monkeypatch):
+    """⛔⛔ THE ACCEPTED RESIDUAL (ruling IG A), pinned from both sides so it
+    cannot drift unnoticed.
 
     A's download times out, leaving its spelling queued on the device. A is
-    closed, B is opened on the same port and downloads at once. At
-    f1188119 B picked the LOWEST-INDEX free spelling -- always `-1`, the one
-    A had just used -- so B synchronised on A's echo and its own setter
-    echoes became file content. Measured there:
-    b'SYSTem:ECHO -1\r\nSYST:ECHO -1\r\n' + payload.
+    closed and a NEW object reaches the same device through the real open().
+    Pinned to the SAME spelling A left in flight, the new object
+    synchronises on A's echo and its own setter echoes reach the file --
+    that is the residual, and the operator accepted it against fw#1263.
+    Pinned to any OTHER spelling, the download must be byte-exact.
 
-    ⚠ That made the first collision after a reconnect CERTAIN on this
-    schedule, where ruling IG A had been granted on a premise of "about 1/8
-    per attempt". The code now picks uniformly at random among the free
-    spellings, so the collision is exactly 1-in-N and this cell pins what it
-    looks like when it happens.
+    ⚠ EVERY LEG ASSERTS THAT IT RAN. The previous version of this cell
+    could pass without a single GET reaching the wire, so `get_writes` is
+    checked before any claim about what came back. An outcome assertion
+    guarded by `if exc is None:` is not a test unless something else proves
+    the operation happened.
     """
     port = _Device(echo_state=1, reply_delay=1.0)
     a = _fresh_device(port)
     a._comm.ECHO_SET_TIMEOUT_S = 0.3
-
     with pytest.raises(EchoSetUnconfirmedError):
         a.sd_get_file_binary("x.bin", timeout=10.0)
-    leaked = sorted(a._comm._echo_spellings_outstanding)
-    assert len(leaked) == 1, "A must leave exactly one spelling: %r" % leaked
-    collided = leaked[0]
+    outstanding = sorted(a._comm._echo_spellings_outstanding)
+    assert len(outstanding) == 1, "A must leave one spelling: %r" % outstanding
+    collided = outstanding[0]
     a._comm.close()
 
-    # B, on the SAME physical port, pinned to the colliding choice.
+    # --- the colliding draw: the residual, and it must actually RUN ---
     port._payload = PAYLOAD + END_OF_FILE_MARKER
-    b = _fresh_device(port)
-    b._comm.ECHO_SET_TIMEOUT_S = 2.0
+    port.get_writes = 0
+    b = _reopen(port, monkeypatch)
     b._comm._echo_rng = _PinnedChoice(collided)
     got, exc = _download(b, port, timeout=30.0)
-    if exc is None:
-        assert bytes(got) != PAYLOAD, (
-            "pinned to the COLLIDING spelling this must reproduce the "
-            "residual; if it comes back clean the cell has stopped "
-            "measuring anything")
+    assert port.get_writes >= 1, (
+        "the colliding leg must reach the GET, or this cell is measuring "
+        "nothing: exc=%r" % exc)
+    assert exc is None, (
+        "the collision does not refuse -- that is why it is a residual and "
+        "not a defect: %r" % exc)
+    assert bytes(got) != PAYLOAD, (
+        "pinned to the COLLIDING spelling the download must come back "
+        "contaminated; if it is clean this cell has stopped measuring the "
+        "residual: %r" % bytes(got))
 
-    # B', pinned to any other spelling, must be byte-exact.
+    # --- any other draw: byte-exact, INCLUDING open()'s own echo traffic ---
+    # ⛔ r8 AUDIT ASKED THIS DIRECTLY: open() writes the FULL
+    # `SYSTem:ECHO -1`, whose echo is in flight when the download starts.
+    # Because the device is FIFO it precedes our own marker and is swept
+    # with everything else ahead of it -- so a non-colliding reconnect must
+    # be clean, with no `DAQIFI> SYSTem:ECHO -1` prefix.
     other = next(sp for sp in FAMILY if sp != collided)
     port2 = _Device(echo_state=1, reply_delay=1.0)
     port2.seed_foreign(collided + b"\r\n" + PROMPT, 0.4)
-    b2 = _fresh_device(port2)
+    b2 = _reopen(port2, monkeypatch)
     b2._comm._echo_rng = _PinnedChoice(other)
     got2, exc2 = _download(b2, port2, timeout=30.0)
-    assert exc2 is None, "a non-colliding choice must succeed: %r" % exc2
+    assert port2.get_writes >= 1, (
+        "the non-colliding leg must reach the GET too: exc=%r" % exc2)
+    assert exc2 is None, "a non-colliding draw must succeed: %r" % exc2
     assert bytes(got2) == PAYLOAD, (
-        "a non-colliding choice must be byte-exact even with the other "
-        "spelling in flight: %r" % bytes(got2))
+        "a non-colliding reconnect must be byte-exact -- no stale marker "
+        "and no open()-setter prefix: %r" % bytes(got2))
 
 
 def test_the_spelling_choice_is_not_lowest_index():
@@ -1276,3 +1353,98 @@ def test_the_shared_helper_covers_every_implementation_spelling():
         "%d implementation spellings the SHARED helper would not recognise "
         "(first %r): every fake using it would mistake the setter for the "
         "GET" % (len(missing), missing[0][:20]))
+
+
+def test_an_echo_split_across_the_timeout_boundary_is_still_reclaimed():
+    """⛔⛔ r8 AUDIT MEDIUM. The echo's CR arrives just inside the budget and
+    its LF just outside, so no single call sees a complete marker. At
+    bb77669d the scan lived in a local `seen`, so each call threw its view
+    away and NEITHER recognised the echo: the spelling was never reclaimed,
+    and after enough such attempts every spelling was outstanding and every
+    later download refused for good -- even after the device recovered.
+
+    The scan state now persists on the instance, so a later call completes
+    a marker an earlier one only partly saw.
+    """
+    port = _SplitEcho(echo_state=1)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = port._budget
+
+    for _ in range(10):
+        try:
+            dev._comm.silence_echo_for_download()
+        except EchoSetUnconfirmedError:
+            pass
+
+    outstanding = len(dev._comm._echo_spellings_outstanding)
+    assert outstanding < 10, (
+        "10 split echoes left %d spellings outstanding: a marker that "
+        "straddles a call boundary must still be recognised, or the pool "
+        "drains one per attempt" % outstanding)
+
+    # And the device recovers: the next download must work.
+    port.__class__ = _Device          # echoes arrive whole again
+    port.reply_delay = 0.05
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+    got, exc = _download(dev, port, timeout=30.0)
+    assert exc is None, (
+        "after recovery the next download must succeed, not refuse on a "
+        "pool drained by split echoes: %r" % exc)
+    assert bytes(got) == PAYLOAD
+
+
+def test_attributing_an_echo_removes_it_from_the_carried_tail():
+    """⛔⛔ A DEFECT r9 INTRODUCED AND r9 FIXED, pinned so it cannot return.
+
+    Carrying the unmatched tail between calls (the r8 split-boundary fix)
+    left ALREADY-ATTRIBUTED bytes in it. A spelling freed by that
+    attribution can be drawn again later, and its stale echo was still in
+    the tail -- so the next attempt synchronised on it INSTANTLY and sent
+    the GET with its own marker still in flight. That is the r6 defect
+    arriving through the r8 fix.
+
+    The tail means "bytes not yet attributed to any marker", so attribution
+    deletes.
+    """
+    comm = NyquistDevice("COM41")._comm
+    member = comm._ECHO_SET_SILENT_FAMILY[5]
+    comm._echo_spellings_outstanding.add(member)
+    buf = bytearray(b"junk" + member + b"\r\n" + PROMPT + b"trailing")
+
+    comm._release_consumed_spellings(buf)
+
+    assert member not in comm._echo_spellings_outstanding, "must be released"
+    assert member + b"\r\n" not in bytes(buf), (
+        "the attributed echo must be DELETED from the buffer, or a later "
+        "attempt that re-draws this spelling syncs on it: %r" % bytes(buf))
+    assert bytes(buf) == b"trailing", (
+        "everything up to and including the marker and its prompt is "
+        "attributed; the rest carries on: %r" % bytes(buf))
+
+
+def test_the_carried_tail_never_holds_a_free_spellings_echo():
+    """⛔ THE INVARIANT THAT MAKES THE TAIL SAFE, asserted after real use.
+
+    A spelling is free only if its echo was never emitted or has been
+    attributed -- and attribution deletes. So the tail can never contain
+    the framing of a spelling the next attempt is allowed to draw. If that
+    ever stops holding, an attempt can sync on a stale echo.
+    """
+    port = _Device(echo_state=1, reply_delay=1.0)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.3
+    for _ in range(12):
+        try:
+            dev._comm.silence_echo_for_download()
+        except EchoSetUnconfirmedError:
+            pass
+
+    tail = bytes(dev._comm._echo_scan_tail)
+    outstanding = dev._comm._echo_spellings_outstanding
+    free_in_tail = [sp for sp in FAMILY
+                    if sp not in outstanding and sp + b"\r\n" in tail]
+    assert not free_in_tail, (
+        "the tail holds the echo of %d spelling(s) that are free to be "
+        "drawn again (first %r): a later attempt would sync on a stale "
+        "marker" % (len(free_in_tail), free_in_tail[0][:20]))
