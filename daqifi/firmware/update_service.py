@@ -510,6 +510,7 @@ class DefaultFirmwareUpdateService:
         firmware_version = self._resolve_wifi_firmware_version(
             firmware_path, firmware_version
         )
+        self._refuse_unsafe_wifi_port(device)
 
         self._run_exclusive(
             lambda: self._run_wifi_update(
@@ -1833,6 +1834,28 @@ class DefaultFirmwareUpdateService:
             )
         return firmware_version
 
+    def _refuse_unsafe_wifi_port(self, device: "DaqifiStreamingDevice") -> None:
+        """Refuse, before anything is sent, a {port} value outside the
+        allow-list when the template also passes {version}: cmd.exe splits a
+        batch argument at , ; = (so "COMx,/v,0.0.0" would add a second /v
+        overriding the validated one) and the tool expands !...!. Reads only
+        options and the transport's port name; a port that cannot be
+        resolved is still reported where it was, when the request is built.
+        """
+        template = self._options.wifi_flash_tool_arguments_template
+        if _VERSION_PLACEHOLDER not in template or "{port}" not in template:
+            return
+        try:
+            port = self._resolve_wifi_port(device)
+        except RuntimeError:
+            return
+        if not _WINC_PORT_ALLOWED.fullmatch(port):
+            raise ValueError(
+                f"The WiFi flash port {port!r} may contain only letters, "
+                "digits and . _ : / - when the arguments template passes "
+                "{version}. Nothing was sent."
+            )
+
     def _resolve_wifi_tool_path(self, firmware_path: str) -> str:
         if os.path.isfile(firmware_path):
             return firmware_path
@@ -3140,6 +3163,8 @@ def _wifi_template_tokens(tool_path: str, template: str) -> List[str]:
 _WINC_TEMPLATE_TOKEN_ALLOWED = re.compile(r"[A-Za-z0-9/._:{}-]+")
 _WINC_VERSION_ALLOWED = re.compile(r"[0-9A-Za-z._-]+")
 _WINC_DEVICE_ALLOWED = re.compile(r"[A-Za-z0-9._-]+")
+# COMn and /dev/tty* forms.
+_WINC_PORT_ALLOWED = re.compile(r"[A-Za-z0-9._:/-]+")
 
 
 def _is_option(token: str) -> bool:

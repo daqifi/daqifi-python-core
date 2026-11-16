@@ -492,3 +492,56 @@ def test_a_device_outside_the_allow_list_is_refused(tmp_path, device_name):
     _assert_refused_untouched(
         service, runner, device, excinfo, repr(device_name), "literal device name"
     )
+
+
+# ---- r4 on PR #274: the substituted {port} is allow-listed too ------------
+
+
+@pytest.mark.parametrize("port", [
+    # cmd.exe splits the unquoted WSL argument at the commas into a second
+    # /v that overrides the validated version.
+    "COMx,/v,0.0.0",
+    # winc_flash_tool.cmd enables delayed expansion.
+    "COMx!y!",
+])
+def test_a_port_outside_the_allow_list_is_refused(tmp_path, port):
+    options = _f._fast_options()
+    service, runner = _service(options)
+    options.wifi_port_override = port
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
+        )
+    _assert_refused_untouched(service, runner, device, excinfo, repr(port))
+
+
+@pytest.mark.parametrize("port", ["COMx", "/dev/ttyACMx", "tty.usbmodem-x.y"])
+def test_ordinary_port_names_pass_the_allow_list(tmp_path, port):
+    options = _f._fast_options()
+    service, runner = _service(options)
+    options.wifi_port_override = port
+    service.update_wifi_module(
+        _RecordingDevice(), str(_bundle(tmp_path, _VERSION)),
+        firmware_version=_VERSION,
+    )
+    assert _tool_arguments(runner)[:2] == ["/p", port]
+
+
+def test_a_delayed_expansion_port_is_refused_on_native_windows(tmp_path, monkeypatch):
+    """Native Windows quotes each value and its per-value guard checks only
+    % and ", so before the allow-list a '!' port reached the tool, whose
+    delayed expansion rewrites it."""
+    import daqifi.firmware.update_service as update_service
+
+    monkeypatch.setattr(update_service, "_is_native_windows", lambda: True)
+    monkeypatch.setattr(update_service, "_path_for_windows_tool", lambda p: p)
+    options = _f._fast_options()
+    service, runner = _service(options)
+    options.wifi_port_override = "COMx!y!"
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
+        )
+    _assert_refused_untouched(service, runner, device, excinfo, "'COMx!y!'")

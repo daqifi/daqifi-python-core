@@ -218,8 +218,9 @@ which was never tagged.
   every template argument is made only of letters, digits and
   `/ . _ : { } -`, the `/d` value only of letters, digits and `. _ -`, and
   the version, given or read from the bundle, only of letters, digits and
-  `. _ -`; and
-  unless `files/winc1500/<version>/firmware/programmer_firmware.bin`
+  `. _ -`; unless the port substituted for `{port}` (from
+  `wifi_port_override` or the serial port name) is made only of letters,
+  digits and `. _ : / -`; and unless `files/winc1500/<version>/firmware/programmer_firmware.bin`
   (`winc3400` for a `/d` ending in 3400) exists beside the tool. Without
   `firmware_version=` the version is read from that one device folder, which
   must then hold exactly one such image. A flash tool that cannot be found
