@@ -1816,17 +1816,15 @@ class DefaultFirmwareUpdateService:
                 )
             firmware_version = available[0]
 
-        unsafe = sorted(set(firmware_version) & _WINC_ARGUMENT_SEPARATORS)
+        if not _WINC_VERSION_ALLOWED.fullmatch(firmware_version):
+            raise ValueError(
+                f"WiFi firmware version {firmware_version!r} may contain only "
+                "letters, digits, '.', '_' and '-'. Nothing was sent."
+            )
         image = os.path.join(
             device_directory, firmware_version, "firmware",
             "programmer_firmware.bin",
         )
-        if unsafe:
-            raise ValueError(
-                f"WiFi firmware version {firmware_version!r} contains "
-                f"{''.join(unsafe)!r}, at which cmd.exe splits the flash "
-                "tool's arguments. Nothing was sent."
-            )
         if not os.path.isfile(image):
             raise ValueError(
                 f"WiFi firmware version {firmware_version!r} for /d {device} "
@@ -3135,8 +3133,13 @@ def _wifi_template_tokens(tool_path: str, template: str) -> List[str]:
     return _split_posix_template(template)
 
 
-# cmd.exe splits a batch script's arguments at these as well as whitespace.
-_WINC_ARGUMENT_SEPARATORS = frozenset(" \t,;=")
+# Allow-lists for a template that passes {version}, rather than a model of
+# cmd.exe: it splits a batch script's arguments at , ; = as well as
+# whitespace, and winc_flash_tool.cmd enables delayed expansion, so ! and %
+# rewrite values. Whatever is not listed is refused.
+_WINC_TEMPLATE_TOKEN_ALLOWED = re.compile(r"[A-Za-z0-9/._:{}-]+")
+_WINC_VERSION_ALLOWED = re.compile(r"[0-9A-Za-z._-]+")
+_WINC_DEVICE_ALLOWED = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def _is_option(token: str) -> bool:
@@ -3155,7 +3158,10 @@ def _winc_template_device(tokens: List[str], template: str) -> str:
     - no non-option argument except as the value right after an option;
     - the argument before /v and before /d is not an option. Only an option
       can take the next argument as its value (the tool's unknown options
-      do too), so this is what guarantees /v and /d are read as options.
+      do too), so this is what guarantees /v and /d are read as options;
+    - every argument, as written, is made only of letters, digits and
+      ``/ . _ : { } -``, and the /d value only of letters, digits and
+      ``. _ -``.
     """
     def refuse(reason: str) -> ValueError:
         return ValueError(
@@ -3166,6 +3172,12 @@ def _winc_template_device(tokens: List[str], template: str) -> str:
             "Nothing was sent."
         )
 
+    for token in tokens:
+        if not _WINC_TEMPLATE_TOKEN_ALLOWED.fullmatch(token):
+            raise refuse(
+                f"{token!r} contains a character other than letters, digits "
+                "and / . _ : { } -"
+            )
     positions = {"v": [], "d": []}
     for index, token in enumerate(tokens):
         if _is_option(token):
@@ -3188,11 +3200,11 @@ def _winc_template_device(tokens: List[str], template: str) -> str:
         raise refuse("the value of /v is not exactly {version}")
     device_index = positions["d"][0] + 1
     device = tokens[device_index] if device_index < len(tokens) else ""
-    if (
-        not device or _is_option(device) or _PLACEHOLDER.search(device)
-        or set(device) & _WINC_ARGUMENT_SEPARATORS
-    ):
-        raise refuse("the value of /d is not a literal device name")
+    if not _WINC_DEVICE_ALLOWED.fullmatch(device):
+        raise refuse(
+            f"the value of /d, {device!r}, is not a literal device name made "
+            "of letters, digits, '.', '_' and '-'"
+        )
     return device
 
 

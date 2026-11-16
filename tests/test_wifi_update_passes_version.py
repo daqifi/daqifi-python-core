@@ -24,7 +24,6 @@ from pathlib import Path
 import pytest
 
 from daqifi.enums import FirmwareUpdateState
-from daqifi.firmware.update_events import FirmwareUpdateException
 from daqifi.firmware.update_service import DefaultFirmwareUpdateService
 
 _HERE = Path(__file__).parent
@@ -202,19 +201,17 @@ def test_an_unusable_version_is_refused(tmp_path, bad):
 
 
 def test_a_version_cmd_exe_would_interpret_is_refused(tmp_path):
-    """The version reaches cmd.exe like the port and the path do."""
+    """A discovered version outside the allow-list is refused at entry; it
+    used to reach the per-value cmd.exe guard while building the request."""
     service, runner = _service()
     root = _bundle(tmp_path)
     _f._add_wifi_bundle_version(str(root), "19&calc")
     device = _RecordingDevice()
-    with pytest.raises(FirmwareUpdateException) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         service.update_wifi_module(device, str(root))
-    # Refused where an unsafe port or path is: while building the request,
-    # before the device is switched into update mode.
-    assert isinstance(excinfo.value.__cause__, ValueError)
-    assert "firmware version '19&calc'" in str(excinfo.value.__cause__)
-    assert device.sent_commands == []
-    assert runner.last_request is None
+    _assert_refused_untouched(
+        service, runner, device, excinfo, "'19&calc'", "may contain only"
+    )
 
 
 def test_a_template_without_version_still_works_on_a_bundle_without_one(tmp_path):
@@ -386,4 +383,112 @@ def test_a_version_cmd_exe_would_split_is_refused(tmp_path):
     _f._add_wifi_bundle_version(str(root), "19,7")
     with pytest.raises(ValueError) as excinfo:
         service.update_wifi_module(device, str(root))
-    _assert_refused_untouched(service, runner, device, excinfo, "splits")
+    _assert_refused_untouched(service, runner, device, excinfo, "may contain only")
+
+
+# ---- Audit r3 on PR #274: allow-lists, not a model of cmd.exe -------------
+
+
+def test_a_comma_joined_second_v_is_refused(tmp_path):
+    """r3 schedule 1: "/v,19.6.1" passed the shape as one unknown option, but
+    cmd.exe splits it at the comma into /v 19.6.1, which overrides the
+    validated 19.7.7 and flashes the other image."""
+    options = _f._fast_options()
+    options.wifi_flash_tool_arguments_template = (
+        "/p {port} /d WINC1500 /v {version} /e /v,19.6.1 /w"
+    )
+    service, runner = _service(options)
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path, "19.6.1", _VERSION)),
+            firmware_version=_VERSION,
+        )
+    _assert_refused_untouched(service, runner, device, excinfo, "'/v,19.6.1'")
+
+
+def test_a_version_delayed_expansion_would_rewrite_is_refused(tmp_path, monkeypatch):
+    """r3 schedule 2: winc_flash_tool.cmd enables delayed expansion, so
+    "19.7.7!candidate!" reaches it as 19.7.7 and a different image is
+    flashed. Native Windows, where the per-value cmd.exe guard allows '!'."""
+    import daqifi.firmware.update_service as update_service
+
+    monkeypatch.setattr(update_service, "_is_native_windows", lambda: True)
+    monkeypatch.setattr(update_service, "_path_for_windows_tool", lambda p: p)
+    service, runner = _service()
+    device = _RecordingDevice()
+    root = _bundle(tmp_path, _VERSION)
+    _f._add_wifi_bundle_version(str(root), "19.7.7!candidate!")
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(root), firmware_version="19.7.7!candidate!"
+        )
+    _assert_refused_untouched(
+        service, runner, device, excinfo, "'19.7.7!candidate!'", "may contain only"
+    )
+
+
+# One template argument per character class outside the allow-list. The
+# arguments are written as cmd.exe's splitter needs them to arrive as shown.
+@pytest.mark.parametrize("written,arrives", [
+    ("a,b", "a,b"),        # argument separators
+    ("a;b", "a;b"),
+    ("a=b", "a=b"),
+    ("a!b!", "a!b!"),      # delayed expansion
+    ("a%b%", "a%b%"),      # expansion
+    ("a^^b", "a^b"),       # escape
+    ("a&b", "a&b"),        # command separators and redirection
+    ("a|b", "a|b"),
+    ("a<b", "a<b"),
+    ("a>b", "a>b"),
+    ("a'b", "a'b"),        # quote
+    ('"a b"', "a b"),      # whitespace
+    ("a\\b", "a\\b"),  # backslash
+])
+def test_a_template_argument_outside_the_allow_list_is_refused(
+    tmp_path, written, arrives
+):
+    options = _f._fast_options()
+    options.wifi_flash_tool_arguments_template = (
+        f"/p {{port}} /d WINC1500 /v {{version}} /i {written} /w"
+    )
+    service, runner = _service(options)
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
+        )
+    _assert_refused_untouched(service, runner, device, excinfo, repr(arrives))
+
+
+@pytest.mark.parametrize("version", [
+    "19,7", "19;7", "19=7", "19!7", "19%7", "19^7", "19&7", "19 7",
+    '19"7', "19'7", "19/7", "19\\7", "19:7",
+])
+def test_a_given_version_outside_the_allow_list_is_refused(tmp_path, version):
+    service, runner = _service()
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path, _VERSION)), firmware_version=version
+        )
+    _assert_refused_untouched(
+        service, runner, device, excinfo, repr(version), "may contain only"
+    )
+
+
+@pytest.mark.parametrize("device_name", ["WINC:1500", "WINC/1500", "{port}"])
+def test_a_device_outside_the_allow_list_is_refused(tmp_path, device_name):
+    options = _f._fast_options()
+    options.wifi_flash_tool_arguments_template = (
+        f"/p {{port}} /d {device_name} /v {{version}} /w"
+    )
+    service, runner = _service(options)
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
+        )
+    _assert_refused_untouched(
+        service, runner, device, excinfo, repr(device_name), "literal device name"
+    )

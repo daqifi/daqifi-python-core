@@ -213,9 +213,12 @@ which was never tagged.
   `{version}`, the update raises `ValueError` before anything is sent to the
   device unless the template has exactly one `/v` (any of `/v`, `-v`, `/V`,
   `-V`) whose value is exactly `{version}`, exactly one `/d` with a literal
-  device name (neither the device nor the version may contain whitespace,
-  `,`, `;` or `=`, where cmd.exe splits arguments), no argument other than an option or the value right after
-  one, and a value (or nothing) right before `/v` and before `/d`; and
+  device name, no argument other than an option or the value right after
+  one, and a value (or nothing) right before `/v` and before `/d`; unless
+  every template argument is made only of letters, digits and
+  `/ . _ : { } -`, the `/d` value only of letters, digits and `. _ -`, and
+  the version, given or read from the bundle, only of letters, digits and
+  `. _ -`; and
   unless `files/winc1500/<version>/firmware/programmer_firmware.bin`
   (`winc3400` for a `/d` ending in 3400) exists beside the tool. Without
   `firmware_version=` the version is read from that one device folder, which
