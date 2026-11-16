@@ -1608,41 +1608,148 @@ def test_a_success_clears_a_reservation_whose_echo_never_came():
         % dev._comm._echo_spellings_outstanding)
 
 
-def test_a_user_command_carrying_two_setter_lines_cannot_fool_the_scan():
-    """⛔⛔ THE r12 HIGH SCHEDULE, which the simplification removes rather
-    than patches.
+class _LateUserEcho(_Device):
+    """Echoes a caller's own command LATE, optionally split at the CR.
 
-    A caller can put our own setter text in their own command:
-    `send_command('SYST:ECHO -1\\r\\nSYST:ECHO 1\\r\\nSYST:ECHO -1')` makes
-    the device echo two identical OFF lines, the second split at the CR. At
-    r12 those echoes were released by TEXT, so a copy could be left behind
-    while its spelling was free, and the next download drawing it synced on
-    the leftover.
-
-    With release-by-text gone there is nothing to leave behind: the scan
-    looks only for THIS attempt's spelling, and anything ahead of it is
-    dropped. Pinned by drawing the exact spelling the user's text contains.
+    `split_victim=True` delivers the victim line's echo through its CR and
+    holds the LF back, which is r12's schedule; otherwise the whole echo
+    arrives at `user_echo_delay`, which is the r13 audit's.
     """
-    port = _Device(echo_state=1, reply_delay=0.02)
-    dev = _fresh_device(port)
 
-    # the user's own command carries our marker text, twice
+    user_echo_delay = 1.2
+    lf_extra = 0.15
+    split_victim = False
+    victim = None
+
+    def _write_one(self, text):
+        member = _family_member(text)
+        if member is not None and member == self.victim:
+            if self.echo_state != -1:
+                if self.split_victim:
+                    super()._enqueue(member + b"\r", self.user_echo_delay)
+                    super()._enqueue(
+                        b"\n", self.user_echo_delay + self.lf_extra)
+                else:
+                    super()._enqueue(member + b"\r\n", self.user_echo_delay)
+            self.echo_state = -1
+            return
+        return super()._write_one(text)
+
+
+@pytest.mark.parametrize("split", [False, True],
+                         ids=["delayed-1.2s", "split-at-CR"])
+def test_a_callers_own_command_text_is_reserved_on_write(split):
+    """⛔⛔ r13 AUDIT HIGH, and the cell it replaces OVERCLAIMED.
+
+    The previous cell's docstring said "the second split at the CR" and the
+    code sent no split and no delay -- it drained the echoes before
+    downloading, so it was green at 0dfd9ede where the audit reproduced
+    corruption, and I reported that green to the coordinator as evidence
+    r12 had fixed something. It had not; my cell was testing a neighbouring
+    case. Renamed to what it proves.
+
+    Both real schedules now: the audit's 1.2 s delayed echo of a caller's
+    own `SYST:ECHO -1`, and r12's split-at-CR with the LF held back. In
+    each, the caller's echo is still in flight when the download draws that
+    same spelling.
+
+    ⭐ THE FIX IS RESERVE-ON-WRITE, and it needs no reading discipline at
+    all: the bytes are the DEVICE's output and we never see them, but we
+    know we WROTE the text, and FIFO puts its echo ahead of our next
+    marker. Marking the spelling stale at the write excludes it from the
+    draw, so the collision cannot happen.
+    """
     victim = FAMILY[0]
+    port = _LateUserEcho(echo_state=1, reply_delay=0.02)
+    port.victim = victim
+    port.split_victim = split
+    dev = _fresh_device(port)
+    dev._comm.timeout = 0.2          # returns well before the echo lands
+
     try:
-        dev._comm.send_command(
-            (victim + b"\r\n" + b"SYST:ECHO 1\r\n" + victim).decode("ascii"),
-            delay=0)
+        dev._comm.send_command(victim.decode("ascii"), delay=0)
     except Exception:                                         # noqa: BLE001
         pass
 
-    # now a download that draws exactly that spelling must still be exact
+    # ⚠ THE OUTCOME IS ASSERTED FIRST, DELIBERATELY. Checking the
+    # reservation before the download would make this cell red at the
+    # pre-fix head merely because the mechanism is absent -- true, but it
+    # would never show the CONTAMINATION, which is the thing being fixed.
+    # Driving the download first means the pre-fix red carries the leaked
+    # bytes in its message.
     port._payload = PAYLOAD + END_OF_FILE_MARKER
     dev._comm._echo_rng = _PinnedChoice(victim)
     got, exc = _download(dev, port, timeout=30.0)
+
+    assert port.get_writes >= 1, "the download must reach the GET: %r" % exc
     assert exc is None, "the download must succeed: %r" % exc
     assert bytes(got) == PAYLOAD, (
-        "a user command carrying our marker text must not reach the file: "
-        "%r" % bytes(got)[:80])
+        "a caller's own echo must not reach the file: %r" % bytes(got)[:70])
+
+    # and the mechanism that makes it impossible rather than unlikely
+    assert victim in dev._comm._echo_spellings_outstanding or (
+        dev._comm._echo_spellings_outstanding == set()), (
+        "the caller's spelling must have been reserved at the write (or "
+        "already cleared by the successful download): %r"
+        % sorted(x[:14] for x in dev._comm._echo_spellings_outstanding))
+
+
+class _SplitEveryEcho(_Device):
+    """Every setter echo is cut by the budget: CR just inside, LF just
+    outside. The audit's schedule, repeated."""
+
+    cr_at = 1.9
+    lf_at = 2.1
+
+    def _enqueue(self, data, delay):
+        blob = bytes(data)
+        member = _family_member(blob)
+        if member is not None and blob.endswith(b"\r\n"):
+            super()._enqueue(blob[:-1], self.cr_at)
+            super()._enqueue(b"\n", self.lf_at)
+            return
+        super()._enqueue(blob, delay)
+
+
+def test_echoes_cut_by_every_deadline_do_not_exhaust_the_pool():
+    """⛔⛔ r13 AUDIT MEDIUM, and INTRODUCED by r13's own simplification.
+
+    With every echo's CR inside the budget and its LF outside, each attempt
+    discarded a partial marker and the next consumed the orphan LF without
+    releasing anything. Every spelling went stale, exhaustion reclaim saw
+    only an LF, and the connection refused FOREVER on a healthy device.
+
+    Fixed by carrying ONE pending partial -- the cut spelling and the exact
+    remainder expected -- which FIFO guarantees is the very next thing in
+    the stream. Not a general tail: that is the machinery r9-r12 kept
+    breaking.
+    """
+    port = _SplitEveryEcho(echo_state=1)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+    dev._comm._ECHO_SET_SILENT_FAMILY = tuple(_family()[:4])
+
+    for _ in range(4):
+        try:
+            dev._comm.silence_echo_for_download()
+        except EchoSetUnconfirmedError:
+            pass
+
+    stale = len(dev._comm._echo_spellings_outstanding)
+    assert stale < 4, (
+        "four cut echoes left %d of 4 spellings stale: a marker cut by its "
+        "own deadline must still be completed by the next attempt" % stale)
+
+    # the device recovers; the next download must work
+    port.__class__ = _Device
+    port.reply_delay = 0.02
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    got, exc = _download(dev, port, timeout=30.0)
+    assert exc is None, (
+        "after recovery the download must succeed, not refuse on a pool "
+        "drained by cut echoes: %r" % exc)
+    assert bytes(got) == PAYLOAD
+
 
 
 def test_no_reader_in_comm_py_references_the_removed_machinery():

@@ -8,6 +8,7 @@ Not intended for direct use - use the public API instead.
 import errno
 import math
 import random
+import re
 import serial
 import sys
 import threading
@@ -1514,6 +1515,21 @@ class SerialInterface:
         #: refuse its downloads.
         #: `test_two_connections_do_not_share_the_spelling_pool` pins it.
         self._echo_spellings_outstanding: set = set()
+        #: At most one `(spelling, expected_remaining_suffix)` from an
+        #: attempt whose marker was cut by its own deadline.
+        #:
+        #: ⛔ r13 AUDIT, MEDIUM, and INTRODUCED by r13's simplification. If
+        #: every echo's CR lands inside the budget and its LF outside, each
+        #: attempt discards a partial marker and the next consumes the
+        #: orphan LF without releasing anything -- so every spelling goes
+        #: stale and the connection refuses FOREVER on a healthy device.
+        #:
+        #: ⚠ ONE, NOT A GENERAL TAIL. The carried tail is what r9-r12 kept
+        #: breaking; this remembers a single expected continuation, and FIFO
+        #: guarantees it is the very next thing in the stream. An older
+        #: partial is ahead of it in FIFO and is covered by the next
+        #: success's clear.
+        self._echo_pending_partial = None
 
     def _cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
@@ -1719,7 +1735,7 @@ class SerialInterface:
         # wire format. send_command() uses bare \r for legacy
         # compatibility but new writes should use the canonical form
         # (Qodo PR #55 /improve pass 4 importance 7).
-        self._serial.write(b"SYSTem:ECHO -1\r\n")
+        self._write_to_port(b"SYSTem:ECHO -1\r\n")
         # #262: bounded, and NO flush(). flush() is tcdrain() on POSIX and
         # takes no timeout, so it hung connect() forever on a port that had
         # stopped draining; see _drain_bounded. Its failure is re-raised as
@@ -1884,6 +1900,7 @@ class SerialInterface:
     #: `test_the_spelling_family_members_cannot_match_inside_one_another`,
     #: not argued from the construction.
     _ECHO_SET_SILENT_FAMILY = _echo_spelling_family()
+    _ECHO_FAMILY_SET = frozenset(_ECHO_SET_SILENT_FAMILY)
 
     #: How much the exhaustion-path drain may read before giving up, so a
     #: continuously streaming console cannot spin it.
@@ -1897,6 +1914,45 @@ class SerialInterface:
     #: SystemRandom reads the OS entropy source on every call and cannot be
     #: seeded.
     _echo_rng = random.SystemRandom()
+
+    #: Matches exactly the family: `SYST:ECHO` in any case, a space, `-`,
+    #: zero to three zeros, `1`. Used to spot OUR OWN marker text inside
+    #: bytes this object is about to write.
+    _ECHO_FAMILY_RE = re.compile(rb"SYST:ECHO -0{0,3}1", re.IGNORECASE)
+
+    def _write_to_port(self, data) -> None:
+        """Write to the port, RESERVING any of our marker spellings that
+        appear in the bytes.
+
+        ⛔⛔ r13 AUDIT, HIGH: A CALLER'S OWN COMMAND CAN CARRY OUR MARKER.
+        `send_command('SYST:ECHO -1')` returns before its echo arrives, the
+        download then draws `-1` and synchronises on the CALLER's echo:
+        measured b'SYST:ECHO -1\r\nabc'. The echo is real device output we
+        never observed, so no amount of reading discipline sees it.
+
+        ⭐ But we do not need to see it. We know we WROTE it, and that is
+        enough: FIFO puts that echo AHEAD of our next marker, so marking the
+        spelling stale excludes it from the draw and makes the collision
+        impossible. The next success clears it, as with any stale spelling.
+        
+        ⚠ RESERVE BEFORE THE WRITE, and do not release if the write raises:
+        pyserial discards the written byte count on a write timeout, so
+        0..len bytes may have landed and the echo may still come.
+
+        ⭐⭐ WHY THIS CLOSES WHERE THE READ FUNNEL COULD NOT. r9-r12 tried to
+        attribute every byte READ from a shared stream, and that rule could
+        not be closed because readers live in other modules and the device
+        can destroy bytes before anyone reads them. WRITES are all ours:
+        they are few, they are enumerable, and nothing else puts them on the
+        wire. A rule over our own writes is checkable; a rule over everyone
+        else's reads was not.
+        """
+        blob = bytes(data)
+        for m in self._ECHO_FAMILY_RE.finditer(blob):
+            member = m.group(0)
+            if member in self._ECHO_FAMILY_SET:
+                self._echo_spellings_outstanding.add(member)
+        self._serial.write(blob)
 
     def _next_echo_spelling(self):
         """A spelling drawn UNIFORMLY AT RANDOM from those not marked stale,
@@ -2008,8 +2064,27 @@ class SerialInterface:
         DATA. That is pre-existing and broader before this change, and is
         tracked in pc#268.
 
-        ACROSS objects the choice is not deterministic: a new object cannot
-        know another's stale spellings. That residual is ruling IG A's.
+        ⚠ WHAT REMAINS, STATED EXACTLY:
+
+        * CROSS-OBJECT (ruling IG A, k/1024 per attempt): a new object
+          cannot know another object's stale spellings, so it may draw one
+          whose echo is in flight. A refusal consumes that spelling, so a
+          retry re-rolls.
+        * BYTES CARRYING OUR MARKER THAT THIS OBJECT NEVER OBSERVED AND
+          NEVER WROTE (pc#268): an earlier GET's payload, which is file
+          data and can contain any spelling -- or all of them, so N buys
+          nothing there. Measured PRE-EXISTING and broader before this
+          change: on main the stale bytes come back for ORDINARY file
+          content.
+        * WRITES FROM OUTSIDE THIS MODULE, which the write funnel cannot
+          see: `device.py` writes the GET itself (two sites), and
+          `devices.py` / `sdcard.py` write to a transport stream. None of
+          them carries setter text today, so none reserves anything; if one
+          ever did, its echo would be unobserved in the same way.
+
+        Everything a caller writes THROUGH this module is covered, because
+        the write funnel reserves our marker text before it reaches the
+        wire.
 
         A port fault propagates unwrapped, per pc#267's contract.
         """
@@ -2046,14 +2121,13 @@ class SerialInterface:
         # Echo ON, then OFF in the drawn spelling. microrl gates the echo on
         # the state as the characters arrive, so the second line's echo is
         # certain from any starting state.
-        self._serial.write(self._ECHO_SET_FRAMED + b"\r\n")
-        # ⚠ MARKED STALE BETWEEN THE TWO WRITES (r11 audit). If the ON write
-        # raises, nothing was written and nothing is owed. If the OFF write
-        # raises, it STAYS stale: pyserial discards the written byte count on
-        # a write timeout, so 0..len bytes may have landed and its echo may
-        # still come. An attempted write is not a write that did not happen.
-        self._echo_spellings_outstanding.add(spelling)
-        self._serial.write(framing)
+        self._write_to_port(self._ECHO_SET_FRAMED + b"\r\n")
+        # ⚠ THE RESERVATION NOW FALLS OUT OF THE WRITE FUNNEL, which marks
+        # any family spelling in the bytes stale BEFORE writing them. The
+        # r11 semantics are preserved exactly: the ON line carries no family
+        # member so a failed ON write reserves nothing, and the OFF line
+        # reserves before it is attempted so a failed OFF write keeps it.
+        self._write_to_port(framing)
         drain_output_bounded(
             self._serial, max(0.0, deadline - time.monotonic()))
 
@@ -2061,6 +2135,7 @@ class SerialInterface:
         # first, check the clock after, so a reply already waiting is never
         # missed by a timer that expired first.
         seen = bytearray()
+        pending = self._echo_pending_partial
         while True:
             try:
                 waiting = self._serial.in_waiting
@@ -2071,6 +2146,20 @@ class SerialInterface:
                 raise
             if waiting:
                 seen.extend(self._serial.read(waiting))
+            if pending is not None and seen:
+                prev, suffix = pending
+                if bytes(seen).startswith(suffix):
+                    # The cut marker completed exactly where FIFO says it
+                    # must: release that spelling and drop its remainder.
+                    self._echo_spellings_outstanding.discard(prev)
+                    del seen[:len(suffix)]
+                    pending = self._echo_pending_partial = None
+                elif not suffix.startswith(bytes(seen)):
+                    # The stream continued with something else, so the
+                    # continuation is never coming -- FIFO would have put it
+                    # first. Stop expecting it; the spelling stays stale
+                    # until a success clears it.
+                    pending = self._echo_pending_partial = None
             if framing in seen:
                 # ⭐ FIFO: our marker is in hand, so nothing written earlier
                 # is still pending. Everything ahead of it in the stream was
@@ -2078,6 +2167,16 @@ class SerialInterface:
                 self._echo_spellings_outstanding.clear()
                 return b""
             if time.monotonic() >= deadline:
+                # If our own marker was cut by this deadline, remember just
+                # the expected remainder so the NEXT attempt can finish it
+                # and release this spelling.
+                tail = bytes(seen)
+                cut = 0
+                for k in range(1, len(framing)):
+                    if tail.endswith(framing[:k]):
+                        cut = k
+                self._echo_pending_partial = (
+                    (spelling, framing[cut:]) if cut else None)
                 # ⛔ REFUSE, DO NOT PROCEED. The marker is GUARANTEED to be
                 # coming, so "not here yet" means "still in flight" and
                 # never "nothing was coming" -- the ambiguity a query could
@@ -2175,7 +2274,7 @@ class SerialInterface:
         clean = True
         try:
             # Refused by CancellablePort once the caller has given up.
-            self._serial.write(b"SYSTem:ECHO 1\r\n")
+            self._write_to_port(b"SYSTem:ECHO 1\r\n")
             self._drain_bounded(self.close_drain_timeout)
             time.sleep(0.05)
         except (serial.SerialException, OSError) as exc:
@@ -2210,7 +2309,9 @@ class SerialInterface:
         try:
             # Send command with CR terminator
             cmd_bytes = (command + "\r").encode('ascii')
-            self._serial.write(cmd_bytes)
+            # Through the write funnel: a caller's own command may carry our
+            # marker text, and we must reserve it before it reaches the wire.
+            self._write_to_port(cmd_bytes)
             # #263: bounded, no flush(). A stall raises SerialTimeoutException,
             # which the handler below reports as a RuntimeError.
             self._drain_bounded(self.send_drain_timeout)
@@ -2342,7 +2443,7 @@ class SerialInterface:
                 # Use \r\n to match ScpiMessage.get_bytes() — the canonical
                 # wire format. send_command() uses bare \r for legacy
                 # compatibility but binary queries expect the canonical form.
-                ser.write((query + "\r\n").encode("ascii"))
+                self._write_to_port((query + "\r\n").encode("ascii"))
                 # #263: bounded, no flush(); a stall is reported as the
                 # RuntimeError below.
                 drain_output_bounded(ser, self.send_drain_timeout)
