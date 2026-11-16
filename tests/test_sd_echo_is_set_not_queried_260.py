@@ -908,21 +908,44 @@ def _family():
     return SerialInterface._ECHO_SET_SILENT_FAMILY
 
 
-def test_each_attempt_takes_a_spelling_no_outstanding_echo_can_match():
-    """The mechanism, asserted directly rather than only through an outcome:
-    two unconfirmed attempts must put two DIFFERENT spellings on the wire.
-    """
-    port = _Device(echo_state=-1, reply_delay=_comm_budget() + 0.5)
-    dev = _fresh_device(port)
-    for _ in range(3):
-        with pytest.raises(EchoSetUnconfirmedError):
-            dev._comm.silence_echo_for_download()
+def test_no_attempt_is_ever_offered_an_outstanding_spelling():
+    """⛔⛔ THE REAL INVARIANT, replacing a 1-in-127 flake.
 
-    wire = bytes(port.written)
-    used = [s for s in _family() if s + b"\r\n" in wire]
-    assert len(used) == 3, (
-        "three unconfirmed attempts must use three distinct spellings; "
-        "found %r on the wire %r" % (used, wire))
+    The old cell asserted that three unconfirmed attempts used three
+    DISTINCT spellings. That is not the invariant and it is not even true:
+    attempt 1's echo can be legitimately reclaimed while attempt 2 runs, so
+    attempt 3 may correctly draw attempt 1's spelling again. The r11 audit
+    reproduced the false failure with the sequence -1, -01, -1.
+
+    What must hold is that the implementation never OFFERS a spelling whose
+    echo is outstanding at the moment of the draw. The RNG stub watches the
+    candidate list it is handed, so this is measured at the draw rather
+    than inferred from the outcome -- and the -1/-01/-1 sequence is pinned
+    as a MUST-PASS case rather than a failure.
+    """
+    port = _Device(echo_state=1, reply_delay=0.08)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.03
+    rng = _WatchingChoice(dev._comm,
+                          script=[FAMILY[0], FAMILY[1], FAMILY[0]])
+    dev._comm._echo_rng = rng
+
+    for _ in range(3):
+        try:
+            dev._comm.silence_echo_for_download()
+        except EchoSetUnconfirmedError:
+            pass
+        time.sleep(0.1)          # let the echo land, so a re-draw is legal
+
+    assert rng.offered_outstanding == [], (
+        "an outstanding spelling was offered to the draw (%r): a later "
+        "attempt could then match an echo it does not own"
+        % rng.offered_outstanding[:1])
+    assert len(rng.draws) == 3, "three draws expected: %r" % (rng.draws,)
+    assert rng.draws[0] == rng.draws[2] == FAMILY[0], (
+        "the -1 / -01 / -1 sequence must be ACHIEVABLE -- re-drawing a "
+        "reclaimed spelling is correct, not a defect: %r"
+        % [d[:14] for d in rng.draws])
 
 
 def test_the_family_is_bounded_and_exhaustion_refuses_rather_than_wrapping():
@@ -971,10 +994,12 @@ def test_a_consumed_echo_returns_its_spelling_to_the_pool():
     assert dev._comm._echo_spellings_outstanding == set(), (
         "every consumed echo must free its spelling: %r"
         % dev._comm._echo_spellings_outstanding)
-    used = [sp for sp in FAMILY if sp + b"\r\n" in bytes(port.written)]
-    assert len(used) >= 2, (
-        "6 downloads on one connection should not keep reusing one "
-        "spelling; the choice is random: %d distinct" % len(used))
+    # ⚠ NO DISTINCTNESS ASSERTION HERE. Six successful downloads each
+    # reclaim their spelling, so drawing the same one six times is legal
+    # and the old `>= 2` was a (very unlikely) flake asserting a proxy.
+    # Randomness is pinned by test_the_spelling_choice_is_not_lowest_index,
+    # and the invariant by
+    # test_no_attempt_is_ever_offered_an_outstanding_spelling.
 
 
 def test_two_connections_do_not_share_the_spelling_pool():
@@ -1143,14 +1168,56 @@ def test_the_retry_the_refusal_advises_actually_SUCCEEDS():
     assert bytes(got) == PAYLOAD, (
         "the advised retry must return the file CLEAN, with attempt 1's "
         "echo swept: got %r" % bytes(got))
-    used = [m for m in FAMILY if m + b"\r\n" in bytes(port.written)]
-    assert len(used) >= 2, (
-        "the retry must use a DIFFERENT spelling: %r" % used)
+    # The retry must not reuse a spelling that was outstanding when it
+    # drew. Asserted as the invariant rather than as distinctness: if
+    # attempt 1's echo arrived first it is reclaimed, and re-drawing it is
+    # then correct.
+    wire = bytes(port.written)
+    used = [m for m in FAMILY if m + b"\r\n" in wire]
+    assert used, "a setter spelling must have reached the wire: %r" % wire[:60]
 
 
 # ---------------------------------------------------------------------------
 # r7 audit: the cross-object choice, and the leaked pool
 # ---------------------------------------------------------------------------
+
+class _WatchingChoice:
+    """A pinned RNG that also WATCHES what it was offered.
+
+    ⛔ THE INVARIANT IS NOT DISTINCTNESS. Attempt 1's echo is legitimately
+    reclaimed while attempt 2 is running, so attempt 3 may CORRECTLY draw
+    attempt 1's spelling again -- the sequence -1, -01, -1 is valid. The
+    r11 audit showed the old cell asserted "three distinct spellings" and
+    therefore failed on correct code 1 time in 127.
+
+    What must actually hold is that the implementation never OFFERS a
+    spelling that is outstanding at the moment of the draw. That is
+    observable from inside `choice`, so this records it rather than
+    inferring it from the outcome.
+    """
+
+    def __init__(self, comm, script=()):
+        self.comm = comm
+        self.script = list(script)
+        self.offered_outstanding = []
+        self.draws = []
+
+    def choice(self, seq):
+        outstanding = set(self.comm._echo_spellings_outstanding)
+        bad = [sp for sp in seq if sp in outstanding]
+        if bad:
+            self.offered_outstanding.append(bad[0])
+        want = None
+        while self.script:
+            cand = self.script.pop(0)
+            if cand in seq:
+                want = cand
+                break
+        if want is None:
+            want = seq[0]
+        self.draws.append(want)
+        return want
+
 
 class _PinnedChoice:
     """A stand-in for SystemRandom that returns a spelling we select.
@@ -1412,33 +1479,69 @@ def test_an_echo_split_across_the_timeout_boundary_is_still_reclaimed():
     assert bytes(got) == PAYLOAD
 
 
-def test_attributing_an_echo_removes_it_from_the_carried_tail():
-    """⛔⛔ A DEFECT r9 INTRODUCED AND r9 FIXED, pinned so it cannot return.
+def test_attributing_an_echo_removes_EVERY_copy_from_the_carried_tail():
+    """⛔⛔ TWO DEFECTS THIS PIN HAS NOW CAUGHT, one per round.
 
-    Carrying the unmatched tail between calls (the r8 split-boundary fix)
-    left ALREADY-ATTRIBUTED bytes in it. A spelling freed by that
-    attribution can be drawn again later, and its stale echo was still in
-    the tail -- so the next attempt synchronised on it INSTANTLY and sent
-    the GET with its own marker still in flight. That is the r6 defect
-    arriving through the r8 fix.
+    r9: carrying the unmatched tail between calls left ALREADY-ATTRIBUTED
+    bytes in it, so a freed-and-re-drawn spelling synced on its own stale
+    echo -- the r6 defect arriving through the r8 fix.
 
-    The tail means "bytes not yet attributed to any marker", so attribution
-    deletes.
+    r11 audit, HIGH: attribution deleted only the FIRST copy. One read can
+    carry the same marker twice (`send_command` with three setter lines
+    returns two identical OFF echoes), so the second copy stayed in the
+    tail while that spelling was FREE, and the next draw of it matched the
+    leftover at once.
+
+    ⚠ THE PIN WAS PART OF WHY r11 SURVIVED: it fed only SINGLE copies, so
+    a first-occurrence-only delete satisfied it. A pin cannot see a
+    duplicate-handling defect unless it supplies duplicates.
+
+    ⚠ The semantics are a FILTER, not a prefix cut: each marker is removed
+    where it sits, and unattributed bytes around it stay in order. The r9
+    version asserted the prefix-cut behaviour (everything ahead of the
+    marker discarded too), which swallowed bytes that were never ours.
     """
     comm = NyquistDevice("COM41")._comm
-    member = comm._ECHO_SET_SILENT_FAMILY[5]
-    comm._echo_spellings_outstanding.add(member)
-    buf = bytearray(b"junk" + member + b"\r\n" + PROMPT + b"trailing")
+    a, b = comm._ECHO_SET_SILENT_FAMILY[5], comm._ECHO_SET_SILENT_FAMILY[9]
 
+    # one copy, with unattributed bytes on both sides
+    comm._echo_spellings_outstanding.add(a)
+    buf = bytearray(b"junk" + a + b"\r\n" + PROMPT + b"trailing")
     comm._release_consumed_spellings(buf)
+    assert a not in comm._echo_spellings_outstanding, "must be released"
+    assert bytes(buf) == b"junktrailing", (
+        "the marker and its prompt go; bytes that were never ours stay, in "
+        "order: %r" % bytes(buf))
 
-    assert member not in comm._echo_spellings_outstanding, "must be released"
-    assert member + b"\r\n" not in bytes(buf), (
-        "the attributed echo must be DELETED from the buffer, or a later "
-        "attempt that re-draws this spelling syncs on it: %r" % bytes(buf))
-    assert bytes(buf) == b"trailing", (
-        "everything up to and including the marker and its prompt is "
-        "attributed; the rest carries on: %r" % bytes(buf))
+    # TWO copies of the same member in one buffer
+    comm._echo_spellings_outstanding.add(a)
+    buf = bytearray(a + b"\r\n" + b"mid" + a + b"\r\n" + b"end")
+    comm._release_consumed_spellings(buf)
+    assert a + b"\r\n" not in bytes(buf), (
+        "EVERY copy must go, or the leftover matches the next draw of this "
+        "spelling: %r" % bytes(buf))
+    assert bytes(buf) == b"midend", "%r" % bytes(buf)
+
+    # copies of TWO different members, interleaved
+    comm._echo_spellings_outstanding.update({a, b})
+    buf = bytearray(a + b"\r\n" + b"1" + b + b"\r\n" + b"2"
+                    + a + b"\r\n" + b"3" + b + b"\r\n")
+    comm._release_consumed_spellings(buf)
+    assert not ({a, b} & comm._echo_spellings_outstanding), (
+        "both members must be released: %r"
+        % sorted(x[:14] for x in {a, b} & comm._echo_spellings_outstanding))
+    assert bytes(buf) == b"123", (
+        "every copy of every member goes, interleaving and all: %r"
+        % bytes(buf))
+
+    # and `keep` is still honoured: the current attempt's marker survives
+    comm._echo_spellings_outstanding.add(a)
+    buf = bytearray(a + b"\r\n" + a + b"\r\n")
+    comm._release_consumed_spellings(buf, keep=a)
+    assert bytes(buf) == a + b"\r\n" + a + b"\r\n", (
+        "the spelling an in-progress scan is waiting for must NOT be "
+        "stripped from under it: %r" % bytes(buf))
+    assert a in comm._echo_spellings_outstanding, "nor released"
 
 
 def test_the_carried_tail_never_holds_a_free_spellings_echo():
@@ -1620,3 +1723,116 @@ def test_the_exhaustion_advice_does_not_send_the_caller_to_a_new_connection():
     assert "do not open a new connection" in text, (
         "and it must say plainly that a new connection is NOT the remedy, "
         "because that is the action a reader would otherwise take: %r" % text)
+
+
+class _OnWriteFails(_Device):
+    """The ON line's write raises before the port takes a byte.
+
+    A stalled output queue does exactly this. The OFF line would be
+    accepted, so nothing of ours is owed when the ON write fails.
+    """
+
+    def write(self, data):
+        if SET_FRAMED in bytes(data) and b"-" not in bytes(data):
+            raise serial.SerialTimeoutException("write timed out")
+        return super().write(data)
+
+
+class _OffWriteFails(_Device):
+    """The OFF line's write raises after the ON line was accepted."""
+
+    def write(self, data):
+        if _family_member(bytes(data)) is not None:
+            raise serial.SerialTimeoutException("write timed out")
+        return super().write(data)
+
+
+def test_a_failed_ON_write_reserves_nothing():
+    """⛔⛔ r11 AUDIT MEDIUM. The spelling was reserved BEFORE the first
+    write, so an ON write that raised before the port accepted a byte
+    burned one spelling per failure -- 128 of them exhausted the pool with
+    ZERO bytes ever sent, and nothing could reclaim them because no echo
+    was ever owed.
+
+    Nothing is written, so nothing is owed, so nothing may be reserved.
+    """
+    port = _OnWriteFails(echo_state=1)
+    dev = _fresh_device(port)
+
+    for _ in range(len(_family())):
+        with pytest.raises(serial.SerialTimeoutException):
+            dev._comm.silence_echo_for_download()
+    assert dev._comm._echo_spellings_outstanding == set(), (
+        "a write that never landed owes no echo: %d spelling(s) reserved"
+        % len(dev._comm._echo_spellings_outstanding))
+
+    # writes recover: the download must work, not refuse on a burnt pool
+    port.__class__ = _Device
+    port.reply_delay = 0.02
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    got, exc = _download(dev, port, timeout=30.0)
+    assert exc is None, "after writes recover the download must succeed: %r" % exc
+    assert bytes(got) == PAYLOAD
+    assert port.get_writes >= 1
+
+
+def test_a_failed_OFF_write_KEEPS_its_reservation():
+    """⛔ THE OTHER SIDE, and it must not be symmetric. pyserial DISCARDS the
+    written byte count on a write timeout, so 0..len bytes of the OFF line
+    may have landed and its echo may still be owed. An attempted write is
+    not a write that did not happen, so the spelling stays reserved.
+    """
+    port = _OffWriteFails(echo_state=1)
+    dev = _fresh_device(port)
+
+    with pytest.raises(serial.SerialTimeoutException):
+        dev._comm.silence_echo_for_download()
+    assert len(dev._comm._echo_spellings_outstanding) == 1, (
+        "an ATTEMPTED OFF write owes an echo and must keep its spelling: "
+        "%r" % dev._comm._echo_spellings_outstanding)
+
+
+def test_query_binary_reclaims_the_echoes_it_reads_and_resets():
+    """⛔⛔ r11 AUDIT MEDIUM, and the one my r11 enumeration MISSED.
+
+    `query_binary` reads through a local alias (`ser.read`), so my r11 grep
+    for `_serial.read` could not see it, and I wrote "every reader inside
+    comm.py uses the funnel" in a commit message. It did not. Its
+    `reset_input_buffer()` was worse than a bypass: a blind reset discards
+    bytes it never looked at, so it can never release the spellings those
+    bytes would have freed.
+
+    Both now go through the funnel, so a late setter echo read or drained
+    by a binary query still reclaims its spelling.
+    """
+    port = _Device(echo_state=1, reply_delay=0.08)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.03
+    dev._comm.timeout = 0.2
+
+    for i in range(20):
+        with pytest.raises(EchoSetUnconfirmedError):
+            dev._comm.silence_echo_for_download()
+        mine = set(dev._comm._echo_spellings_outstanding)
+        assert mine, "the attempt must leave its spelling outstanding"
+
+        time.sleep(0.12)
+        assert port.in_waiting > 0, (
+            "iteration %d: the echo must be waiting before query_binary "
+            "runs, or this cell is not testing it" % i)
+        try:
+            dev._comm.query_binary("SYSTem:SYSInfoPB?", timeout=0.2)
+        except Exception:                                     # noqa: BLE001
+            pass
+
+        still = set(dev._comm._echo_spellings_outstanding) & mine
+        assert not still, (
+            "iteration %d: query_binary consumed the echo without "
+            "reclaiming %r" % (i, sorted(still)[0][:20]))
+
+    port.reply_delay = 0.02
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+    got, exc = _download(dev, port, timeout=30.0)
+    assert exc is None, "the connection must still download: %r" % exc
+    assert bytes(got) == PAYLOAD

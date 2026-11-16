@@ -1957,22 +1957,44 @@ class SerialInterface:
         So the tail means "bytes not yet attributed to any marker", and the
         code now matches the words.
         """
+        # ⛔⛔ r11 AUDIT, HIGH: EVERY OCCURRENCE, NOT THE FIRST. One read can
+        # carry the same marker twice -- `send_command` with three setter
+        # lines in it returns two identical OFF echoes -- and the old code
+        # released the spelling, deleted the FIRST copy, and left the second
+        # in the tail while that spelling was FREE. The next draw of it then
+        # synchronised on the leftover instantly and returned
+        # b'SYST:ECHO -1\r\n' + payload. The r9 invariant ("the tail never
+        # holds a free spelling's echo") was therefore false for duplicates.
+        #
+        # ⚠ AND IT IS A FILTER NOW, NOT A PREFIX CUT. The old shape deleted
+        # everything up to the furthest marker, which both swallowed
+        # unattributed bytes ahead of it and could not reach a duplicate
+        # behind it. Removing each marker where it actually sits leaves the
+        # unattributed bytes in order, which is what "the unattributed tail"
+        # is supposed to mean.
         blob = bytes(buf)
-        cut = 0
-        for member in self._ECHO_SET_SILENT_FAMILY:
-            if member == keep:
-                continue
-            framing = member + b"\r\n"
-            at = blob.find(framing)
-            if at < 0:
-                continue
-            self._echo_spellings_outstanding.discard(member)
-            end = at + len(framing)
-            if blob[end:end + len(self._ECHO_PROMPT)] == self._ECHO_PROMPT:
-                end += len(self._ECHO_PROMPT)
-            cut = max(cut, end)
-        if cut and isinstance(buf, bytearray):
-            del buf[:cut]
+        changed = True
+        while changed:
+            changed = False
+            for member in self._ECHO_SET_SILENT_FAMILY:
+                if member == keep:
+                    continue
+                framing = member + b"\r\n"
+                at = blob.find(framing)
+                while at >= 0:
+                    self._echo_spellings_outstanding.discard(member)
+                    end = at + len(framing)
+                    if (blob[end:end + len(self._ECHO_PROMPT)]
+                            == self._ECHO_PROMPT):
+                        end += len(self._ECHO_PROMPT)
+                    blob = blob[:at] + blob[end:]
+                    changed = True
+                    at = blob.find(framing)
+            # The outer pass repeats because deleting one marker can join
+            # its neighbours into another member's framing. Each pass
+            # strictly shortens `blob`, so this terminates.
+        if isinstance(buf, bytearray):
+            buf[:] = blob
 
     def _next_echo_spelling(self):
         """A spelling chosen UNIFORMLY AT RANDOM among those whose echo is
@@ -2101,8 +2123,18 @@ class SerialInterface:
         # is therefore certain -- microrl gates on the state as characters
         # arrive -- which is what gives the scan a marker in every starting
         # state.
-        self._echo_spellings_outstanding.add(spelling)
+        # ⛔ r11 AUDIT, MEDIUM: RESERVE ON THE OFF WRITE, NOT BEFORE THE ON
+        # WRITE. The ON line's write can raise before the port accepts a
+        # byte -- a stalled output queue does exactly that -- and reserving
+        # first burned one spelling per failure: 128 of them exhausted the
+        # pool with ZERO bytes ever sent, and nothing could reclaim them
+        # because no echo was ever owed.
         self._serial.write(self._ECHO_SET_FRAMED + b"\r\n")
+        # ⚠ RESERVED BEFORE the OFF write and NOT released if it raises.
+        # pyserial discards the written byte count on a write timeout, so
+        # 0..len bytes may have landed and its echo may still be owed --
+        # an ATTEMPTED write is not a write that did not happen.
+        self._echo_spellings_outstanding.add(spelling)
         self._serial.write(framing)
         drain_output_bounded(
             self._serial, max(0.0, deadline - time.monotonic()))
@@ -2437,6 +2469,27 @@ class SerialInterface:
                 # being accurate (the loop already gates on it).
                 pass
             try:
+                # ⛔ r11 AUDIT, MEDIUM: A BLIND RESET CANNOT RELEASE WHAT IT
+                # NEVER SAW. This reset threw away bytes that may have been
+                # our own setter echoes, so their spellings stayed
+                # outstanding forever -- 128 cycles and every download
+                # refused with nothing left to reclaim.
+                #
+                # So anything already waiting is attributed FIRST, and only
+                # then discarded. The reset itself stays: the generated pin
+                # `test_resets_input_before_write` requires it to precede
+                # the write, and it is what clears bytes that arrive in the
+                # window between the drain and the write.
+                #
+                # ⚠ ONLY WHEN THERE IS SOMETHING TO RECLAIM. With no
+                # spelling outstanding the drain can gain nothing, and
+                # reading ahead of a write is not free: the generated fakes
+                # pre-queue the reply in `in_waiting`, so an unconditional
+                # pre-write read consumed it and five pins went red. The
+                # condition is not test-shaped -- "have I anything owed?"
+                # is exactly when this is worth doing.
+                if self._echo_spellings_outstanding:
+                    self._reclaim_arrived_echoes()
                 ser.reset_input_buffer()
                 # Use \r\n to match ScpiMessage.get_bytes() — the canonical
                 # wire format. send_command() uses bare \r for legacy
@@ -2452,7 +2505,12 @@ class SerialInterface:
                 while time.monotonic() < deadline:
                     pending = ser.in_waiting
                     if pending:
-                        chunk = ser.read(pending)
+                        # Through the funnel, so a late setter echo inside
+                        # a binary reply still releases its spelling. AST
+                        # enumeration found this read: it uses the local
+                        # alias `ser`, which my r11 grep for `_serial.read`
+                        # structurally could not see.
+                        chunk = self._consume_from_port(pending)
                         if chunk:
                             received.extend(chunk)
                             last_byte_time = time.monotonic()
