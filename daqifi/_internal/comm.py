@@ -1868,6 +1868,47 @@ class SerialInterface:
     #: seeded.
     _echo_rng = random.SystemRandom()
 
+    def _reclaim_arrived_echoes(self) -> None:
+        """Read what has ALREADY arrived and attribute it, without waiting.
+
+        ⛔ r9 AUDIT, MEDIUM: THE EXHAUSTION CHECK REFUSED BEFORE READING, so
+        reclamation was unreachable once all spellings were outstanding --
+        measured with 9,920 bytes of complete echoes sitting readable and
+        zero reads, refusing forever. Every one of those echoes would have
+        freed a spelling.
+
+        ⚠ It reads only what is in hand. Waiting here would turn an
+        exhausted pool into a second timeout on a path that has no budget of
+        its own, and the caller's deadline has not started yet. A device
+        that is genuinely mute therefore still refuses -- the refusal is
+        made RECOVERABLE, not removed.
+
+        Bounded on purpose: a console streaming continuously must not spin
+        this loop, so it stops once it has taken at most the tail window.
+        """
+        if self._serial is None or not getattr(self._serial, "is_open", False):
+            return
+        taken = 0
+        while taken < self._ECHO_SCAN_TAIL_MAX:
+            try:
+                waiting = getattr(self._serial, "in_waiting", 0)
+            except Exception:                                 # noqa: BLE001
+                return          # a dead port is the caller's problem, not ours
+            if not waiting:
+                break
+            chunk = self._serial.read(min(waiting,
+                                          self._ECHO_SCAN_TAIL_MAX - taken))
+            if not chunk:
+                break
+            taken += len(chunk)
+            self._echo_scan_tail.extend(chunk)
+        # The SAME attribution path as the scan, so the r9 invariant holds:
+        # whatever is attributed is deleted from the tail, and a spelling is
+        # freed only together with the bytes that freed it.
+        self._release_consumed_spellings(self._echo_scan_tail)
+        if len(self._echo_scan_tail) > self._ECHO_SCAN_TAIL_MAX:
+            del self._echo_scan_tail[:-self._ECHO_SCAN_TAIL_MAX]
+
     def _release_consumed_spellings(self, buf, keep=None):
         """Release every family spelling whose echo appears in ``buf``, and
         DELETE those bytes from it when ``buf`` is a bytearray.
@@ -1978,6 +2019,12 @@ class SerialInterface:
         from ..exceptions import EchoSetUnconfirmedError
 
         spelling = self._next_echo_spelling()
+        if spelling is None:
+            # Reclaim before refusing: echoes that have already landed free
+            # their spellings, and refusing without reading them made an
+            # exhausted pool permanent (r9 audit).
+            self._reclaim_arrived_echoes()
+            spelling = self._next_echo_spelling()
         if spelling is None:
             # ⛔ REFUSE RATHER THAN WRAP. Reusing a spelling whose echo is
             # still outstanding is exactly the r6 defect, so an exhausted

@@ -179,8 +179,7 @@ class _Device(EchoSetterFake):
             # being pinned: same effect on the device, different bytes on
             # the wire.
             if self.echo_state != -1:
-                self._enqueue(OPEN_SETTER + b"\r\n" + PROMPT,
-                              self.reply_delay)
+                self._enqueue(OPEN_SETTER + b"\r\n", self.reply_delay)
             self.echo_state = -1
             return len(data)
         member = _family_member(text)
@@ -201,7 +200,10 @@ class _Device(EchoSetterFake):
             # demonstrating that a retry WORKS.
             self.setter_writes += 1
             if self.echo_state != -1:
-                self._enqueue(member + b"\r\n" + PROMPT, self.reply_delay)
+                # No trailing prompt: MEASURED on the bench, the OFF line's
+                # echo is the last thing on the wire because echo is -1 by
+                # the time the prompt would be written.
+                self._enqueue(member + b"\r\n", self.reply_delay)
             self.echo_state = -1
             return len(data)
         if SET_FRAMED in text:
@@ -1061,6 +1063,22 @@ class _SplitEcho(_Device):
         super()._enqueue(data, delay)
 
 
+class _Withholding(_Device):
+    """Queues its echoes but delivers nothing until `deliver_now()`.
+
+    Models a device whose output is stalled -- a busy SD flush, a blocked
+    USB endpoint -- and then resumes. The echoes are REAL and COMPLETE; they
+    simply have not been read yet, which is exactly the state in which
+    refusing without reading loses them.
+    """
+
+    reply_delay = 3600.0        # effectively never, until released
+
+    def deliver_now(self):
+        self._queue = [(0.0, blob) for _due, blob in self._queue]
+        self._last_due = 0.0
+
+
 class _Mute(_Device):
     """Answers nothing at all: no echo, ever.
 
@@ -1222,7 +1240,7 @@ def test_a_new_object_colliding_on_the_previous_marker_is_the_known_residual(
     # be clean, with no `DAQIFI> SYSTem:ECHO -1` prefix.
     other = next(sp for sp in FAMILY if sp != collided)
     port2 = _Device(echo_state=1, reply_delay=1.0)
-    port2.seed_foreign(collided + b"\r\n" + PROMPT, 0.4)
+    port2.seed_foreign(collided + b"\r\n", 0.4)
     b2 = _reopen(port2, monkeypatch)
     b2._comm._echo_rng = _PinnedChoice(other)
     got2, exc2 = _download(b2, port2, timeout=30.0)
@@ -1448,3 +1466,61 @@ def test_the_carried_tail_never_holds_a_free_spellings_echo():
         "the tail holds the echo of %d spelling(s) that are free to be "
         "drawn again (first %r): a later attempt would sync on a stale "
         "marker" % (len(free_in_tail), free_in_tail[0][:20]))
+
+
+def test_an_exhausted_pool_recovers_once_its_echoes_arrive():
+    """⛔⛔ r9 AUDIT MEDIUM. The exhaustion check refused BEFORE reading, so
+    reclamation was unreachable: with every spelling outstanding, 9,920
+    bytes of complete echoes sat readable and the connection refused
+    forever. Each of those echoes would have freed a spelling.
+
+    Exhaustion now reads what has arrived, attributes it through the same
+    carried-tail path, and draws again.
+    """
+    port = _Withholding(echo_state=1)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.02
+
+    n = len(_family())
+    for _ in range(n):
+        with pytest.raises(EchoSetUnconfirmedError):
+            dev._comm.silence_echo_for_download()
+    assert len(dev._comm._echo_spellings_outstanding) == n, (
+        "the pool must be exhausted for this cell to mean anything: %d of %d"
+        % (len(dev._comm._echo_spellings_outstanding), n))
+
+    # Nothing was lost -- the echoes are all still queued on the device.
+    port.deliver_now()
+    port.reply_delay = 0.01
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+
+    got, exc = _download(dev, port, timeout=30.0)
+    assert exc is None, (
+        "once the withheld echoes arrive, an exhausted pool must reclaim "
+        "them and the download must succeed: %r" % exc)
+    assert bytes(got) == PAYLOAD
+    assert port.get_writes >= 1, "the download must have reached the GET"
+
+
+def test_a_device_that_stays_mute_still_refuses_when_exhausted():
+    """⛔ THE REFUSAL IS MADE RECOVERABLE, NOT REMOVED. Reading on the
+    exhaustion path must not become a way to proceed with nothing in hand:
+    a device that never answers still has every spelling outstanding and
+    nothing to attribute, so it must still refuse.
+    """
+    port = _Mute(echo_state=1)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.02
+
+    n = len(_family())
+    for _ in range(n):
+        with pytest.raises(EchoSetUnconfirmedError):
+            dev._comm.silence_echo_for_download()
+
+    with pytest.raises(EchoSetUnconfirmedError) as err:
+        dev._comm.silence_echo_for_download()
+    assert "outstanding on this connection" in str(err.value), (
+        "a mute device must still refuse with the exhaustion message: %r"
+        % str(err.value))
+    assert port.get_writes == 0, "and nothing may be downloaded"

@@ -68,7 +68,19 @@ def echo_setter_reply(written, echo_state):
     for cmd in sorted(ECHO_SET_SILENT_FAMILY + (OPEN_SET_SILENT,),
                       key=len, reverse=True):
         if cmd in text:
-            reply = (cmd + b"\r\n" + PROMPT) if echo_state != -1 else b""
+            # ⛔ NO PROMPT AFTER A LINE THAT SETS ECHO TO -1, and this is
+            # MEASURED, not inferred. Captured on this lane's board
+            # (2026-11-15), the ON/OFF pair returns exactly:
+            #   `SYST:ECHO 1` CRLF `DAQIFI> ` `SYST:ECHO -01` CRLF
+            # and then nothing. The prompt follows the ON line because echo
+            # is on when that line completes; after the OFF line echo is -1,
+            # which suppresses the prompt as well as the echo.
+            #
+            # An earlier version appended PROMPT here too. Any cell relying
+            # on that trailing prompt was testing a device that does not
+            # exist -- the r9 audit's blind leg suppressed it "to match
+            # firmware", which is what prompted the check.
+            reply = (cmd + b"\r\n") if echo_state != -1 else b""
             return reply, -1
     for cmd in (ECHO_SET_FRAMED, CLOSE_SET_FRAMED):
         if cmd in text:
