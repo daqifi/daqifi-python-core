@@ -57,11 +57,20 @@ _OLD_HEX_URL = "https://github.com/daqifi/daqifi-nyquist-firmware/releases/downl
 _WIFI_ZIP_URL = "https://api.github.com/repos/daqifi/winc1500-Manual-UART-Firmware-Update/zipball/v19.5.4"
 
 
-def _wifi_zip() -> bytes:
+def _wifi_zip(versions=("19.5.4",), device="winc1500") -> bytes:
+    """A zipball laid out like the real one: a top-level folder, then the
+    tool beside files/<device>/<version>/firmware/programmer_firmware.bin."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("winc/firmware/m2m_aio_3a0.bin", b"winc image")
         z.writestr("winc/download_all.bat", b"@echo off")
+        z.writestr("winc/winc_flash_tool.cmd", b"@echo off")
+        z.writestr(f"winc/files/{device}/gain_tables/gain.config", b"")
+        for version in versions:
+            z.writestr(
+                f"winc/files/{device}/{version}/firmware/programmer_firmware.bin",
+                b"programmer",
+            )
     return buf.getvalue()
 
 
@@ -213,8 +222,10 @@ class TestGitHubDownloadService:
             urlopen=urlopen,
         )
         assert result is not None
-        path, tag = result
-        assert tag == "v19.5.4"
+        path, version = result
+        # The bundle's version folder, not the release tag "v19.5.4": it is
+        # what the flash tool's /v takes (#274 r2).
+        assert version == "19.5.4"
         assert path == tmp_path / "wifi-firmware-v19.5.4"
         assert (path / "winc/firmware/m2m_aio_3a0.bin").read_bytes() == b"winc image"
         assert (path / "winc/download_all.bat").read_bytes() == b"@echo off"
@@ -222,3 +233,14 @@ class TestGitHubDownloadService:
         assert [p.name for p in tmp_path.iterdir()] == ["wifi-firmware-v19.5.4"]
         assert calls == [_WIFI_ZIP_URL]
         assert progress[0] == 0 and 85 in progress and progress[-1] == 100
+
+    @pytest.mark.parametrize("versions", [(), ("19.5.4", "19.6.1")])
+    def test_download_wifi_firmware_needs_exactly_one_bundle_version(
+        self, tmp_path, versions
+    ):
+        urlopen, _ = _serve({_WIFI_ZIP_URL: _wifi_zip(versions)})
+        with pytest.raises(RuntimeError, match="expected exactly one"):
+            _run(
+                GitHubFirmwareDownloadService().download_wifi_firmware(tmp_path),
+                urlopen=urlopen,
+            )

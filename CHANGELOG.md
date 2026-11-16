@@ -207,12 +207,17 @@ which was never tagged.
   `/p {port} /d WINC1500 /v {version} /k /e /i aio /w`, and `{version}` is a
   new placeholder. `update_wifi_module()` takes a `firmware_version=`
   argument: pass the version `download_wifi_firmware()` returns with the
-  path. When the template uses `{version}`, the update reads the arguments
-  the way `winc_flash_tool.cmd` does and raises `ValueError` before anything
-  is sent to the device unless the template has a literal `/d` device and
-  the programmer image the tool will open,
-  `files/winc1500/<version>/firmware/programmer_firmware.bin` beside the tool
-  (`winc3400` for a `/d` ending in 3400), exists. Without
+  path, which is now the bundle's version folder (`19.7.7` under
+  `files/winc1500/`) rather than the release tag; a downloaded bundle
+  without exactly one version raises `RuntimeError`. When the template uses
+  `{version}`, the update raises `ValueError` before anything is sent to the
+  device unless the template has exactly one `/v` (any of `/v`, `-v`, `/V`,
+  `-V`) whose value is exactly `{version}`, exactly one `/d` with a literal
+  device name (neither the device nor the version may contain whitespace,
+  `,`, `;` or `=`, where cmd.exe splits arguments), no argument other than an option or the value right after
+  one, and a value (or nothing) right before `/v` and before `/d`; and
+  unless `files/winc1500/<version>/firmware/programmer_firmware.bin`
+  (`winc3400` for a `/d` ending in 3400) exists beside the tool. Without
   `firmware_version=` the version is read from that one device folder, which
   must then hold exactly one such image. A flash tool that cannot be found
   is still reported where it was before, when the flash request is built. A

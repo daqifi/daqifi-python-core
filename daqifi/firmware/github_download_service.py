@@ -239,7 +239,19 @@ class GitHubFirmwareDownloadService(FirmwareDownloadService):
             pass
         _report(progress, 100)
 
-        return (extract_path, release.tag_name)
+        # The version the flash tool takes is the bundle's version folder,
+        # not the release tag, which can differ ("v19.7.7" over 19.7.7).
+        versions = await asyncio.to_thread(_bundle_firmware_versions, extract_path)
+        if len(versions) != 1:
+            raise RuntimeError(
+                f"WiFi firmware release {release.tag_name!r}, extracted to "
+                f"{str(extract_path)!r}, holds "
+                f"{len(versions)} files/winc*/<version>/firmware/"
+                "programmer_firmware.bin versions"
+                + (f" ({', '.join(versions)})" if versions else "")
+                + "; expected exactly one."
+            )
+        return (extract_path, versions[0])
 
     def invalidate_cache(self) -> None:
         self._firmware_cache = _Cache()
@@ -759,3 +771,20 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _bundle_firmware_versions(root: Path) -> List[str]:
+    """The version folders of every
+    ``files/winc*/<version>/firmware/programmer_firmware.bin`` under root."""
+    versions = set()
+    for image in root.rglob("programmer_firmware.bin"):
+        parts = image.relative_to(root).parts
+        if (
+            len(parts) >= 5
+            and parts[-2] == "firmware"
+            and parts[-4].lower().startswith("winc")
+            and parts[-5] == "files"
+            and image.is_file()
+        ):
+            versions.add(parts[-3])
+    return sorted(versions)

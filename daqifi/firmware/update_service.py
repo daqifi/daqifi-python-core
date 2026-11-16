@@ -262,7 +262,8 @@ class FirmwareUpdateService(Protocol):
                 :meth:`FirmwareDownloadService.download_wifi_firmware`
                 returns with the path. When the template uses ``{version}``,
                 the update is refused with ValueError before anything is sent
-                unless the template has a literal ``/d`` device and
+                unless the template has the shape _winc_template_device
+                checks (one /v {version}, one literal /d) and
                 ``files/winc<1500|3400>/<version>/firmware/
                 programmer_firmware.bin``, the image the tool will open, exists
                 beside the tool. When omitted, the version is read from that
@@ -1766,12 +1767,13 @@ class DefaultFirmwareUpdateService:
     ) -> Optional[str]:
         """The version to substitute for ``{version}``, or a ValueError.
 
-        When the template uses ``{version}``, the arguments are split as the
-        tool will receive them and read the way ``winc_flash_tool.cmd`` reads
-        them, and the programmer image the tool will open,
-        ``files/winc<device>/<version>/firmware/programmer_firmware.bin``
-        beside the tool, must exist. Anything else is refused here. Reads
-        only the filesystem, so a refusal leaves the device untouched.
+        When the template uses ``{version}`` it must have the shape
+        _winc_template_device checks, which fixes the /v value the tool
+        reads to the version given here, and the programmer image the tool
+        will open, ``files/winc<device>/<version>/firmware/
+        programmer_firmware.bin`` beside the tool, must exist. Anything else
+        is refused here. Reads only the filesystem, so a refusal leaves the
+        device untouched.
         """
         if firmware_version is not None and (
             not isinstance(firmware_version, str)
@@ -1792,17 +1794,9 @@ class DefaultFirmwareUpdateService:
             # request; with no tool there is no bundle to check.
             return firmware_version
         tool_directory = os.path.dirname(os.path.abspath(tool_path))
-        written = _wifi_template_tokens(tool_path, template)
-
-        device, _ = _winc_tool_options(written)
-        if not device or _PLACEHOLDER.search(device):
-            raise ValueError(
-                f"The WiFi flash arguments template {template!r} passes "
-                "{version} but no /d device the bundle folder can be read "
-                "from (files/winc<device>/<version>), so the version cannot "
-                "be checked. Give /d a literal device such as WINC1500. "
-                "Nothing was sent."
-            )
+        device = _winc_template_device(
+            _wifi_template_tokens(tool_path, template), template
+        )
         device_folder = _winc_device_folder(device)
         device_directory = os.path.join(tool_directory, "files", device_folder)
 
@@ -1822,19 +1816,18 @@ class DefaultFirmwareUpdateService:
                 )
             firmware_version = available[0]
 
-        # The version as the tool will read it: the rendered /v value, which
-        # differs from firmware_version if the template places /v where the
-        # tool's option parsing never reaches it.
-        _, tool_version = _winc_tool_options(
-            _substitute_placeholders(
-                written, "{port}", "{firmwarePath}", firmware_version
-            )
-        )
+        unsafe = sorted(set(firmware_version) & _WINC_ARGUMENT_SEPARATORS)
         image = os.path.join(
-            device_directory, tool_version or "", "firmware",
+            device_directory, firmware_version, "firmware",
             "programmer_firmware.bin",
         )
-        if not tool_version or not os.path.isfile(image):
+        if unsafe:
+            raise ValueError(
+                f"WiFi firmware version {firmware_version!r} contains "
+                f"{''.join(unsafe)!r}, at which cmd.exe splits the flash "
+                "tool's arguments. Nothing was sent."
+            )
+        if not os.path.isfile(image):
             raise ValueError(
                 f"WiFi firmware version {firmware_version!r} for /d {device} "
                 f"needs {image!r}, which does not exist; the flash tool would "
@@ -3142,36 +3135,65 @@ def _wifi_template_tokens(tool_path: str, template: str) -> List[str]:
     return _split_posix_template(template)
 
 
-# winc_flash_tool.cmd's flags that take no value; every other option,
-# including an unknown one, consumes the argument after it.
-_WINC_TOOL_FLAGS = frozenset("exwr")
+# cmd.exe splits a batch script's arguments at these as well as whitespace.
+_WINC_ARGUMENT_SEPARATORS = frozenset(" \t,;=")
 
 
-def _winc_tool_options(tokens: List[str]) -> Tuple[Optional[str], Optional[str]]:
-    """The (/d, /v) values ``winc_flash_tool.cmd`` would read from tokens.
+def _is_option(token: str) -> bool:
+    return token[:1] in ("/", "-")
 
-    Mirrors its ``:getops`` loop: options start with ``/`` or ``-`` and are
-    case-insensitive, parsing stops at the first argument that is not an
-    option (or is empty), and a later repeat of an option wins.
+
+def _winc_template_device(tokens: List[str], template: str) -> str:
+    """The /d device of a template that passes ``{version}``, or ValueError.
+
+    Checks a SHAPE rather than mirroring winc_flash_tool.cmd's option
+    parsing, so the version validated is provably the one the tool reads:
+
+    - exactly one /v (any of /v, -v, /V, -V), whose value is exactly
+      ``{version}``;
+    - exactly one /d, whose value is a literal device name;
+    - no non-option argument except as the value right after an option;
+    - the argument before /v and before /d is not an option. Only an option
+      can take the next argument as its value (the tool's unknown options
+      do too), so this is what guarantees /v and /d are read as options.
     """
-    device: Optional[str] = None
-    version: Optional[str] = None
-    i = 0
-    while i < len(tokens):
-        option = tokens[i]
-        if not option or option[0] not in "/-":
-            break
-        key = option[1:].lower()
-        if key in _WINC_TOOL_FLAGS:
-            i += 1
-            continue
-        value = tokens[i + 1] if i + 1 < len(tokens) else ""
-        if key == "d":
-            device = value
-        elif key == "v":
-            version = value
-        i += 2
-    return device, version
+    def refuse(reason: str) -> ValueError:
+        return ValueError(
+            f"The WiFi flash arguments template {template!r} passes "
+            f"{{version}}, so it must have exactly one /v {{version}} and one "
+            "/d <device>, each after a value (or first), and no other "
+            f"argument that is not an option or an option's value: {reason}. "
+            "Nothing was sent."
+        )
+
+    positions = {"v": [], "d": []}
+    for index, token in enumerate(tokens):
+        if _is_option(token):
+            key = token[1:].lower()
+            if key in positions:
+                positions[key].append(index)
+        elif index == 0 or not _is_option(tokens[index - 1]):
+            raise refuse(f"{token!r} is not an option's value")
+    for key in ("v", "d"):
+        if len(positions[key]) != 1:
+            raise refuse(f"it has {len(positions[key])} /{key}")
+        index = positions[key][0]
+        if index > 0 and _is_option(tokens[index - 1]):
+            raise refuse(
+                f"{tokens[index - 1]!r} comes right before {tokens[index]!r} "
+                "and the tool can read the latter as its value"
+            )
+    version_index = positions["v"][0] + 1
+    if version_index >= len(tokens) or tokens[version_index] != _VERSION_PLACEHOLDER:
+        raise refuse("the value of /v is not exactly {version}")
+    device_index = positions["d"][0] + 1
+    device = tokens[device_index] if device_index < len(tokens) else ""
+    if (
+        not device or _is_option(device) or _PLACEHOLDER.search(device)
+        or set(device) & _WINC_ARGUMENT_SEPARATORS
+    ):
+        raise refuse("the value of /d is not a literal device name")
+    return device
 
 
 def _winc_device_folder(device: str) -> str:

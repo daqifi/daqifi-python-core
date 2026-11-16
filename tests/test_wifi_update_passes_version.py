@@ -314,18 +314,21 @@ def test_a_custom_device_reads_its_own_folder(tmp_path):
 
 
 @pytest.mark.parametrize("template,fragment", [
-    # No /d: the folder cannot be read from the template.
-    ("/p {port} /v {version} /w", "no /d device"),
-    # /d after a non-option argument: the tool stops parsing before it.
-    ("/p {port} stray /d WINC1500 /v {version}", "no /d device"),
-    # /d from a placeholder: not a literal device.
-    ("/p {port} /d {port} /v {version}", "no /d device"),
-    # /v after the tool stops parsing: it would never see the version.
-    ("/p {port} /d WINC1500 stray /v {version}", "Firmware release not found"),
+    # #274 r2 audit schedule: the tool parses PAST a non-option, so the
+    # second /v wins and it reads 0.0.0 while 19.7.7 was validated.
+    ("/p {port} /d WINC1500 /v {version} stray /v 0.0.0", "'stray'"),
+    ("/p {port} /d WINC1500 /v {version} /e /v 0.0.0", "it has 2 /v"),
+    ("/p {port} /v {version} /w", "it has 0 /d"),
+    ("/p {port} /d WINC1500 /d WINC3400 /v {version}", "it has 2 /d"),
+    ("/p {port} stray /d WINC1500 /v {version}", "'stray'"),
+    ("/p {port} /d {port} /v {version}", "not a literal device"),
+    ("/p {port} /d WINC1500 /v x{version}", "not exactly {version}"),
+    # An option right before /v can take /v as its value: the tool's
+    # unknown /k does, and never reads the version.
+    ("/p {port} /d WINC1500 /k /v {version} /w", "'/k' comes right before '/v'"),
+    ("/p {port} /e /d WINC1500 /v {version}", "'/e' comes right before '/d'"),
 ])
-def test_a_template_the_tool_would_read_differently_is_refused(
-    tmp_path, template, fragment
-):
+def test_a_template_of_another_shape_is_refused(tmp_path, template, fragment):
     options = _f._fast_options()
     options.wifi_flash_tool_arguments_template = template
     service, runner = _service(options)
@@ -337,12 +340,50 @@ def test_a_template_the_tool_would_read_differently_is_refused(
     _assert_refused_untouched(service, runner, device, excinfo, fragment)
 
 
-def test_options_are_read_case_insensitively_and_the_last_wins(tmp_path):
+def test_options_are_matched_case_insensitively(tmp_path):
     options = _f._fast_options()
-    options.wifi_flash_tool_arguments_template = (
-        "-P {port} /D WINC3400 /e /d WINC1500 -V {version} /w"
-    )
+    options.wifi_flash_tool_arguments_template = "-P {port} /D WINC3400 -V {version} /w"
     service, runner = _service(options)
-    service.update_wifi_module(_RecordingDevice(), str(_bundle(tmp_path, _VERSION)))
+    root = _bundle(tmp_path)
+    _f._add_wifi_bundle_version(str(root), "1.4.2", device="winc3400")
+    service.update_wifi_module(_RecordingDevice(), str(root))
 
-    assert _tool_arguments(runner)[-3:] == ["-V", _VERSION, "/w"]
+    assert _tool_arguments(runner) == [
+        "-P", "TESTPORT", "/D", "WINC3400", "-V", "1.4.2", "/w",
+    ]
+
+
+def test_the_downloaded_version_drives_the_update(tmp_path):
+    """#274 r2: download_wifi_firmware returned the release tag, so a tag
+    "v19.5.4" over files/winc1500/19.5.4 was refused, contradicting "pass the
+    version it returns". The documented composition, end to end."""
+    d = _load("download_fakes_wifi_version",
+              _HERE / "portomatic-generated" / "test_download_service.py")
+    from daqifi.firmware.github_download_service import (
+        GitHubFirmwareDownloadService,
+    )
+
+    urlopen, _ = d._serve({d._WIFI_ZIP_URL: d._wifi_zip()})
+    path, version = d._run(
+        GitHubFirmwareDownloadService().download_wifi_firmware(tmp_path),
+        urlopen=urlopen,
+    )
+    service, runner = _service()
+    service.update_wifi_module(
+        _RecordingDevice(), str(path), firmware_version=version
+    )
+
+    assert _tool_arguments(runner)[4:6] == ["/v", "19.5.4"]
+    assert service.current_state == FirmwareUpdateState.COMPLETE
+
+
+def test_a_version_cmd_exe_would_split_is_refused(tmp_path):
+    """cmd.exe splits a batch script's arguments at , ; = too, so the tool
+    would read only "19" of a folder named "19,7"."""
+    service, runner = _service()
+    device = _RecordingDevice()
+    root = _bundle(tmp_path)
+    _f._add_wifi_bundle_version(str(root), "19,7")
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(device, str(root))
+    _assert_refused_untouched(service, runner, device, excinfo, "splits")
