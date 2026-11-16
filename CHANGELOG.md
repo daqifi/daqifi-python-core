@@ -207,11 +207,16 @@ which was never tagged.
   `/p {port} /d WINC1500 /v {version} /k /e /i aio /w`, and `{version}` is a
   new placeholder. `update_wifi_module()` takes a `firmware_version=`
   argument: pass the version `download_wifi_firmware()` returns with the
-  path. Without it the version is read from the bundle, which must then hold
-  exactly one `files/winc*/<version>/firmware/programmer_firmware.bin`. When
-  the template uses `{version}` and no version can be settled, or the given
-  one is not in the bundle, the update raises `ValueError` before anything is
-  sent to the device. A template without `{version}` behaves as before (#270).
+  path. When the template uses `{version}`, the update reads the arguments
+  the way `winc_flash_tool.cmd` does and raises `ValueError` before anything
+  is sent to the device unless the template has a literal `/d` device and
+  the programmer image the tool will open,
+  `files/winc1500/<version>/firmware/programmer_firmware.bin` beside the tool
+  (`winc3400` for a `/d` ending in 3400), exists. Without
+  `firmware_version=` the version is read from that one device folder, which
+  must then hold exactly one such image. A flash tool that cannot be found
+  is still reported where it was before, when the flash request is built. A
+  template without `{version}` behaves as before (#270).
 - `update_firmware()` called from a message-received callback is refused at
   its entry, before anything reaches the device. It used to stop streaming
   first and only then refuse, so the caller got an exception AND a device

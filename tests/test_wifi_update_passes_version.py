@@ -159,7 +159,7 @@ def test_a_bundle_with_no_version_is_refused_before_anything_is_sent(tmp_path):
     with pytest.raises(ValueError) as excinfo:
         service.update_wifi_module(device, str(_bundle(tmp_path)))
     _assert_refused_untouched(
-        service, runner, device, excinfo, "firmware_version=", "no files/winc*"
+        service, runner, device, excinfo, "firmware_version=", "holds no"
     )
 
 
@@ -254,3 +254,95 @@ def test_the_native_windows_line_quotes_the_version(tmp_path, monkeypatch):
         '/d /v:off /s /c ""winc_flash_tool.cmd" /p "TESTPORT" /d WINC1500 '
         f'/v "{_VERSION}" /k /e /i aio /w"'
     )
+
+
+# ---- Audit r1 on PR #274: the image the tool will open must exist ----------
+
+
+def test_a_given_version_with_no_programmer_image_at_all_is_refused(tmp_path):
+    """r1 finding 1: an EMPTY listing skipped the check, so a given version
+    went through, FWUpdate was sent and the tool failed in PROGRAMMING."""
+    service, runner = _service()
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path)), firmware_version=_VERSION
+        )
+    _assert_refused_untouched(
+        service, runner, device, excinfo, "'19.7.7'", "Firmware release not found"
+    )
+
+
+def test_a_version_for_another_device_is_not_picked_up(tmp_path):
+    """r1 finding 2: discovery pooled every files/winc*/ folder, so a bundle
+    holding only winc3400/1.0.0 ran /d WINC1500 /v 1.0.0 and failed late."""
+    service, runner = _service()
+    device = _RecordingDevice()
+    root = _bundle(tmp_path)
+    _f._add_wifi_bundle_version(str(root), "1.0.0", device="winc3400")
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(device, str(root))
+    _assert_refused_untouched(
+        service, runner, device, excinfo, "/d WINC1500", "holds no"
+    )
+
+
+def test_a_given_version_for_another_device_is_refused(tmp_path):
+    service, runner = _service()
+    device = _RecordingDevice()
+    root = _bundle(tmp_path)
+    _f._add_wifi_bundle_version(str(root), "1.0.0", device="winc3400")
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(device, str(root), firmware_version="1.0.0")
+    _assert_refused_untouched(
+        service, runner, device, excinfo, "winc1500", "Firmware release not found"
+    )
+
+
+def test_a_custom_device_reads_its_own_folder(tmp_path):
+    """The caller's /d is honoured: WINC3400 reads files/winc3400."""
+    options = _f._fast_options()
+    options.wifi_flash_tool_arguments_template = (
+        "/p {port} /d WINC3400 /v {version} /k /e /i aio /w"
+    )
+    service, runner = _service(options)
+    root = _bundle(tmp_path, _VERSION)
+    _f._add_wifi_bundle_version(str(root), "1.4.2", device="winc3400")
+    service.update_wifi_module(_RecordingDevice(), str(root))
+
+    assert _tool_arguments(runner)[2:6] == ["/d", "WINC3400", "/v", "1.4.2"]
+
+
+@pytest.mark.parametrize("template,fragment", [
+    # No /d: the folder cannot be read from the template.
+    ("/p {port} /v {version} /w", "no /d device"),
+    # /d after a non-option argument: the tool stops parsing before it.
+    ("/p {port} stray /d WINC1500 /v {version}", "no /d device"),
+    # /d from a placeholder: not a literal device.
+    ("/p {port} /d {port} /v {version}", "no /d device"),
+    # /v after the tool stops parsing: it would never see the version.
+    ("/p {port} /d WINC1500 stray /v {version}", "Firmware release not found"),
+])
+def test_a_template_the_tool_would_read_differently_is_refused(
+    tmp_path, template, fragment
+):
+    options = _f._fast_options()
+    options.wifi_flash_tool_arguments_template = template
+    service, runner = _service(options)
+    device = _RecordingDevice()
+    with pytest.raises(ValueError) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
+        )
+    _assert_refused_untouched(service, runner, device, excinfo, fragment)
+
+
+def test_options_are_read_case_insensitively_and_the_last_wins(tmp_path):
+    options = _f._fast_options()
+    options.wifi_flash_tool_arguments_template = (
+        "-P {port} /D WINC3400 /e /d WINC1500 -V {version} /w"
+    )
+    service, runner = _service(options)
+    service.update_wifi_module(_RecordingDevice(), str(_bundle(tmp_path, _VERSION)))
+
+    assert _tool_arguments(runner)[-3:] == ["-V", _VERSION, "/w"]

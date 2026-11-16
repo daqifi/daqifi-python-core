@@ -1795,11 +1795,12 @@ class TestUpdateWifiModule:
         firmware_dir = _make_temp_directory()
         with open(os.path.join(firmware_dir, "flash-tool"), "w") as handle:
             handle.write("#!/bin/sh\n")
+        # The default template passes {version}, so the image it names must
+        # be beside the tool (#270).
+        _add_wifi_bundle_version(firmware_dir, "19.7.7")
         parent, name = os.path.split(firmware_dir)
         monkeypatch.chdir(parent)
         try:
-            # A custom tool with no WINC bundle layout: the default template
-            # needs {version}, so it is given rather than read (#270).
             service.update_wifi_module(device, name, firmware_version="19.7.7")
         finally:
             shutil.rmtree(firmware_dir, ignore_errors=True)

@@ -260,12 +260,13 @@ class FirmwareUpdateService(Protocol):
                 ``{version}`` in ``wifi_flash_tool_arguments_template`` (the
                 default template passes it as ``/v``). Pass the version
                 :meth:`FirmwareDownloadService.download_wifi_firmware`
-                returns with the path. When omitted it is read from the
-                bundle, which must then hold exactly one
-                ``files/winc*/<version>/firmware/programmer_firmware.bin``.
-                The update is refused before anything is sent when the
-                template needs a version and none can be settled, and when a
-                given version is not one the bundle holds.
+                returns with the path. When the template uses ``{version}``,
+                the update is refused with ValueError before anything is sent
+                unless the template has a literal ``/d`` device and
+                ``files/winc<1500|3400>/<version>/firmware/
+                programmer_firmware.bin``, the image the tool will open, exists
+                beside the tool. When omitted, the version is read from that
+                device folder, which must hold exactly one such image.
 
         Raises:
             FirmwareUpdateException: when any update step fails.
@@ -1765,7 +1766,12 @@ class DefaultFirmwareUpdateService:
     ) -> Optional[str]:
         """The version to substitute for ``{version}``, or a ValueError.
 
-        Reads only the filesystem, so a refusal leaves the device untouched.
+        When the template uses ``{version}``, the arguments are split as the
+        tool will receive them and read the way ``winc_flash_tool.cmd`` reads
+        them, and the programmer image the tool will open,
+        ``files/winc<device>/<version>/firmware/programmer_firmware.bin``
+        beside the tool, must exist. Anything else is refused here. Reads
+        only the filesystem, so a refusal leaves the device untouched.
         """
         if firmware_version is not None and (
             not isinstance(firmware_version, str)
@@ -1783,32 +1789,58 @@ class DefaultFirmwareUpdateService:
             tool_path = self._resolve_wifi_tool_path(firmware_path)
         except FileNotFoundError:
             # Reported where it always was, while building the flash
-            # request; no version can be read from a bundle with no tool.
+            # request; with no tool there is no bundle to check.
             return firmware_version
         tool_directory = os.path.dirname(os.path.abspath(tool_path))
-        available = _wifi_bundle_versions(tool_directory)
-        if firmware_version is not None:
-            if available and firmware_version not in available:
-                raise ValueError(
-                    f"WiFi firmware version {firmware_version!r} is not in the "
-                    f"bundle at {tool_directory!r}, which holds "
-                    f"{', '.join(available)}; the flash tool would fail with "
-                    "'Firmware release not found'. Nothing was sent."
+        written = _wifi_template_tokens(tool_path, template)
+
+        device, _ = _winc_tool_options(written)
+        if not device or _PLACEHOLDER.search(device):
+            raise ValueError(
+                f"The WiFi flash arguments template {template!r} passes "
+                "{version} but no /d device the bundle folder can be read "
+                "from (files/winc<device>/<version>), so the version cannot "
+                "be checked. Give /d a literal device such as WINC1500. "
+                "Nothing was sent."
+            )
+        device_folder = _winc_device_folder(device)
+        device_directory = os.path.join(tool_directory, "files", device_folder)
+
+        if firmware_version is None:
+            available = _wifi_bundle_versions(device_directory)
+            if len(available) != 1:
+                found = (
+                    f"it holds {', '.join(available)}" if available
+                    else "it holds no <version>/firmware/programmer_firmware.bin"
                 )
-            return firmware_version
-        if len(available) == 1:
-            return available[0]
-        found = (
-            f"it holds {', '.join(available)}" if available
-            else "no files/winc*/<version>/firmware/programmer_firmware.bin "
-            "was found there"
+                raise ValueError(
+                    "The WiFi firmware version could not be read from "
+                    f"{device_directory!r} (the folder for /d {device}): "
+                    f"{found}. Pass firmware_version=, the version "
+                    "download_wifi_firmware returns with the path. Nothing "
+                    "was sent."
+                )
+            firmware_version = available[0]
+
+        # The version as the tool will read it: the rendered /v value, which
+        # differs from firmware_version if the template places /v where the
+        # tool's option parsing never reaches it.
+        _, tool_version = _winc_tool_options(
+            _substitute_placeholders(
+                written, "{port}", "{firmwarePath}", firmware_version
+            )
         )
-        raise ValueError(
-            f"The WiFi flash arguments template {template!r} passes "
-            "{version}, and the version could not be read from the bundle at "
-            f"{tool_directory!r}: {found}. Pass firmware_version=, the version "
-            "download_wifi_firmware returns with the path. Nothing was sent."
+        image = os.path.join(
+            device_directory, tool_version or "", "firmware",
+            "programmer_firmware.bin",
         )
+        if not tool_version or not os.path.isfile(image):
+            raise ValueError(
+                f"WiFi firmware version {firmware_version!r} for /d {device} "
+                f"needs {image!r}, which does not exist; the flash tool would "
+                "fail with 'Firmware release not found'. Nothing was sent."
+            )
+        return firmware_version
 
     def _resolve_wifi_tool_path(self, firmware_path: str) -> str:
         if os.path.isfile(firmware_path):
@@ -3081,35 +3113,71 @@ def _substitute_placeholders(
     ]
 
 
-def _wifi_bundle_versions(tool_directory: str) -> List[str]:
-    """The firmware versions a WINC bundle holds, sorted.
+def _wifi_bundle_versions(device_directory: str) -> List[str]:
+    """The firmware versions one device folder of a WINC bundle holds, sorted.
 
-    ``winc_flash_tool.cmd`` reads its programmer image from
-    ``files\\winc<device>\\<version>\\firmware\\programmer_firmware.bin``
-    relative to its own directory, so a version counts only when that file
-    exists. Lists two directory levels; no walk.
+    A version counts only when its ``firmware/programmer_firmware.bin``
+    exists, the file ``winc_flash_tool.cmd`` checks before it flashes.
     """
-    files_directory = os.path.join(tool_directory, "files")
-    versions = set()
     try:
-        devices = os.listdir(files_directory)
+        candidates = os.listdir(device_directory)
     except OSError:
         return []
-    for device in devices:
-        if not device.lower().startswith("winc"):
+    return sorted(
+        candidate for candidate in candidates
+        if os.path.isfile(os.path.join(
+            device_directory, candidate, "firmware", "programmer_firmware.bin"
+        ))
+    )
+
+
+def _wifi_template_tokens(tool_path: str, template: str) -> List[str]:
+    """Split the template by the rules the request builder uses for this
+    tool on this host (see _build_wifi_process_request)."""
+    extension = os.path.splitext(tool_path)[1].lower()
+    if extension in (".cmd", ".bat"):
+        return _split_windows_template(template)
+    if extension in (".exe", ".com") or _is_native_windows():
+        return _split_crt_template(template)
+    return _split_posix_template(template)
+
+
+# winc_flash_tool.cmd's flags that take no value; every other option,
+# including an unknown one, consumes the argument after it.
+_WINC_TOOL_FLAGS = frozenset("exwr")
+
+
+def _winc_tool_options(tokens: List[str]) -> Tuple[Optional[str], Optional[str]]:
+    """The (/d, /v) values ``winc_flash_tool.cmd`` would read from tokens.
+
+    Mirrors its ``:getops`` loop: options start with ``/`` or ``-`` and are
+    case-insensitive, parsing stops at the first argument that is not an
+    option (or is empty), and a later repeat of an option wins.
+    """
+    device: Optional[str] = None
+    version: Optional[str] = None
+    i = 0
+    while i < len(tokens):
+        option = tokens[i]
+        if not option or option[0] not in "/-":
+            break
+        key = option[1:].lower()
+        if key in _WINC_TOOL_FLAGS:
+            i += 1
             continue
-        device_directory = os.path.join(files_directory, device)
-        try:
-            candidates = os.listdir(device_directory)
-        except OSError:
-            continue
-        for candidate in candidates:
-            if os.path.isfile(os.path.join(
-                device_directory, candidate, "firmware",
-                "programmer_firmware.bin",
-            )):
-                versions.add(candidate)
-    return sorted(versions)
+        value = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if key == "d":
+            device = value
+        elif key == "v":
+            version = value
+        i += 2
+    return device, version
+
+
+def _winc_device_folder(device: str) -> str:
+    """The bundle folder ``winc_flash_tool.cmd`` uses for a /d value: it
+    takes WINC3400 when the value ends in 3400, and WINC15x0 otherwise."""
+    return "winc3400" if device[-4:] == "3400" else "winc1500"
 
 
 def _is_native_windows() -> bool:
