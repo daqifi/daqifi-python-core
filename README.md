@@ -21,6 +21,14 @@ A clean, Pythonic API for controlling DAQiFi Nyquist devices (NQ1, NQ2, NQ3).
 
 ## Installation
 
+Requires Python 3.9 or later.
+
+```bash
+pip install daqifi
+# with the PIC32 bootloader's HID transport:
+pip install "daqifi[hid]"
+```
+
 ### For Local Development
 
 ```bash
