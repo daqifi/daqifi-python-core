@@ -1531,6 +1531,11 @@ class SerialInterface:
         #: of anything are outstanding, so the counts, the text reclaim and
         #: the pending partial are all gone. See `_fifo_barrier`.
         self._echo_spellings_outstanding: set = set()
+        #: One frozen pool snapshot per barrier written whose reply has not
+        #: been read, OLDEST FIRST. A reply retires the oldest, because
+        #: replies are byte-identical and only their ORDER is attributable.
+        #: See `_fifo_barrier`.
+        self._echo_barrier_outstanding: list = []
         #: Tail of the previous write, so a spelling split across two
         #: write() calls is still reserved.
         self._echo_write_carry: bytes = b""
@@ -1930,6 +1935,10 @@ class SerialInterface:
     #: cannot match a four-field shape. That is the one property the barrier
     #: rests on, and it is measured rather than argued.
     _ECHO_BARRIER = b"*IDN?"
+    #: How many unanswered barriers may be outstanding before a download
+    #: refuses outright. Reached only when something else is consuming or
+    #: the device is dropping every reply; the refusal says so.
+    _ECHO_BARRIER_MAX = 8
     #: ⚠ SHAPE, NOT VALUE: no serial and no firmware revision is pinned
     #: here, so this matches any board's reply and no board's identity. It
     #: also cannot match a family echo, which has no comma either.
@@ -1956,11 +1965,26 @@ class SerialInterface:
     def _reserve_spelling(self, spelling) -> None:
         """Mark ``spelling`` as written-but-not-yet-proven-past.
 
-        ⚠ Idempotent, and that is the point: a set needs no notion of "owed
-        twice", because nothing releases a single spelling. The two releases
-        are clear-everything, each on a FIFO proof.
+        ⚠ Idempotent in the POOL, which is why a set suffices there: nothing
+        releases an individual spelling, so "owed twice" has nothing to mean.
+
+        ⛔⛔ BUT IT IS NOT IDEMPOTENT IN THE BARRIER SNAPSHOTS, and that is a
+        hole I put in r17's first draft. A snapshot means "these spellings
+        were last written BEFORE this barrier". Writing one again makes that
+        false: the new echo is behind the barrier, so no reply the barrier
+        can produce proves it has passed. With the spelling left in the
+        snapshot, retiring that snapshot would free it with its newer echo
+        still on the wire -- the r14 multiplicity defect, reappearing one
+        level up, where a set again cannot represent "written twice".
+
+        The fix is not to count. It is to say what a snapshot means and keep
+        it true: a re-written spelling leaves every outstanding snapshot.
         """
         self._echo_spellings_outstanding.add(spelling)
+        if self._echo_barrier_outstanding:
+            self._echo_barrier_outstanding = [
+                snap - {spelling}
+                for snap in self._echo_barrier_outstanding]
 
 
 
@@ -2061,7 +2085,7 @@ class SerialInterface:
         ⚠ A LATE barrier reply is harmless: it lands AHEAD of the next
         attempt's marker, holds no family member, and is dropped with the
         pre-marker bytes. Pinned, not assumed, by
-        `test_a_late_barrier_reply_does_not_corrupt_the_next_download`.
+        `test_an_unanswered_barrier_refuses_and_a_late_reply_is_harmless`.
 
         ⚠ RESIDUAL, STATED NOT HIDDEN: a stale GET payload is file data and
         could contain an IDN-shaped line, which would satisfy this barrier
@@ -2072,9 +2096,35 @@ class SerialInterface:
 
         Returns True only if the barrier's own reply shape was read.
         """
+        from ..exceptions import EchoSetUnconfirmedError
+
         if self._serial is None or not getattr(self._serial, "is_open", False):
             return False
+
+        # ⛔ BOUNDED, AND LOUD WHEN IT FILLS. One unanswered barrier is
+        # recorded per refused download, so this list only grows while
+        # something is eating or dropping replies. Growing it without limit
+        # would be a slow leak that still refuses every download; refusing
+        # HERE says why, once, in words.
+        if len(self._echo_barrier_outstanding) >= self._ECHO_BARRIER_MAX:
+            raise EchoSetUnconfirmedError(
+                "%d echo barriers (%r) have been written on this connection "
+                "and none of their replies has been read, so nothing can be "
+                "proven to have gone past and no download is attempted. "
+                "Every reply was consumed by another reader of this port or "
+                "dropped by the device's output buffer. A new connection "
+                "does not help: the bytes are queued on the device."
+                % (len(self._echo_barrier_outstanding),
+                   bytes(self._ECHO_BARRIER))
+            )
+
         deadline = time.monotonic() + self.ECHO_SET_TIMEOUT_S
+        # ⭐⭐ SNAPSHOT BEFORE THE WRITE. Everything reserved at this instant
+        # was written BEFORE this barrier, so a reply to this barrier proves
+        # exactly these have passed -- and nothing about a spelling reserved
+        # afterwards.
+        self._echo_barrier_outstanding.append(
+            frozenset(self._echo_spellings_outstanding))
         # Through the write funnel like every other write, so the carry and
         # the reservation rules see it. `*IDN?` carries no family member, so
         # it reserves nothing.
@@ -2092,8 +2142,28 @@ class SerialInterface:
             if waiting:
                 seen.extend(self._serial.read(
                     min(waiting, self._ECHO_READ_CAP - len(seen))))
-            if self._ECHO_BARRIER_RE.search(bytes(seen)):
-                return True
+            # ⛔⛔ ONE REPLY RETIRES THE EARLIEST BARRIER, NOT THIS ONE. Every
+            # IDN reply is byte-identical, so a reply cannot be attributed to
+            # the barrier that asked for it -- the SAME no-nonce problem that
+            # killed the `SYSTem:ECHO?` probe in r2-r5, reappearing one level
+            # up. What a reply DOES prove is that the earliest unanswered
+            # barrier has been processed, because replies leave in the order
+            # their commands arrived. So retire the OLDEST snapshot.
+            #
+            # ⭐ That stays correct when the reply really belonged to a later
+            # barrier: then even more has passed, and we released less than
+            # we could have. Conservative in exactly the safe direction.
+            while self._echo_barrier_outstanding:
+                m = self._ECHO_BARRIER_RE.search(bytes(seen))
+                if m is None:
+                    break
+                del seen[:m.end()]
+                self._echo_spellings_outstanding -= (
+                    self._echo_barrier_outstanding.pop(0))
+                if self._next_echo_spelling() is not None:
+                    # A spelling is free: proceed without waiting for the
+                    # rest of the backlog to answer.
+                    return True
             if (len(seen) >= self._ECHO_READ_CAP
                     or time.monotonic() >= deadline):
                 return False
@@ -2196,8 +2266,11 @@ class SerialInterface:
             # has already consumed the echo (r15 audit), because then there
             # is nothing left to match and every spelling stays reserved on
             # a healthy device. One barrier answers for all 1024 at once.
+            # ⚠ THE BARRIER RELEASES WHAT IT CAN PROVE, and no longer
+            # clears the pool wholesale. A reply retires the EARLIEST
+            # outstanding barrier's snapshot; a spelling reserved after that
+            # barrier is not covered by it and stays reserved.
             if self._fifo_barrier():
-                self._echo_spellings_outstanding.clear()
                 spelling = self._next_echo_spelling()
         if spelling is None:
             raise EchoSetUnconfirmedError(
@@ -2253,6 +2326,12 @@ class SerialInterface:
                 # is still pending. Everything ahead of it in the stream was
                 # pre-GET console traffic and is dropped with `seen`.
                 self._echo_spellings_outstanding.clear()
+                # ⚠ AND THE BARRIER BACKLOG, by the same argument: every
+                # barrier was written before this marker, so every reply it
+                # could still produce is already behind us. Leaving stale
+                # snapshots here would walk a HEALTHY connection into the
+                # `_ECHO_BARRIER_MAX` refusal.
+                self._echo_barrier_outstanding.clear()
                 return b""
             if time.monotonic() >= deadline:
                 # ⚠ NOTHING IS REMEMBERED ABOUT A MARKER CUT BY THIS

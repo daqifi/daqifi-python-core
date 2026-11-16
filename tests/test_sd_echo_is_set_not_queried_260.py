@@ -2156,3 +2156,232 @@ def test_a_healthy_download_sends_no_barrier():
     assert port.probe_writes == 0, (
         "and it must still never QUERY the echo state (#260's whole "
         "point): %d" % port.probe_writes)
+
+
+def test_a_late_barrier_reply_must_not_clear_a_spelling_written_after_it():
+    """⛔⛔ THE NO-NONCE PROBLEM, ONE LEVEL UP. Every `*IDN?` reply is
+    byte-identical, so barrier 2 cannot tell its own reply from barrier 1's
+    late one -- exactly what sank the `SYSTem:ECHO?` probe in r2-r5, now
+    inside the mechanism that replaced it.
+
+    The pool is exhausted, barrier 1 times out, the caller then writes
+    family spelling X, and the next download reads barrier 1's LATE reply.
+    FIFO proves only that everything written BEFORE barrier 1 has passed; X
+    was written after it. At b5ed2b0e any reply cleared the whole pool, so X
+    became drawable with its echo still on the wire.
+
+    ⚠ WHAT THIS CELL MEASURES AT b5ed2b0e, stated as measured: the DRAW
+    picks X while X's echo is in flight. The file in this schedule still
+    comes back byte-exact, because one stale echo at the head is absorbed by
+    the preamble strip -- so the corruption is a CONSEQUENCE that needs the
+    arrival order to line up, and the premature release is the defect. Both
+    assertions are kept, with the draw carrying the differential. (My first
+    draft of this docstring asserted the corruption outright, and my own run
+    of this schedule contradicted it -- the same class of false claim I
+    corrected in r15's exhaustion cell.)
+
+    ⭐ The fix is attribution by ORDER, the only attribution a byte-identical
+    reply admits: one reply retires the EARLIEST outstanding barrier's
+    snapshot. ⛔ AND a spelling written again after a barrier LEAVES that
+    barrier's snapshot -- without which this very schedule still broke,
+    because the exhausted pool means X was already IN the snapshot and a set
+    cannot say "written twice". That was a hole in my own first draft of
+    r17, found by building this cell.
+
+    ⚠ THE STREAM IS IN HONEST FIFO ORDER: barrier 1's reply was generated
+    before X was written, so it genuinely precedes X's echo. The draw is
+    pinned to X so the hazard is deterministic rather than 1-in-3, and the
+    pin is also the discriminator -- at the fixed head X is not free, so the
+    pin falls back and the download is clean.
+    """
+    port = _Device(echo_state=1, reply_delay=0.02)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.3
+    dev._comm._ECHO_SET_SILENT_FAMILY = tuple(_family()[:3])
+    victim = _family()[2]
+
+    # (1) the pool is exhausted and barrier 1 gets no reply
+    for sp in _family()[:3]:
+        dev._comm._reserve_spelling(sp)
+    port.barrier_answers = False
+    got, exc = _download(dev, port, timeout=30.0)
+    assert isinstance(exc, EchoSetUnconfirmedError), exc
+    assert port.barrier_writes == 1, port.barrier_writes
+    # ⚠ CHECKED ONLY WHERE THE MECHANISM EXISTS. Asserting this
+    # unconditionally made the cell red at b5ed2b0e with AttributeError --
+    # red for want of an API, which demonstrates nothing, and the THIRD time
+    # that trap has come up in this ticket. The behavioural assertions below
+    # are what must carry the differential.
+    outstanding = getattr(dev._comm, "_echo_barrier_outstanding", None)
+    if outstanding is not None:
+        assert len(outstanding) == 1, (
+            "barrier 1 must be recorded as outstanding: %r" % (outstanding,))
+
+    # (2) the caller writes X AFTER barrier 1; its echo is queued behind
+    #     barrier 1's reply, which is where a real device would put it.
+    port.barrier_answers = True
+    port._queue.insert(0, (0.0, BARRIER_REPLY))      # barrier 1's late reply
+    port.reply_delay = 0.30                          # X's echo, still coming
+    dev._comm._write_to_port(victim + b"\r\n")
+    assert victim in dev._comm._echo_spellings_outstanding, _pool(dev)
+
+    # (3) the next download: barrier 2 is written and reads barrier 1's reply
+    port.reply_delay = 0.02
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+    dev._comm._echo_rng = _PinnedChoice(victim)
+
+    got, exc = _download(dev, port, timeout=30.0)
+
+    # ⚠ OUTCOME FIRST: the corrupted file is the defect.
+    assert exc is None or isinstance(exc, EchoSetUnconfirmedError), exc
+    assert port.get_writes >= 1, (
+        "the schedule must reach a GET, or it proves nothing: %r" % exc)
+    assert bytes(got) == PAYLOAD, (
+        "a spelling written AFTER the timed-out barrier must not be released "
+        "by that barrier's late reply: %r" % bytes(got)[:90])
+
+    # and the mechanism, observed rather than inferred: which spelling this
+    # attempt actually drew. It is the last family member written before the
+    # GET; X was written earlier, by the caller, and a barrier carries no
+    # family member. A successful download clears the pool, so the pool
+    # cannot be inspected afterwards -- the WRITES can.
+    trace = bytes(port.written)
+    get_at = trace.rfind(b"SD:GET")
+    assert get_at > 0, "no GET in the write trace"
+    drawn = _FAMILY_RE.findall(trace[:get_at])
+    assert drawn, "no spelling was drawn"
+    assert drawn[-1] != victim, (
+        "the draw must not pick the spelling written after the timed-out "
+        "barrier -- its echo is still in flight: drew %r" % drawn[-1])
+
+
+def test_the_outstanding_barrier_list_is_bounded_and_refuses_loudly():
+    """⚠ The bound exists because the list grows by one per refused
+    download whenever something else is eating the replies. Unbounded, that
+    is a slow leak on a connection that refuses every download anyway; the
+    refusal has to SAY so instead.
+    """
+    port = _Withholding(echo_state=1)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.05
+    dev._comm._ECHO_SET_SILENT_FAMILY = tuple(_family()[:1])
+    port.barrier_answers = False
+
+    with pytest.raises(EchoSetUnconfirmedError):
+        dev._comm.silence_echo_for_download()
+
+    seen_messages = []
+    for _ in range(dev._comm._ECHO_BARRIER_MAX + 3):
+        try:
+            dev._comm.silence_echo_for_download()
+        except EchoSetUnconfirmedError as exc:
+            seen_messages.append(str(exc))
+
+    assert len(dev._comm._echo_barrier_outstanding) <= \
+        dev._comm._ECHO_BARRIER_MAX, (
+        "the outstanding-barrier list must stay bounded: %d"
+        % len(dev._comm._echo_barrier_outstanding))
+    assert any("none of their replies has been read" in m
+               for m in seen_messages), (
+        "and the overflow must be LOUD and say why: %r" % seen_messages[-1:])
+    assert port.barrier_writes <= dev._comm._ECHO_BARRIER_MAX, (
+        "no barrier is written once the bound is reached: %d"
+        % port.barrier_writes)
+
+
+def test_every_test_name_cited_in_comm_py_exists():
+    """⛔ A CITED TEST NAME IS A CLAIM, and r17 found one that was false:
+    `_fifo_barrier` cited a cell I had RENAMED mid-round, so the docstring
+    pointed at nothing. That is the "green on its own comment" shape from
+    this series -- a reference that reads as evidence and is not.
+
+    ⚠ AST AND TOKENIZE, NOT GREP. A grep for the cited name matches the
+    citation itself, so it can never fail. Citations live in `#` comments
+    (tokenize -- an AST cannot see them) and in docstrings and string
+    literals (AST), and the names that satisfy them are FunctionDefs in the
+    test modules.
+    """
+    import io
+    import tokenize
+
+    import daqifi._internal.comm as comm_mod
+
+    src = Path(comm_mod.__file__).read_text(encoding="utf-8")
+    pattern = re.compile(r"\btest_[A-Za-z0-9_]+")
+    cited = {}
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            for m in pattern.finditer(tok.string):
+                cited.setdefault(m.group(0), tok.start[0])
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            for m in pattern.finditer(node.value):
+                cited.setdefault(m.group(0), node.lineno)
+
+    assert cited, "the guard must have something to check"
+
+    defined = set()
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.FunctionDef) \
+                    and node.name.startswith("test_"):
+                defined.add(node.name)
+
+    missing = sorted((name, line) for name, line in cited.items()
+                     if name not in defined)
+    assert not missing, (
+        "comm.py cites test names that do not exist in tests/: %r. Either "
+        "the cell was renamed or it was never written; a citation that "
+        "resolves to nothing reads as evidence and is not." % missing)
+
+
+def test_a_success_clears_the_barrier_backlog_so_a_healthy_link_survives():
+    """⚠ FOUND BY MUTATION, NOT BY THE BRIEF, and it is MY addition that
+    needed it. r17 clears the outstanding-barrier list on a successful
+    download, by the same FIFO argument that clears the pool: every barrier
+    was written before this attempt's marker, so every reply it could still
+    produce is already behind us.
+
+    Without that line, each cycle of [barrier times out -> refusal] followed
+    by [barrier answered -> success] leaves ONE snapshot behind: the
+    answered reply pops the earliest, and the one pushed by the successful
+    attempt is never retired. After `_ECHO_BARRIER_MAX` cycles the bound
+    trips and a PERFECTLY HEALTHY connection refuses every download.
+
+    A mutant removing the clear left the module 59/59 green, which is how
+    this cell came to exist.
+    """
+    small = b"0123,"
+    port = _Device(echo_state=1, reply_delay=0.02)
+    port.payload_gap = 0.0
+    dev = _fresh_device(port)
+    dev._comm._ECHO_SET_SILENT_FAMILY = tuple(_family()[:2])
+    port._payload = small + END_OF_FILE_MARKER
+
+    cycles = dev._comm._ECHO_BARRIER_MAX + 2
+    for i in range(cycles):
+        for sp in dev._comm._ECHO_SET_SILENT_FAMILY:
+            dev._comm._reserve_spelling(sp)
+
+        # (a) a barrier that gets no reply: its snapshot stays outstanding
+        port.barrier_answers = False
+        dev._comm.ECHO_SET_TIMEOUT_S = 0.05
+        got, exc = _download(dev, port, timeout=30.0)
+        assert isinstance(exc, EchoSetUnconfirmedError), (i, exc)
+
+        # (b) the device answers again, so this one must SUCCEED -- and must
+        #     leave nothing behind for the next cycle to inherit
+        port.barrier_answers = True
+        port._queue = []            # the device's output has been consumed
+        port._last_due = 0.0
+        dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+        got, exc = _download(dev, port, timeout=30.0)
+        assert exc is None, (
+            "cycle %d of %d refused on a HEALTHY device: snapshots left "
+            "behind by earlier successes accumulate until the bound trips "
+            "-- %r" % (i + 1, cycles, exc))
+        assert bytes(got) == small, bytes(got)[:40]
+        assert not dev._comm._echo_barrier_outstanding, (
+            "a success must leave NO barrier outstanding, cycle %d: %r"
+            % (i + 1, dev._comm._echo_barrier_outstanding))
