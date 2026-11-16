@@ -1514,7 +1514,23 @@ class SerialInterface:
         #: device's unconfirmed attempts would exhaust another's family and
         #: refuse its downloads.
         #: `test_two_connections_do_not_share_the_spelling_pool` pins it.
-        self._echo_spellings_outstanding: set = set()
+        #: spelling -> how many copies we have WRITTEN whose complete echo
+        #: we have not yet observed. A spelling is drawable only at zero,
+        #: and a key at zero is deleted so `in`, `len` and `== {}` all read
+        #: naturally.
+        #:
+        #: ⛔ r14 AUDIT, HIGH: A COUNT, NOT A SET. Reserve-on-write made
+        #: multiplicity real -- an attempt writes a spelling and a caller
+        #: writes the same text, or two callers do -- and a set cannot
+        #: represent "owed twice". Both partial release paths then freed the
+        #: spelling on seeing ONE copy while another was still queued, and
+        #: the next draw synced on the duplicate: measured
+        #: b'SYST:ECHO -1\r\nabc'.
+        #:
+        #: ⚠ Success still clears EVERYTHING and needs no counts: FIFO says
+        #: every earlier copy is behind our marker or never coming. The
+        #: counts exist only to make the two PARTIAL release paths honest.
+        self._echo_spellings_outstanding: dict = {}
         #: At most one `(spelling, expected_remaining_suffix)` from an
         #: attempt whose marker was cut by its own deadline.
         #:
@@ -1530,6 +1546,9 @@ class SerialInterface:
         #: partial is ahead of it in FIFO and is covered by the next
         #: success's clear.
         self._echo_pending_partial = None
+        #: Tail of the previous write, so a spelling split across two
+        #: write() calls is still reserved.
+        self._echo_write_carry: bytes = b""
 
     def _cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
@@ -1906,8 +1925,11 @@ class SerialInterface:
     #: continuously streaming console cannot spin it.
     _ECHO_READ_CAP = 4096
 
-    #: ⛔ NOT `random`. A fresh process must not be able to agree with
-    #: another process's choice, and `random`'s default instance is seeded
+    #: ⛔ NOT `random`. A random draw does NOT establish ownership of a
+    #: spelling -- two objects can still pick the same one, which is
+    #: exactly the k/1024 residual under ruling IG A. What it does is make
+    #: that agreement 1-in-N instead of CERTAIN, which a deterministic rule
+    #: (lowest free index, r7) made it. `random`'s default instance is seeded
     #: from entropy but is still a user-visible global that application code
     #: can reseed (`random.seed(0)` in a test harness would make every
     #: object pick alike again, which is exactly the r7 defect). A
@@ -1919,6 +1941,47 @@ class SerialInterface:
     #: zero to three zeros, `1`. Used to spot OUR OWN marker text inside
     #: bytes this object is about to write.
     _ECHO_FAMILY_RE = re.compile(rb"SYST:ECHO -0{0,3}1", re.IGNORECASE)
+
+    def _reserve_spelling(self, spelling) -> None:
+        """One more copy of ``spelling`` is owed an echo."""
+        self._echo_spellings_outstanding[spelling] = (
+            self._echo_spellings_outstanding.get(spelling, 0) + 1)
+
+    def _observe_spelling(self, spelling, times: int = 1) -> None:
+        """``times`` complete echoes of ``spelling`` have been observed.
+
+        ⚠ DECREMENT BY AT MOST WHAT IS OWED. `times` comes from COUNTING
+        TEXT, and this family admits no nonce -- that is the whole #260
+        lesson -- so copies another object wrote, or copies that are file
+        payload (pc#268), are INDISTINGUISHABLE from ours. An over-count is
+        therefore possible, and it has only two possible treatments:
+
+        * clamped, as here: the key is deleted and the spelling becomes
+          drawable, so a later draw may synchronise on a copy still in
+          flight. That is the no-nonce residual already documented under
+          ruling IG A -- bounded, understood, and it re-rolls on refusal.
+        * left to go NEGATIVE: the count becomes a LIE about how many
+          echoes are owed, and it then misleads in BOTH directions. While
+          negative it withholds a spelling although nothing is owed, and a
+          foreign echo per spelling would leave no draw able to produce the
+          success that clears the pool -- the r14 item 2 defect, refusing
+          forever on a healthy device. And because a later write of the
+          same spelling INCREMENTS, the count climbs back through zero
+          while a FRESH copy is genuinely owed, releasing it early: the
+          exact hazard this method exists to prevent.
+
+        So clamping is not the lesser of two releases -- the negative
+        variant releases early too, and loses the pool as well. Neither
+        branch is a fix for attribution, because counting text cannot
+        attribute; only a nonce could, and `SYSTem:ECHO?` has none.
+        """
+        have = self._echo_spellings_outstanding.get(spelling)
+        if have is None:
+            return
+        if have > times:
+            self._echo_spellings_outstanding[spelling] = have - times
+        else:
+            del self._echo_spellings_outstanding[spelling]
 
     def _write_to_port(self, data) -> None:
         """Write to the port, RESERVING any of our marker spellings that
@@ -1948,10 +2011,22 @@ class SerialInterface:
         else's reads was not.
         """
         blob = bytes(data)
-        for m in self._ECHO_FAMILY_RE.finditer(blob):
+        # ⛔ SCAN ACROSS THE WRITE BOUNDARY. The regex runs per write, so a
+        # caller writing "SYST:EC" then "HO -1\r\n" puts a contiguous line
+        # on the device -- echoed as a family member -- while neither write
+        # contains one. Carrying the last (longest member - 1) bytes makes
+        # the scan see the join. The carry is bytes WE wrote, so it costs
+        # nothing to keep and nothing to trust.
+        probe = self._echo_write_carry + blob
+        base = len(self._echo_write_carry)
+        for m in self._ECHO_FAMILY_RE.finditer(probe):
             member = m.group(0)
-            if member in self._ECHO_FAMILY_SET:
-                self._echo_spellings_outstanding.add(member)
+            if member in self._ECHO_FAMILY_SET and m.end() > base:
+                # `m.end() > base` so a member wholly inside the carry is
+                # not counted twice: it was already reserved last time.
+                self._reserve_spelling(member)
+        keep = max(len(x) for x in self._ECHO_SET_SILENT_FAMILY) - 1
+        self._echo_write_carry = probe[-keep:] if keep else b""
         self._serial.write(blob)
 
     def _next_echo_spelling(self):
@@ -1983,8 +2058,11 @@ class SerialInterface:
         has already arrived is free information.
         """
         for member in self._ECHO_SET_SILENT_FAMILY:
-            if member + b"\r\n" in blob:
-                self._echo_spellings_outstanding.discard(member)
+            seen_copies = blob.count(member + b"\r\n")
+            if seen_copies:
+                # One decrement per COPY observed, so a spelling owed twice
+                # stays undrawable until both echoes have been seen.
+                self._observe_spelling(member, seen_copies)
 
     def _reclaim_arrived_echoes(self) -> None:
         """Read what has ALREADY arrived, attribute it, and never wait.
@@ -2008,7 +2086,24 @@ class SerialInterface:
             if not chunk:
                 break
             seen.extend(chunk)
-        self._reclaim_stale_by_text(bytes(seen))
+        blob = bytes(seen)
+        # ⛔ r14 AUDIT, MEDIUM: HONOUR THE PENDING PARTIAL HERE TOO. After N
+        # timeouts with the last marker cut at its CR, the LF arrives and
+        # the device recovers -- but this reader only looked for COMPLETE
+        # markers, so it consumed the LF, freed nothing, and the connection
+        # refused forever on a healthy device. The scan honours the partial;
+        # so must the one reader that runs when the pool is empty.
+        if self._echo_pending_partial is not None and blob:
+            prev, suffix = self._echo_pending_partial
+            if blob.startswith(suffix):
+                self._observe_spelling(prev)
+                blob = blob[len(suffix):]
+                self._echo_pending_partial = None
+            elif not suffix.startswith(blob):
+                # FIFO would have put the continuation first, so it is
+                # never coming; stop expecting it.
+                self._echo_pending_partial = None
+        self._reclaim_stale_by_text(blob)
 
     def silence_echo_for_download(self) -> bytes:
         """Set the console silent before a download. Returns the framing
@@ -2151,7 +2246,7 @@ class SerialInterface:
                 if bytes(seen).startswith(suffix):
                     # The cut marker completed exactly where FIFO says it
                     # must: release that spelling and drop its remainder.
-                    self._echo_spellings_outstanding.discard(prev)
+                    self._observe_spelling(prev)
                     del seen[:len(suffix)]
                     pending = self._echo_pending_partial = None
                 elif not suffix.startswith(bytes(seen)):

@@ -79,6 +79,35 @@ def _family_member(text):
     return m.group(0) if m else None
 
 
+def _pool(dev):
+    """The spelling pool as a plain dict, whatever TYPE the head stores.
+
+    ⛔ WHY THIS EXISTS, and it is not tidiness. r15 changed the pool from a
+    SET to spelling -> COUNT. Two r15 cells read it with `.get()`, so at
+    77cac1b2 they failed with `AttributeError: 'set' object has no attribute
+    'get'` -- RED FOR WANT OF AN API, which demonstrates nothing about the
+    defect. A differential cell has to be able to read BOTH heads, or its
+    red at the older one says only that the fix is absent.
+
+    Same discipline, stated for the same reason, as the comment in
+    `test_a_callers_own_command_text_is_reserved_on_write`: drive the thing
+    being fixed, so the pre-fix red carries the evidence.
+    """
+    pool = dev._comm._echo_spellings_outstanding
+    if isinstance(pool, dict):
+        return dict(pool)
+    return {spelling: 1 for spelling in pool}      # the pre-r15 SET
+
+
+def _owed(dev, spelling):
+    """How many echoes of ``spelling`` the pool says are owed (0 if none).
+
+    A set can only ever answer 0 or 1 -- which IS the r14 defect, so a cell
+    asserting 2 here reds at 77cac1b2 on the behaviour, not on a TypeError.
+    """
+    return _pool(dev).get(spelling, 0)
+
+
 class _Device(EchoSetterFake):
     """A port modelling ONE device-side output stream.
 
@@ -968,7 +997,7 @@ def test_no_attempt_is_ever_offered_an_outstanding_spelling():
     dev._comm.ECHO_SET_TIMEOUT_S = 2.0
     rng.script = [FAMILY[0]]
     assert dev._comm.silence_echo_for_download() == b""
-    assert dev._comm._echo_spellings_outstanding == set(), (
+    assert dev._comm._echo_spellings_outstanding == {}, (
         "a success must clear every stale spelling")
 
     rng.script = [FAMILY[0]]
@@ -1047,7 +1076,7 @@ def test_two_connections_do_not_share_the_spelling_pool():
 
     assert a._comm._echo_spellings_outstanding, (
         "A should have consumed its pool")
-    assert b._comm._echo_spellings_outstanding == set(), (
+    assert b._comm._echo_spellings_outstanding == {}, (
         "B's pool must be untouched by A: %r"
         % b._comm._echo_spellings_outstanding)
     got, exc = _download(b, b_port)
@@ -1547,7 +1576,7 @@ def test_a_failed_ON_write_reserves_nothing():
     for _ in range(len(_family())):
         with pytest.raises(serial.SerialTimeoutException):
             dev._comm.silence_echo_for_download()
-    assert dev._comm._echo_spellings_outstanding == set(), (
+    assert dev._comm._echo_spellings_outstanding == {}, (
         "a write that never landed owes no echo: %d spelling(s) reserved"
         % len(dev._comm._echo_spellings_outstanding))
 
@@ -1603,7 +1632,7 @@ def test_a_success_clears_a_reservation_whose_echo_never_came():
     port.__class__ = _Device
     port.reply_delay = 0.02
     assert dev._comm.silence_echo_for_download() == b""
-    assert dev._comm._echo_spellings_outstanding == set(), (
+    assert dev._comm._echo_spellings_outstanding == {}, (
         "a success must clear a reservation whose echo never came: %r"
         % dev._comm._echo_spellings_outstanding)
 
@@ -1688,7 +1717,7 @@ def test_a_callers_own_command_text_is_reserved_on_write(split):
 
     # and the mechanism that makes it impossible rather than unlikely
     assert victim in dev._comm._echo_spellings_outstanding or (
-        dev._comm._echo_spellings_outstanding == set()), (
+        dev._comm._echo_spellings_outstanding == {}), (
         "the caller's spelling must have been reserved at the write (or "
         "already cleared by the successful download): %r"
         % sorted(x[:14] for x in dev._comm._echo_spellings_outstanding))
@@ -1801,3 +1830,208 @@ def test_no_reader_in_comm_py_references_the_removed_machinery():
         "That is allowed under r13 -- a reader no longer owes attribution "
         "-- but it must be a deliberate change, so update this list and say "
         "why in the commit." % readers)
+
+
+def test_a_spelling_written_twice_needs_both_echoes_before_it_is_drawable():
+    """⛔⛔ r14 AUDIT HIGH, the direct pin. Reserve-on-write made
+    multiplicity real: an attempt writes a spelling and a caller writes the
+    same text, so it is owed TWICE. A set cannot represent that, and both
+    partial release paths freed it on seeing ONE copy while the other was
+    still queued -- the next draw then synced on the duplicate.
+    """
+    port = _Device(echo_state=1, reply_delay=0.02)
+    dev = _fresh_device(port)
+    victim = FAMILY[0]
+
+    dev._comm._write_to_port(victim + b"\r\n")
+    dev._comm._write_to_port(victim + b"\r\n")
+
+    # ⛔⛔ RELEASE IS DRIVEN THROUGH `_reclaim_stale_by_text`, WHICH EXISTS AT
+    # BOTH HEADS -- not through r15's own `_observe_spelling`. My first
+    # version called the new method, so at 77cac1b2 the cell died with
+    # `AttributeError: 'SerialInterface' object has no attribute
+    # '_observe_spelling'`: red because the fix is ABSENT, which demonstrates
+    # nothing about the defect. One copy of the echo text is also what the
+    # device actually delivers, and at 77cac1b2 that one copy `discard`s the
+    # spelling outright -- so asked this way the old head reds on the
+    # BEHAVIOUR, at the assertion below, with the pool in the message.
+    dev._comm._reclaim_stale_by_text(victim + b"\r\n")
+
+    assert victim in dev._comm._echo_spellings_outstanding, (
+        "one observed echo must NOT make a doubly-owed spelling drawable: %r"
+        % _pool(dev))
+    assert _owed(dev, victim) == 1, (
+        "two written and one observed leaves exactly one owed: %r"
+        % _pool(dev))
+
+    dev._comm._reclaim_stale_by_text(victim + b"\r\n")
+    assert victim not in dev._comm._echo_spellings_outstanding, (
+        "both observed: now drawable: %r" % _pool(dev))
+
+    # ⚠ AND A COUNT MUST NOT BE DRIVEN BELOW ZERO. More copies arrive than we
+    # wrote -- another object's echo on a shared link, or file payload
+    # carrying the text. This one cannot differ between the heads (a set has
+    # no arithmetic to get wrong), so it is not part of the differential; it
+    # is here because it fails against a mutant that drops the clamp.
+    other = FAMILY[1]
+    dev._comm._write_to_port(other + b"\r\n")
+    dev._comm._reclaim_stale_by_text((other + b"\r\n") * 5)
+    assert other not in dev._comm._echo_spellings_outstanding, (
+        "the copy we owed was among those five, so it is released: %r"
+        % _pool(dev))
+    assert all(v > 0 for v in _pool(dev).values()), (
+        "counts must never go non-positive: %r" % _pool(dev))
+
+
+def test_exhaustion_reclaim_needs_every_copy_not_just_one():
+    """⛔⛔ r14 AUDIT HIGH, main leg's schedule, made exact with a
+    ONE-MEMBER family so "exhausted" and "owed twice" are unambiguous.
+
+    The attempt draws the only spelling and times out (owed once); a caller
+    then writes the same text (owed twice); the pool is now empty. ONE copy
+    of the echo arrives.
+
+    ⚠ WHAT THIS CELL ACTUALLY PINS AT 77cac1b2, measured 2026-11-16: the
+    set-based pool FREES the spelling on that one copy -- the pool reads {}
+    where one copy is still owed -- which is what licenses the next draw
+    onto the queued duplicate. In this cell's timing the duplicate was then
+    consumed by the pre-download drain and the file came out CLEAN, so what
+    reds here is the premature RELEASE, not the corruption.
+
+    ⛔ An earlier draft of this docstring asserted the corruption
+    (b'SYST:ECHO -1\r\n' + payload) because the audit reported it on the
+    audit's own schedule. My run of THIS schedule contradicts that sentence,
+    so it is gone: the release is what this cell measures, and the
+    corruption belongs to row 1158's reproduction, not to this one.
+    """
+    port = _Withholding(echo_state=1)
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.02
+    only = _family()[0]
+    dev._comm._ECHO_SET_SILENT_FAMILY = (only,)
+
+    with pytest.raises(EchoSetUnconfirmedError):
+        dev._comm.silence_echo_for_download()
+    dev._comm._write_to_port(only + b"\r\n")          # a caller, same text
+    # ⚠ THE PRECONDITION IS PHRASED SO BOTH HEADS CAN ANSWER IT. "Owed
+    # twice" is precisely what 77cac1b2's SET cannot represent, so asserting
+    # the count here reds there before the download has run -- and the
+    # contamination this cell exists to measure would never be reached.
+    # Reserved-and-exhausted holds at both heads and is all the schedule
+    # needs; the count is asserted after the download, where the two heads
+    # genuinely differ.
+    assert only in dev._comm._echo_spellings_outstanding, (
+        "the caller's write must reserve the spelling: %r" % _pool(dev))
+    assert dev._comm._next_echo_spelling() is None, (
+        "and the one-member pool must be exhausted: %r" % _pool(dev))
+
+    # exactly ONE copy of the echo arrives, and the device is healthy
+    # ⚠ `_queue`, not `queue`. I first wrote `port.queue`, which created a
+    # NEW attribute and queued nothing at all -- the cell then failed for
+    # want of the bytes it was supposed to deliver. The name came from a
+    # standalone script whose fake used a different one.
+    port._queue = [(0.0, only + b"\r\n")]
+    # ⚠ RESET THE DEVICE'S OUTPUT CLOCK. The fake is strictly FIFO, so
+    # `_last_due` still carries the long delay from the broken schedule --
+    # leave it and every later echo is clamped seconds out, the attempt
+    # times out, and the cell fails for a reason that has nothing to do
+    # with reclamation. "The device recovered" means its backlog cleared.
+    port._last_due = 0.0
+    port.reply_delay = 0.02
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+
+    got, exc = _download(dev, port, timeout=30.0)
+
+    # ⚠ THE MECHANISM, asserted first. A refusal is the CORRECT r15
+    # outcome here (one copy still owed, so nothing is drawable), but a
+    # refusal for any other reason would also satisfy an outcome-only
+    # assertion -- which is how this cell first passed while its device
+    # was still clamped seconds into the future.
+    assert _owed(dev, only) == 1, (
+        "observing ONE of two copies must leave exactly one owed -- the pool "
+        "says %r and the download returned %r"
+        % (_pool(dev), bytes(got)[:70]))
+    assert exc is None or isinstance(exc, EchoSetUnconfirmedError), (
+        "and any refusal must be the setter's own: %r" % exc)
+    if exc is None:
+        assert bytes(got) == PAYLOAD, (
+            "one observed copy must not license a draw while another copy "
+            "is queued: %r" % bytes(got)[:70])
+
+
+def test_the_exhaustion_reader_honours_a_pending_partial():
+    """⛔⛔ r14 AUDIT MEDIUM, blind leg, made exact with a ONE-MEMBER family.
+
+    The only spelling is drawn and its marker is cut at the CR, so the pool
+    is empty and a partial is pending. Then the LF lands and the device is
+    healthy. At 77cac1b2 the exhaustion reader searched only for COMPLETE
+    markers, so it consumed the LF, freed nothing, and the connection
+    refused forever on a device that was working.
+    """
+    port = _SplitEveryEcho(echo_state=1)
+    # ⚠ A TINY BASE LATENCY, because the fake is strictly FIFO: the ON
+    # line's echo is queued first, and at the default 0.65 s the monotonic
+    # clamp pushes the CR out to 0.65 too -- so nothing arrived inside the
+    # budget, no partial was recorded, and the precondition assertion
+    # caught it. Same clamp interaction as r12's split cell.
+    port.reply_delay = 0.005
+    port.cr_at = 0.01
+    port.lf_at = 5.0          # well beyond the attempt's budget
+    dev = _fresh_device(port)
+    dev._comm.ECHO_SET_TIMEOUT_S = 0.05
+    only = _family()[0]
+    dev._comm._ECHO_SET_SILENT_FAMILY = (only,)
+
+    with pytest.raises(EchoSetUnconfirmedError):
+        dev._comm.silence_echo_for_download()
+    assert dev._comm._echo_pending_partial is not None, (
+        "the attempt must have been cut mid-marker: that is the precondition")
+    assert only in dev._comm._echo_spellings_outstanding, "and the pool empty"
+
+    # the LF lands, and the device is healthy again
+    port._queue = [(0.0, b"\n")]   # `_queue`: see the note above
+    port.__class__ = _Device
+    # ⚠ RESET THE DEVICE'S OUTPUT CLOCK. The fake is strictly FIFO, so
+    # `_last_due` still carries the long delay from the broken schedule --
+    # leave it and every later echo is clamped seconds out, the attempt
+    # times out, and the cell fails for a reason that has nothing to do
+    # with reclamation. "The device recovered" means its backlog cleared.
+    port._last_due = 0.0
+    port.reply_delay = 0.02
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    dev._comm.ECHO_SET_TIMEOUT_S = 2.0
+
+    got, exc = _download(dev, port, timeout=30.0)
+    assert exc is None, (
+        "the exhaustion reader must complete the pending partial and free "
+        "the spelling, or the connection refuses forever: %r" % exc)
+    assert bytes(got) == PAYLOAD
+
+
+def test_a_spelling_split_across_two_writes_is_still_reserved():
+    """⛔ MINE, not the audit's: the reserve-on-write regex runs per write,
+    so a caller writing "SYST:EC" then "HO -1\\r\\n" puts a contiguous line
+    on the device -- echoed as a family member -- while neither write
+    contains one. The scan carries the previous write's tail across the
+    boundary.
+    """
+    victim = FAMILY[0]
+    port = _LateUserEcho(echo_state=1, reply_delay=0.02)
+    port.victim = victim
+    dev = _fresh_device(port)
+
+    head, tail = victim[:7], victim[7:] + b"\r\n"
+    dev._comm._write_to_port(head)
+    dev._comm._write_to_port(tail)
+    assert victim in dev._comm._echo_spellings_outstanding, (
+        "a spelling split across two writes must still be reserved: %r"
+        % _pool(dev))
+
+    port._payload = PAYLOAD + END_OF_FILE_MARKER
+    dev._comm._echo_rng = _PinnedChoice(victim)
+    got, exc = _download(dev, port, timeout=30.0)
+    assert exc is None, "the download must succeed: %r" % exc
+    assert bytes(got) == PAYLOAD, (
+        "the split-written spelling's echo must not reach the file: %r"
+        % bytes(got)[:70])
