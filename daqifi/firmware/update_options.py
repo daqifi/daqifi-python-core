@@ -79,8 +79,11 @@ class FirmwareUpdateServiceOptions:
     # WiFi flashing --------------------------------------------------------
     wifi_process_timeout: float = 8 * 60.0  # 8 minutes
     wifi_flash_tool_file_name: str = "winc_flash_tool.cmd"
+    # Placeholders: {port}, {firmwarePath}, {version}. The tool needs /v: it
+    # finds its programmer image under files\winc1500\<version>\, and
+    # without one fails with "Firmware release not found" (#270).
     wifi_flash_tool_arguments_template: str = (
-        "/p {port} /d WINC1500 /k /e /i aio /w"
+        "/p {port} /d WINC1500 /v {version} /k /e /i aio /w"
     )
     wifi_port_override: Optional[str] = None
 

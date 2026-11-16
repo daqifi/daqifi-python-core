@@ -350,12 +350,9 @@ def test_all_sixteen_channels_decode_rate_under_5_pct(
 # ---- Typed factory rejects bitmask shapes that would break SCPI framing ----
 #
 # Hex-literal note: the typed factory ``enable_adc_channels`` accepts
-# decimal *and* hex digit strings on the host side, but the bench unit on fw 3.4.6b1
-# only honours the decimal form on the device side — sending the hex
-# literal ``FFFF`` enables zero channels rather than all 16. The host-
-# side factory acceptance is exercised by the rejection test below;
-# the firmware-side hex-literal mismatch is a documentation/firmware
-# divergence to follow up on separately and is not asserted here.
+# decimal digit strings only (#224). The firmware parses the mask as a
+# decimal integer, so a hex literal such as ``FFFF`` is refused on the host
+# rather than sent; the rejection test below asserts that refusal.
 
 
 def test_enable_adc_channels_factory_rejects_bad_input(device_info) -> None:
@@ -378,5 +375,5 @@ def test_enable_adc_channels_factory_rejects_bad_input(device_info) -> None:
         scpi_commands.enable_adc_channels("")
     with pytest.raises(ValueError, match="CR/LF"):
         scpi_commands.enable_adc_channels("1\r\nMEM:RES")
-    with pytest.raises(ValueError, match="decimal or hex"):
+    with pytest.raises(ValueError, match="decimal bitmask string"):
         scpi_commands.enable_adc_channels("not-a-number")

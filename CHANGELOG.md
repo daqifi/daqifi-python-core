@@ -199,6 +199,19 @@ which was never tagged.
   directly (#204 item 2, #231).
 
 ### Fixed
+- `update_wifi_module()` works with the default options. The default
+  `wifi_flash_tool_arguments_template` never passed `/v <version>`, which
+  `winc_flash_tool.cmd` needs to find its programmer image, so every update
+  failed in `PROGRAMMING` with "Firmware release not found", after the device
+  was already in WiFi-update mode. The template is now
+  `/p {port} /d WINC1500 /v {version} /k /e /i aio /w`, and `{version}` is a
+  new placeholder. `update_wifi_module()` takes a `firmware_version=`
+  argument: pass the version `download_wifi_firmware()` returns with the
+  path. Without it the version is read from the bundle, which must then hold
+  exactly one `files/winc*/<version>/firmware/programmer_firmware.bin`. When
+  the template uses `{version}` and no version can be settled, or the given
+  one is not in the bundle, the update raises `ValueError` before anything is
+  sent to the device. A template without `{version}` behaves as before (#270).
 - `update_firmware()` called from a message-received callback is refused at
   its entry, before anything reaches the device. It used to stop streaming
   first and only then refuse, so the caller got an exception AND a device
