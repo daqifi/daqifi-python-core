@@ -12,6 +12,35 @@ The first tagged release. Everything since the 0.1.0 development version,
 which was never tagged.
 
 ### Behaviour changes
+- A serial `SerialInterface.open()` now FAILS on a port that will not take
+  output, instead of hanging. After writing its echo-disable command it waits
+  at most 1 s (`open_drain_timeout`) for the output queue to empty; a port
+  that misses that, raises an I/O error while draining, or has no
+  `out_waiting` is refused and released, and `connect()` raises
+  `SerialPortConnectError` with the original error as `__cause__`. A failed
+  echo-disable write is still tolerated, as before (#262, #267).
+- Every serial send now RAISES after 5 s (`send_drain_timeout`) if the
+  device stops taking bytes, instead of blocking the calling thread forever
+  with no exception. `send_command` and `query_binary` raise `RuntimeError`,
+  stream start raises `CommandError`, and `sd_get_file`,
+  `sd_get_file_binary` and a serial `DaqifiDevice` send raise
+  `serial.SerialTimeoutException` (or the raw `OSError` if the port died
+  mid-drain). No serial send calls `flush()` any more. A healthy port is
+  unaffected; its queue drains in milliseconds (#263, #267).
+- `SerialInterface.close()` (and so `NyquistDevice.disconnect()`) no longer
+  hangs on a device that stopped draining. It waits at most 20 s
+  (`close_drain_timeout`), always releases the port, and returns `False`
+  with the cause in `last_close_error` instead of raising (#259, #261).
+- `NyquistDevice.sd_get_file()` and `sd_get_file_binary()` return the
+  file's bytes as sent. They used to delete every occurrence of the GET
+  command, the `DAQIFI>` prompt and the end marker anywhere in the file,
+  drop everything before a `DAQIFI>` in the first 200 bytes, and `.strip()`
+  leading and trailing whitespace. Now only the echoed command and prompt
+  at the very head are removed, and only when a prompt proves they are
+  framing. They no longer raise `SdCardTransferErrorException`: a transfer
+  the device aborts times out instead, and a file containing
+  `__END_OF_FILE__` still ends there. See Known issues for the one head
+  shape that is still stripped (#154, #206 item 5, #257).
 - `NyquistDevice.sd_get_file_size()` returns 0 (unknown) instead of a stale
   cached size after `sd_enable`, `sd_set_logging`, `sd_delete_file`,
   `sd_format`, `sd_benchmark` or `disconnect`. Each of those can change or
@@ -21,6 +50,16 @@ which was never tagged.
   can raise `ExchangeTimeoutError` instead of returning (#238, #251).
 
 ### Added
+- `NyquistDevice.connect(..., verify=callable)` runs `callable(port)` on the
+  freshly opened port BEFORE the library writes anything to it, on the same
+  handle the library then uses, so checking which board is on a path (for
+  example with `*IDN?`) no longer changes that board first. A falsy result
+  raises `DeviceVerificationError` (in `daqifi.exceptions`) and an exception
+  from the callable is re-raised unchanged; either way the port is closed
+  with nothing written. A cancellation wins over a truthy verdict (#259,
+  #261).
+- `SerialInterface.open_drain_timeout` (1 s), `send_drain_timeout` (5 s),
+  `close_drain_timeout` (20 s) and `last_close_error` (#261, #267).
 - `ExchangeTimeoutError`: a `send()` could not get exclusive use of the
   device, and the command was NOT sent -- from an ordinary thread after
   `send_exchange_wait_s` (60 s by default, settable per device), or at once
@@ -583,6 +622,29 @@ which was never tagged.
   it, and the recording ran with the previous channel set (#200).
 - `run_sd_benchmark` takes its size in KB, 1 to 1024, as the firmware does
   (#200).
+
+### Known issues
+- **An SD download can lose the head of a file whose content begins with
+  the device's own console framing.** If a file's first bytes are a
+  `DAQIFI> ` prompt, the echoed `SYSTem:STORage:SD:GET` line for that same
+  file, a line ending and another `DAQIFI> ` -- byte for byte what an idle
+  console sends ahead of a real download -- `sd_get_file` and
+  `sd_get_file_binary` remove them as framing. The loss is the length of
+  that framing, so it grows with the filename: 49 bytes for `log.csv`, 214
+  for a 176-character name. A file that merely begins with `DAQIFI> ` loses
+  those 8 bytes. Before 0.2.0 the text download already lost these bytes
+  and the binary download kept most or all of them. Ordinary log files are
+  not affected. If your files can begin with `DAQIFI>`,
+  compare the downloaded length with the size `sd_list_files()` reports
+  (`sd_get_file_size()`). Fixed device-side by
+  daqifi/daqifi-nyquist-firmware#1265; host adoption is tracked in #260.
+- **After an SD download times out, the next download on the same device
+  object can return the previous file's bytes.** A timeout leaves the rest
+  of that file still arriving, and the next `sd_get_file` or
+  `sd_get_file_binary` reads it as part of its own file, with no error.
+  After a download times out, disconnect, wait for the device to finish
+  sending, and reconnect before downloading again, and check the length of
+  the next file against the listed size. Tracked in #268.
 
 ## [0.1.0]
 
