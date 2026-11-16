@@ -1531,24 +1531,23 @@ class SerialInterface:
         if self.timeout is not None and self.timeout > 0:
             write_timeout = self.timeout
         self.last_open_error = None
-        # ⛔⛔ r4 finding 1: THIS DELIBERATELY DOES NOT CLEAR THE PROBE POISON,
-        # and r3's claim that "a fresh port resynchronises the stream by
-        # construction" was FALSE. close()/open() resets HOST-side buffers,
-        # which discards only what has already ARRIVED; replies the device has
-        # already queued survive, and the firmware's DTR handler does not
-        # cancel pending output. Measured on r3: a late first-probe reply
-        # satisfied the post-reopen probe and the download returned
-        # b'DAQIFI> SYSTem:ECHO -1\r\n-1\r\npayload' -- the reopen's own
-        # echo-disable traffic included.
+        # ⛔ A REOPEN RESYNCHRONISES NOTHING, and this is kept because it is
+        # WHY the download no longer probes at all. close()/open() resets
+        # HOST-side buffers, which discards only what has already ARRIVED;
+        # replies the device has already queued survive, and the firmware's
+        # DTR handler does not cancel pending output.
         #
-        # ⚠ SO THERE IS NO RECOVERY ON THIS OBJECT, stated plainly rather than
-        # softened. The brief's other option, clearing on a reply "uniquely
-        # attributable to THIS probe", is not available: `SYSTem:ECHO?` admits
-        # no nonce, so two probes' replies are byte-identical and no reply can
-        # be tied to a particular one. A caller that needs downloads after a
-        # poisoned probe must construct a NEW connection object -- and even
-        # that is a practical resynchronisation, not a proof, for the same
-        # reason this comment exists.
+        # r2-r5 carried a per-object "poison" flag to refuse downloads after
+        # an unaccounted-for probe, and open() deliberately did not clear it.
+        # The r5 audit showed the flag could not work at all: it is
+        # per-OBJECT and the stale bytes are on the DEVICE, so a new
+        # connection object -- which r5's own refusal message advised --
+        # starts clean and adopts them. Measured: the file came back with
+        # b'-1\r\n' spliced into its middle.
+        #
+        # So there is nothing here to clear any more. The download SETS the
+        # echo state and synchronises on its own echo, which is exactly
+        # known bytes; see silence_echo_for_download().
         try:
             self._serial = serial.Serial(
                 port=self.port,
@@ -1734,223 +1733,175 @@ class SerialInterface:
         except (serial.SerialException, OSError):
             pass
 
-    #: How long :meth:`probe_echo_silent` will wait for a COMPLETE reply
-    #: before refusing the download. Bounded, but a timeout now RAISES rather
-    #: than falling back -- see :class:`EchoProbeUnansweredError`.
-    ECHO_PROBE_TIMEOUT_S = 0.5
+    #: How long :meth:`silence_echo_for_download` waits for the setter's
+    #: own echo before REFUSING the download.
+    #:
+    #: ⚠ Sized for a device, not for a unit test. The probe's 0.5 s was a
+    #: budget to give up and fall back in; this is a budget to declare the
+    #: link unresponsive in, and a device that answers in 0.65 s is normal.
+    #: Measured consequence of the old value: every download against such a
+    #: device refused.
+    ECHO_SET_TIMEOUT_S = 2.0
 
-    #: The probe command, and the exact reply a SILENT console sends back.
-    #: ⛔ `-1\r\n` is not a guess: libscpi writes the value and then
-    #: `SCPI_LINE_ENDING`, which this firmware sets to `LINE_ENDING_CRLF`
-    #: (`libscpi/inc/scpi/config.h`), emitted in ONE `writeData` by
-    #: `writeNewLine`. Knowing the exact terminator is what makes a CONTENT
-    #: completion test possible at all.
-    _ECHO_QUERY = b"SYSTem:ECHO?"
-    _ECHO_SILENT_REPLY = b"-1\r\n"
+    #: ⛔ A SET, NOT A QUERY, and that is the r6 redesign in one line.
+    #: `SYSTem:ECHO?` admits no nonce, so two probes' replies are
+    #: byte-identical and NO reply can be tied to the probe that asked for
+    #: it. r2-r5 tried to cover that with a host-side per-object "poison"
+    #: flag; the r5 audit killed it in one sentence -- the flag is
+    #: per-object and the stale bytes live on the DEVICE, so a new
+    #: connection object, a new process or a different client inherits the
+    #: previous object's reply as its own confirmation. Measured on
+    #: d8930bad: the file came back as
+    #: b'000,001,...,016,-1\r\n017,...' -- the reply SPLICED INTO THE
+    #: MIDDLE of a data file, which is worse than a visible prepend.
+    #:
+    #: A set has no reply to misattribute. After it the state is known by
+    #: construction, so there is nothing to attribute and nothing to poison.
+    #: ⛔ THE SHORT FORM, AND THAT IS THE DISCRIMINATOR. open() writes the
+    #: FULL `SYSTem:ECHO -1` and close() writes `SYSTem:ECHO 1`, so if the
+    #: download used the full spelling too its marker would be
+    #: byte-identical to open()'s echo -- and the download would
+    #: synchronise on OPEN'S marker and leave its own in flight. Measured
+    #: on exactly that collision: a connect immediately followed by a
+    #: download returned
+    #: b'000,...,004,SYSTem:ECHO -1\r\nDAQIFI> 005,...'.
+    #:
+    #: Legal per the SCPI abbreviation rule: `SYSTem` truncates at its first
+    #: lowercase to `SYST`, and `ECHO` is all-caps so it has exactly one
+    #: spelling. The echo is verbatim, so the short form comes back short
+    #: and nothing this library writes elsewhere can forge it.
+    #: `test_the_download_marker_cannot_be_forged_by_open_or_close` pins the
+    #: distinctness, so changing open()'s spelling fails loudly here rather
+    #: than silently recreating the collision.
+    _ECHO_SET_SILENT = b"SYST:ECHO -1"
     _ECHO_PROMPT = b"DAQIFI> "
 
-    #: #260 r3: set once a probe has been written whose reply was not fully
-    #: accounted for. While true, every download REFUSES without probing.
-    #: Cleared only by :meth:`open`, because only a fresh port resynchronises
-    #: the stream by construction.
-    _echo_probe_poisoned = False
+    #: ⛔ WRITTEN FIRST, AND ONLY TO GUARANTEE THE MARKER. With echo already
+    #: silent, `SYSTem:ECHO -1` produces NOTHING -- no echo, no reply -- so
+    #: there is no known byte to synchronise on and foreign bytes still in
+    #: flight (another client's `SYSTem:ECHO?` reply, an older version of
+    #: this library) land inside the file. Measured: a stale `-1\r\n` due
+    #: 0.65 s out arrived 150 ms into the payload.
+    #:
+    #: Turning echo ON first makes the next line's echo CERTAIN, because
+    #: microrl gates on the state at the time the characters arrive. So the
+    #: pair always produces one exactly-known marker, in every starting
+    #: state, and everything ahead of it can be discarded.
+    #:
+    #: ⚠ `SYSTem:ECHO 1` is NOT a substring of `SYSTem:ECHO -1` (the `-`
+    #: separates them), so scanning for the second never matches the first.
+    _ECHO_SET_FRAMED = b"SYST:ECHO 1"
 
-    @classmethod
-    def _echo_probe_verdict(cls, buf):
-        """``"incomplete"`` / ``"silent"`` / ``"framed"``, from CONTENT, and
-        only for a reply this probe can ATTRIBUTE TO ITSELF.
+    def silence_echo_for_download(self) -> bytes:
+        """Set the console silent before a download. Returns the framing
+        bytes that may still appear at the head of the next response.
 
-        ⛔ r4 finding 3: "TERMINATED" IS NOT "MINE". r3 returned
-        ``"unparseable"`` for any terminated buffer that was not our reply,
-        and fell back to the byte-shape download on it. But a PRECEDING
-        command's delayed CRLF is exactly that -- terminated, not ours -- and
-        it completed the probe before our own reply had arrived, so the
-        download ran with the reply still in flight and returned contaminated
-        bytes. Measured: disabling the probe entirely gave the correct payload
-        under the same schedule, which is the clearest possible statement that
-        the probe was the thing doing the damage.
+        ⛔ WHY THIS REPLACED A PROBE (#260 r6, audit r5 finding 1). The
+        probe asked `SYSTem:ECHO?` and tried to decide, from the reply's
+        CONTENT, whether that reply was its own. It cannot be done: the
+        query takes no nonce, so every probe's reply is the same four bytes.
+        Every round from r2 to r5 added machinery to that unanswerable
+        question and the audit broke each one.
 
-        ⭐ SO THE QUESTION IS NOT "IS THIS COMPLETE" BUT "IS THIS MINE, AND
-        COMPLETE". Only two shapes qualify:
+        ⭐ The state is what the download needs, and a SET reaches the state
+        without asking anything. #260's text suggested a query; its GOAL is
+        the echo state.
 
-          framed  our own echo of ``SYSTem:ECHO?`` appears, and after it a
-                  value line and then the prompt. The echo is what makes the
-                  reply attributable, and everything before it is somebody
-                  else's traffic.
-          silent  the buffer is EXACTLY ``-1\r\n``. With echo off there is no
-                  echo to anchor on, so the only honest attribution is that
-                  nothing preceded it.
+        What this still has to handle is the setter's OWN framing: if echo
+        is on when the setter lands, the device echoes the setter line and
+        may follow it with a prompt. ⚠ THE DIFFERENCE THAT MATTERS is that
+        those are EXACT KNOWN BYTES, which `-1\r\n` never was:
 
-        ⚠ EVERYTHING ELSE IS ``incomplete`` -- keep waiting, then refuse. That
-        includes a terminated buffer of foreign bytes, and it includes
-        ``\r\n-1\r\n`` where a real reply follows junk: we cannot tell our
-        ``-1\r\n`` from a STALE one left by an earlier probe (r4 finding 1),
-        so accepting it at an offset would reintroduce that defect. There is
-        deliberately no ``"unparseable"`` verdict any more; r3's
-        complete-but-unparseable fallback is withdrawn, because "complete
-        garbage" and "foreign bytes, our reply still coming" are the same
-        bytes.
+        * consumed BY CONTENT here when they arrive in time -- the scan
+          discards anything ahead of them, which also sweeps out whatever a
+          previous client left in flight; and
+        * returned to the caller when they do not, so the receiver strips
+          them as a PREFIX. `_PreambleSkip` removes a candidate only when a
+          PROMPT follows it, so a payload that was never framed is passed
+          through untouched.
+
+        Either way no decision rests on attributing a reply to a request.
+
+        ⚠ RESIDUAL, stated rather than hidden: if the set does not take
+        effect at all -- a device that rejects it, which would also push an
+        SCPI error -- the GET is still echoed, and the GET's echo is not the
+        prefix returned here, so it would reach the caller's file. That is a
+        device fault with a visible symptom, not a silent corruption, and it
+        is strictly narrower than r5's hazard (a reply nobody could place).
+
+        A port fault propagates unwrapped, per pc#267's contract: all six
+        send sites report a stuck output queue identically.
         """
-        b = bytes(buf)
-        i = b.find(cls._ECHO_QUERY)
-        if i >= 0:
-            rest = b[i + len(cls._ECHO_QUERY):]
-            eol = rest.find(b"\r\n")
-            if eol < 0:
-                return "incomplete"              # echo line unfinished
-            value_end = rest.find(b"\r\n", eol + 2)
-            if value_end < 0:
-                return "incomplete"              # value line unfinished
-            if rest.find(cls._ECHO_PROMPT, value_end) < 0:
-                return "incomplete"              # prompt not yet arrived
-            return "framed"
-        if b == cls._ECHO_SILENT_REPLY:
-            return "silent"
-        return "incomplete"
+        # Local import, matching this module's style for exception types.
+        from ..exceptions import EchoSetUnconfirmedError
 
-    def probe_echo_silent(self) -> bool:
-        """True iff the device CONFIRMED the one state with no framing (#260).
-
-        ⛔ THE PROMPT AND THE COMMAND ECHO ARE ONE FIRMWARE VARIABLE.
-        `microrl.c` gates the prompt with ``if (pThis->echoOn > -1)`` and
-        ``echoOn`` is an **int**; ``SCPI_SetEcho`` accepts only -1..1 and
-        EVERY gate in microrl is ``> -1``. So -1 is the only silent state and
-        0 behaves exactly like 1 -- ``SYSTem:ECHO 0`` does NOT turn echo off.
-        Because one field decides both, a device cannot truthfully answer -1
-        while printing a prompt, which is what makes a confirmed -1 sound.
-
-        ⛔ NOT CACHED. The caller can send ``SYSTem:ECHO 1`` down the raw
-        path, or the device can REBOOT to its per-transport default (USB 1,
-        TCP 0) with no event anyone could invalidate on. So this is asked
-        immediately before each download and used at once.
-
-        ⛔ NEVER RETURNS WHILE A REPLY MAY BE OUTSTANDING. On an incomplete
-        reply, or no reply, inside the budget it raises
-        :class:`EchoProbeUnansweredError` and the caller does NOT download.
-        That is a contract change from the base, which never probed; it is
-        taken because a partly-arrived reply is indistinguishable from a
-        finished one by waiting, and downloading anyway glues its bytes to the
-        front of the file.
-
-        ⭐ NO `reset_input_buffer()` ANY MORE, and its absence is the
-        improvement rather than an omission. Completion is now decided by
-        content, so on every returning path the whole reply has been consumed
-        and the port is empty by construction. r1 needed a reset precisely
-        because it stopped early; a belt-and-suspenders that cannot stop
-        in-flight bytes was never the guarantee it looked like.
-
-        Returns True only for a confirmed -1. A COMPLETE framed or
-        unparseable reply returns False and the caller falls back to the
-        byte-shape path, unchanged from the base -- a complete reply leaves
-        nothing in flight.
-        """
-        from ..exceptions import EchoProbeUnansweredError
-
+        framing = self._ECHO_SET_SILENT + b"\r\n"
         if self._serial is None or not getattr(self._serial, "is_open", False):
-            return False
+            return framing
 
-        if self._echo_probe_poisoned:
-            raise EchoProbeUnansweredError(
-                "echo probe unanswered earlier on this connection; download "
-                "not attempted. A probe was written whose reply was never "
-                "fully accounted for, so bytes of it may arrive at any time "
-                "and would land inside a downloaded file. ⚠ A REOPEN DOES NOT "
-                "CLEAR THIS (r4 finding 1): close()/open() resets host-side "
-                "buffers, which discards only what has already ARRIVED, and "
-                "the firmware's DTR handler does not cancel output the device "
-                "has already queued. Use a NEW connection object."
-            )
+        # ⛔ THE DEADLINE IS CREATED BEFORE THE DRAIN (r4 finding 2).
+        # `write_timeout` governs neither backend's flush, so a drain placed
+        # ahead of the clock can spend the whole budget before it starts.
+        deadline = time.monotonic() + self.ECHO_SET_TIMEOUT_S
 
-        # ⛔ r4 finding 4: POISON BEFORE THE WRITE, cleared only by a
-        # content-confirmed completion, in a `finally` so BaseException is
-        # covered. r3 set it on the refusal path, so a KeyboardInterrupt (or
-        # any BaseException) during the probe escaped with the transport still
-        # marked clean -- and the retry then accepted the earlier reply.
-        self._echo_probe_poisoned = True
-        settled = None                      # None => nothing confirmed
-        try:
-            # ⛔ r4 finding 2: THE DEADLINE IS CREATED BEFORE THE DRAIN, and
-            # the drain is bounded. r3 called `flush()` and only then computed
-            # the deadline -- but `write_timeout` governs neither backend's
-            # flush (pyserial 3.5 polls `out_waiting` with no deadline on
-            # Windows, calls `tcdrain()` on POSIX), so the budget could be
-            # spent before the clock even started. drain_output_bounded()
-            # is this module's one bounded drain (#259, made module-level by
-            # #263); the probe calls it directly, as the other send paths do.
-            deadline = time.monotonic() + self.ECHO_PROBE_TIMEOUT_S
+        # Echo ON, then OFF. The second line's echo is therefore certain,
+        # which is what gives the scan below a marker to synchronise on in
+        # every starting state.
+        self._serial.write(self._ECHO_SET_FRAMED + b"\r\n")
+        self._serial.write(framing)
+        drain_output_bounded(
+            self._serial, max(0.0, deadline - time.monotonic()))
 
-            try:
-                self._serial.write(self._ECHO_QUERY + b"\r\n")
-            except Exception as exc:                          # noqa: BLE001
-                # An ATTEMPTED write is not a write that did not happen:
-                # pyserial discards the written byte count on a write
-                # timeout, so 0..len bytes landed and which is unknowable.
-                raise EchoProbeUnansweredError(
-                    "echo probe write failed; download not attempted. The "
-                    "query may have been sent in full before the error, so a "
-                    "reply may still arrive and would land inside a "
-                    "downloaded file."
-                ) from exc
-
-            # ⛔ A PORT FAULT PROPAGATES AS A PORT FAULT, deliberately NOT
-            # wrapped. A stuck output queue is a property of the port, not of
-            # the echo probe, and every one of #263's six send sites reports
-            # it the same way (serial.SerialTimeoutException, or whatever the
-            # port itself raised -- `out_waiting` can raise OSError(EIO) on a
-            # disconnected device) so callers keep ONE handler for it.
-            #
-            # An earlier version of this round re-raised it as
-            # EchoProbeUnansweredError, which read better here and split that
-            # handler in two for sd_get_file and sd_get_file_binary only.
-            #
-            # ⚠ WHAT STILL MAKES THE NEXT DOWNLOAD REFUSE: the poison was set
-            # BEFORE the write and `settled` is still None, so the `finally`
-            # below leaves this transport poisoned on the way out. The
-            # "a reply may still arrive" warning therefore survives the
-            # unwrapping -- it is carried by the poison, not by this type.
-            drain_output_bounded(
-                self._serial, max(0.0, deadline - time.monotonic()))
-
-            got = bytearray()
-            verdict = "incomplete"
-            # Read first, check the clock after -- a do-while. Testing the
-            # deadline before the first read means zero reads under any
-            # scheduling delay (ts#516 r15, one layer down).
-            while True:
-                try:
-                    pending = self._serial.in_waiting
-                    if pending:
-                        got.extend(self._serial.read(pending))
-                except (serial.SerialException, OSError):
-                    break
-                verdict = self._echo_probe_verdict(got)
-                if verdict != "incomplete":
-                    break
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.005)
-
-            if verdict == "silent":
-                settled = True
-                return True
-            if verdict == "framed":
-                settled = False
-                return False
-            raise EchoProbeUnansweredError(
-                "echo probe unanswered; download not attempted. Sent %r and "
-                "got %r inside %.2fs, which is not a complete reply "
-                "ATTRIBUTABLE TO THIS PROBE -- more of it may still be in "
-                "flight, and downloading now would put those bytes at the "
-                "front of the file."
-                % (self._ECHO_QUERY, bytes(got), self.ECHO_PROBE_TIMEOUT_S)
-            )
-        finally:
-            # ⭐ THE ONLY PLACE THE POISON CLEARS. A confirmed reply -- ours,
-            # and complete -- is the only evidence that nothing of it is left
-            # on the wire. Any other exit, including BaseException, leaves the
-            # transport marked.
-            if settled is not None:
-                self._echo_probe_poisoned = False
+        # Consume the setter's echo BY CONTENT, never by quiet time. A
+        # do-while: read first, check the clock after, so a reply that is
+        # already waiting is never missed by a timer that expired first.
+        seen = bytearray()
+        while True:
+            if getattr(self._serial, "in_waiting", 0):
+                seen.extend(self._serial.read(self._serial.in_waiting))
+            end = seen.find(framing)
+            if end >= 0:
+                # Found our own echo. Everything BEFORE it is foreign --
+                # another object's stale reply, a previous prompt -- and is
+                # discarded here, which is the resync the probe could never
+                # perform. Consume the trailing prompt too when present.
+                rest = seen[end + len(framing):]
+                if rest.startswith(self._ECHO_PROMPT):
+                    rest = rest[len(self._ECHO_PROMPT):]
+                # ⚠ ANYTHING LEFT IS DISCARDED, and that is safe for a
+                # reason worth stating: the GET has not been written yet, so
+                # nothing behind our own marker can belong to the download.
+                # It is leftover console traffic, and dropping it here is
+                # the point rather than a loss.
+                del rest
+                return b""
+            if time.monotonic() >= deadline:
+                # ⛔⛔ REFUSE, DO NOT PROCEED -- and this is the one decision
+                # the probe design could never make soundly. The marker is
+                # GUARANTEED to be coming: echo was switched on immediately
+                # before, so the device will echo that line. "Not here yet"
+                # therefore means "still in flight", never "nothing was
+                # coming" -- which is exactly the ambiguity `SYSTem:ECHO?`
+                # could not resolve, because a missing `-1\r\n` could equally
+                # mean a silent console.
+                #
+                # Proceeding puts our own echo inside the file. Measured with
+                # a 0.65 s device against a 0.5 s budget:
+                # b'000,...,004,SYSTem:ECHO -1\r\nDAQIFI> 005,...' -- and a
+                # PREFIX strip cannot reach it there, which is why returning
+                # it as a strippable candidate was not good enough.
+                raise EchoSetUnconfirmedError(
+                    "the echo setter's own echo did not arrive within "
+                    "%.2fs, so it is still in flight and would land inside "
+                    "the downloaded file; no download attempted. Retry on "
+                    "THIS connection -- the next attempt discards everything "
+                    "ahead of the marker it finds. ⚠ Do NOT reconnect to "
+                    "escape this: the bytes are queued on the DEVICE, and a "
+                    "new connection object cannot discard what has not "
+                    "arrived yet (r5 finding 1)."
+                    % self.ECHO_SET_TIMEOUT_S
+                )
+            time.sleep(0.005)
 
     def _drain_bounded(self, deadline_s: float) -> None:
         """Wait, BOUNDED, for the OS output queue to empty. No ``flush()``.

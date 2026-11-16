@@ -35,7 +35,8 @@ import time
 
 import pytest
 
-from _sd_echo_probe import EchoProbeFake
+from _sd_echo_setter import (EchoSetterFake,
+                             transport_cannot_silence)
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import END_OF_FILE_MARKER
 
@@ -44,7 +45,7 @@ MARKER_NAME = "__END_OF_FILE__"
 FULL_ECHO = ('SYSTem:STORage:SD:GET "%s"' % MARKER_NAME).encode("ascii")
 
 
-class _ScriptedSerial(EchoProbeFake):
+class _ScriptedSerial(EchoSetterFake):
     """Hands out queued chunks; a ``None`` entry is one SILENT poll.
 
     A silent poll is how "the rest of the framing is still in flight" is
@@ -66,22 +67,22 @@ class _ScriptedSerial(EchoProbeFake):
                 self._q.pop(0)
                 return 0
             return len(self._q[0]) if self._q else 0
-        return self._probe_pending(_own)
+        return self._console_pending(_own)
 
     def read(self, n: int = 1) -> bytes:
-        return self._probe_read(
+        return self._console_read(
             n, lambda: self._q.pop(0) if self._q else b"")
 
     def write(self, data):
         self.written.extend(data)
-        self._probe_write(data)
+        self._console_write(data)
         return len(data)
 
     def flush(self):
         pass
 
     def reset_input_buffer(self):
-        self._probe_reset()
+        self._console_reset()
 
     def close(self):
         self.is_open = False
@@ -95,6 +96,7 @@ def _device(chunks):
     dev = NyquistDevice("COM41")
     ser = _ScriptedSerial(chunks)
     dev._comm._serial = ser
+    transport_cannot_silence(dev)
     return dev, ser
 
 
@@ -165,15 +167,18 @@ def test_a_finite_timeout_is_still_accepted(entry):
     dev, ser = _device([ECHO_PREFIX + END_OF_FILE_MARKER])
     got = getattr(dev, entry)("log.csv", timeout=1.0)
     assert got in (ECHO_PREFIX, ECHO_PREFIX.decode("ascii"))
-    # ⛔ #260: THE PROBE PRECEDES THE GET, asserted as an ORDER rather than
-    # loosened. The echo state must be established BEFORE the command that
-    # starts the stream; afterwards the device is already sending and a query
-    # would interleave with the payload.
+    # ⚠ #260's ORDERING ASSERTION LIVED HERE AND IS REMOVED, not loosened.
+    # It pinned `SYSTem:ECHO?` as the first thing on the wire; r6 removed
+    # that query altogether, because no reply to it can be attributed to
+    # the probe that asked (r5 finding 1). The ordering now belongs to the
+    # module that owns the setter --
+    # test_sd_echo_is_set_not_queried_260.py's
+    # `test_the_setter_is_written_before_the_get` -- so it moved rather
+    # than being dropped. This module's own subject is the echo PREFIX, and
+    # its device is deliberately one whose console cannot be silenced,
+    # which is the path that still produces such a prefix.
     wire = bytes(ser.written)
-    assert wire.startswith(b"SYSTem:ECHO?"), (
-        "the echo probe must be the first thing on the wire; got %r" % wire[:40])
     assert b"SYSTem:STORage:SD:GET" in wire, "the GET must still be sent"
-    assert wire.index(b"SYSTem:ECHO?") < wire.index(b"SYSTem:STORage:SD:GET")
 
 
 # --------------------------------------------------------------------------

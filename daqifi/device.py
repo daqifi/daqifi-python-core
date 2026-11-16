@@ -1035,12 +1035,13 @@ class NyquistDevice:
         # AFTER the GET went out would leave the device streaming a file
         # nobody will read.
         timeout = _require_finite_sd_timeout(timeout, "sd_get_file")
-        # ⛔ #260 -- ASKED BEFORE THE GET IS WRITTEN, and on THIS transport.
-        # The console is per-transport in the firmware (SCPI_GetMicroRLClient),
-        # so the answer is only about the link the download will use. It has to
-        # precede the write: once the GET is out the device is streaming and a
-        # query would interleave with the payload.
-        echo_silent = self._echo_confirmed_silent()
+        # ⛔ #260 -- SET BEFORE THE GET IS WRITTEN, and on THIS transport.
+        # The console is per-transport in the firmware
+        # (SCPI_GetMicroRLClient), so only the state of the link this
+        # download will use means anything. It has to precede the write:
+        # once the GET is out the device is streaming and the setter would
+        # interleave with the payload.
+        preamble = self._silence_echo_before_get()
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
@@ -1074,7 +1075,7 @@ class NyquistDevice:
         # was absolute in the base and stays absolute.
         return self._receive_sd_file(
             filename, cmd, timeout, idle_reset=True,
-            echo_confirmed_silent=echo_silent,
+            preamble_candidate=preamble,
         ).decode("ascii", errors="ignore")
 
     def sd_get_file_binary(self, filename: str, timeout: float = 30.0) -> bytes:
@@ -1110,12 +1111,13 @@ class NyquistDevice:
         # reach the same unbounded head-resolution wait and a caller reaching
         # only one of them would still hang.
         timeout = _require_finite_sd_timeout(timeout, "sd_get_file_binary")
-        # ⛔ #260 -- ASKED BEFORE THE GET IS WRITTEN, and on THIS transport.
-        # The console is per-transport in the firmware (SCPI_GetMicroRLClient),
-        # so the answer is only about the link the download will use. It has to
-        # precede the write: once the GET is out the device is streaming and a
-        # query would interleave with the payload.
-        echo_silent = self._echo_confirmed_silent()
+        # ⛔ #260 -- SET BEFORE THE GET IS WRITTEN, and on THIS transport.
+        # The console is per-transport in the firmware
+        # (SCPI_GetMicroRLClient), so only the state of the link this
+        # download will use means anything. It has to precede the write:
+        # once the GET is out the device is streaming and the setter would
+        # interleave with the payload.
+        preamble = self._silence_echo_before_get()
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
@@ -1130,66 +1132,40 @@ class NyquistDevice:
 
         return self._receive_sd_file(
             filename, cmd, timeout, idle_reset=False,
-            echo_confirmed_silent=echo_silent,
+            preamble_candidate=preamble,
         )
 
-    def _echo_confirmed_silent(self) -> bool:
-        """Delegate to the transport's bounded probe; False if it has none.
+    def _silence_echo_before_get(self):
+        """Make the console silent for this download. Returns the bytes that
+        may still turn up at the head of the response, or None if this
+        transport cannot set echo at all.
 
-        ⛔ #260. The decision belongs to the transport because that is where
-        the console lives: the firmware keeps echo state PER TRANSPORT
-        (`SCPI_GetMicroRLClient`), so the only answer that means anything is
-        the one from the link this download will use. The implementation,
-        including why it is never cached and why only an exact -1 confirms,
-        is :meth:`SerialInterface.probe_echo_silent`.
+        ⛔ #260 r6. This replaced `_echo_confirmed_silent`, which asked the
+        transport to CONFIRM a state by probing for it. The r5 audit
+        established that the confirmation was unobtainable: `SYSTem:ECHO?`
+        takes no nonce, so a reply cannot be tied to the probe that asked,
+        and the per-object flag that stood in for attribution does not
+        survive a new connection object -- which r5's own refusal told the
+        caller to create. Setting the state asks nothing and so has nothing
+        to misattribute.
 
-        ⚠ A transport without the method falls back to the byte-shape path
-        rather than raising. That keeps this change additive for any
-        `_comm` that is not a SerialInterface: a transport that never probes
-        cannot have left a reply in flight, so there is nothing to be unsafe
-        about.
-
-        ⛔ BUT AN INCOMPLETE REPLY IS NOT A FALLBACK CASE (r2). If the probe
-        ran and could not finish, bytes may still be arriving and
-        :class:`EchoProbeUnansweredError` propagates so no GET is sent. The
-        distinction is "never probed" versus "probed and did not finish", and
-        only the first is safe to continue from.
+        ⚠ None, NOT b"", for a transport without the setter. b"" means
+        "strip nothing", which would be wrong here: a transport whose echo
+        state we could not set may well echo the GET, and that echo has to
+        stay strippable. None preserves exactly the pre-#260 behaviour for
+        such a transport -- the receiver falls back to stripping the GET
+        command -- which is what keeps this change additive for any `_comm`
+        that is not a SerialInterface.
         """
-        probe = getattr(self._comm, "probe_echo_silent", None)
-        if probe is None:
-            return False
-        # ⛔ #260 r2: EchoProbeUnansweredError MUST PROPAGATE. An earlier
-        # revision caught bare `Exception` here and returned False, which
-        # would have turned the whole r2 fix back into r1's defect -- a
-        # refusal silently downgraded to "download anyway on the byte-shape
-        # path", with the unfinished reply still in flight. Only transport
-        # faults are swallowed, and they are named.
-        # ⛔ TRANSPORT FAULTS ONLY, and the list is short on purpose. An
-        # earlier revision also caught TypeError/AttributeError/ValueError --
-        # and a TypeError from this very refusal's own constructor was then
-        # swallowed into "download anyway", which is precisely the defect r2
-        # exists to remove. A bug in the probe must fail loudly, not quietly
-        # become a fallback.
-        # ⛔⛔ AND THE POISON DECIDES WHICH OSError IS SAFE, not the class.
-        # pc#266 r5 made the probe let a port fault propagate unwrapped, so
-        # that all six of #263's send sites report a stuck output queue
-        # identically. `serial.SerialTimeoutException` subclasses
-        # `SerialException` subclasses `OSError` -- so the bare `except
-        # OSError` above silently became "drain timed out => download
-        # anyway", reintroducing the r2 defect this handler exists to
-        # prevent. Measured: the GET went out as
-        # b'SYSTem:ECHO?\r\nSYSTem:STORage:SD:GET "x.csv"\r'.
-        #
-        # The discriminator is not the exception type but whether the probe
-        # GOT AS FAR AS WRITING: the poison is set before the write and
-        # cleared only on a settled verdict, so a poisoned transport IS the
-        # "probed and did not finish" case, whatever class came out of it.
-        try:
-            return bool(probe())
-        except OSError:
-            if getattr(self._comm, "_echo_probe_poisoned", False):
-                raise
-            return False
+        silence = getattr(self._comm, "silence_echo_for_download", None)
+        if silence is None:
+            return None
+        # ⛔ NOT WRAPPED, and no bare `except` here. A port fault is
+        # pc#267's contract (one handler at all six send sites), and an
+        # earlier round learned the hard way that a broad `except` around
+        # this call silently converts a refusal into "download anyway" --
+        # including a TypeError raised by the refusal's own constructor.
+        return silence()
 
     def _read_sd_response(
         self, timeout: float, idle_reset: bool, echo: bytes = b"",
@@ -1325,7 +1301,7 @@ class NyquistDevice:
 
     def _receive_sd_file(
         self, filename: str, cmd: str, timeout: float, idle_reset: bool,
-        echo_confirmed_silent: bool = False,
+        preamble_candidate: bytes = None,
     ) -> bytes:
         """The SD receive contract, applied by the one implementation of it.
 
@@ -1387,7 +1363,8 @@ class NyquistDevice:
             # for the marker from byte 0, which is also why a payload that is
             # a proper prefix of this command can no longer stall the loop on
             # a confirmed-silent link.
-            echo=b"" if echo_confirmed_silent else cmd.encode("ascii"),
+            echo=(cmd.encode("ascii") if preamble_candidate is None
+                  else preamble_candidate),
         )
         destination = io.BytesIO()
         SdCardFileReceiver(io.BytesIO(raw)).receive(
@@ -1411,7 +1388,8 @@ class NyquistDevice:
             # ⛔ #260: likewise EMPTY on a confirmed -1. `receive()` builds
             # its skip as `_PreambleSkip(preamble) if preamble else None`, so
             # an empty preamble already means "strip nothing" there.
-            preamble=b"" if echo_confirmed_silent else cmd.encode("ascii"),
+            preamble=(cmd.encode("ascii") if preamble_candidate is None
+                      else preamble_candidate),
             eof_only=True,
         )
         return destination.getvalue()

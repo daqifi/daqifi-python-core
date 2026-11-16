@@ -26,7 +26,8 @@ import time
 
 import pytest
 
-from _sd_echo_probe import EchoProbeFake
+from _sd_echo_setter import (EchoSetterFake,
+                             transport_cannot_silence)
 from daqifi._internal import scpi_commands
 from daqifi.device import NyquistDevice
 from daqifi.exceptions import SdCardTransferErrorException
@@ -39,7 +40,7 @@ from daqifi.sdcard import (
 PROMPT = b"DAQIFI> "
 
 
-class _Serial(EchoProbeFake):
+class _Serial(EchoSetterFake):
     """Serial-shaped: exposes ``in_waiting`` and never reports EOF, which is
     what pyserial does and what makes an absent marker a timeout."""
     out_waiting = 0  # #263: the send path drains this queue, bounded
@@ -58,7 +59,7 @@ class _Serial(EchoProbeFake):
 
     def write(self, data) -> int:
         self.written.append(bytes(data))
-        if self._probe_write(data):
+        if self._console_write(data):
             return len(data)
         if b"SD:GET" in bytes(data):
             # Staged delays are measured from the GET when there is one.
@@ -78,7 +79,7 @@ class _Serial(EchoProbeFake):
         def _own():
             self._release()
             return len(self._pending)
-        return self._probe_pending(_own)
+        return self._console_pending(_own)
 
     def read(self, n: int) -> bytes:
         def _own():
@@ -86,12 +87,13 @@ class _Serial(EchoProbeFake):
             out = bytes(self._pending[:n])
             del self._pending[:n]
             return out
-        return self._probe_read(n, _own)
+        return self._console_read(n, _own)
 
 
 def _device(*stages) -> NyquistDevice:
     device = NyquistDevice("COM41")
     device._comm._serial = _Serial(*stages)
+    transport_cannot_silence(device)
     return device
 
 
@@ -127,6 +129,7 @@ def test_the_listed_size_is_not_consulted_by_the_download() -> None:
     device = _device((0.0, b"abcdef" + END_OF_FILE_MARKER))
     for wrong in (0, 3, 9999):
         device._comm._serial = _Serial((0.0, b"abcdef" + END_OF_FILE_MARKER))
+        transport_cannot_silence(device)
         device._file_sizes = {name: wrong}
         assert device.sd_get_file_binary(name, timeout=2.0) == b"abcdef", (
             f"a listed size of {wrong} changed the result"
@@ -238,6 +241,7 @@ def test_sd_get_file_size_still_reports_and_still_forgets() -> None:
     device._comm._serial = _Serial(
         (0.0, b"DAQiFi/log.bin 3\r\n__END_OF_LIST__ OK\r\n"),
     )
+    transport_cannot_silence(device)
     device.sd_list_files()
     assert device.sd_get_file_size("DAQiFi/log.bin") == 3
     device._forget_sd_file_sizes()

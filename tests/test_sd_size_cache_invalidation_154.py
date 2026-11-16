@@ -26,12 +26,13 @@ listing from an earlier session is not a safe download length either.
 
 import pytest
 
-from _sd_echo_probe import EchoProbeFake
+from _sd_echo_setter import (EchoSetterFake,
+                             transport_cannot_silence)
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import END_OF_FILE_MARKER
 
 
-class _Serial(EchoProbeFake):
+class _Serial(EchoSetterFake):
     """Replies by looking at the command, not by position.
 
     ⚠ An earlier version of this fake popped one reply per write, which
@@ -54,7 +55,7 @@ class _Serial(EchoProbeFake):
         self.written.append(text)
         # #260: the probe's reply comes from the shared policy, not from this
         # fake's command dispatch -- see tests/_sd_echo_probe.py.
-        if self._probe_write(text):
+        if self._console_write(text):
             return len(data)
         if b"SD:LIST?" in text or b"STORage:SD:LIST?" in text:
             self._pending.extend(self._listing)
@@ -70,14 +71,14 @@ class _Serial(EchoProbeFake):
 
     @property
     def in_waiting(self) -> int:
-        return self._probe_pending(lambda: len(self._pending))
+        return self._console_pending(lambda: len(self._pending))
 
     def read(self, n: int) -> bytes:
         def _own():
             out = bytes(self._pending[:n])
             del self._pending[:n]
             return out
-        return self._probe_read(n, _own)
+        return self._console_read(n, _own)
 
 
 LISTING = b'DAQiFi/log.bin 3\r\n__END_OF_LIST__ OK\r\n'
@@ -88,6 +89,7 @@ DOWNLOAD = b"abcdef" + END_OF_FILE_MARKER
 def _device() -> NyquistDevice:
     device = NyquistDevice("COM41")
     device._comm._serial = _Serial(LISTING, DOWNLOAD)
+    transport_cannot_silence(device)
     return device
 
 
@@ -146,6 +148,7 @@ def test_a_size_is_never_borrowed_across_directories() -> None:
     device._comm._serial = _Serial(
         b"OTHER/log.bin 3\r\n__END_OF_LIST__ OK\r\n", DOWNLOAD,
     )
+    transport_cannot_silence(device)
     device.sd_list_files()
     assert device.sd_get_file_size("DAQiFi/log.bin") == 0
     assert device.sd_get_file_size("log.bin") == 0, (
@@ -166,6 +169,7 @@ def test_a_listed_zero_is_an_empty_file_not_an_unknown_size() -> None:
         b"DAQiFi/empty.bin 0\r\nOTHER/empty.bin 3\r\n__END_OF_LIST__ OK\r\n",
         END_OF_FILE_MARKER,
     )
+    transport_cannot_silence(device)
     device.sd_list_files()
     assert device._listed_size_for("DAQiFi/empty.bin") == 0
     assert device.sd_get_file_binary("DAQiFi/empty.bin", timeout=2.0) == b""
@@ -179,6 +183,7 @@ def test_an_unsized_old_format_listing_enforces_no_boundary() -> None:
     device._comm._serial = _Serial(
         b"DAQiFi/log.bin\r\n__END_OF_LIST__ OK\r\n", DOWNLOAD,
     )
+    transport_cannot_silence(device)
     device.sd_list_files()
     assert device._listed_size_for("DAQiFi/log.bin") is None
     assert device.sd_get_file_binary("DAQiFi/log.bin", timeout=2.0) == b"abcdef"
@@ -332,6 +337,7 @@ def test_a_listing_publishes_its_cache_in_one_step() -> None:
              b"__END_OF_LIST__ OK\r\n")
     device = NyquistDevice("COM41")
     device._comm._serial = _Serial(three, DOWNLOAD)
+    transport_cannot_silence(device)
 
     calls = {"n": 0, "b": 0, "fired": False}
     real = sdcard_mod._list_end_status
@@ -418,6 +424,7 @@ def test_the_generation_check_and_the_publish_are_one_step() -> None:
 
     device = NyquistDevice("COM41")
     device._comm._serial = _Serial(LISTING, DOWNLOAD)
+    transport_cannot_silence(device)
 
     target_file = device_mod.__file__
     paused = threading.Event()

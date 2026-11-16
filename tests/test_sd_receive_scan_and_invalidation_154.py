@@ -12,12 +12,13 @@ import time
 
 import pytest
 
-from _sd_echo_probe import EchoProbeFake
+from _sd_echo_setter import (EchoSetterFake,
+                             transport_cannot_silence)
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import END_OF_FILE_MARKER
 
 
-class _ChunkedSerial(EchoProbeFake):
+class _ChunkedSerial(EchoSetterFake):
     """A serial-shaped source that hands out `payload` in fixed-size reads.
 
     No delays: `in_waiting` is always the next chunk's size until the payload
@@ -35,7 +36,7 @@ class _ChunkedSerial(EchoProbeFake):
 
     @property
     def in_waiting(self) -> int:
-        return self._probe_pending(
+        return self._console_pending(
             lambda: min(self._chunk, len(self._payload) - self._pos))
 
     def read(self, n: int = 1) -> bytes:
@@ -44,17 +45,17 @@ class _ChunkedSerial(EchoProbeFake):
             out = self._payload[self._pos:end]
             self._pos = end
             return out
-        return self._probe_read(n, _own)
+        return self._console_read(n, _own)
 
     def write(self, data):            # the command write, or an echo probe
-        self._probe_write(data)
+        self._console_write(data)
         return len(data)
 
     def flush(self):
         pass
 
     def reset_input_buffer(self):
-        self._probe_reset()
+        self._console_reset()
 
     def close(self):
         self.is_open = False
@@ -68,6 +69,7 @@ def _device_with(payload: bytes, chunk: int = 4096):
     device = NyquistDevice("COM41")
     ser = _ChunkedSerial(payload, chunk)
     device._comm._serial = ser
+    transport_cannot_silence(device)
     return device, ser
 
 
@@ -322,6 +324,7 @@ def test_a_listing_that_crosses_an_invalidation_is_discarded() -> None:
     device = NyquistDevice("COM41")
     ser = _PausingSerial(LISTING)
     device._comm._serial = ser
+    transport_cannot_silence(device)
 
     result = {}
 
@@ -358,6 +361,7 @@ def test_a_listing_with_no_invalidation_still_publishes() -> None:
     """
     device = NyquistDevice("COM41")
     device._comm._serial = _ChunkedSerial(LISTING, chunk=len(LISTING))
+    transport_cannot_silence(device)
     files = device.sd_list_files()
     assert files == ["DAQiFi/log.bin"]
     assert device.sd_get_file_size("DAQiFi/log.bin") == 3, (

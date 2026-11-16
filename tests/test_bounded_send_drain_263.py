@@ -38,6 +38,7 @@ import daqifi.devices as devices_mod
 from daqifi._internal.comm import SerialInterface
 from daqifi._internal.scpi_commands import reboot_device
 from daqifi.device import NyquistDevice
+from tests._sd_echo_setter import transport_cannot_silence
 from daqifi.devices import DaqifiDevice
 from daqifi.exceptions import CommandError
 from daqifi.streaming import StreamManager
@@ -166,6 +167,19 @@ def _nyquist(port):
     device = NyquistDevice("COM41")           # constructing opens no port
     device._comm._serial = port
     device._comm.send_drain_timeout = BOUND_S
+    # ⛔⛔ r5 AUDIT FINDING 2 (MEDIUM). #260 put echo-state traffic ahead of
+    # the GET, and this module's `_Port` answers nothing -- so every one of
+    # the six sd_get_file cases failed INSIDE that traffic and NOT ONE
+    # reached either GET write or its drain. Replacing both GET drains with
+    # an unbounded flush() still passed all six: the pins were inert, and
+    # my exemption of this module from #260's "fakes must answer" rule is
+    # what let that through. An exemption that drops coverage is worse than
+    # the duplication it avoids.
+    #
+    # The console here cannot be silenced, so no setter is written and the
+    # GET is the first write again -- which is also what re-arms `_Wedge`'s
+    # fault on the GET, since it arms on the first write.
+    transport_cannot_silence(device)
     return device
 
 

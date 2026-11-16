@@ -58,7 +58,8 @@ serial. Re-measure before changing one.
 
 import pytest
 
-from _sd_echo_probe import EchoProbeFake
+from _sd_echo_setter import (EchoSetterFake,
+                             transport_cannot_silence)
 from daqifi._internal import scpi_commands
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import END_OF_FILE_MARKER, _PreambleSkip
@@ -67,7 +68,7 @@ PROMPT = b"DAQIFI> "
 BODY = b"1,2\r\n"
 
 
-class _Serial(EchoProbeFake):
+class _Serial(EchoSetterFake):
     """Serial-shaped: ``in_waiting`` and never EOF, as pyserial behaves."""
     out_waiting = 0  # #263: the send path drains this queue, bounded
 
@@ -78,19 +79,19 @@ class _Serial(EchoProbeFake):
 
     def write(self, data) -> int:
         self.written.append(bytes(data))
-        self._probe_write(data)
+        self._console_write(data)
         return len(data)
 
     @property
     def in_waiting(self) -> int:
-        return self._probe_pending(lambda: len(self._buf))
+        return self._console_pending(lambda: len(self._buf))
 
     def read(self, size: int = 1) -> bytes:
         def _own():
             out = bytes(self._buf[:size])
             del self._buf[:size]
             return out
-        return self._probe_read(size, _own)
+        return self._console_read(size, _own)
 
     def reset_input_buffer(self) -> None:
         pass
@@ -109,6 +110,7 @@ def _echo() -> bytes:
 def _get(payload: bytes) -> str:
     device = NyquistDevice("COM41")
     device._comm._serial = _Serial(payload)
+    transport_cannot_silence(device)
     return device.sd_get_file("log.csv", timeout=1.0)
 
 
@@ -123,6 +125,7 @@ def _get_binary(payload: bytes, filename: str = "log.csv") -> bytes:
     """
     device = NyquistDevice("COM41")
     device._comm._serial = _Serial(payload)
+    transport_cannot_silence(device)
     return device.sd_get_file_binary(filename, timeout=1.0)
 
 
