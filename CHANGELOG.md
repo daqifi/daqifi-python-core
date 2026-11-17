@@ -209,28 +209,22 @@ which was never tagged.
   argument: pass the version `download_wifi_firmware()` returns with the
   path, which is now the bundle's version folder (`19.7.7` under
   `files/winc1500/`) rather than the release tag; a downloaded bundle
-  without exactly one version raises `RuntimeError`. When the template uses
-  `{version}`, the flash request is built once, before anything is sent to
-  the device, and the update runs that same request; its arguments as the
-  tool receives them, after every substitution (`{port}`, `{firmwarePath}`,
-  `{version}`), are checked, and the update raises `ValueError` unless there
-  is exactly one `/v` (any of `/v`, `-v`, `/V`, `-V`) written as exactly
-  `{version}`, exactly one `/d` with a literal device name made of letters,
-  digits and `. _ -`, no argument other than an option or the value right
-  after one, no option right before `/v` or `/d`, and every argument is made
-  only of letters, digits and `/ . _ : { } -`. A value that starts with `/`
-  reads as an option, so a `/dev/tty*` port is refused with such a template;
-  a Windows path (as `wslpath -w` produces under WSL) contains backslashes,
-  so `{firmwarePath}` cannot be used with `{version}` there — leave it out,
-  as the default template does, since the tool runs in the bundle folder.
-  The version, given or read from the bundle, must be made of letters,
-  digits and `. _ -`, and
-  `files/winc1500/<version>/firmware/programmer_firmware.bin` (`winc3400`
-  for a `/d` ending in 3400) must exist beside the tool. Without
-  `firmware_version=` the version is read from that one device folder, which
-  must then hold exactly one such image. A flash tool that cannot be found
-  is still reported where it was before, when the flash request is built. A
-  template without `{version}` behaves as before (#270).
+  without exactly one version raises `RuntimeError`.
+  With the default tool and arguments (by value: the tool that runs is a
+  file named `winc_flash_tool.cmd` and the template is exactly the one
+  above), the update checks before anything is sent to the device, and
+  raises `ValueError` unless the version is made of letters, digits and
+  `. _ -`, `files/winc1500/<version>/firmware/programmer_firmware.bin`
+  exists beside the tool (without `firmware_version=`, that folder must hold
+  exactly one such version), and the port is made of letters, digits and
+  `. _ : / -`; the flash request checked there is the one that runs. A
+  custom tool or template that uses `{version}` gets the version given, or
+  else the one version found across the bundle's `files/winc*/` folders
+  (`ValueError` otherwise), filled in with the same cmd.exe checks as
+  `{port}` and `{firmwarePath}`. Its arguments are not checked further, and
+  making the tool use the version is the caller's job. A flash tool that
+  cannot be found is still reported where it was before, when the flash
+  request is built. A template without `{version}` behaves as before (#270).
 - `update_firmware()` called from a message-received callback is refused at
   its entry, before anything reaches the device. It used to stop streaming
   first and only then refuse, so the caller got an exception AND a device

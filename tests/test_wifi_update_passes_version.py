@@ -14,6 +14,10 @@ when the caller passes only the path, read from the bundle's own layout. When
 it can be neither, the update is refused at entry, before the device is
 queried, rather than at the flash tool's late failure.
 
+Those advance checks cover the DEFAULT tool and arguments only. A custom tool or template gets ``{version}`` filled
+in with the same cmd.exe checks as ``{port}`` and ``{firmwarePath}``, and is
+not parsed: making the tool use it is the caller's job.
+
 ``test_default_arguments_pass_the_bundle_version`` and
 ``test_the_given_version_is_passed`` fail at dedc287c (no ``/v`` in the
 arguments, and no ``firmware_version`` parameter).
@@ -280,7 +284,7 @@ def test_a_version_for_another_device_is_not_picked_up(tmp_path):
     with pytest.raises(ValueError) as excinfo:
         service.update_wifi_module(device, str(root))
     _assert_refused_untouched(
-        service, runner, device, excinfo, "/d WINC1500", "holds no"
+        service, runner, device, excinfo, "winc1500", "holds no"
     )
 
 
@@ -294,60 +298,6 @@ def test_a_given_version_for_another_device_is_refused(tmp_path):
     _assert_refused_untouched(
         service, runner, device, excinfo, "winc1500", "Firmware release not found"
     )
-
-
-def test_a_custom_device_reads_its_own_folder(tmp_path):
-    """The caller's /d is honoured: WINC3400 reads files/winc3400."""
-    options = _f._fast_options()
-    options.wifi_flash_tool_arguments_template = (
-        "/p {port} /d WINC3400 /v {version} /k /e /i aio /w"
-    )
-    service, runner = _service(options)
-    root = _bundle(tmp_path, _VERSION)
-    _f._add_wifi_bundle_version(str(root), "1.4.2", device="winc3400")
-    service.update_wifi_module(_RecordingDevice(), str(root))
-
-    assert _tool_arguments(runner)[2:6] == ["/d", "WINC3400", "/v", "1.4.2"]
-
-
-@pytest.mark.parametrize("template,fragment", [
-    # #274 r2 audit schedule: the tool parses PAST a non-option, so the
-    # second /v wins and it reads 0.0.0 while 19.7.7 was validated.
-    ("/p {port} /d WINC1500 /v {version} stray /v 0.0.0", "'stray'"),
-    ("/p {port} /d WINC1500 /v {version} /e /v 0.0.0", "it has 2 /v"),
-    ("/p {port} /v {version} /w", "it has 0 /d"),
-    ("/p {port} /d WINC1500 /d WINC3400 /v {version}", "it has 2 /d"),
-    ("/p {port} stray /d WINC1500 /v {version}", "'stray'"),
-    ("/p {port} /d {port} /v {version}", "not a literal device"),
-    ("/p {port} /d WINC1500 /v x{version}", "not exactly {version}"),
-    # An option right before /v can take /v as its value: the tool's
-    # unknown /k does, and never reads the version.
-    ("/p {port} /d WINC1500 /k /v {version} /w", "'/k' comes right before '/v'"),
-    ("/p {port} /e /d WINC1500 /v {version}", "'/e' comes right before '/d'"),
-])
-def test_a_template_of_another_shape_is_refused(tmp_path, template, fragment):
-    options = _f._fast_options()
-    options.wifi_flash_tool_arguments_template = template
-    service, runner = _service(options)
-    device = _RecordingDevice()
-    with pytest.raises(ValueError) as excinfo:
-        service.update_wifi_module(
-            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
-        )
-    _assert_refused_untouched(service, runner, device, excinfo, fragment)
-
-
-def test_options_are_matched_case_insensitively(tmp_path):
-    options = _f._fast_options()
-    options.wifi_flash_tool_arguments_template = "-P {port} /D WINC3400 -V {version} /w"
-    service, runner = _service(options)
-    root = _bundle(tmp_path)
-    _f._add_wifi_bundle_version(str(root), "1.4.2", device="winc3400")
-    service.update_wifi_module(_RecordingDevice(), str(root))
-
-    assert _tool_arguments(runner) == [
-        "-P", "TESTPORT", "/D", "WINC3400", "-V", "1.4.2", "/w",
-    ]
 
 
 def test_the_downloaded_version_drives_the_update(tmp_path):
@@ -389,24 +339,6 @@ def test_a_version_cmd_exe_would_split_is_refused(tmp_path):
 # ---- Audit r3 on PR #274: allow-lists, not a model of cmd.exe -------------
 
 
-def test_a_comma_joined_second_v_is_refused(tmp_path):
-    """r3 schedule 1: "/v,19.6.1" passed the shape as one unknown option, but
-    cmd.exe splits it at the comma into /v 19.6.1, which overrides the
-    validated 19.7.7 and flashes the other image."""
-    options = _f._fast_options()
-    options.wifi_flash_tool_arguments_template = (
-        "/p {port} /d WINC1500 /v {version} /e /v,19.6.1 /w"
-    )
-    service, runner = _service(options)
-    device = _RecordingDevice()
-    with pytest.raises(ValueError) as excinfo:
-        service.update_wifi_module(
-            device, str(_bundle(tmp_path, "19.6.1", _VERSION)),
-            firmware_version=_VERSION,
-        )
-    _assert_refused_untouched(service, runner, device, excinfo, "'/v,19.6.1'")
-
-
 def test_a_version_delayed_expansion_would_rewrite_is_refused(tmp_path, monkeypatch):
     """r3 schedule 2: winc_flash_tool.cmd enables delayed expansion, so
     "19.7.7!candidate!" reaches it as 19.7.7 and a different image is
@@ -428,39 +360,6 @@ def test_a_version_delayed_expansion_would_rewrite_is_refused(tmp_path, monkeypa
     )
 
 
-# One template argument per character class outside the allow-list. The
-# arguments are written as cmd.exe's splitter needs them to arrive as shown.
-@pytest.mark.parametrize("written,arrives", [
-    ("a,b", "a,b"),        # argument separators
-    ("a;b", "a;b"),
-    ("a=b", "a=b"),
-    ("a!b!", "a!b!"),      # delayed expansion
-    ("a%b%", "a%b%"),      # expansion
-    ("a^^b", "a^b"),       # escape
-    ("a&b", "a&b"),        # command separators and redirection
-    ("a|b", "a|b"),
-    ("a<b", "a<b"),
-    ("a>b", "a>b"),
-    ("a'b", "a'b"),        # quote
-    ('"a b"', "a b"),      # whitespace
-    ("a\\b", "a\\b"),  # backslash
-])
-def test_a_template_argument_outside_the_allow_list_is_refused(
-    tmp_path, written, arrives
-):
-    options = _f._fast_options()
-    options.wifi_flash_tool_arguments_template = (
-        f"/p {{port}} /d WINC1500 /v {{version}} /i {written} /w"
-    )
-    service, runner = _service(options)
-    device = _RecordingDevice()
-    with pytest.raises(ValueError) as excinfo:
-        service.update_wifi_module(
-            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
-        )
-    _assert_refused_untouched(service, runner, device, excinfo, repr(arrives))
-
-
 @pytest.mark.parametrize("version", [
     "19,7", "19;7", "19=7", "19!7", "19%7", "19^7", "19&7", "19 7",
     '19"7', "19'7", "19/7", "19\\7", "19:7",
@@ -474,23 +373,6 @@ def test_a_given_version_outside_the_allow_list_is_refused(tmp_path, version):
         )
     _assert_refused_untouched(
         service, runner, device, excinfo, repr(version), "may contain only"
-    )
-
-
-@pytest.mark.parametrize("device_name", ["WINC:1500", "WINC/1500", "{port}"])
-def test_a_device_outside_the_allow_list_is_refused(tmp_path, device_name):
-    options = _f._fast_options()
-    options.wifi_flash_tool_arguments_template = (
-        f"/p {{port}} /d {device_name} /v {{version}} /w"
-    )
-    service, runner = _service(options)
-    device = _RecordingDevice()
-    with pytest.raises(ValueError) as excinfo:
-        service.update_wifi_module(
-            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
-        )
-    _assert_refused_untouched(
-        service, runner, device, excinfo, repr(device_name), "literal device name"
     )
 
 
@@ -516,7 +398,7 @@ def test_a_port_outside_the_allow_list_is_refused(tmp_path, port):
     _assert_refused_untouched(service, runner, device, excinfo, repr(port))
 
 
-@pytest.mark.parametrize("port", ["COMx", "tty.usbmodem-x.y"])
+@pytest.mark.parametrize("port", ["COMx", "tty.usbmodem-x.y", "/dev/ttyACMx"])
 def test_ordinary_port_names_pass_the_allow_list(tmp_path, port):
     options = _f._fast_options()
     service, runner = _service(options)
@@ -547,133 +429,187 @@ def test_a_delayed_expansion_port_is_refused_on_native_windows(tmp_path, monkeyp
     _assert_refused_untouched(service, runner, device, excinfo, "'COMx!y!'")
 
 
+def test_the_flow_runs_the_request_that_was_checked(tmp_path, monkeypatch):
+    """Default setup: the request is built ONCE, at entry, before the device
+    is queried, and the runner gets that very object."""
+    import daqifi.firmware.update_service as update_service
 
-def test_a_port_that_looks_like_an_option_is_refused(tmp_path):
-    """The rendered check cannot tell a value starting with / from an
-    option, so /dev/tty* ports are refused with a {version} template. The
-    WINC tool is a Windows script and takes a COM port name."""
-    options = _f._fast_options()
-    service, runner = _service(options)
-    options.wifi_port_override = "/dev/ttyACMx"
+    built = []
+    real_build = update_service.DefaultFirmwareUpdateService._build_wifi_process_request
+
+    def _spy(self, *args, **kwargs):
+        request = real_build(self, *args, **kwargs)
+        built.append((request, device.chip_info_queries))
+        return request
+
+    monkeypatch.setattr(
+        update_service.DefaultFirmwareUpdateService,
+        "_build_wifi_process_request", _spy,
+    )
     device = _RecordingDevice()
-    with pytest.raises(ValueError) as excinfo:
-        service.update_wifi_module(
-            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION
-        )
-    _assert_refused_untouched(service, runner, device, excinfo, "'/dev/ttyACMx'")
+    service, runner = _service()
+    service.update_wifi_module(device, str(_bundle(tmp_path, _VERSION)))
+
+    assert len(built) == 1
+    request, queries_before_build = built[0]
+    assert queries_before_build == 0
+    assert runner.last_request is request
+    assert service.current_state == FirmwareUpdateState.COMPLETE
 
 
-# ---- r5 on PR #274: the RENDERED arguments are what is checked ------------
+# ---- r6 on PR #274: custom tools and arguments are filled in, not parsed --
 
+_CUSTOM_TEMPLATE = "/p {port} /d WINC1500 /v {version} /w"
 _PATH_TEMPLATE = "/p {port} /d WINC1500 /v {version} /f {firmwarePath} /w"
 
 
-def _comma_bundle(tmp_path):
-    """A bundle folder whose own name carries a second -v once substituted."""
-    root = tmp_path / "fw,-v,19.6.1"
-    root.mkdir()
-    (root / "winc_flash_tool.cmd").write_text("@echo off")
-    for version in ("19.6.1", _VERSION):
-        _f._add_wifi_bundle_version(str(root), version)
-    return root
-
-
-def test_a_firmware_path_carrying_a_second_v_is_refused_wsl(tmp_path):
-    """r5 schedule (WSL): the template text is valid; the path substituted
-    for {firmwarePath} has no whitespace, so it goes unquoted, and cmd.exe
-    splits it at the commas into a second -v that flashes 19.6.1."""
+def _custom(template=_CUSTOM_TEMPLATE):
     options = _f._fast_options()
-    options.wifi_flash_tool_arguments_template = _PATH_TEMPLATE
+    options.wifi_flash_tool_arguments_template = template
+    return _service(options)
+
+
+def _no_fwupdate_and_no_tool(device, runner):
+    assert not any("FWUpdate" in command for command in device.sent_commands)
+    assert runner.last_request is None
+
+
+@pytest.mark.parametrize("template", [
+    # Each was refused by the argument parsing rounds 2-5 added.
+    "/p {port} /d WINC1500 /v {version} stray /v 0.0.0",
+    "/p {port} /d WINC1500 /k /v {version} /w",
+    "/p {port} /d WINC1500 /v {version} /e /v,19.6.1 /w",
+    "-P {port} /D WINC3400 -V {version}",
+    "/p {port} /v {version}",
+])
+def test_a_custom_template_is_filled_in_not_parsed(tmp_path, template):
+    service, runner = _custom(template)
+    service.update_wifi_module(
+        _RecordingDevice(), str(_bundle(tmp_path, _VERSION)),
+        firmware_version=_VERSION,
+    )
+
+    assert _tool_arguments(runner) == (
+        template.replace("{port}", "TESTPORT")
+        .replace("{version}", _VERSION).split()
+    )
+    assert service.current_state == FirmwareUpdateState.COMPLETE
+
+
+def test_a_custom_tool_with_the_default_template_gets_no_advance_check(tmp_path):
+    """Default means the shipped tool AND the shipped template. A caller's
+    own tool gets the given version even though the bundle does not hold it."""
+    options = _f._fast_options()
+    options.wifi_flash_tool_file_name = "own_flash_tool.cmd"
     service, runner = _service(options)
+    root = _bundle(tmp_path, _VERSION)
+    (root / "winc_flash_tool.cmd").rename(root / "own_flash_tool.cmd")
+    service.update_wifi_module(
+        _RecordingDevice(), str(root), firmware_version="0.0.1"
+    )
+
+    assert runner.last_request.arguments[3] == "own_flash_tool.cmd"
+    assert runner.last_request.arguments[8:10] == ["/v", "0.0.1"]
+
+
+def test_a_custom_template_reads_the_one_version_across_the_winc_folders(tmp_path):
+    service, runner = _custom("/p {port} /d WINC3400 /v {version} /w")
+    root = _bundle(tmp_path)
+    _f._add_wifi_bundle_version(str(root), "1.4.2", device="winc3400")
+    service.update_wifi_module(_RecordingDevice(), str(root))
+
+    assert _tool_arguments(runner)[4:6] == ["/v", "1.4.2"]
+
+
+def test_a_custom_template_refuses_a_bundle_with_two_versions(tmp_path):
+    service, runner = _custom()
+    root = _bundle(tmp_path, _VERSION)
+    _f._add_wifi_bundle_version(str(root), "1.4.2", device="winc3400")
     device = _RecordingDevice()
     with pytest.raises(ValueError) as excinfo:
-        service.update_wifi_module(
-            device, str(_comma_bundle(tmp_path)), firmware_version=_VERSION
-        )
+        service.update_wifi_module(device, str(root))
     _assert_refused_untouched(
-        service, runner, device, excinfo, "{firmwarePath}", "backslashes",
-        "Leave {firmwarePath} out",
+        service, runner, device, excinfo, "1.4.2, 19.7.7", "firmware_version="
     )
 
 
-def test_a_firmware_path_carrying_a_second_v_is_refused_posix(tmp_path):
-    """r5 schedule (POSIX tool, path passed untranslated): refused on the
-    rendered argument, which the template text alone could not show."""
+def test_a_linux_port_and_the_firmware_path_reach_a_custom_tool(tmp_path):
+    """Both refused in round 5: a /dev/tty* port, and {firmwarePath} with
+    {version}. A POSIX tool gets the path untranslated."""
     options = _f._fast_options()
     options.wifi_flash_tool_file_name = "flash-tool"
     options.wifi_flash_tool_arguments_template = _PATH_TEMPLATE
     service, runner = _service(options)
-    root = _comma_bundle(tmp_path)
-    (root / "flash-tool").write_text("#!/bin/sh\n")
-    (root / "winc_flash_tool.cmd").unlink()
-    device = _RecordingDevice()
-    with pytest.raises(ValueError) as excinfo:
-        service.update_wifi_module(device, str(root), firmware_version=_VERSION)
-    _assert_refused_untouched(
-        service, runner, device, excinfo, "fw,-v,19.6.1", "{firmwarePath}"
-    )
-
-
-def test_a_plain_posix_firmware_path_is_allowed(tmp_path):
-    """Nothing in the rendered argument to refuse: a {firmwarePath} that
-    stays inside the allow-list is passed."""
-    options = _f._fast_options()
-    options.wifi_flash_tool_file_name = "flash-tool"
-    options.wifi_flash_tool_arguments_template = _PATH_TEMPLATE
-    service, runner = _service(options)
+    options.wifi_port_override = "/dev/ttyACMx"
     root = _bundle(tmp_path, _VERSION)
     (root / "flash-tool").write_text("#!/bin/sh\n")
     (root / "winc_flash_tool.cmd").unlink()
     service.update_wifi_module(_RecordingDevice(), str(root), firmware_version=_VERSION)
 
-    assert runner.last_request.arguments[-3:] == ["/f", str(root), "/w"]
+    assert runner.last_request.arguments == [
+        "/p", "/dev/ttyACMx", "/d", "WINC1500", "/v", _VERSION,
+        "/f", str(root), "/w",
+    ]
 
 
-def test_the_flow_runs_the_request_that_was_checked(tmp_path, monkeypatch):
-    """The request is rendered ONCE, at entry, and the runner gets that very
-    object: no second render can change what was checked."""
-    import daqifi.firmware.update_service as update_service
+def test_the_firmware_path_and_version_reach_a_custom_cmd_template(tmp_path):
+    """Under WSL the script gets the translated path, backslashes and all."""
+    service, runner = _custom(_PATH_TEMPLATE)
+    root = _bundle(tmp_path, _VERSION)
+    service.update_wifi_module(_RecordingDevice(), str(root), firmware_version=_VERSION)
 
-    rendered = []
-    real_render = update_service.DefaultFirmwareUpdateService._render_wifi_process_request
-
-    def _spy(self, *args, **kwargs):
-        request = real_render(self, *args, **kwargs)
-        rendered.append((request, kwargs.get("check_arguments") is not None))
-        return request
-
-    monkeypatch.setattr(
-        update_service.DefaultFirmwareUpdateService,
-        "_render_wifi_process_request", _spy,
-    )
-    service, runner = _service()
-    service.update_wifi_module(_RecordingDevice(), str(_bundle(tmp_path, _VERSION)))
-
-    assert len(rendered) == 1
-    request, checked = rendered[0]
-    assert checked
-    assert runner.last_request is request
-    assert service.current_state == FirmwareUpdateState.COMPLETE
+    assert _tool_arguments(runner)[4:] == [
+        "/v", _VERSION, "/f", "C:\\WSL" + str(root).replace("/", "\\"), "/w",
+    ]
 
 
-def test_a_template_switched_to_version_after_entry_is_not_rendered(tmp_path):
-    """Options are mutable: a {version} template that appears after entry
-    must not be rendered unchecked by the flow."""
+@pytest.mark.parametrize("template,port,version,folder", [
+    (_CUSTOM_TEMPLATE, "TESTPORT", "19&7", "fw"),
+    (_CUSTOM_TEMPLATE, "COMx|y", _VERSION, "fw"),
+    (_PATH_TEMPLATE, "TESTPORT", _VERSION, "fw!x"),
+    ("/p {port} /d WINC1500 /v {version} /i a<b /w", "TESTPORT", _VERSION, "fw"),
+])
+def test_the_cmd_exe_checks_still_refuse_for_a_custom_template(
+    tmp_path, template, port, version, folder
+):
+    """What every substituted value had before #270: a value or template
+    argument cmd.exe would interpret is refused while the request is built,
+    before the device is put in WiFi-update mode."""
+    from daqifi.firmware.update_events import FirmwareUpdateException
+
     options = _f._fast_options()
-    options.wifi_flash_tool_arguments_template = "/p {port} /d WINC1500 /w"
+    options.wifi_flash_tool_arguments_template = template
     service, runner = _service(options)
+    options.wifi_port_override = port
+    (tmp_path / folder).mkdir()
+    device = _RecordingDevice()
+    with pytest.raises(FirmwareUpdateException) as excinfo:
+        service.update_wifi_module(
+            device, str(_bundle(tmp_path / folder, _VERSION)),
+            firmware_version=version,
+        )
+    assert "cmd.exe would interpret" in str(excinfo.value.__cause__)
+    _no_fwupdate_and_no_tool(device, runner)
+
+
+def test_options_switched_to_the_default_mid_update_are_not_run_unchecked(tmp_path):
+    """Options are mutable: a custom setup settled at entry and switched to
+    the default before the request is built would otherwise run the default
+    arguments without their advance check."""
+    service, runner = _custom()
+    options = service._options
 
     class _SwitchingDevice(_RecordingDevice):
         def get_lan_chip_info(self):
             options.wifi_flash_tool_arguments_template = (
-                "/p {port} /d WINC1500 /v {version} /w"
+                "/p {port} /d WINC1500 /v {version} /k /e /i aio /w"
             )
             return super().get_lan_chip_info()
 
+    device = _SwitchingDevice()
     with pytest.raises(Exception) as excinfo:
         service.update_wifi_module(
-            _SwitchingDevice(), str(_bundle(tmp_path, _VERSION)),
-            firmware_version=_VERSION,
+            device, str(_bundle(tmp_path, _VERSION)), firmware_version="0.0.1",
         )
-    assert "was not checked" in str(excinfo.value.__cause__)
-    assert runner.last_request is None
+    assert "changed during the update" in str(excinfo.value.__cause__)
+    _no_fwupdate_and_no_tool(device, runner)
