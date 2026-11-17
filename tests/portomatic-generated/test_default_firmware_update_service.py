@@ -370,10 +370,25 @@ def _make_temp_directory() -> str:
     return tempfile.mkdtemp(prefix="firmware-tests-")
 
 
-def _make_temp_wifi_dir() -> str:
+# The layout of the real bundle (daqifi/winc1500-Manual-UART-Firmware-Update,
+# release 19.7.7): the tool reads files/winc<device>/<version>/firmware/
+# programmer_firmware.bin, and the default template's {version} is read from it.
+_FAKE_WIFI_VERSION = "19.7.7"
+
+
+def _add_wifi_bundle_version(path: str, version: str, device: str = "winc1500") -> None:
+    firmware = os.path.join(path, "files", device, version, "firmware")
+    os.makedirs(firmware, exist_ok=True)
+    with open(os.path.join(firmware, "programmer_firmware.bin"), "wb") as handle:
+        handle.write(b"\x00")
+
+
+def _make_temp_wifi_dir(version: Optional[str] = _FAKE_WIFI_VERSION) -> str:
     path = _make_temp_directory()
     with open(os.path.join(path, "winc_flash_tool.cmd"), "w") as handle:
         handle.write("@echo off")
+    if version is not None:
+        _add_wifi_bundle_version(path, version)
     return path
 
 
@@ -1780,10 +1795,13 @@ class TestUpdateWifiModule:
         firmware_dir = _make_temp_directory()
         with open(os.path.join(firmware_dir, "flash-tool"), "w") as handle:
             handle.write("#!/bin/sh\n")
+        # The default template passes {version}, so the image it names must
+        # be beside the tool (#270).
+        _add_wifi_bundle_version(firmware_dir, "19.7.7")
         parent, name = os.path.split(firmware_dir)
         monkeypatch.chdir(parent)
         try:
-            service.update_wifi_module(device, name)
+            service.update_wifi_module(device, name, firmware_version="19.7.7")
         finally:
             shutil.rmtree(firmware_dir, ignore_errors=True)
 

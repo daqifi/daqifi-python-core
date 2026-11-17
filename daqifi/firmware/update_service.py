@@ -47,6 +47,7 @@ from typing import (
     FrozenSet,
     Iterable,
     List,
+    NamedTuple,
     Optional,
     Protocol,
     Sequence,
@@ -83,6 +84,8 @@ from daqifi.firmware.update_events import (
     FirmwareUpdateStateChangedEventArgs,
 )
 from daqifi.firmware.update_options import (
+    DEFAULT_WIFI_FLASH_TOOL_ARGUMENTS_TEMPLATE,
+    DEFAULT_WIFI_FLASH_TOOL_FILE_NAME,
     WIFI_BRIDGE_SETTLE_SECONDS,
     FirmwareUpdateServiceOptions,
 )
@@ -242,6 +245,7 @@ class FirmwareUpdateService(Protocol):
         progress: _PROGRESS_CALLBACK = None,
         cancel_event: Optional[threading.Event] = None,
         skip_version_check: bool = False,
+        firmware_version: Optional[str] = None,
     ) -> None:
         """Run a WiFi-module update via the external flashing tool.
 
@@ -255,6 +259,32 @@ class FirmwareUpdateService(Protocol):
                 cannot be reflashed at all, so there is no way to reinstall
                 the current image — which is what validating the WiFi update
                 path on hardware requires when every board is already current.
+            firmware_version: the bundle's firmware version, substituted for
+                ``{version}`` in ``wifi_flash_tool_arguments_template`` (the
+                default template passes it as ``/v``). Pass the version
+                :meth:`FirmwareDownloadService.download_wifi_firmware`
+                returns with the path; when omitted it is read from the
+                bundle.
+
+                **Default tool and arguments: checked before anything is
+                sent.** "Default" is by value: the tool that will run is a
+                file named exactly ``winc_flash_tool.cmd`` and the template is
+                exactly the shipped one. The update is then refused with
+                ValueError, before the device is queried, unless the version
+                is made of letters, digits, ``.``, ``_`` and ``-`` and
+                ``files/winc1500/<version>/firmware/programmer_firmware.bin``
+                (the image the tool opens) exists beside the tool -- when
+                omitted, that folder must hold exactly one such version --
+                and the port is made of letters, digits and ``. _ : / -``.
+                The flash request checked there is the one that runs.
+
+                **Any other tool or template:** ``{version}`` is the version
+                given, or else the one version found across the bundle's
+                ``files/winc*/`` folders (ValueError when there is not exactly
+                one). It is substituted with the same checks as ``{port}`` and
+                ``{firmwarePath}`` and nothing more: the arguments are not
+                parsed, and making the tool use the version is the caller's
+                job.
 
         Raises:
             FirmwareUpdateException: when any update step fails.
@@ -457,6 +487,7 @@ class DefaultFirmwareUpdateService:
         progress: _PROGRESS_CALLBACK = None,
         cancel_event: Optional[threading.Event] = None,
         skip_version_check: bool = False,
+        firmware_version: Optional[str] = None,
     ) -> None:
         if device is None:
             raise TypeError("device must not be None")
@@ -489,11 +520,14 @@ class DefaultFirmwareUpdateService:
             raise FileNotFoundError(
                 f"WiFi firmware path was not found: {firmware_path!r}"
             )
+        plan = self._plan_wifi_update(
+            device, firmware_path, progress, firmware_version
+        )
 
         self._run_exclusive(
             lambda: self._run_wifi_update(
                 device, firmware_path, progress, cancel_event,
-                skip_version_check,
+                skip_version_check, plan,
             ),
             cancel_event,
         )
@@ -939,6 +973,7 @@ class DefaultFirmwareUpdateService:
         progress: _PROGRESS_CALLBACK,
         cancel_event: Optional[threading.Event],
         skip_version_check: bool = False,
+        plan: Optional[_WifiPlan] = None,
     ) -> None:
         # "update_requested" is armed BEFORE the FWUpdate send: a send that
         # raises can still have been delivered. "recovered" is what
@@ -947,7 +982,7 @@ class DefaultFirmwareUpdateService:
         try:
             self._run_wifi_update_steps(
                 device, firmware_path, progress, cancel_event, bridge_state,
-                skip_version_check,
+                skip_version_check, plan,
             )
         finally:
             # Whatever ended the update, and wherever an interrupt landed
@@ -978,6 +1013,7 @@ class DefaultFirmwareUpdateService:
         cancel_event: Optional[threading.Event],
         bridge_state: dict,
         skip_version_check: bool = False,
+        plan: Optional[_WifiPlan] = None,
     ) -> None:
         total_bytes = 100
 
@@ -1028,8 +1064,16 @@ class DefaultFirmwareUpdateService:
                     "USB serial: while the WiFi bridge is up, the board can "
                     "only be reached on its USB port."
                 )
-            request = self._build_wifi_process_request(
-                device, firmware_path, progress
+            plan = plan or _WifiPlan()
+            if plan.error is not None:
+                raise plan.error
+            # A {version} template's request was rendered at entry from one
+            # read of the options; it is never rendered again here.
+            request = (
+                plan.request if plan.request is not None
+                else self._build_wifi_process_request(
+                    device, firmware_path, progress
+                )
             )
 
             def _prepare(deadline: _Cancellation) -> None:
@@ -1619,14 +1663,39 @@ class DefaultFirmwareUpdateService:
         firmware_path: str,
         progress: _PROGRESS_CALLBACK,
     ) -> ExternalProcessRequest:
+        """Build the request for a template without ``{version}``, reading
+        the options here, as the flow always has."""
         # Absolute before anything else: the tool runs with its own directory
         # as the working directory, so a relative tool or firmware path would
         # be resolved against that directory instead of the caller's.
         firmware_path = _anchor_to_cwd(firmware_path)
         tool_path = _anchor_to_cwd(self._resolve_wifi_tool_path(firmware_path))
         port = self._resolve_wifi_port(device)
-
         template = self._options.wifi_flash_tool_arguments_template
+        if _VERSION_PLACEHOLDER in template:
+            # _plan_wifi_update renders every {version} template at entry,
+            # so this one appeared since: its version was never settled.
+            raise ValueError(
+                f"The WiFi flash arguments template {template!r} passes "
+                "{version} but did not when the update started, so no "
+                "version was settled for it."
+            )
+        return self._render_wifi_process_request(
+            firmware_path, tool_path, template, port, None, progress
+        )
+
+    def _render_wifi_process_request(
+        self,
+        firmware_path: str,
+        tool_path: str,
+        template: str,
+        port: str,
+        firmware_version: Optional[str],
+        progress: _PROGRESS_CALLBACK,
+    ) -> ExternalProcessRequest:
+        """The flash request for exactly these values. Reads no option that
+        decides the tool or its arguments, so what a caller checked is what
+        is rendered."""
 
         executable_path = tool_path
         executable_arguments: Any
@@ -1647,10 +1716,12 @@ class DefaultFirmwareUpdateService:
                 _split_crt_template(template),
                 port,
                 _path_for_windows_tool(firmware_path),
+                firmware_version,
             )
         elif extension not in (".cmd", ".bat"):
             executable_arguments = _substitute_placeholders(
-                _split_posix_template(template), port, firmware_path
+                _split_posix_template(template), port, firmware_path,
+                firmware_version,
             )
         else:
             cmd_exe = shutil.which("cmd.exe")
@@ -1682,6 +1753,7 @@ class DefaultFirmwareUpdateService:
                 port,
                 _path_for_windows_tool(firmware_path),
                 native_windows=_is_native_windows(),
+                version=firmware_version,
             )
 
         progress_state = {"last_process_percent": 0}
@@ -1727,6 +1799,66 @@ class DefaultFirmwareUpdateService:
             on_standard_error_line=_on_stderr_line,
             standard_input_response_factory=_stdin_response,
         )
+
+    def _plan_wifi_update(
+        self,
+        device: "DaqifiStreamingDevice",
+        firmware_path: str,
+        progress: _PROGRESS_CALLBACK,
+        firmware_version: Optional[str],
+    ) -> "_WifiPlan":
+        """For a template that passes ``{version}``, settle the version and
+        render the flash request before anything reaches the device: the
+        tool reports a version it cannot use only at the very end, as
+        "Firmware release not found", after the device is in WiFi-update mode
+        (#270). The tool, template, port and path are each read ONCE here,
+        the default setup's checks run on those values, and the request is
+        rendered from the same values; the flow runs that request.
+
+        Raises ValueError (_WifiRequestRefused) for a refusal. Any other
+        failure to find the tool or build the request (no cmd.exe, a UNC
+        bundle, no serial port, a value cmd.exe would interpret) is held in
+        the plan and raised where building always failed, in PREPARING_DEVICE
+        after the device-connected check.
+        """
+        if firmware_version is not None and (
+            not isinstance(firmware_version, str)
+            or not firmware_version.strip()
+        ):
+            raise _WifiRequestRefused(
+                "firmware_version must be a non-empty string, the version "
+                "download_wifi_firmware returns with the path (got "
+                f"{firmware_version!r}). Nothing was sent."
+            )
+        template = self._options.wifi_flash_tool_arguments_template
+        if _VERSION_PLACEHOLDER not in template:
+            return _WifiPlan()
+        try:
+            firmware_path = _anchor_to_cwd(firmware_path)
+            tool_path = _anchor_to_cwd(self._resolve_wifi_tool_path(firmware_path))
+            if _is_default_wifi_setup(tool_path, template):
+                firmware_version = _checked_default_wifi_version(
+                    tool_path, firmware_version
+                )
+                port = self._resolve_wifi_port(device)
+                if not _WINC_PORT_ALLOWED.fullmatch(port):
+                    raise _WifiRequestRefused(
+                        f"WiFi flash tool port {port!r} may contain only "
+                        "letters, digits, '.', '_', ':', '/' and '-'. Nothing "
+                        "was sent."
+                    )
+            else:
+                if firmware_version is None:
+                    firmware_version = _single_bundle_version(tool_path)
+                port = self._resolve_wifi_port(device)
+            return _WifiPlan(request=self._render_wifi_process_request(
+                firmware_path, tool_path, template, port, firmware_version,
+                progress,
+            ))
+        except _WifiRequestRefused:
+            raise
+        except Exception as exc:
+            return _WifiPlan(error=exc)
 
     def _resolve_wifi_tool_path(self, firmware_path: str) -> str:
         if os.path.isfile(firmware_path):
@@ -2894,6 +3026,7 @@ def _cmd_exe_arguments(
     firmware_path: str,
     *,
     native_windows: bool,
+    version: Optional[str] = None,
 ) -> Union[str, List[str]]:
     """Arguments for ``cmd.exe`` running the WiFi flash script.
 
@@ -2918,7 +3051,8 @@ def _cmd_exe_arguments(
     # arrive literally inside the arguments it does quote.
     unsafe_chars = _CMD_ALWAYS_UNSAFE if native_windows else _CMD_METACHARACTERS
     for name, value in (
-        ("tool name", script), ("port", port), ("firmware path", firmware_path)
+        ("tool name", script), ("port", port), ("firmware path", firmware_path),
+        ("firmware version", version or ""),
     ):
         unsafe = sorted(set(value) & unsafe_chars)
         if unsafe:
@@ -2927,7 +3061,7 @@ def _cmd_exe_arguments(
                 "which cmd.exe would interpret. Use a path or port name "
                 "without cmd.exe special characters."
             )
-    literal_text = template.replace("{port}", "").replace("{firmwarePath}", "")
+    literal_text = _PLACEHOLDER.sub("", template)
     if native_windows and "%" in literal_text:
         # Quotes in the template survive into the line, so its own
         # metacharacters stay as written; %VAR% expands regardless.
@@ -2941,7 +3075,7 @@ def _cmd_exe_arguments(
         # already quoted can't end up between two quote pairs, leaving its
         # value's metacharacters bare.
         written = _split_windows_template(template)
-        filled = _substitute_placeholders(written, port, firmware_path)
+        filled = _substitute_placeholders(written, port, firmware_path, version)
         tool_arguments = " ".join(
             _quote_cmd_token(value, bool(_PLACEHOLDER.search(token)))
             for token, value in zip(written, filled)
@@ -2958,7 +3092,7 @@ def _cmd_exe_arguments(
             "cmd.exe cannot run reliably when started from WSL; rename it."
         )
     tokens = _substitute_placeholders(
-        _split_windows_template(template), port, firmware_path
+        _split_windows_template(template), port, firmware_path, version
     )
     for token in tokens:
         # The split removes a quoted literal's quotes, and WSL re-quotes only
@@ -2974,16 +3108,152 @@ def _cmd_exe_arguments(
     return ["/d", "/v:off", "/c", script] + tokens
 
 
-_PLACEHOLDER = re.compile(r"\{port\}|\{firmwarePath\}")
+_VERSION_PLACEHOLDER = "{version}"
+_PLACEHOLDER = re.compile(r"\{port\}|\{firmwarePath\}|\{version\}")
 
 
 def _substitute_placeholders(
-    tokens: List[str], port: str, firmware_path: str
+    tokens: List[str],
+    port: str,
+    firmware_path: str,
+    version: Optional[str] = None,
 ) -> List[str]:
     """Fill the placeholders in already-split arguments, in one pass, so a
-    value that itself contains ``{firmwarePath}`` is not substituted again."""
+    value that itself contains ``{firmwarePath}`` is not substituted again.
+    ``{version}`` is left as written when no version is given; the callers
+    refuse that case before they get here."""
     values = {"{port}": port, "{firmwarePath}": firmware_path}
-    return [_PLACEHOLDER.sub(lambda m: values[m.group(0)], t) for t in tokens]
+    if version is not None:
+        values[_VERSION_PLACEHOLDER] = version
+    return [
+        _PLACEHOLDER.sub(lambda m: values.get(m.group(0), m.group(0)), t)
+        for t in tokens
+    ]
+
+
+def _wifi_bundle_versions(device_directory: str) -> List[str]:
+    """The firmware versions one device folder of a WINC bundle holds, sorted.
+
+    A version counts only when its ``firmware/programmer_firmware.bin``
+    exists, the file ``winc_flash_tool.cmd`` checks before it flashes.
+    """
+    try:
+        candidates = os.listdir(device_directory)
+    except OSError:
+        return []
+    return sorted(
+        candidate for candidate in candidates
+        if os.path.isfile(os.path.join(
+            device_directory, candidate, "firmware", "programmer_firmware.bin"
+        ))
+    )
+
+
+def _single_bundle_version(tool_path: str) -> str:
+    """For a custom tool or template: the one version found across the
+    bundle's ``files/winc*/`` folders beside the tool."""
+    files_directory = os.path.join(os.path.dirname(tool_path), "files")
+    try:
+        names = os.listdir(files_directory)
+    except OSError:
+        names = []
+    available = sorted({
+        version
+        for name in names if name.lower().startswith("winc")
+        for version in _wifi_bundle_versions(os.path.join(files_directory, name))
+    })
+    if len(available) != 1:
+        found = (
+            f"it holds {', '.join(available)}" if available
+            else "it holds no winc*/<version>/firmware/programmer_firmware.bin"
+        )
+        raise _WifiRequestRefused(
+            "The WiFi flash arguments template passes {version}, and the "
+            f"version could not be read from {files_directory!r}: {found}. "
+            "Pass firmware_version=, the version download_wifi_firmware "
+            "returns with the path. Nothing was sent."
+        )
+    return available[0]
+
+
+def _checked_default_wifi_version(
+    tool_path: str, firmware_version: Optional[str]
+) -> str:
+    """For the default tool and arguments: the version given, or the one in
+    ``files/winc1500/``, refused unless it is allow-listed and its
+    programmer image exists. Only the values can vary in the default
+    arguments, so allow-listing them is what keeps the rendered arguments as
+    written: cmd.exe splits a batch script's arguments at , ; = as well as
+    whitespace, and winc_flash_tool.cmd enables delayed expansion."""
+    device_directory = os.path.join(
+        os.path.dirname(tool_path), "files", "winc1500"
+    )
+    if firmware_version is None:
+        available = _wifi_bundle_versions(device_directory)
+        if len(available) != 1:
+            found = (
+                f"it holds {', '.join(available)}" if available
+                else "it holds no <version>/firmware/programmer_firmware.bin"
+            )
+            raise _WifiRequestRefused(
+                "The WiFi firmware version could not be read from "
+                f"{device_directory!r}: {found}. Pass firmware_version=, the "
+                "version download_wifi_firmware returns with the path. "
+                "Nothing was sent."
+            )
+        firmware_version = available[0]
+    if not _WINC_VERSION_ALLOWED.fullmatch(firmware_version):
+        raise _WifiRequestRefused(
+            f"WiFi firmware version {firmware_version!r} may contain only "
+            "letters, digits, '.', '_' and '-'. Nothing was sent."
+        )
+    image = os.path.join(
+        device_directory, firmware_version, "firmware", "programmer_firmware.bin"
+    )
+    if not os.path.isfile(image):
+        raise _WifiRequestRefused(
+            f"WiFi firmware version {firmware_version!r} needs {image!r}, "
+            "which does not exist; the flash tool would fail with "
+            "'Firmware release not found'. Nothing was sent."
+        )
+    return firmware_version
+
+
+def _is_default_wifi_setup(tool_path: str, template: str) -> bool:
+    """Whether the update runs the shipped tool with the shipped arguments,
+    the only setup whose arguments update_wifi_module checks in advance.
+
+    By value, not by provenance: the options are a plain dataclass that
+    records no history, and what is checked depends only on what runs, so a
+    caller who sets the shipped values explicitly gets the same command and
+    the same check. The tool is the file that will RUN, which is the path
+    itself when the caller names a file, so its name is compared rather than
+    the wifi_flash_tool_file_name option."""
+    return (
+        os.path.basename(tool_path) == DEFAULT_WIFI_FLASH_TOOL_FILE_NAME
+        and template == DEFAULT_WIFI_FLASH_TOOL_ARGUMENTS_TEMPLATE
+    )
+
+
+# Allow-lists for the values substituted into the default arguments, rather
+# than a model of cmd.exe and winc_flash_tool.cmd (see
+# _checked_default_wifi_version). Whatever is not listed is refused.
+_WINC_VERSION_ALLOWED = re.compile(r"[0-9A-Za-z._-]+")
+# COMn and /dev/tty* forms; /p always takes the next argument as its value.
+_WINC_PORT_ALLOWED = re.compile(r"[A-Za-z0-9._:/-]+")
+
+
+class _WifiRequestRefused(ValueError):
+    """The WiFi update was refused at entry, before anything was sent.
+    Raised to the caller as a ValueError."""
+
+
+class _WifiPlan(NamedTuple):
+    """What update_wifi_module settled at entry for the WiFi flow: the
+    request rendered for a {version} template, or the error building it."""
+
+    request: Optional[ExternalProcessRequest] = None
+    error: Optional[BaseException] = None
 
 
 def _is_native_windows() -> bool:

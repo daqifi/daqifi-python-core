@@ -199,6 +199,32 @@ which was never tagged.
   directly (#204 item 2, #231).
 
 ### Fixed
+- `update_wifi_module()` works with the default options. The default
+  `wifi_flash_tool_arguments_template` never passed `/v <version>`, which
+  `winc_flash_tool.cmd` needs to find its programmer image, so every update
+  failed in `PROGRAMMING` with "Firmware release not found", after the device
+  was already in WiFi-update mode. The template is now
+  `/p {port} /d WINC1500 /v {version} /k /e /i aio /w`, and `{version}` is a
+  new placeholder. `update_wifi_module()` takes a `firmware_version=`
+  argument: pass the version `download_wifi_firmware()` returns with the
+  path, which is now the bundle's version folder (`19.7.7` under
+  `files/winc1500/`) rather than the release tag; a downloaded bundle
+  without exactly one version raises `RuntimeError`.
+  With the default tool and arguments (by value: the tool that runs is a
+  file named `winc_flash_tool.cmd` and the template is exactly the one
+  above), the update checks before anything is sent to the device, and
+  raises `ValueError` unless the version is made of letters, digits and
+  `. _ -`, `files/winc1500/<version>/firmware/programmer_firmware.bin`
+  exists beside the tool (without `firmware_version=`, that folder must hold
+  exactly one such version), and the port is made of letters, digits and
+  `. _ : / -`; the flash request checked there is the one that runs. A
+  custom tool or template that uses `{version}` gets the version given, or
+  else the one version found across the bundle's `files/winc*/` folders
+  (`ValueError` otherwise), filled in with the same cmd.exe checks as
+  `{port}` and `{firmwarePath}`. Its arguments are not checked further, and
+  making the tool use the version is the caller's job. A flash tool that
+  cannot be found is still reported where it was before, when the flash
+  request is built. A template without `{version}` behaves as before (#270).
 - `update_firmware()` called from a message-received callback is refused at
   its entry, before anything reaches the device. It used to stop streaming
   first and only then refuse, so the caller got an exception AND a device

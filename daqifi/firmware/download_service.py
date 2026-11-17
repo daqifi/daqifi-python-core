@@ -89,7 +89,13 @@ class FirmwareDownloadService(Protocol):
         destination_directory: Path,
         progress: Optional[ProgressReporter] = None,
     ) -> Optional[Tuple[Path, str]]:
-        """Download + extract the WiFi firmware bundle. Returns (extracted_path, version) or None."""
+        """Download + extract the WiFi firmware bundle.
+
+        Returns (extracted_path, version) or None. ``version`` is the
+        bundle's version folder (``files/winc*/<version>/``), the value
+        ``update_wifi_module(firmware_version=...)`` takes, not the release
+        tag; a bundle without exactly one raises RuntimeError.
+        """
         ...
 
     async def get_latest_wifi_release(self) -> Optional[FirmwareReleaseInfo]:

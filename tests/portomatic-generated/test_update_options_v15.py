@@ -37,7 +37,7 @@ def test_defaults_match_upstream_constants():
     assert o.wifi_flash_tool_file_name == "winc_flash_tool.cmd"
     assert (
         o.wifi_flash_tool_arguments_template
-        == "/p {port} /d WINC1500 /k /e /i aio /w"
+        == "/p {port} /d WINC1500 /v {version} /k /e /i aio /w"
     )
     assert o.wifi_port_override is None
 
