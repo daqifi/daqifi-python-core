@@ -395,13 +395,11 @@ def test_accepted_case_d_loss_on_both_paths() -> None:
     is that a change in EITHER direction becomes visible, because an accepted
     cost that drifts silently stops being accepted and becomes unknown.
 
-    ⭐ RULING HJ B: the operator selected option B; the option wording is the
-    convergence coordinator's. Option B was r8's longest-match behaviour, with
-    case D losing its bytes, and the operator's own words were "case D seems
-    increadibly unlikely. seems like B would be okay" (2026-11-11). So the
-    operator CHOSE this outcome and the coordinator WORDED it -- the same
-    split as HN C on the firmware side, recorded because tracing an accepted
-    defect to the wrong author is the failure that matters here.
+    ⭐ RULING HJ B chose r8's longest-match behaviour, with case D losing its
+    bytes, on the judgement that case D -- a file whose own content begins
+    with the whole reply framing -- is very unlikely in practice. It is
+    recorded so the accepted cost traces to a decision rather than reading as
+    an oversight.
 
     ⚠ TWO SHAPES, because one of them disproves a bound the docs used to
     claim. The 49-byte figure is a property of the 7-character filename

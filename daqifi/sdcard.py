@@ -214,13 +214,12 @@ class _PreambleSkip:
     bytes an earlier revision cited: it scales with the FILENAME, up to the
     whole matched framing, because the candidate it matches contains the echo.
 
-    ⭐ RULING HJ B accepts that deletion (the operator selected option B;
-    the option wording is the convergence coordinator's). Option B was r8's
-    longest-match behaviour, with case D losing its 41 bytes, and the operator
-    added: "case D seems increadibly unlikely. seems like B would be okay"
-    (2026-11-11). So this is an ACCEPTED TRADE, not a narrowing, and it is
-    written that way here because the next reader needs the cost, not a
-    reassurance. The accepted outputs are pinned in
+    ⭐ RULING HJ B accepts that deletion. It chose r8's longest-match
+    behaviour, with case D losing its 41 bytes, on the judgement that case D
+    -- a file whose own content begins with the whole reply framing -- is
+    very unlikely in practice. So this is an ACCEPTED TRADE, not a narrowing,
+    and it is written that way here because the next reader needs the cost,
+    not a reassurance. The accepted outputs are pinned in
     ``tests/test_sd_framing_oracle_154.py`` as accepted-LOSS pins -- they
     assert today's bytes so a move in EITHER direction is visible, and they
     are not correctness tests.

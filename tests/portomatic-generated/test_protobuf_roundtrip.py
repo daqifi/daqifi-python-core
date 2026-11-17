@@ -28,12 +28,12 @@ def test_serialized_protobuf_round_trip_populates_metadata() -> None:
     src.device_sn = 1234567890123456789
     src.device_fw_rev = "3.4.6b1"
     src.device_hw_rev = "2.0.0"
-    src.host_name = "DAQiFi-A7B4"
-    src.ssid = "Tesla"
+    src.host_name = "DAQiFi-0000"
+    src.ssid = "ExampleNet"
     src.device_port = 9760
     src.wifi_security_mode = 3
     src.wifi_inf_mode = 1
-    src.ip_addr = bytes([192, 168, 1, 60])
+    src.ip_addr = bytes([192, 0, 2, 60])
     src.mac_addr = bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])
 
     wire = src.SerializeToString()
@@ -46,12 +46,12 @@ def test_serialized_protobuf_round_trip_populates_metadata() -> None:
     assert md.serial_number == "1234567890123456789"
     assert md.firmware_version == "3.4.6b1"
     assert md.hardware_revision == "2.0.0"
-    assert md.host_name == "DAQiFi-A7B4"
-    assert md.ssid == "Tesla"
+    assert md.host_name == "DAQiFi-0000"
+    assert md.ssid == "ExampleNet"
     assert md.device_port == 9760
     assert md.wifi_security_mode == 3
     assert md.wifi_infrastructure_mode == 1
-    assert md.ip_address == "192.168.1.60"
+    assert md.ip_address == "192.0.2.60"
     assert md.mac_address == "AA-BB-CC-DD-EE-FF"
     assert md.device_type == DeviceType.NYQUIST_1
 
@@ -84,13 +84,13 @@ def test_partial_update_does_not_clobber_existing_fields() -> None:
 
     # Second update: only ssid populated, rest default — should not erase prior values.
     second = DaqifiOutMessage()
-    second.ssid = "Tesla"
+    second.ssid = "ExampleNet"
     md.update_from_protobuf(DaqifiOutMessage.FromString(second.SerializeToString()))
 
     assert md.part_number == "Nq1"
     assert md.serial_number == "12345"
     assert md.firmware_version == "3.4.6b1"
-    assert md.ssid == "Tesla"
+    assert md.ssid == "ExampleNet"
 
 
 def test_proto_field_inventory_matches_bridge_contract() -> None:

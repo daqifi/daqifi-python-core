@@ -25,7 +25,7 @@ Destructive (gated on ``DAQIFI_DESTRUCTIVE_OK=1``):
 * ``DaqifiStreamingDevice.update_network_configuration`` /
   ``apply_network_configuration`` / ``save_network_configuration``
   / ``prepare_lan_interface`` — full canonical sequence with
-  Tesla LAN credentials + restore. Touches flash; will trigger a
+  bench-network credentials + restore. Touches flash; will trigger a
   WiFi module restart that takes ~5s.
 
 Hardware safety (destructive path): the full update_network_config
@@ -207,7 +207,7 @@ def test_set_wifi_mode_existing_smoke(
 
     Run this LAST in the smoke-test sequence so the staged-but-
     unsaved leftover state matches the saved-flash state our test
-    rig boots into (associated to Tesla as EXISTING_NETWORK)."""
+    rig boots into (associated to the bench network as EXISTING_NETWORK)."""
     streaming_device.set_wifi_mode_existing()
 
 
@@ -257,10 +257,10 @@ def test_update_network_configuration_round_trip(
     Touches flash via the SAVE step inside
     update_network_configuration. Restores using the DAQIFI_TEST_*
     env vars from .env so the test rig is left in its
-    pre-test associated-to-Tesla state. Final reboot is required
+    pre-test associated-to-bench-network state. Final reboot is required
     because rapid back-to-back apply+save+apply+save leaves the
     WINC unable to re-join the AP without a power-cycle (saved
-    Tesla credentials persist; only the live radio is wedged).
+    bench-network credentials persist; only the live radio is wedged).
     """
     dev = streaming_device
 
@@ -343,7 +343,7 @@ def test_update_network_configuration_round_trip(
         assert snap.password == transient.password
 
     finally:
-        # --- STAGE 2 (always-runs): restore Tesla credentials ---
+        # --- STAGE 2 (always-runs): restore bench-network credentials ---
         restore_failed: Exception | None = None
         try:
             dev.update_network_configuration(restore)
@@ -364,10 +364,10 @@ def test_update_network_configuration_round_trip(
         # --- STAGE 3 (always-runs): reboot for clean re-association ---
         # Empirically: rapid back-to-back apply+save+apply+save (the
         # transient → restore thrash above) leaves the WINC in a state
-        # where the Tesla credentials are saved to flash but the radio
+        # where the bench-network credentials are saved to flash but the radio
         # never re-joins the AP — the unit sits at the self-hosted-
         # default ip=192.168.1.1 indefinitely. A SYSTem:REboot forces
-        # a clean power-up sequence; the saved Tesla config then
+        # a clean power-up sequence; the saved bench-network config then
         # drives a normal association on next boot.
         try:
             dev.send(scpi_commands.reboot_device())
@@ -398,7 +398,7 @@ def test_update_network_configuration_round_trip(
 
         if restore_failed is not None:
             pytest.fail(
-                "FAILED to restore Tesla credentials after stage 1. "
+                "FAILED to restore the bench-network credentials after stage 1. "
                 "Device may be persistently misconfigured — manual "
                 f"restoration required. Underlying: {restore_failed!r}"
             )

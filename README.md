@@ -650,7 +650,7 @@ The package tree above is the module index.
 ## Alignment with daqifi-core
 
 This Python API mirrors the C# daqifi-core library. Selected
-correspondences (full machine-readable map under `.portomatic/map/`):
+correspondences:
 
 | C# (daqifi-core) | Python (daqifi-python-core) |
 |---|---|
@@ -666,10 +666,6 @@ correspondences (full machine-readable map under `.portomatic/map/`):
 | `IFirmwareUpdateService` / `FirmwareUpdateService` | `FirmwareUpdateService` Protocol / `DefaultFirmwareUpdateService` (`daqifi.firmware`) |
 | `CsvExporter` / `ChannelDescriptor` / `SampleRow` / `ISampleSource` | same names (`daqifi.export`) |
 | `SdCardOperationException` (+ subclasses) | same names (`daqifi.exceptions`) |
-
-The C#-to-Python port itself is catalogued at the method level under
-`.portomatic/map/<Shard>.yaml`, which records every C# symbol's Python
-counterpart.
 
 ## Known Issues
 
