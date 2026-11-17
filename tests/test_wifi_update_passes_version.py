@@ -435,7 +435,7 @@ def test_the_flow_runs_the_request_that_was_checked(tmp_path, monkeypatch):
     import daqifi.firmware.update_service as update_service
 
     built = []
-    real_build = update_service.DefaultFirmwareUpdateService._build_wifi_process_request
+    real_build = update_service.DefaultFirmwareUpdateService._render_wifi_process_request
 
     def _spy(self, *args, **kwargs):
         request = real_build(self, *args, **kwargs)
@@ -444,7 +444,7 @@ def test_the_flow_runs_the_request_that_was_checked(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         update_service.DefaultFirmwareUpdateService,
-        "_build_wifi_process_request", _spy,
+        "_render_wifi_process_request", _spy,
     )
     device = _RecordingDevice()
     service, runner = _service()
@@ -592,12 +592,37 @@ def test_the_cmd_exe_checks_still_refuse_for_a_custom_template(
     _no_fwupdate_and_no_tool(device, runner)
 
 
-def test_options_switched_to_the_default_mid_update_are_not_run_unchecked(tmp_path):
-    """Options are mutable: a custom setup settled at entry and switched to
-    the default before the request is built would otherwise run the default
-    arguments without their advance check."""
+def test_a_custom_request_is_rendered_once_at_entry(tmp_path):
+    """The custom path reads the options once too: a port that cmd.exe would
+    split, and a switch to the default template, made after entry, do not
+    reach what runs; the request rendered at entry does."""
     service, runner = _custom()
     options = service._options
+
+    class _SwitchingDevice(_RecordingDevice):
+        def get_lan_chip_info(self):
+            options.wifi_port_override = "COMx,/r"
+            options.wifi_flash_tool_arguments_template = (
+                "/p {port} /d WINC1500 /v {version} /k /e /i aio /w"
+            )
+            return super().get_lan_chip_info()
+
+    service.update_wifi_module(
+        _SwitchingDevice(), str(_bundle(tmp_path, _VERSION)),
+        firmware_version="0.0.1",
+    )
+
+    assert _tool_arguments(runner) == [
+        "/p", "TESTPORT", "/d", "WINC1500", "/v", "0.0.1", "/w",
+    ]
+
+
+def test_a_template_switched_to_version_after_entry_is_not_rendered(tmp_path):
+    """A template without {version} is built where it always was; one that
+    gains {version} after entry was never settled, and is refused."""
+    options = _f._fast_options()
+    options.wifi_flash_tool_arguments_template = "/p {port} /d WINC1500 /w"
+    service, runner = _service(options)
 
     class _SwitchingDevice(_RecordingDevice):
         def get_lan_chip_info(self):
@@ -609,7 +634,78 @@ def test_options_switched_to_the_default_mid_update_are_not_run_unchecked(tmp_pa
     device = _SwitchingDevice()
     with pytest.raises(Exception) as excinfo:
         service.update_wifi_module(
-            device, str(_bundle(tmp_path, _VERSION)), firmware_version="0.0.1",
+            device, str(_bundle(tmp_path, _VERSION)), firmware_version=_VERSION,
         )
-    assert "changed during the update" in str(excinfo.value.__cause__)
+    assert "did not when the update started" in str(excinfo.value.__cause__)
     _no_fwupdate_and_no_tool(device, runner)
+
+
+# ---- r7 on PR #274: read once, check what was read, render that -----------
+
+import daqifi.firmware.update_service as _update_service  # noqa: E402
+
+_REAL_PORT_ALLOWED = _update_service._WINC_PORT_ALLOWED
+
+
+class _SwapAfterCheck:
+    """Stands in for the default port allow-list: answers as the real one,
+    then changes the options -- what another thread could do between the
+    check and the build."""
+
+    def __init__(self, options, swap):
+        self._options, self._swap = options, swap
+
+    def fullmatch(self, value):
+        result = _REAL_PORT_ALLOWED.fullmatch(value)
+        for name, new in self._swap.items():
+            setattr(self._options, name, new)
+        return result
+
+
+def _default_update(tmp_path, monkeypatch, native, swap):
+    """A default-setup update on port COMx; ``swap`` is applied to the
+    options right after the port check passes."""
+    if native:
+        monkeypatch.setattr(_update_service, "_is_native_windows", lambda: True)
+        monkeypatch.setattr(_update_service, "_path_for_windows_tool", lambda p: p)
+    service, runner = _service()
+    service._options.wifi_port_override = "COMx"
+    tmp_path.mkdir()
+    root = _bundle(tmp_path, _VERSION)
+    (root / "other_tool.cmd").write_text("@echo off")
+    monkeypatch.setattr(
+        _update_service, "_WINC_PORT_ALLOWED",
+        _SwapAfterCheck(service._options, swap),
+    )
+    service.update_wifi_module(_RecordingDevice(), str(root))
+    return runner.last_request
+
+
+@pytest.mark.parametrize("native,swap", [
+    # Audit r6, main leg: delayed expansion reads only the part before the
+    # '!', a port that never entered update mode; the native per-value guard
+    # allows '!'.
+    (True, {"wifi_port_override": "COMy!not_defined!"}),
+    # Audit r6, blind leg: cmd.exe splits at the comma, the script reads /r
+    # (readback), prints its success marker, and the update reports COMPLETE.
+    (False, {"wifi_port_override": "COMx,/r"}),
+    (False, {"wifi_flash_tool_arguments_template":
+             "/p {port} /d WINC1500 /v {version} /r /w"}),
+    (False, {"wifi_flash_tool_file_name": "other_tool.cmd"}),
+], ids=["port-bang-native", "port-comma-wsl", "template", "tool"])
+def test_the_default_request_is_rendered_from_the_values_checked(
+    tmp_path, monkeypatch, native, swap
+):
+    """Options changed after the default check passed do not reach the
+    request: it equals the one the unchanged options produce."""
+    expected = _default_update(tmp_path / "a", monkeypatch, native, {})
+    actual = _default_update(tmp_path / "b", monkeypatch, native, swap)
+
+    def _same_place(arguments):
+        return str(arguments).replace(str(tmp_path / "a"), str(tmp_path / "b"))
+
+    assert actual.file_name == expected.file_name
+    assert str(actual.arguments) == _same_place(expected.arguments)
+    assert "COMx" in str(actual.arguments)
+    for value in swap.values():
+        assert value not in str(actual.arguments)
