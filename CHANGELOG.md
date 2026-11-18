@@ -199,6 +199,27 @@ which was never tagged.
   directly (#204 item 2, #231).
 
 ### Fixed
+- A board with no PIC32 bootloader now says so, instead of timing out. The
+  check for "the port came back as the application" only began sampling after
+  the `post_force_boot_delay` settle, so an absence that started and ended
+  inside that delay was never seen: the update waited the full
+  `waiting_for_bootloader_timeout` and raised a generic timeout. Measured on
+  hardware, the port was absent from about 0.6 s to 1.6 s after the write
+  against a 1.5 s settle, leaving roughly 0.08 s visible to a 0.28 s poll
+  cadence. The target port is now sampled every 50 ms from the `FORceBoot`
+  write through the settle, so the absence is recorded when it happens; the
+  refusal still comes from the wait loop, so `failed_state` stays
+  `WAITING_FOR_BOOTLOADER`, and the settle keeps its cancellation check,
+  including at a zero delay (#280).
+- `FirmwareUpdateException` messages now carry the cause's own text. `str(exc)`
+  was built from the failed state and operation alone, so a "this device does
+  not appear to carry the PIC32 bootloader" refusal and an ordinary bootloader
+  timeout rendered identically, and the timeout's VID/PID and poll count were
+  lost; only `__cause__` had them. The first sentence is unchanged. The
+  no-bootloader case also gets its own recovery guidance -- program a
+  bootloader with a hardware programmer -- instead of advice to replug USB,
+  which cannot add one; it is selected by exception type, not by matching the
+  message text (#280).
 - `update_wifi_module()` works with the default options. The default
   `wifi_flash_tool_arguments_template` never passed `/v <version>`, which
   `winc_flash_tool.cmd` needs to find its programmer image, so every update

@@ -440,7 +440,11 @@ refuses if more than one candidate remains. If the board's own serial
 port drops after `FORceBoot` and then comes back, the board rebooted
 into its application, which is what a board built without the bootloader
 does. The update stops there rather than take whatever bootloader
-appears next.
+appears next. That port is watched from the moment `FORceBoot` is
+written, through the settle delay that follows it, because the drop can
+begin and end inside that delay (#280); the refusal itself is still
+reported against `WAITING_FOR_BOOTLOADER`, and its message names the
+missing bootloader.
 
 **Residual risk.** Step 1 runs once, at the start. A second board
 plugged in (or attached over usbipd) *during* the update isn't caught by

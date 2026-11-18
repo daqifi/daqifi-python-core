@@ -366,6 +366,24 @@ def _list_serial_port_names() -> Optional[FrozenSet[str]]:
 _list_usb_serial_ports = list_usb_serial_ports
 
 
+# How often the target port is sampled during the FORceBoot settle (#280).
+# Justified by measurement, not taste: listing the ports costs about 8 ms on
+# Windows, so 50 ms sampling across a 1.5 s settle is roughly 26 calls -- and
+# the absence being watched for lasted about 0.97 s on a board WITH a
+# bootloader and is expected to be shorter without one.
+_SETTLE_SAMPLE_INTERVAL = 0.05
+
+
+class _TargetReturnedToApplicationError(RuntimeError):
+    """The target came back as its application instead of a bootloader.
+
+    A distinct type, not a distinguishing message: selecting the recovery
+    guidance by matching on wording would be in-band signalling, and the
+    wording is exactly the thing a later edit is free to change. Subclasses
+    RuntimeError so existing ``except RuntimeError`` handlers are unaffected.
+    """
+
+
 class DefaultFirmwareUpdateService:
     """Default firmware update orchestrator (PIC32 + WiFi).
 
@@ -558,7 +576,8 @@ class DefaultFirmwareUpdateService:
     # -- device-exclusive send ------------------------------------------
 
     def _send_and_settle(
-        self, device, message, delay: float, deadline: _Cancellation
+        self, device, message, delay: float, deadline: _Cancellation,
+        settle_observer: Optional[Callable[[], object]] = None,
     ) -> None:
         """Send a command the following delay depends on, then wait.
 
@@ -594,7 +613,32 @@ class DefaultFirmwareUpdateService:
             # POWer:STATe 0 landed mid-settle and the update aborted. The
             # settling time is this command's, so it is part of the
             # exchange.
-            self._sleep_with_cancel(delay, deadline)
+            # ⭐ #280: when a caller passes an observer, SAMPLE across the
+            # settle instead of sleeping blind through it. The port's absence
+            # after FORceBoot begins and can END inside this delay -- measured
+            # at roughly 0.6 s to 1.6 s after the write on a board WITH a
+            # bootloader -- so a watcher that only starts afterwards can miss
+            # it entirely and then report a bare timeout.
+            #
+            # ⛔ The cancel property above is PRESERVED, not worked around:
+            # every wait still goes through `_sleep_with_cancel`, including a
+            # final zero-length call, so `delay == 0` still performs its
+            # cancel check and a cancel landing mid-settle still aborts.
+            # Other callers pass no observer and keep the exact old path.
+            if settle_observer is None:
+                self._sleep_with_cancel(delay, deadline)
+            else:
+                settle_observer()
+                end = time.monotonic() + max(delay, 0.0)
+                while True:
+                    remaining = end - time.monotonic()
+                    if remaining <= 0:
+                        self._sleep_with_cancel(0, deadline)
+                        break
+                    self._sleep_with_cancel(
+                        min(remaining, _SETTLE_SAMPLE_INTERVAL), deadline
+                    )
+                    settle_observer()
 
         device.run_exclusive(_send_then_settle)
 
@@ -689,6 +733,10 @@ class DefaultFirmwareUpdateService:
                 self._send_and_settle(
                     device, scpi_commands.force_bootloader(),
                     self._options.post_force_boot_delay, deadline,
+                    # #280: record the port's absence while it happens. The
+                    # refusal still belongs to the wait loop, so the reported
+                    # failed_state stays WAITING_FOR_BOOTLOADER.
+                    settle_observer=self._sample_target_port_presence,
                 )
                 device.disconnect()
 
@@ -2075,6 +2123,28 @@ class DefaultFirmwareUpdateService:
             "updated, including any left in bootloader mode, then retry."
         )
 
+    def _sample_target_port_presence(self) -> Optional[bool]:
+        """Record whether the target port is present right now.
+
+        Returns True/False, or None when it cannot be told (no target name,
+        or the listing failed -- a failed listing is no evidence that a port
+        disappeared). Latches ``_target_port_seen_gone`` on an absent
+        reading, and does NOT raise: #280 needs the absence RECORDED during
+        the FORceBoot settle, while the refusal still belongs to the wait
+        loop so the reported state stays WAITING_FOR_BOOTLOADER.
+        """
+        if not self._target_port_name:
+            return None
+        ports = _list_serial_port_names()
+        if ports is None:
+            return None
+        # Re-resolved each sample: a by-id alias dangles while the device is
+        # gone and points at its node again once it is back.
+        present = canonical_port_name(self._target_port_name) in ports
+        if not present:
+            self._target_port_seen_gone = True
+        return present
+
     def _raise_if_target_returned_to_application(self) -> None:
         """Stop when the device rebooted back into its application.
 
@@ -2085,31 +2155,23 @@ class DefaultFirmwareUpdateService:
         port to have been seen gone first, so the window before the reset
         lands is not mistaken for a return.
         """
-        if not self._target_port_name:
+        present = self._sample_target_port_presence()
+        if present is not True or not self._target_port_seen_gone:
             return
-        ports = _list_serial_port_names()
-        if ports is None:
+        if (
+            self._target_usb_location is not None
+            and serial_port_location(self._target_port_name)
+            != self._target_usb_location
+        ):
+            # Linux reuses ttyACM names: the node that came back belongs
+            # to a board on another port, not to ours.
             return
-        # Re-resolved each poll: a by-id alias dangles while the device is
-        # gone and points at its node again once it is back.
-        present = canonical_port_name(self._target_port_name) in ports
-        if not present:
-            self._target_port_seen_gone = True
-        elif self._target_port_seen_gone:
-            if (
-                self._target_usb_location is not None
-                and serial_port_location(self._target_port_name)
-                != self._target_usb_location
-            ):
-                # Linux reuses ttyACM names: the node that came back belongs
-                # to a board on another port, not to ours.
-                return
-            raise RuntimeError(
-                f"{self._target_port_name} came back as the application after "
-                "FORceBoot instead of entering the bootloader; this device "
-                "does not appear to carry the PIC32 bootloader. Refusing to "
-                "select any other bootloader device."
-            )
+        raise _TargetReturnedToApplicationError(
+            f"{self._target_port_name} came back as the application after "
+            "FORceBoot instead of entering the bootloader; this device "
+            "does not appear to carry the PIC32 bootloader. Refusing to "
+            "select any other bootloader device."
+        )
 
     def _wait_for_bootloader_device(
         self, deadline: _Cancellation
@@ -2882,13 +2944,29 @@ class DefaultFirmwareUpdateService:
         if isinstance(exception, FirmwareUpdateException):
             return exception
         # When a re-erase ran, its outcome is what the user must act on.
-        recovery_guidance = _CLEANUP_GUIDANCE.get(
-            cleanup_outcome, None
-        ) or _build_recovery_guidance(failed_state)
+        recovery_guidance = _CLEANUP_GUIDANCE.get(cleanup_outcome, None)
+        if recovery_guidance is None:
+            # ⭐ #280: keyed on the exception TYPE. Matching the wording would
+            # be in-band signalling, and the wording is the part a later edit
+            # may freely reword.
+            if isinstance(exception, _TargetReturnedToApplicationError):
+                recovery_guidance = _NO_BOOTLOADER_GUIDANCE
+            else:
+                recovery_guidance = _build_recovery_guidance(failed_state)
+        # ⭐ #280: the cause's own text goes in the MESSAGE. It used to live
+        # only on __cause__, so a caller printing str(exc) -- the obvious
+        # thing to do -- saw the state and the operation and nothing else:
+        # a "this board has no bootloader" refusal and a plain 45 s timeout
+        # rendered BYTE-IDENTICALLY, and the timeout's own VID/PID and poll
+        # count were lost too. The first sentence is unchanged so anything
+        # matching on it still matches.
         message = (
             f"Firmware update failed in state '{failed_state.name}' "
             f"while {failed_operation}."
         )
+        detail = str(exception).strip() if exception is not None else ""
+        if detail:
+            message = f"{message} {detail}"
         return FirmwareUpdateException(
             failed_state=failed_state,
             operation=failed_operation,
@@ -2968,6 +3046,14 @@ class _WrongBootloaderError(Exception):
 class _FlashVerificationError(Exception):
     """The flash's CRC differs from the image's. Never retried."""
 
+
+# #280. Says what is true and what to do, with no bench or internal detail.
+_NO_BOOTLOADER_GUIDANCE = (
+    "The device returned as its application instead of entering the "
+    "bootloader, so it does not appear to have the PIC32 bootloader "
+    "installed. A USB firmware update requires it. Program the bootloader "
+    "with a hardware programmer, then retry."
+)
 
 _CLEANUP_GUIDANCE = {
     _RECOVERED:
