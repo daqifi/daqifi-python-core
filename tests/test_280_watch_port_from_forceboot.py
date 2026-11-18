@@ -146,10 +146,9 @@ def _options(settle=SETTLE):
     options.wifi_recovery_timeout = 40.0
     # ⛔ Assigned AFTER construction on purpose when settle == 0:
     # _validate_positive rejects post_force_boot_delay <= 0, so a zero settle
-    # is NOT reachable through the public options API, while the comment at
-    # update_service.py:579 still says "which validate() allows". Mutation is
-    # not re-validated, which is the only way to exercise the zero path -- and
-    # that path is exactly where _sleep_with_cancel IS the cancel check.
+    # is not reachable for THIS caller through the public options API.
+    # Mutation is not re-validated, which is how the zero path is exercised --
+    # and that path is exactly where _sleep_with_cancel IS the cancel check.
     options.post_force_boot_delay = settle
     # Long enough that the wait loop really does time out rather than racing
     # the test, short enough to keep the suite quick.
@@ -340,13 +339,13 @@ def test_the_guidance_is_keyed_on_type_not_wording():
 def test_cancelling_during_the_settle_still_cancels(monkeypatch, settle):
     """The settle must remain a cancel check, including at a ZERO delay.
 
-    ⛔ A zero post_force_boot_delay is NOT reachable through either public
-    path at this base: _validate_positive rejects it when the options are
-    constructed AND again when the service is constructed. The comment at
-    update_service.py:579 says "which validate() allows", which is no longer
-    true. The zero path still exists in the code and is exactly where
-    _sleep_with_cancel IS the cancel check, so it is reached here by mutating
-    the options the service already holds -- the delay is read at call time.
+    ⛔ A zero post_force_boot_delay is not reachable through either public
+    path: _validate_positive rejects it when the options are constructed and
+    again when the service is constructed. Other callers of the settle do
+    permit a zero delay, so the zero path is live code, and it is exactly
+    where _sleep_with_cancel IS the cancel check. It is reached here by
+    mutating the options the service already holds -- the delay is read at
+    call time.
     """
     cancel = threading.Event()
     cancel.set()
