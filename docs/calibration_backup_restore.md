@@ -35,6 +35,16 @@ every monitoring channel and asks for eight IDs that do not exist.
 the live coefficients *unchanged*, so the reads that follow would silently
 report the bank you did not ask for.
 
+**One state needs a reboot instead of `USECal`.** If the selection you record
+is **0** (factory) and the device has **no factory bank**, `CONF:ADC:USECal 0`
+is refused: there is no factory bank to load. Such a device runs on the
+coefficients it starts with when no factory bank is stored, which are
+identity. In that case, wherever a step below says
+`CONF:ADC:USECal <the value you recorded>` and then `SYST:ERR?`, send
+`SYST:REboot` instead. On restart the device loads its selected bank, finds
+none, and is back on those coefficients. Without the reboot, the last bank a
+step loaded stays in use.
+
 **Nothing may be streaming.** These commands are refused during acquisition.
 `SYST:STR:STOP` is safe to send when nothing is running; it leaves the error
 queue clean.
@@ -87,7 +97,8 @@ Record the user bank the same way:
     CONF:ADC:CHANCALB? 0
     ... repeat for the same IDs
 
-Put the selection back; this reloads that bank into the live coefficients:
+Put the selection back; this reloads that bank into the live coefficients
+(selection 0 with no factory bank: `SYST:REboot` instead, see above):
 
     CONF:ADC:USECal <the value you recorded>
     SYST:ERR?                     -> 0,"No error"
@@ -118,7 +129,8 @@ Then the user bank, if the backup recorded one:
     SYST:ERR?                     -> 0,"No error"
 
 Only now choose the bank. `USECal` refuses a bank it cannot load, so it has to
-come after the banks are populated:
+come after the banks are populated (selection 0 with no factory bank:
+`SYST:REboot` instead, see above):
 
     CONF:ADC:USECal <the value you recorded>
     SYST:ERR?                     -> 0,"No error"
@@ -159,7 +171,9 @@ comparisons on every ID) **and the closing two lines**:
 Do not leave those off. Each comparison LOADS a bank into the live
 coefficients, so a check that ends on `LOADcal` leaves the user bank live no
 matter which bank is selected, until something reboots the device. The
-closing `USECal` puts the selected bank back in use.
+closing `USECal` puts the selected bank back in use. For selection 0 with no
+factory bank, both `USECal` pairs in this section are a `SYST:REboot`
+instead, as described at the top.
 
 Compare values as numbers, not as text. The device prints the shortest form
 that reads back to the same double, which need not be the digits you typed:
@@ -188,4 +202,6 @@ could be loaded, every coefficient read as identity, and the selection was
 back at its default. The restore above then brought back every value in both
 banks exactly, including a 17-significant-digit value, and the result
 survived a reboot. The NQ3 channel list comes from the firmware source; the
-procedure has not been run on an NQ3.
+procedure has not been run on an NQ3. Neither has the reboot path for
+selection 0 without a factory bank: it follows from how the firmware loads
+calibration at startup.
