@@ -1035,6 +1035,13 @@ class NyquistDevice:
         # AFTER the GET went out would leave the device streaming a file
         # nobody will read.
         timeout = _require_finite_sd_timeout(timeout, "sd_get_file")
+        # ⛔ #260 -- SET BEFORE THE GET IS WRITTEN, and on THIS transport.
+        # The console is per-transport in the firmware
+        # (SCPI_GetMicroRLClient), so only the state of the link this
+        # download will use means anything. It has to precede the write:
+        # once the GET is out the device is streaming and the setter would
+        # interleave with the payload.
+        preamble = self._silence_echo_before_get()
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
@@ -1068,6 +1075,7 @@ class NyquistDevice:
         # was absolute in the base and stays absolute.
         return self._receive_sd_file(
             filename, cmd, timeout, idle_reset=True,
+            preamble_candidate=preamble,
         ).decode("ascii", errors="ignore")
 
     def sd_get_file_binary(self, filename: str, timeout: float = 30.0) -> bytes:
@@ -1103,6 +1111,13 @@ class NyquistDevice:
         # reach the same unbounded head-resolution wait and a caller reaching
         # only one of them would still hang.
         timeout = _require_finite_sd_timeout(timeout, "sd_get_file_binary")
+        # ⛔ #260 -- SET BEFORE THE GET IS WRITTEN, and on THIS transport.
+        # The console is per-transport in the firmware
+        # (SCPI_GetMicroRLClient), so only the state of the link this
+        # download will use means anything. It has to precede the write:
+        # once the GET is out the device is streaming and the setter would
+        # interleave with the payload.
+        preamble = self._silence_echo_before_get()
         if not self._comm.is_open():
             raise RuntimeError("Serial port not open")
 
@@ -1115,7 +1130,42 @@ class NyquistDevice:
             self._comm._serial,
             getattr(self._comm, "send_drain_timeout", SEND_DRAIN_TIMEOUT_S))
 
-        return self._receive_sd_file(filename, cmd, timeout, idle_reset=False)
+        return self._receive_sd_file(
+            filename, cmd, timeout, idle_reset=False,
+            preamble_candidate=preamble,
+        )
+
+    def _silence_echo_before_get(self):
+        """Make the console silent for this download. Returns the bytes that
+        may still turn up at the head of the response, or None if this
+        transport cannot set echo at all.
+
+        ⛔ #260 r6. This replaced `_echo_confirmed_silent`, which asked the
+        transport to CONFIRM a state by probing for it. The r5 audit
+        established that the confirmation was unobtainable: `SYSTem:ECHO?`
+        takes no nonce, so a reply cannot be tied to the probe that asked,
+        and the per-object flag that stood in for attribution does not
+        survive a new connection object -- which r5's own refusal told the
+        caller to create. Setting the state asks nothing and so has nothing
+        to misattribute.
+
+        ⚠ None, NOT b"", for a transport without the setter. b"" means
+        "strip nothing", which would be wrong here: a transport whose echo
+        state we could not set may well echo the GET, and that echo has to
+        stay strippable. None preserves exactly the pre-#260 behaviour for
+        such a transport -- the receiver falls back to stripping the GET
+        command -- which is what keeps this change additive for any `_comm`
+        that is not a SerialInterface.
+        """
+        silence = getattr(self._comm, "silence_echo_for_download", None)
+        if silence is None:
+            return None
+        # ⛔ NOT WRAPPED, and no bare `except` here. A port fault is
+        # pc#267's contract (one handler at all six send sites), and an
+        # earlier round learned the hard way that a broad `except` around
+        # this call silently converts a refusal into "download anyway" --
+        # including a TypeError raised by the refusal's own constructor.
+        return silence()
 
     def _read_sd_response(
         self, timeout: float, idle_reset: bool, echo: bytes = b"",
@@ -1180,7 +1230,12 @@ class NyquistDevice:
         serial = self._comm._serial
         out = bytearray()
         deadline = time.monotonic() + timeout
-        skip = _PreambleSkip(echo)
+        # ⛔ #260: NO SKIP AT ALL when the caller established there is no
+        # framing. Passing an EMPTY echo is not the same thing -- the candidate
+        # set is built from `(b"", echo)`, so an empty echo still yields the
+        # bare-prompt candidates and would still strip a payload that opens
+        # with `DAQIFI> `. The skip has to be absent, not empty.
+        skip = _PreambleSkip(echo) if echo else None
         # ⛔ r10 :1028 (MEDIUM) -- SCAN INCREMENTALLY, AND NEVER COPY THE
         # BUFFER. This loop did `buf = bytes(out)` and then
         # `END_OF_FILE_MARKER in buf[head:]` on EVERY iteration, idle polls
@@ -1201,7 +1256,9 @@ class NyquistDevice:
         # across two reads straddles that boundary, and without the overlap it
         # would be missed by both passes. `bytearray.find` searches in place,
         # so no copy is made.
-        head = None
+        # With no skip there is no head, so the marker scan starts at byte 0
+        # on the first pass instead of waiting for a span that never resolves.
+        head = None if skip is not None else 0
         scanned = 0
         overlap = len(END_OF_FILE_MARKER) - 1
         while time.monotonic() < deadline:
@@ -1244,6 +1301,7 @@ class NyquistDevice:
 
     def _receive_sd_file(
         self, filename: str, cmd: str, timeout: float, idle_reset: bool,
+        preamble_candidate: bytes = None,
     ) -> bytes:
         """The SD receive contract, applied by the one implementation of it.
 
@@ -1299,7 +1357,14 @@ class NyquistDevice:
         from .sdcard import SdCardFileReceiver
 
         raw = self._read_sd_response(
-            timeout, idle_reset, echo=cmd.encode("ascii"),
+            timeout, idle_reset,
+            # ⛔ #260: EMPTY when the device confirmed -1, which makes
+            # `_read_sd_response` build no skip at all. The capture then scans
+            # for the marker from byte 0, which is also why a payload that is
+            # a proper prefix of this command can no longer stall the loop on
+            # a confirmed-silent link.
+            echo=(cmd.encode("ascii") if preamble_candidate is None
+                  else preamble_candidate),
         )
         destination = io.BytesIO()
         SdCardFileReceiver(io.BytesIO(raw)).receive(
@@ -1320,7 +1385,11 @@ class NyquistDevice:
             timeout_s=_LOCAL_REPARSE_LIVENESS_S,
             # The command as sent: the console may echo it back ahead of the
             # payload, and it is removed as a PREFIX, never searched for.
-            preamble=cmd.encode("ascii"),
+            # ⛔ #260: likewise EMPTY on a confirmed -1. `receive()` builds
+            # its skip as `_PreambleSkip(preamble) if preamble else None`, so
+            # an empty preamble already means "strip nothing" there.
+            preamble=(cmd.encode("ascii") if preamble_candidate is None
+                      else preamble_candidate),
             eof_only=True,
         )
         return destination.getvalue()

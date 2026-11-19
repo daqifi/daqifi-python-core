@@ -239,6 +239,56 @@ class SdCardOperationException(DAQiFiError):
             self.last_scpi_error = s or None
 
 
+class EchoSetUnconfirmedError(SdCardOperationException):
+    """The echo setter's own echo never arrived, so no download was tried.
+
+    ⛔ #260 r6, and it REPLACED `EchoProbeUnansweredError`. That one was
+    raised when a `SYSTem:ECHO?` probe could not be answered -- a question
+    the r5 audit established was unanswerable, because the query takes no
+    nonce and so no reply can be tied to the probe that asked for it.
+
+    ⭐ WHAT CHANGED IS THAT THE EXPECTED BYTES ARE NOW GUARANTEED. The
+    download writes `SYSTem:ECHO 1` and then `SYSTem:ECHO -1`; microrl gates
+    the echo on the state as characters arrive, so the second line is
+    CERTAIN to be echoed back. "It has not arrived" therefore means "it is
+    still in flight", and never "nothing was coming" -- which is precisely
+    the ambiguity the probe could not resolve, since a missing `-1\r\n`
+    could equally mean a silent console.
+
+    So this refusal rests on a guarantee rather than on an inference, and
+    the alternative to raising it is measurable corruption: with a 0.65 s
+    device against a 0.5 s budget the file came back as
+    b'000,...,004,SYSTem:ECHO -1\r\nDAQIFI> 005,...'. A prefix strip
+    cannot remove that, because it is not at the head.
+
+    ⛔ IT DOES NOT ADVISE RECONNECTING, and the previous message's advice to
+    "Use a NEW connection object" is withdrawn. That told the caller to do
+    the one thing that defeats the protection: the stale bytes are queued on
+    the DEVICE, and a new object starts with clean host-side state and takes
+    them as its own. Retrying on the SAME connection is what resynchronises,
+    because the scan discards everything ahead of the marker it finds.
+
+    ⚠ RESIDUAL, for the operator rather than hidden here: a marker left
+    outstanding by a PREVIOUS connection object can still be the one a new
+    object synchronises on, leaving a later marker in flight. Nothing
+    host-side closes that -- it needs a device-side drain or a power cycle.
+
+    Subclasses :class:`SdCardOperationException` so callers that already
+    handle "my SD download failed" keep working.
+
+    ⛔ IT TAKES JUST A MESSAGE, and that override is not cosmetic. The base
+    requires ``raw_device_response``, which is meaningless here -- the whole
+    complaint is that the device has not responded yet. Raising it with only
+    a message threw ``TypeError`` instead, and a caller's narrowed
+    ``except`` swallowed that and DOWNLOADED ANYWAY. A refusal path is only
+    as reliable as its own constructor.
+    """
+
+    def __init__(self, message: str, raw_device_response=(),
+                 last_scpi_error=None):
+        super().__init__(message, raw_device_response, last_scpi_error)
+
+
 class SdCardTransferErrorException(SdCardOperationException):
     """The device reported a read error part-way through sending an SD card
     file, ending the transfer with ``__TRANSFER_ERROR__`` instead of

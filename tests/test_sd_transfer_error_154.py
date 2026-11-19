@@ -24,6 +24,8 @@ import time
 
 import pytest
 
+from _sd_echo_setter import (EchoSetterFake,
+                             transport_cannot_silence)
 import daqifi.exceptions as exc_mod
 import daqifi.sdcard as sdcard
 
@@ -260,13 +262,14 @@ def test_download_the_total_cap_also_classifies_an_open_candidate(total_s, idle_
 # ---- legacy NyquistDevice: unchanged -------------------------------------
 
 
-class _SerialWithReply:
+class _SerialWithReply(EchoSetterFake):
     out_waiting = 0  # #263: the send path drains this queue, bounded
     def __init__(self, *reads: bytes):
         self.is_open = True
         self._reads = [bytearray(r) for r in reads]
 
     def write(self, data):
+        self._console_write(data)
         return len(data)
 
     def flush(self):
@@ -274,14 +277,17 @@ class _SerialWithReply:
 
     @property
     def in_waiting(self):
-        return len(self._reads[0]) if self._reads else 0
+        return self._console_pending(
+            lambda: len(self._reads[0]) if self._reads else 0)
 
     def read(self, n):
-        out = bytes(self._reads[0][:n])
-        del self._reads[0][:n]
-        if not self._reads[0]:
-            self._reads.pop(0)
-        return out
+        def _own():
+            out = bytes(self._reads[0][:n])
+            del self._reads[0][:n]
+            if not self._reads[0]:
+                self._reads.pop(0)
+            return out
+        return self._console_read(n, _own)
 
 
 def test_the_legacy_download_isnt_stopped_by_an_echoed_filename() -> None:
@@ -294,6 +300,7 @@ def test_the_legacy_download_isnt_stopped_by_an_echoed_filename() -> None:
     echo = scpi_commands.get_sd_file(name).data.encode("ascii")
     device = NyquistDevice("COM41")
     device._comm._serial = _SerialWithReply(echo + b"\r\nDAQIFI> abc", b"def" + EOF)
+    transport_cannot_silence(device)
     assert device.sd_get_file_binary(name, timeout=2.0) == b"abcdef"
 
 

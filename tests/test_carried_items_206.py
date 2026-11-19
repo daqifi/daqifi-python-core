@@ -17,6 +17,8 @@ from datetime import timedelta
 
 import pytest
 
+from _sd_echo_setter import (EchoSetterFake,
+                             transport_cannot_silence)
 from daqifi._internal import scpi_commands
 from daqifi.device import NyquistDevice
 from daqifi.sdcard import SdCardCsvFileParser, SdCardParseOptions
@@ -26,7 +28,7 @@ from daqifi.timestamp import TimestampProcessor
 # ---- 5 ---------------------------------------------------------------------
 
 
-class _SerialWithReply:
+class _SerialWithReply(EchoSetterFake):
     out_waiting = 0  # #263: the send path drains this queue, bounded
     def __init__(self, reply: bytes):
         self.is_open = True
@@ -35,6 +37,8 @@ class _SerialWithReply:
 
     def write(self, data):
         self.written.append(bytes(data))
+        if self._console_write(data):
+            return len(data)
         return len(data)
 
     def flush(self):
@@ -42,17 +46,20 @@ class _SerialWithReply:
 
     @property
     def in_waiting(self):
-        return len(self._reply)
+        return self._console_pending(lambda: len(self._reply))
 
     def read(self, n):
-        out = bytes(self._reply[:n])
-        del self._reply[:n]
-        return out
+        def _own():
+            out = bytes(self._reply[:n])
+            del self._reply[:n]
+            return out
+        return self._console_read(n, _own)
 
 
 def _download(reply: bytes) -> bytes:
     device = NyquistDevice("COM41")  # constructing doesn't open the port
     device._comm._serial = _SerialWithReply(reply)
+    transport_cannot_silence(device)
     return device.sd_get_file_binary("log_a.bin", timeout=2.0)
 
 

@@ -18,6 +18,8 @@ import io
 
 import pytest
 
+from _sd_echo_setter import (EchoSetterFake,
+                             transport_cannot_silence)
 from daqifi._internal import scpi_commands
 from daqifi.device import NyquistDevice
 from daqifi.exceptions import SdCardTransferErrorException
@@ -30,7 +32,7 @@ from daqifi.sdcard import (
 PROMPT = b"DAQIFI> "
 
 
-class _Serial:
+class _Serial(EchoSetterFake):
     """pyserial-shaped fake: ``in_waiting`` plus a draining ``read``.
 
     Stays "open" after its bytes run out, which is what pyserial does and
@@ -45,6 +47,7 @@ class _Serial:
 
     def write(self, data) -> int:
         self.written.append(bytes(data))
+        self._console_write(data)
         return len(data)
 
     def flush(self) -> None:
@@ -52,17 +55,20 @@ class _Serial:
 
     @property
     def in_waiting(self) -> int:
-        return len(self._data)
+        return self._console_pending(lambda: len(self._data))
 
     def read(self, n: int) -> bytes:
-        out = bytes(self._data[:n])
-        del self._data[:n]
-        return out
+        def _own():
+            out = bytes(self._data[:n])
+            del self._data[:n]
+            return out
+        return self._console_read(n, _own)
 
 
 def _device(*chunks: bytes, sizes=None) -> NyquistDevice:
     device = NyquistDevice("COM41")          # constructing opens no port
     device._comm._serial = _Serial(*chunks)
+    transport_cannot_silence(device)
     if sizes:
         device._file_sizes = dict(sizes)
     return device

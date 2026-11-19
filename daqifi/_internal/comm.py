@@ -7,6 +7,8 @@ Not intended for direct use - use the public API instead.
 
 import errno
 import math
+import random
+import re
 import serial
 import sys
 import threading
@@ -67,6 +69,32 @@ OPEN_DRAIN_TIMEOUT_S = 1.0
 #: caller sees, rather than a hang. Per-instance via
 #: SerialInterface.send_drain_timeout.
 SEND_DRAIN_TIMEOUT_S = 5.0
+
+
+def _echo_spelling_family():
+    """The 1024 spellings of one command: 256 case variants x 4 zero forms.
+
+    ⛔ BITS MAP ONTO LETTER POSITIONS ONLY. An earlier revision enumerated
+    every character of `SYST:ECHO`, so one bit toggled the `:` (a no-op)
+    and the last letter never toggled at all -- 1024 entries holding only
+    512 distinct values, each duplicated. The symptom was obscure: a single
+    written line matched TWO family members, so every "how many spellings
+    did this use" count doubled. Distinctness is asserted below rather than
+    left to the reader of the comprehension.
+    """
+    base = "SYST:ECHO"
+    letters = [i for i, c in enumerate(base) if c.isalpha()]
+    out = []
+    for bits in range(1 << len(letters)):
+        chars = list(base)
+        for k, i in enumerate(letters):
+            if (bits >> k) & 1:
+                chars[i] = chars[i].lower()
+        head = "".join(chars).encode("ascii")
+        for z in range(4):
+            out.append(head + b" -" + b"0" * z + b"1")
+    assert len(set(out)) == len(out), "duplicate spellings in the family"
+    return tuple(out)
 
 
 def drain_output_bounded(port, deadline_s: float) -> None:
@@ -1475,6 +1503,42 @@ class SerialInterface:
         #: Deadline for the drain after each command write, in seconds. A
         #: drain that misses it raises instead of hanging the caller (#263).
         self.send_drain_timeout: float = SEND_DRAIN_TIMEOUT_S
+        #: Echo-setter spellings written on THIS connection whose echo has not
+        #: been accounted for. A new attempt never reuses one.
+        #:
+        #: ⛔ PER INSTANCE, AND IT HAS TO BE. The poison flag this replaces
+        #: was a CLASS attribute and that was safe, because `self.x = v`
+        #: REBINDS onto the instance. A set is MUTATED instead:
+        #: `self.x.add(v)` would reach the one class-level object, so every
+        #: SerialInterface in the process would share a single pool and one
+        #: device's unconfirmed attempts would exhaust another's family and
+        #: refuse its downloads.
+        #: `test_two_connections_do_not_share_the_spelling_pool` pins it.
+        #: Spellings we have WRITTEN whose echo we have not seen pass. They
+        #: are excluded from the draw, so no attempt can synchronise on an
+        #: echo that is already on the wire.
+        #:
+        #: ⭐⭐ A SET, BECAUSE NOTHING RELEASES ONE SPELLING ANY MORE (r15
+        #: audit). It was a dict of counts while two paths released
+        #: individual spellings by MATCHING TEXT, and multiplicity made that
+        #: arithmetic necessary: a spelling can be owed twice, and freeing it
+        #: on one of the two echoes let the next draw sync on the duplicate.
+        #:
+        #: r16 removes the premise instead of refining the arithmetic. The
+        #: only two releases left are CLEAR-EVERYTHING, each licensed by the
+        #: same FIFO proof -- a successful attempt's own marker, or the
+        #: exhaustion barrier's reply. Neither needs to know how many copies
+        #: of anything are outstanding, so the counts, the text reclaim and
+        #: the pending partial are all gone. See `_fifo_barrier`.
+        self._echo_spellings_outstanding: set = set()
+        #: One frozen pool snapshot per barrier written whose reply has not
+        #: been read, OLDEST FIRST. A reply retires the oldest, because
+        #: replies are byte-identical and only their ORDER is attributable.
+        #: See `_fifo_barrier`.
+        self._echo_barrier_outstanding: list = []
+        #: Tail of the previous write, so a spelling split across two
+        #: write() calls is still reserved.
+        self._echo_write_carry: bytes = b""
 
     def _cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
@@ -1531,6 +1595,23 @@ class SerialInterface:
         if self.timeout is not None and self.timeout > 0:
             write_timeout = self.timeout
         self.last_open_error = None
+        # ⛔ A REOPEN RESYNCHRONISES NOTHING, and this is kept because it is
+        # WHY the download no longer probes at all. close()/open() resets
+        # HOST-side buffers, which discards only what has already ARRIVED;
+        # replies the device has already queued survive, and the firmware's
+        # DTR handler does not cancel pending output.
+        #
+        # r2-r5 carried a per-object "poison" flag to refuse downloads after
+        # an unaccounted-for probe, and open() deliberately did not clear it.
+        # The r5 audit showed the flag could not work at all: it is
+        # per-OBJECT and the stale bytes are on the DEVICE, so a new
+        # connection object -- which r5's own refusal message advised --
+        # starts clean and adopts them. Measured: the file came back with
+        # b'-1\r\n' spliced into its middle.
+        #
+        # So there is nothing here to clear any more. The download SETS the
+        # echo state and synchronises on its own echo, which is exactly
+        # known bytes; see silence_echo_for_download().
         try:
             self._serial = serial.Serial(
                 port=self.port,
@@ -1663,7 +1744,7 @@ class SerialInterface:
         # wire format. send_command() uses bare \r for legacy
         # compatibility but new writes should use the canonical form
         # (Qodo PR #55 /improve pass 4 importance 7).
-        self._serial.write(b"SYSTem:ECHO -1\r\n")
+        self._write_to_port(b"SYSTem:ECHO -1\r\n")
         # #262: bounded, and NO flush(). flush() is tcdrain() on POSIX and
         # takes no timeout, so it hung connect() forever on a port that had
         # stopped draining; see _drain_bounded. Its failure is re-raised as
@@ -1715,6 +1796,568 @@ class SerialInterface:
                 self._serial.reset_input_buffer()
         except (serial.SerialException, OSError):
             pass
+
+    #: How long :meth:`silence_echo_for_download` waits for the setter's
+    #: own echo before REFUSING the download.
+    #:
+    #: ⚠ Sized for a device, not for a unit test. The probe's 0.5 s was a
+    #: budget to give up and fall back in; this is a budget to declare the
+    #: link unresponsive in, and a device that answers in 0.65 s is normal.
+    #: Measured consequence of the old value: every download against such a
+    #: device refused.
+    ECHO_SET_TIMEOUT_S = 2.0
+
+    #: ⛔ A SET, NOT A QUERY, and that is the r6 redesign in one line.
+    #: `SYSTem:ECHO?` admits no nonce, so two probes' replies are
+    #: byte-identical and NO reply can be tied to the probe that asked for
+    #: it. r2-r5 tried to cover that with a host-side per-object "poison"
+    #: flag; the r5 audit killed it in one sentence -- the flag is
+    #: per-object and the stale bytes live on the DEVICE, so a new
+    #: connection object, a new process or a different client inherits the
+    #: previous object's reply as its own confirmation. Measured on
+    #: d8930bad: the file came back as
+    #: b'000,001,...,016,-1\r\n017,...' -- the reply SPLICED INTO THE
+    #: MIDDLE of a data file, which is worse than a visible prepend.
+    #:
+    #: A set has no reply to misattribute. After it the state is known by
+    #: construction, so there is nothing to attribute and nothing to poison.
+    #: ⛔ THE SHORT FORM, AND THAT IS THE DISCRIMINATOR. open() writes the
+    #: FULL `SYSTem:ECHO -1` and close() writes `SYSTem:ECHO 1`, so if the
+    #: download used the full spelling too its marker would be
+    #: byte-identical to open()'s echo -- and the download would
+    #: synchronise on OPEN'S marker and leave its own in flight. Measured
+    #: on exactly that collision: a connect immediately followed by a
+    #: download returned
+    #: b'000,...,004,SYSTem:ECHO -1\r\nDAQIFI> 005,...'.
+    #:
+    #: Legal per the SCPI abbreviation rule: `SYSTem` truncates at its first
+    #: lowercase to `SYST`, and `ECHO` is all-caps so it has exactly one
+    #: spelling. The echo is verbatim, so the short form comes back short
+    #: and nothing this library writes elsewhere can forge it.
+    #: `test_the_download_marker_cannot_be_forged_by_open_or_close` pins the
+    #: distinctness, so changing open()'s spelling fails loudly here rather
+    #: than silently recreating the collision.
+    #: The family's first member, kept as a name for the pins that compare
+    #: the download's marker against open()'s and close()'s traffic. Every
+    #: member shares this prefix, so distinctness proven for it holds for
+    #: all of them.
+    _ECHO_SET_SILENT = b"SYST:ECHO -1"
+    _ECHO_PROMPT = b"DAQIFI> "
+
+    #: ⛔ WRITTEN FIRST, AND ONLY TO GUARANTEE THE MARKER. With echo already
+    #: silent, `SYSTem:ECHO -1` produces NOTHING -- no echo, no reply -- so
+    #: there is no known byte to synchronise on and foreign bytes still in
+    #: flight (another client's `SYSTem:ECHO?` reply, an older version of
+    #: this library) land inside the file. Measured: a stale `-1\r\n` due
+    #: 0.65 s out arrived 150 ms into the payload.
+    #:
+    #: Turning echo ON first makes the next line's echo CERTAIN, because
+    #: microrl gates on the state at the time the characters arrive. So the
+    #: pair always produces one exactly-known marker, in every starting
+    #: state, and everything ahead of it can be discarded.
+    #:
+    #: ⚠ `SYSTem:ECHO 1` is NOT a substring of `SYSTem:ECHO -1` (the `-`
+    #: separates them), so scanning for the second never matches the first.
+    _ECHO_SET_FRAMED = b"SYST:ECHO 1"
+
+
+    #: ⛔ ONE VALUE, EIGHT DISTINCT MARKERS. `-1`, `-01`, `-001`, ... all set
+    #: the console silent, and the device echoes whichever spelling it was
+    #: sent, VERBATIM -- so the marker carries a per-attempt nonce even
+    #: though `SYSTem:ECHO` has no nonce field. That is what closes the r6
+    #: HIGH: a retry waits for ITS spelling instead of matching the previous
+    #: attempt's identical echo.
+    #:
+    #: ⚠ BOUNDED ON PURPOSE. Each unconfirmed attempt consumes one spelling
+    #: and does not give it back, because its echo may still arrive. When
+    #: all eight are outstanding the next call REFUSES rather than wrapping
+    #: onto `-1` again, since reusing an outstanding spelling is precisely
+    #: the defect. Eight is a budget, not a guarantee; a caller retrying
+    #: forever on a mute device is told so rather than silently losing the
+    #: protection.
+    #:
+    #: ⚠ No member may be a substring of another (with its terminator), or
+    #: a scan for one would match inside another;
+    #: `test_the_spelling_family_members_cannot_match_inside_one_another`
+    #: pins that, and
+    #: `test_the_download_marker_cannot_be_forged_by_open_or_close`
+    #: pins distinctness from open()'s full `SYSTem:ECHO -1`.
+    #: ⛔ ONE VALUE, 1024 DISTINCT MARKERS. Every member sets the console
+    #: silent, and the device echoes whichever spelling it was sent
+    #: VERBATIM -- so the marker carries a per-attempt nonce although
+    #: `SYSTem:ECHO` has no nonce field.
+    #:
+    #: Two independent axes, both bench-verified on this lane's board
+    #: (2026-11-16, no flash):
+    #:   * CASE. libscpi's `compareStr` is case-insensitive, and microrl
+    #:     echoes what it was typed. `sYsT:eChO -01` came back as exactly
+    #:     `sYsT:eChO -01`, `SYST:ECHO?` then read -1, and `SYST:ERR?`
+    #:     stayed `0,"No error"`. Eight letters in `SYST:ECHO` give 256
+    #:     spellings of one command.
+    #:   * LEADING ZEROS in the parameter. `strtol(str, &endptr, 10)` under
+    #:     `DaqifiIntTokenFullyConsumed` accepts `-1`, `-01`, `-001`, ...
+    #:     all as -1; the 139-byte form was verified earlier.
+    #:
+    #: 256 x 4 = 1024, at 12-15 bytes each -- far inside the firmware's
+    #: MEASURED 243 B single-command ceiling (the 512 B
+    #: SCPI_INPUT_BUFFER_LENGTH is not the binding limit; a longer command
+    #: is rejected as INPUT_BUFFER_OVERRUN before the callback runs).
+    #:
+    #: ⚠ NO MEMBER MAY MATCH INSIDE ANOTHER, or a scan would sync on the
+    #: wrong attempt. Checked EXHAUSTIVELY over all 1024x1024 pairs with
+    #: terminator and prompt by
+    #: `test_the_spelling_family_members_cannot_match_inside_one_another`,
+    #: not argued from the construction.
+    _ECHO_SET_SILENT_FAMILY = _echo_spelling_family()
+    _ECHO_FAMILY_SET = frozenset(_ECHO_SET_SILENT_FAMILY)
+
+    #: How much the exhaustion barrier may read before giving up, so a
+    #: continuously streaming console cannot spin it.
+    _ECHO_READ_CAP = 4096
+
+    #: The exhaustion BARRIER command, and the only reply shape accepted as
+    #: proof that it ran. See `_fifo_barrier` for why a barrier replaces
+    #: release-by-text entirely.
+    #:
+    #: ⭐ VERIFIED AT SOURCE AND ON THE BENCH, as the r16 brief required.
+    #: Source: `*IDN?` is registered to `SCPI_CoreIdnQ` in SCPIInterface.c;
+    #: that callback emits FOUR fields via `SCPI_ResultMnemonic` (which is
+    #: `SCPI_ResultCharacters`, so raw and unquoted), libscpi's
+    #: `writeDelimiter` puts a bare "," between them, and SCPI_LINE_ENDING
+    #: is LINE_ENDING_CRLF. Field 1 is the literal `SCPI_IDN1` "DAQiFi" and
+    #: field 4 the literal `SCPI_IDN4`; 2 and 3 are built at run time from
+    #: the board variant and serial.
+    #:
+    #: Measured on this lane's board (2026-11-16) with echo ON:
+    #:   b'*IDN?\r\nDAQiFi,Nq1,<serial>,01-02\r\nDAQIFI> '
+    #: and with echo OFF, the reply alone. ⭐ THE ECHO CANNOT BE MISTAKEN
+    #: FOR THE REPLY -- it is the command text, which holds no comma, so it
+    #: cannot match a four-field shape. That is the one property the barrier
+    #: rests on, and it is measured rather than argued.
+    _ECHO_BARRIER = b"*IDN?"
+    #: How many unanswered barriers may be outstanding before a download
+    #: refuses outright. Reached only when something else is consuming or
+    #: the device is dropping every reply; the refusal says so.
+    _ECHO_BARRIER_MAX = 8
+    #: ⚠ SHAPE, NOT VALUE: no serial and no firmware revision is pinned
+    #: here, so this matches any board's reply and no board's identity. It
+    #: also cannot match a family echo, which has no comma either.
+    _ECHO_BARRIER_RE = re.compile(
+        rb"DAQiFi,[^,\r\n]+,[^,\r\n]+,[^,\r\n]+\r\n")
+
+    #: ⛔ NOT `random`. A random draw does NOT establish ownership of a
+    #: spelling -- two objects can still pick the same one, which is
+    #: exactly the k/1024 residual under ruling IG A. What it does is make
+    #: that agreement 1-in-N instead of CERTAIN, which a deterministic rule
+    #: (lowest free index, r7) made it. `random`'s default instance is seeded
+    #: from entropy but is still a user-visible global that application code
+    #: can reseed (`random.seed(0)` in a test harness would make every
+    #: object pick alike again, which is exactly the r7 defect). A
+    #: SystemRandom reads the OS entropy source on every call and cannot be
+    #: seeded.
+    _echo_rng = random.SystemRandom()
+
+    #: Matches exactly the family: `SYST:ECHO` in any case, a space, `-`,
+    #: zero to three zeros, `1`. Used to spot OUR OWN marker text inside
+    #: bytes this object is about to write.
+    _ECHO_FAMILY_RE = re.compile(rb"SYST:ECHO -0{0,3}1", re.IGNORECASE)
+
+    def _reserve_spelling(self, spelling) -> None:
+        """Mark ``spelling`` as written-but-not-yet-proven-past.
+
+        ⚠ Idempotent in the POOL, which is why a set suffices there: nothing
+        releases an individual spelling, so "owed twice" has nothing to mean.
+
+        ⛔⛔ BUT IT IS NOT IDEMPOTENT IN THE BARRIER SNAPSHOTS, and that is a
+        hole I put in r17's first draft. A snapshot means "these spellings
+        were last written BEFORE this barrier". Writing one again makes that
+        false: the new echo is behind the barrier, so no reply the barrier
+        can produce proves it has passed. With the spelling left in the
+        snapshot, retiring that snapshot would free it with its newer echo
+        still on the wire -- the r14 multiplicity defect, reappearing one
+        level up, where a set again cannot represent "written twice".
+
+        The fix is not to count. It is to say what a snapshot means and keep
+        it true: a re-written spelling leaves every outstanding snapshot.
+        """
+        self._echo_spellings_outstanding.add(spelling)
+        if self._echo_barrier_outstanding:
+            self._echo_barrier_outstanding = [
+                snap - {spelling}
+                for snap in self._echo_barrier_outstanding]
+
+
+
+    def _write_to_port(self, data) -> None:
+        """Write to the port, RESERVING any of our marker spellings that
+        appear in the bytes.
+
+        ⛔⛔ r13 AUDIT, HIGH: A CALLER'S OWN COMMAND CAN CARRY OUR MARKER.
+        `send_command('SYST:ECHO -1')` returns before its echo arrives, the
+        download then draws `-1` and synchronises on the CALLER's echo:
+        measured b'SYST:ECHO -1\r\nabc'. The echo is real device output we
+        never observed, so no amount of reading discipline sees it.
+
+        ⭐ But we do not need to see it. We know we WROTE it, and that is
+        enough: FIFO puts that echo AHEAD of our next marker, so marking the
+        spelling stale excludes it from the draw and makes the collision
+        impossible. The next success clears it, as with any stale spelling.
+        
+        ⚠ RESERVE BEFORE THE WRITE, and do not release if the write raises:
+        pyserial discards the written byte count on a write timeout, so
+        0..len bytes may have landed and the echo may still come.
+
+        ⭐⭐ WHY THIS CLOSES WHERE THE READ FUNNEL COULD NOT. r9-r12 tried to
+        attribute every byte READ from a shared stream, and that rule could
+        not be closed because readers live in other modules and the device
+        can destroy bytes before anyone reads them. WRITES are all ours:
+        they are few, they are enumerable, and nothing else puts them on the
+        wire. A rule over our own writes is checkable; a rule over everyone
+        else's reads was not.
+        """
+        blob = bytes(data)
+        # ⛔ SCAN ACROSS THE WRITE BOUNDARY. The regex runs per write, so a
+        # caller writing "SYST:EC" then "HO -1\r\n" puts a contiguous line
+        # on the device -- echoed as a family member -- while neither write
+        # contains one. Carrying the last (longest member - 1) bytes makes
+        # the scan see the join. The carry is bytes WE wrote, so it costs
+        # nothing to keep and nothing to trust.
+        probe = self._echo_write_carry + blob
+        base = len(self._echo_write_carry)
+        for m in self._ECHO_FAMILY_RE.finditer(probe):
+            member = m.group(0)
+            if member in self._ECHO_FAMILY_SET and m.end() > base:
+                # `m.end() > base` so a member wholly inside the carry is
+                # not counted twice: it was already reserved last time.
+                self._reserve_spelling(member)
+        keep = max(len(x) for x in self._ECHO_SET_SILENT_FAMILY) - 1
+        self._echo_write_carry = probe[-keep:] if keep else b""
+        self._serial.write(blob)
+
+    def _next_echo_spelling(self):
+        """A spelling drawn UNIFORMLY AT RANDOM from those not marked stale,
+        or None if every one is.
+
+        ⛔ NOT the lowest free index (r7 audit): a fresh object has an empty
+        stale set, so a deterministic rule makes every object in the fleet
+        choose alike and the cross-object collision stops being 1-in-N.
+        """
+        free = [sp for sp in self._ECHO_SET_SILENT_FAMILY
+                if sp not in self._echo_spellings_outstanding]
+        if not free:
+            return None
+        return self._echo_rng.choice(free)
+
+
+    def _fifo_barrier(self) -> bool:
+        """Prove by FIFO that every echo we are still excluding has passed.
+
+        ⭐⭐⭐ THIS IS r13'S ARGUMENT APPLIED ONE MORE TIME, and it is what
+        let r16 delete three mechanisms. Since r13 a SUCCESS has needed no
+        guessing: seeing the reply to something written LATER proves
+        everything written earlier has already gone past. Exhaustion was the
+        one place still guessing from bytes which echoes were outstanding --
+        matching echo TEXT, carrying a partial marker, counting copies -- and
+        every audited round from r9 to r15 broke some corner of it:
+
+        * r9: refusing without looking made an exhausted pool permanent;
+        * r13: an echo split at its CR exhausted the pool for good;
+        * r14: one observed copy freed a spelling that was owed twice;
+        * r15: echoes consumed by OTHER readers (`send_command`) left
+          nothing to reclaim, so all 1024 stayed reserved forever; and the
+          reader kept a stale suffix after consuming part of it.
+
+        Every one of those is the same mistake: inferring from bytes whether
+        a specific echo is still on the wire. Text cannot answer it, because
+        this family admits NO NONCE -- two copies are byte-identical.
+
+        So stop asking. Write a barrier whose reply CANNOT be confused with
+        a family echo and read until that reply appears:
+
+        * reply seen  => FIFO says every earlier echo has already passed
+                         (consumed by us, consumed by another reader, or
+                         dropped by a full device buffer -- all equivalent,
+                         because none of them can still arrive). The caller
+                         clears the pool.
+        * no reply    => refuse, exactly as before. Loud, and the device is
+                         the only thing that could have answered.
+
+        ⚠ A LATE barrier reply is harmless: it lands AHEAD of the next
+        attempt's marker, holds no family member, and is dropped with the
+        pre-marker bytes. Pinned, not assumed, by
+        `test_an_unanswered_barrier_refuses_and_a_late_reply_is_harmless`.
+
+        ⚠ RESIDUAL, STATED NOT HIDDEN: a stale GET payload is file data and
+        could contain an IDN-shaped line, which would satisfy this barrier
+        without the device having answered. That is the pc#268 class -- bytes
+        this object never observed and never wrote -- and no matcher fixes
+        it, so none is built. It is strictly narrower than what it replaces:
+        release-by-text accepted any payload line carrying a family member.
+
+        Returns True only if the barrier's own reply shape was read.
+        """
+        from ..exceptions import EchoSetUnconfirmedError
+
+        if self._serial is None or not getattr(self._serial, "is_open", False):
+            return False
+
+        # ⛔ BOUNDED, AND LOUD WHEN IT FILLS. One unanswered barrier is
+        # recorded per refused download, so this list only grows while
+        # something is eating or dropping replies. Growing it without limit
+        # would be a slow leak that still refuses every download; refusing
+        # HERE says why, once, in words.
+        if len(self._echo_barrier_outstanding) >= self._ECHO_BARRIER_MAX:
+            raise EchoSetUnconfirmedError(
+                "%d echo barriers (%r) have been written on this connection "
+                "and none of their replies has been read, so nothing can be "
+                "proven to have gone past and no download is attempted. "
+                "Every reply was consumed by another reader of this port or "
+                "dropped by the device's output buffer. A new connection "
+                "does not help: the bytes are queued on the device."
+                % (len(self._echo_barrier_outstanding),
+                   bytes(self._ECHO_BARRIER))
+            )
+
+        deadline = time.monotonic() + self.ECHO_SET_TIMEOUT_S
+        # ⭐⭐ SNAPSHOT BEFORE THE WRITE. Everything reserved at this instant
+        # was written BEFORE this barrier, so a reply to this barrier proves
+        # exactly these have passed -- and nothing about a spelling reserved
+        # afterwards.
+        self._echo_barrier_outstanding.append(
+            frozenset(self._echo_spellings_outstanding))
+        # Through the write funnel like every other write, so the carry and
+        # the reservation rules see it. `*IDN?` carries no family member, so
+        # it reserves nothing.
+        self._write_to_port(self._ECHO_BARRIER + b"\r\n")
+        drain_output_bounded(
+            self._serial, max(0.0, deadline - time.monotonic()))
+        seen = bytearray()
+        while True:
+            try:
+                waiting = self._serial.in_waiting
+            except (serial.SerialException, OSError):
+                # A dead port is a port fault and belongs to the caller,
+                # per pc#267's contract.
+                raise
+            if waiting:
+                seen.extend(self._serial.read(
+                    min(waiting, self._ECHO_READ_CAP - len(seen))))
+            # ⛔⛔ ONE REPLY RETIRES THE EARLIEST BARRIER, NOT THIS ONE. Every
+            # IDN reply is byte-identical, so a reply cannot be attributed to
+            # the barrier that asked for it -- the SAME no-nonce problem that
+            # killed the `SYSTem:ECHO?` probe in r2-r5, reappearing one level
+            # up. What a reply DOES prove is that the earliest unanswered
+            # barrier has been processed, because replies leave in the order
+            # their commands arrived. So retire the OLDEST snapshot.
+            #
+            # ⭐ That stays correct when the reply really belonged to a later
+            # barrier: then even more has passed, and we released less than
+            # we could have. Conservative in exactly the safe direction.
+            while self._echo_barrier_outstanding:
+                m = self._ECHO_BARRIER_RE.search(bytes(seen))
+                if m is None:
+                    break
+                del seen[:m.end()]
+                self._echo_spellings_outstanding -= (
+                    self._echo_barrier_outstanding.pop(0))
+                if self._next_echo_spelling() is not None:
+                    # A spelling is free: proceed without waiting for the
+                    # rest of the backlog to answer.
+                    return True
+            if (len(seen) >= self._ECHO_READ_CAP
+                    or time.monotonic() >= deadline):
+                return False
+
+
+    def silence_echo_for_download(self) -> bytes:
+        """Set the console silent before a download. Returns the framing
+        bytes that may still appear at the head of the next response.
+
+        ⛔ WHY A SET AND NOT A PROBE (#260, audit r5). A probe asked
+        `SYSTem:ECHO?` and tried to decide from the reply's CONTENT whether
+        that reply was its own. It cannot be done: the query takes no nonce,
+        so every probe's reply is the same four bytes.
+
+        ⛔ WHY A PER-ATTEMPT SPELLING (audit r6). One spelling made every
+        attempt's marker identical, so a retry synchronised on the previous
+        attempt's echo and sent the GET with its own still in flight. Each
+        attempt now draws a spelling no stale echo can match.
+
+        ⭐⭐ WHY SUCCESS CLEARS EVERYTHING, which is what let r13 delete the
+        release-by-text machinery. THE DEVICE IS FIFO, verified rather than
+        assumed:
+
+        * `UsbCdc.c` feeds microrl one character at a time, microrl echoes
+          each character as it is inserted, and `SCPI_Input` runs
+          SYNCHRONOUSLY from `microrl_commandComplete` on the newline -- so
+          a line's echo and its reply are appended before the next line's
+          echo.
+        * echo and SCPI replies share ONE circular buffer per transport
+          (`UsbCdc_WriteToBuffer` -> `CircularBuf_AddBytes`, under the
+          client's write mutex), appended in call order. There is no second
+          path that could overtake it.
+        * measured on this lane's board: three lines in one write came back
+          as echo(1), prompt, echo(2), REPLY(2), prompt, echo(3) -- exactly
+          input order.
+
+        So when THIS attempt's marker is in hand, every earlier OFF line's
+        echo is already behind it in the stream or is never coming (its line
+        was never echoed, or a partial write concatenated into a garbage
+        line that was echoed before ours). Nothing earlier can still be
+        pending, so the whole stale set can be dropped.
+
+        ⚠ TWO CAVEATS FROM THE SOURCE CHECK, both safe for this argument.
+        `UsbCdc_WriteToBuffer` is non-blocking and all-or-nothing, so output
+        can be DROPPED when the buffer is full -- a loss, not a reorder, and
+        "never coming" already covers it. And because the echo is written
+        per character, another writer on the same buffer (streaming, logs,
+        the wifi bridge) can interleave BETWEEN characters, so a marker can
+        arrive split by foreign bytes. That is also not a reorder: the scan
+        simply fails to match and the attempt refuses, which is the loud
+        direction.
+
+        ⚠ WITHIN ONE OBJECT THIS IS DETERMINISTIC -- but only while no
+        EARLIER RESPONSE is still in flight. A previous GET's payload is
+        file data, which can contain any spelling, so a download that timed
+        out with bytes still arriving can feed the next scan a marker out of
+        DATA. That is pre-existing and broader before this change, and is
+        tracked in pc#268.
+
+        ⚠ WHAT REMAINS, STATED EXACTLY:
+
+        * CROSS-OBJECT (ruling IG A, k/1024 per attempt): a new object
+          cannot know another object's stale spellings, so it may draw one
+          whose echo is in flight. A refusal consumes that spelling, so a
+          retry re-rolls.
+        * BYTES CARRYING OUR MARKER THAT THIS OBJECT NEVER OBSERVED AND
+          NEVER WROTE (pc#268): an earlier GET's payload, which is file
+          data and can contain any spelling -- or all of them, so N buys
+          nothing there. Measured PRE-EXISTING and broader before this
+          change: on main the stale bytes come back for ORDINARY file
+          content.
+        * AN IDN-SHAPED LINE INSIDE STALE PAYLOAD (pc#268, new at r16): the
+          exhaustion barrier accepts the first four-comma-field line
+          beginning `DAQiFi,`. A previous GET's payload is file data and
+          could contain one, which would satisfy the barrier without the
+          device having answered, and the pool would be cleared early. No
+          matcher fixes that -- the bytes are indistinguishable -- so none
+          is built. ⚠ It is strictly NARROWER than what it replaces:
+          release-by-text accepted any payload line carrying a family
+          member, of which there are 1024, in any file.
+        * WRITES FROM OUTSIDE THIS MODULE, which the write funnel cannot
+          see: `device.py` writes the GET itself (two sites), and
+          `devices.py` / `sdcard.py` write to a transport stream. None of
+          them carries setter text today, so none reserves anything; if one
+          ever did, its echo would be unobserved in the same way.
+
+        Everything a caller writes THROUGH this module is covered, because
+        the write funnel reserves our marker text before it reaches the
+        wire.
+
+        A port fault propagates unwrapped, per pc#267's contract.
+        """
+        from ..exceptions import EchoSetUnconfirmedError
+
+        spelling = self._next_echo_spelling()
+        if spelling is None:
+            # ⭐ EXHAUSTION: PROVE IT, DO NOT GUESS FROM BYTES. Reading
+            # whatever had arrived and matching echo TEXT is what r9-r15
+            # kept breaking -- and it cannot work at all when another reader
+            # has already consumed the echo (r15 audit), because then there
+            # is nothing left to match and every spelling stays reserved on
+            # a healthy device. One barrier answers for all 1024 at once.
+            # ⚠ THE BARRIER RELEASES WHAT IT CAN PROVE, and no longer
+            # clears the pool wholesale. A reply retires the EARLIEST
+            # outstanding barrier's snapshot; a spelling reserved after that
+            # barrier is not covered by it and stays reserved.
+            if self._fifo_barrier():
+                spelling = self._next_echo_spelling()
+        if spelling is None:
+            raise EchoSetUnconfirmedError(
+                "all %d echo-setter spellings are stale on this connection "
+                "and the device did not answer %r within %.2fs, so it cannot "
+                "be shown that their echoes have gone past. No download "
+                "attempted. Retrying on this connection is what can clear "
+                "them -- one answered barrier clears every spelling at once; "
+                "opening a new connection cannot, because the bytes are "
+                "queued on the device."
+                % (len(self._ECHO_SET_SILENT_FAMILY),
+                   bytes(self._ECHO_BARRIER), self.ECHO_SET_TIMEOUT_S)
+            )
+
+        framing = spelling + b"\r\n"
+        if self._serial is None or not getattr(self._serial, "is_open", False):
+            return framing
+
+        # ⛔ THE DEADLINE IS CREATED BEFORE THE DRAIN (r4 finding 2):
+        # `write_timeout` governs neither backend's flush, so a drain placed
+        # ahead of the clock can spend the whole budget before it starts.
+        deadline = time.monotonic() + self.ECHO_SET_TIMEOUT_S
+
+        # Echo ON, then OFF in the drawn spelling. microrl gates the echo on
+        # the state as the characters arrive, so the second line's echo is
+        # certain from any starting state.
+        self._write_to_port(self._ECHO_SET_FRAMED + b"\r\n")
+        # ⚠ THE RESERVATION NOW FALLS OUT OF THE WRITE FUNNEL, which marks
+        # any family spelling in the bytes stale BEFORE writing them. The
+        # r11 semantics are preserved exactly: the ON line carries no family
+        # member so a failed ON write reserves nothing, and the OFF line
+        # reserves before it is attempted so a failed OFF write keeps it.
+        self._write_to_port(framing)
+        drain_output_bounded(
+            self._serial, max(0.0, deadline - time.monotonic()))
+
+        # Read until THIS attempt's marker is in hand. A do-while: read
+        # first, check the clock after, so a reply already waiting is never
+        # missed by a timer that expired first.
+        seen = bytearray()
+        while True:
+            try:
+                waiting = self._serial.in_waiting
+            except (serial.SerialException, OSError):
+                # ⚠ NARROW. A bare `except Exception` here would swallow
+                # cancellation and programming errors alike; a dead port is
+                # a port fault and belongs to the caller.
+                raise
+            if waiting:
+                seen.extend(self._serial.read(waiting))
+            if framing in seen:
+                # ⭐ FIFO: our marker is in hand, so nothing written earlier
+                # is still pending. Everything ahead of it in the stream was
+                # pre-GET console traffic and is dropped with `seen`.
+                self._echo_spellings_outstanding.clear()
+                # ⚠ AND THE BARRIER BACKLOG, by the same argument: every
+                # barrier was written before this marker, so every reply it
+                # could still produce is already behind us. Leaving stale
+                # snapshots here would walk a HEALTHY connection into the
+                # `_ECHO_BARRIER_MAX` refusal.
+                self._echo_barrier_outstanding.clear()
+                return b""
+            if time.monotonic() >= deadline:
+                # ⚠ NOTHING IS REMEMBERED ABOUT A MARKER CUT BY THIS
+                # DEADLINE. r13 kept the expected remainder so a later
+                # attempt could finish it and release the spelling; that
+                # bookkeeping produced a MEDIUM in each of r14 and r15 (it
+                # ignored the partial on one path, then kept a stale suffix
+                # after consuming part of it). The spelling simply stays
+                # reserved, and the exhaustion barrier is what releases it
+                # -- one proof for all 1024, with nothing to keep in step.
+                # ⛔ REFUSE, DO NOT PROCEED. The marker is GUARANTEED to be
+                # coming, so "not here yet" means "still in flight" and
+                # never "nothing was coming" -- the ambiguity a query could
+                # not resolve. Proceeding puts our own echo inside the file.
+                raise EchoSetUnconfirmedError(
+                    "the echo setter's own echo (%r) did not arrive within "
+                    "%.2fs, so it is still in flight and would land inside "
+                    "the downloaded file; no download attempted. The next "
+                    "attempt on this connection draws a different spelling "
+                    "and drops this one as pre-marker bytes; a successful "
+                    "attempt clears every stale spelling. Opening a new "
+                    "connection does not help: the bytes are queued on the "
+                    "device, which a new object cannot discard."
+                    % (bytes(spelling), self.ECHO_SET_TIMEOUT_S)
+                )
+            time.sleep(0.005)
 
     def _drain_bounded(self, deadline_s: float) -> None:
         """Wait, BOUNDED, for the OS output queue to empty. No ``flush()``.
@@ -1796,7 +2439,7 @@ class SerialInterface:
         clean = True
         try:
             # Refused by CancellablePort once the caller has given up.
-            self._serial.write(b"SYSTem:ECHO 1\r\n")
+            self._write_to_port(b"SYSTem:ECHO 1\r\n")
             self._drain_bounded(self.close_drain_timeout)
             time.sleep(0.05)
         except (serial.SerialException, OSError) as exc:
@@ -1831,7 +2474,9 @@ class SerialInterface:
         try:
             # Send command with CR terminator
             cmd_bytes = (command + "\r").encode('ascii')
-            self._serial.write(cmd_bytes)
+            # Through the write funnel: a caller's own command may carry our
+            # marker text, and we must reserve it before it reaches the wire.
+            self._write_to_port(cmd_bytes)
             # #263: bounded, no flush(). A stall raises SerialTimeoutException,
             # which the handler below reports as a RuntimeError.
             self._drain_bounded(self.send_drain_timeout)
@@ -1963,7 +2608,7 @@ class SerialInterface:
                 # Use \r\n to match ScpiMessage.get_bytes() — the canonical
                 # wire format. send_command() uses bare \r for legacy
                 # compatibility but binary queries expect the canonical form.
-                ser.write((query + "\r\n").encode("ascii"))
+                self._write_to_port((query + "\r\n").encode("ascii"))
                 # #263: bounded, no flush(); a stall is reported as the
                 # RuntimeError below.
                 drain_output_bounded(ser, self.send_drain_timeout)
