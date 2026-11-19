@@ -699,10 +699,13 @@ which was never tagged.
   bootloader that reports version 1.x, and 2.0 bootloaders built before that
   fix; the version number cannot tell the two 2.0 builds apart.
   `update_firmware` logs the bootloader's version at INFO level. The update
-  itself succeeds and the new firmware verifies. Record the WiFi settings
-  before updating, so they can be entered again afterwards. Programming a
-  current bootloader removes the problem; that needs a hardware programmer,
-  and python-core cannot do it.
+  itself succeeds and the new firmware verifies. Before updating, record the
+  WiFi settings, so they can be entered again afterwards, and back up the ADC
+  calibration with the procedure in
+  [docs/calibration_backup_restore.md](docs/calibration_backup_restore.md),
+  which restores both calibration banks exactly. Programming a current
+  bootloader removes the problem; that needs a hardware programmer, and
+  python-core cannot do it.
 
 ## [0.1.0]
 

@@ -400,6 +400,11 @@ opts.validate()                                # raises ValueError on misconfig
   refused before anything is sent to the board; it would be skipped or
   written over unerased flash. Bootloader-linked release images never have
   such data. Records in the protected calibration range are still dropped.
+- **Older bootloaders erase the saved settings.** A bootloader that
+  predates firmware #1141 erases all of program flash, including the
+  device's WiFi settings and its ADC calibration (see Known issues in the
+  CHANGELOG). Back the calibration up first with the procedure in
+  [docs/calibration_backup_restore.md](docs/calibration_backup_restore.md).
 - **Verifying.** After programming, the service asks the bootloader for the
   CRC of every programmed region (`READ_CRC`) and compares it with the
   image's. A mismatch fails the update in `VERIFYING`.
