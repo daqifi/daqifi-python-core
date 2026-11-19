@@ -6,7 +6,7 @@ aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-11-18
+## [0.2.0] - 2026-11-19
 
 The first tagged release. Everything since the 0.1.0 development version,
 which was never tagged.
