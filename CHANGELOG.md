@@ -6,7 +6,7 @@ aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.2.0] - TBD
+## [0.2.0] - 2026-11-19
 
 The first tagged release. Everything since the 0.1.0 development version,
 which was never tagged.
@@ -690,6 +690,22 @@ which was never tagged.
   `sd_get_file_binary` reads it as part of its own file, with no error.
   There is no verified workaround yet, so do not trust a download made on
   the same device object after one has timed out. Tracked in #268.
+- **On a device whose bootloader predates
+  daqifi/daqifi-nyquist-firmware#1141, a firmware update erases the
+  settings saved on the device.** Those bootloaders erase all of program
+  flash before writing, and the device keeps its settings there: the WiFi
+  configuration (it returns to the factory access point), the device's other
+  saved settings, and its factory and user calibration. This affects every
+  bootloader that reports version 1.x, and 2.0 bootloaders built before that
+  fix; the version number cannot tell the two 2.0 builds apart.
+  `update_firmware` logs the bootloader's version at INFO level. The update
+  itself succeeds and the new firmware verifies. Before updating, record the
+  WiFi settings, so they can be entered again afterwards, and back up the ADC
+  calibration with the procedure in
+  [docs/calibration_backup_restore.md](docs/calibration_backup_restore.md),
+  which restores both calibration banks exactly. Programming a current
+  bootloader removes the problem; that needs a hardware programmer, and
+  python-core cannot do it.
 
 ## [0.1.0]
 
